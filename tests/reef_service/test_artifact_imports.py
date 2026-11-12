@@ -22,7 +22,9 @@ from reef.artifact import (
     directory_checksum,
     read_reference,
 )
+from reef.artifact.artifact import training_starts_of
 from reef.core.errors import CommitPending, UnknownScenario
+from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
@@ -33,7 +35,7 @@ from reef.train.trainer import Trainer
 
 
 def weights(directory: Path, content: bytes = b"w9") -> Path:
-    """A full-weight release: the layout of ``StubTrainingComponent``'s releases."""
+    """A full-weight artifact: the layout of ``StubTrainingComponent``'s releases."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -60,6 +62,31 @@ def store(tmp_path: Path) -> Path:
 
 
 @pytest.mark.unit
+def test_a_training_artifact_names_its_training_starts(tmp_path) -> None:
+    """RFC #1263: an artifact that training makes names its training start, then that start's own starts."""
+    value, _, _ = dispatcher(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    files = weights(tmp_path / "qwen")
+    imported = value.import_artifact(
+        "math", opened(files), None, source=source(files), directory=store(tmp_path), item=ItemIdentity("qwen-base")
+    )
+    value.train_from("math", imported.artifact_id)
+    train(value, 1)
+    first = value.list_artifacts("math")[0]["artifact_id"]
+    value.train_from("math", first)
+    train(value, 2)
+    second = value.list_artifacts("math")[0]["artifact_id"]
+
+    def starts(artifact_id: str) -> tuple[str, ...]:
+        return training_starts_of(scenario.resolve_artifact(artifact_id)[1])
+
+    assert starts(imported.artifact_id) == ()
+    assert starts(first) == (imported.artifact_id,)
+    assert starts(second) == (first, imported.artifact_id)
+    value.close()
+
+
+@pytest.mark.unit
 def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path) -> None:
     value, runtime, backend_factory = dispatcher(tmp_path)
     train(value, 1)
@@ -75,7 +102,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
         "math", opened(weights(tmp_path / "w9")), None, source=source(tmp_path / "w9"), directory=store(tmp_path)
     )
 
-    # Nothing serves, trains from or moves to the artifact: the active release, the chain tip and the start stay.
+    # Nothing serves, trains from or moves to the artifact: the active selection, the chain tip and the start stay.
     assert scenario.current_snapshot() == served
     assert scenario.repository.checkpoint_artifact == checkpoint
     assert scenario.trainer.state == trainer_state
@@ -175,7 +202,7 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
 
 
 class CountingReader(ArtifactSourceReader):
-    """Opens ``mem://`` URIs as the full-weight release in ``directory`` and keeps each URI it opened."""
+    """Opens ``mem://`` URIs as the full-weight artifact in ``directory`` and keeps each URI it opened."""
 
     def __init__(self, directory: Path) -> None:
         self.directory = weights(directory)
@@ -289,7 +316,7 @@ def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_pa
             assert read_reference(stored) is not None and (stored / REFERENCE_FILE).is_file()
             assert not (stored / "model.safetensors").exists()
 
-            # The revision must have the layout of the component's releases, and resolve.
+            # The revision must have the layout of the component's snapshots, and resolve.
             del hub.files["config.json"]
             refused = await client.post("/reef/scenarios/math/artifacts", json={"source": uri})
             assert refused.status == 400 and "config.json and weight files" in await refused.text()

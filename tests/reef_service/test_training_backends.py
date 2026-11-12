@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.support._training_deployment import LocalDeployment
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 
 from reef.core.errors import RuntimeConfigError
@@ -52,7 +53,9 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert "execution" not in config
         assert not {"ray_address", "ray_namespace", "inference_handler_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
-        runtime, inference = connect_training_component(settings, model_path=settings.model_path, loss_family="sao")
+        runtime, inference = connect_training_component(
+            settings, model_path=settings.model_path, default_parameters={}
+        )
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
         assert runtime.config["checkpoint_layers"] is False
@@ -78,7 +81,7 @@ def test_invalid_options_fail_before_constructing_runtime(tmp_path, options):
     [
         {"training.ray-address": "auto"},
         {"execution.training.backend": "ray"},
-        # The backend serves its own releases; Reef's engines are not that serving.
+        # The backend serves its own snapshots; Reef's engines are not that serving.
         {"inference.serving": "trainer", "inference.backend": "sglang"},
         {"inference.serving": "trainer", "inference.tensor-parallel-size": "2"},
         {"recipe.runtime.type": "ray_training"},
@@ -112,19 +115,18 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
     monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="must build a TrainingComponent"):
         connect_training_component(
-            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", loss_family="sao"
+            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
         )
 
 
 def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanup(tmp_path):
     from recipes.sao.recipe import SAORecipe
-    from reef.storage.sqlite import SQLiteRecordStore
 
     config, _ = resolve_deployment_config(
         {**deployment(), "pipeline": {"sample2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
     )
     recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
-    records = SQLiteRecordStore()
+    records = memory_records("scenario")
     try:
         trainer = recipe.build("scenario", records, root=STUB_ROOT)
         assert trainer.job_loop.component is recipe.training_component

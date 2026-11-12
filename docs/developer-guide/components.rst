@@ -1,7 +1,7 @@
 Scenario components
 ===================
 
-A recipe declares the components that every release of a scenario binds, such
+A recipe declares the components that every snapshot of a scenario binds, such
 as ``weights``, ``harness`` or ``config``. For each component, it says what
 kind of artifact the component holds, how Reef admits and imports it, and
 which files a client pulls. The scenario reads this declaration. The inference
@@ -40,14 +40,14 @@ has a weight kind (``model`` or ``model_adapter``), and at most one has a
 file tree.
 
 Each selected artifact keeps its own ``artifact_id``. ``Artifact.component``
-provides the view of one component. A release of at most one component is
-flat; a release of several components has one directory per component. That
+provides the view of one component. A snapshot of at most one component is
+flat; a snapshot of several components has one directory per component. That
 view does not create a new artifact identity.
 
 Publication admits the changed component and carries the others as previously
 admitted. Activation validates the target component and changes the complete
 scenario selection atomically. It does not publish a repository snapshot. The
-runtime loads a release only when its loaded component changed. See the
+runtime loads a snapshot only when its loaded component changed. See the
 `state model <../advanced_topics/state-model.rst>`__ for ordering and recovery.
 
 Fields and where Reef reads them
@@ -59,7 +59,7 @@ Fields and where Reef reads them
 | ``validator``                    | ``scenario/committer.py``,          | Admit a component before it is published or activated. Raising       |
 |                                  | ``scenario/factory.py``             | rejects the step or the activation. The default accepts anything.    |
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``layout``                       | ``scenario/committer.py``,          | Check an imported directory against the component's release layout   |
+| ``layout``                       | ``scenario/committer.py``,          | Check an imported directory against the component's snapshot layout  |
 |                                  | ``scenario/factory.py``             | before admission. Without ``layout``, the component takes no import. |
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``files``                        | ``service/request_service.py``      | Read the files a client pulls from the frozen release. Without a     |
@@ -67,15 +67,15 @@ Fields and where Reef reads them
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``kind``                         | ``scenario/binding.py``,            | The ``ArtifactKind`` of the component. A ``model`` or                |
 |                                  | ``scenario/scenario.py``,           | ``model_adapter`` component loads into the inference runtime         |
-|                                  | ``service/artifact_evaluations.py`` | (``activate_release``). A kind also makes the component a side of an |
+|                                  | ``service/artifact_evaluations.py`` | (``activate_snapshot``). A kind also makes the component a side of an|
 |                                  |                                     | artifact evaluation. ``None`` declares no kind.                      |
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 
-``activate_release`` (``reef.scenario.binding``) calls the runtime's
-``InferenceRuntime.activate_checkpoint`` for the loaded component. It runs at
-startup recovery, after a commit publishes a release that the activation rule
-activates, and at an activation, before the commit record makes the release
-active. Without a runtime or a loaded component, moving the head is enough.
+``activate_snapshot`` (``reef.scenario.binding``) calls the runtime's
+``InferenceRuntime.activate_checkpoint`` for the loaded component. The inference
+worker calls it for each selection that control queues, after the commit that
+makes the snapshot active. Without a runtime or a loaded component, moving the
+head is enough.
 
 The scenario owns lifecycle ordering and admission; the service owns
 transport. The components supply only the facts at these sites.
@@ -98,7 +98,7 @@ Built-in recipes
 +-------------------------------+-------------+---------------------------------+----------------------------+------------------+
 
 **Weights.** ``InferenceRuntime.activate_checkpoint`` makes the runtime serve
-a release. It returns the runtime load ID that serves the release: a new load
+a snapshot. It returns the runtime load ID that serves the snapshot: a new load
 ID for a runtime that loads weights, or the release ID for one that loads
 nothing, such as a proxy. The runtime loads only published weights; no trainer
 changes what the engines serve. The runtime load ID stays inside the runtime:
@@ -106,12 +106,12 @@ each record names the artifact that answered by its ``artifact_id`` (see
 `HTTP API <../reference/http-api.rst#artifact-of-a-recorded-response>`__).
 
 **Per-scenario adapters.** When the runtime serves one PEFT adapter per
-scenario (``InferenceRuntime.per_scenario_adapters``), ``activate_release``
+scenario (``InferenceRuntime.per_scenario_adapters``), ``activate_snapshot``
 passes the scenario name to ``activate_checkpoint``. The runtime serves the
 scenario's adapter revision under its own model name
 (``InferenceRuntime.served_model_name``), and control writes that name to the
 scenario's row in ``served_models``, so every request reaches that revision.
-After a restart, each scenario's release loads again under a new runtime load
+After a restart, each scenario's snapshot loads again under a new runtime load
 ID. ``adapter_name(scenario, runtime_load_id)`` in ``reef.inference.residency``
 names a revision on the engine, and ``parse_adapter_name`` inverts it, so a
 recorded ``lora_path`` names exactly one (scenario, revision). The serving
@@ -120,7 +120,7 @@ runtime owns one ``AdapterResidencyManager``, which keeps at most
 the oldest-activated adapter that is no scenario's current one.
 
 **Harness file trees.** ``HarnessFiles`` (``reef.harness.sync``) serves each
-release of the ``harness`` component. A release stores the harness source
+snapshot of the ``harness`` component. A snapshot stores the harness source
 tree, and a read renders it for the descriptor's adapter without a model
 binding, so the client gets the files its agent reads and binds its own model.
 ``GET /reef/harness?form=source`` reads the stored source tree instead (see
@@ -148,7 +148,7 @@ A recipe returns a ``ScenarioComponents`` from ``build_components``:
            return ScenarioComponents({"prompt": prompt})
 
 A recipe whose scenario serves two components declares both. A step then
-publishes one of them, naming it in ``TrainStepResult.component``, and the
+publishes one of them, naming it in ``TrainingCommit.component``, and the
 committer carries the other forward from the previous checkpoint:
 
 .. code:: python
@@ -162,7 +162,7 @@ committer carries the other forward from the previous checkpoint:
                }
            )
 
-The root release of such a scenario keeps one directory per component
+The root snapshot of such a scenario keeps one directory per component
 (``weights/``, ``harness/``). ``CompositeRecipe`` (``reef.recipe.composite``)
 builds exactly this from existing flat recipes, one per component, and runs
 each one's trainer as its own worker; see `configuration
@@ -172,11 +172,11 @@ Remote weight snapshots
 -----------------------
 
 An inference runtime implements ``activate_checkpoint(artifact)``. The
-saved-weight serving runtimes (``reef.inference.serving``) load the release's
+saved-weight serving runtimes (``reef.inference.serving``) load the snapshot's
 files into the engines. A proxy runtime loads nothing and returns the release
 ID. An inference runtime that serves immutable remote snapshots validates the
 checkpoint and binds its remote sampler. Tinker's inference runtime uses this
 to serve the authoritative artifact before the scenario serves requests. The
 training component does not read the head: the next job starts from the
-trainer's committed start, and a ``train-from`` imports the release into the
+trainer's committed start, and a ``train-from`` imports the snapshot into the
 component with ``import_start``.

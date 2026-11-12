@@ -180,7 +180,7 @@ def create_authentication_middleware(
     ``evaluation_tokens`` open the evaluation routes (``EVALUATION_ROUTES``)
     only, on POST. The service hands one to the recipe for its evaluation
     rollouts and method, which run candidate code: that code can sample the
-    served release, and nothing else of the service. With no ``tokens``,
+    served artifact, and nothing else of the service. With no ``tokens``,
     authentication is off and these tokens change nothing.
     """
 
@@ -263,9 +263,9 @@ def create_authentication_middleware(
 
     @web.middleware
     async def authenticate(request: web.Request, handler):
-        # /healthz stays reachable without credentials: liveness probes (the
+        # /healthz and /readyz stay reachable without credentials: probes (the
         # bundled configs' ready checks, orchestrators) cannot authenticate.
-        if accepted and request.path != "/healthz" and not _authorized(request):
+        if accepted and request.path not in ("/healthz", "/readyz") and not _authorized(request):
             raise web.HTTPUnauthorized(text="invalid service token")
         return await handler(request)
 

@@ -2,18 +2,14 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-import sqlite3
 from contextlib import closing
 
 import pytest
-from sqlalchemy import select
 
 from reef.core.serving_config import ServingConfig
 from reef.core.snapshot import SnapshotRef
 from reef.storage.commits import CommitHistoryError, CommitRecord
-from reef.storage.postgres import POSTGRES_SCHEMA_VERSION, PostgresRecordDatabase, PostgresScenarioStorage
+from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -54,12 +50,22 @@ def test_settings_default_replace_and_stay_per_scenario(open_storage):
         artifact_evaluation=EVALUATION,
         activation={"module": "evaluated", "config": {"min_mean_score": 0.5}},
         serving_config=ServingConfig({"weights": {"temperature": 0.6, "min_replicas": 1}}),
+        record2sample_config={"records": {"max_staleness": 2, "steps": [{"keep_score": {"min": 1.0}}]}},
     )
     storage.write_settings("math", settings)
     assert open_storage().read_settings("math") == settings
     assert open_storage().read_settings("code") == ScenarioSettings()
     storage.write_settings("math", ScenarioSettings(training_mode="auto"))
     assert open_storage().read_settings("math") == ScenarioSettings(training_mode="auto")
+
+
+@pytest.mark.parametrize(
+    "config",
+    [[], {"": {}}, {"records": "max_staleness=2"}, {"records": {"limit": float("nan")}}],
+)
+def test_settings_refuse_a_record2sample_config_that_is_not_json_objects_by_component(config):
+    with pytest.raises(ValueError, match="record2sample_config"):
+        ScenarioSettings(record2sample_config=config)
 
 
 def test_postgres_session_of_an_archived_scenario_refuses_commit_reads(postgres_config, tmp_path):
@@ -70,8 +76,8 @@ def test_postgres_session_of_an_archived_scenario_refuses_commit_reads(postgres_
         storage.archive("math")
         with pytest.raises(RuntimeError, match="archived"):
             store.history()
-        with pytest.raises(RuntimeError, match="archived"):
-            store.records.count("math")
+        # The records are record items, and the archive removed the scenario's uses of them.
+        assert store.records.count("math") == 0
         store.close()
 
 
@@ -89,7 +95,8 @@ def test_archive_retires_settings_with_records_and_commits(open_storage):
 def test_reading_settings_of_an_unknown_scenario_creates_nothing(tmp_path):
     storage = SQLiteScenarioStorage(tmp_path)
     assert storage.read_settings("math") == ScenarioSettings()
-    assert list(tmp_path.iterdir()) == []
+    # Only the storage's own data store is there.
+    assert [path.name for path in tmp_path.iterdir()] == ["data"]
 
 
 @pytest.mark.parametrize("value", [["not", "an", "object"], 3])
@@ -98,20 +105,6 @@ def test_settings_reject_values_of_the_wrong_type(value):
         ScenarioSettings(artifact_evaluation=value)
     with pytest.raises(ValueError):
         ScenarioSettings(training_mode=value)
-
-
-def test_sqlite_upgrade_drops_a_stored_model_setting(tmp_path):
-    """A database of an older version keeps a ``model_config`` row; the next open deletes it and keeps the rest."""
-    SQLiteScenarioStorage(tmp_path).write_settings("math", ScenarioSettings(training_mode="manual"))
-    database = tmp_path / f"{hashlib.sha256(b'math').hexdigest()}.sqlite3"
-    with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(
-            "INSERT INTO scenario_setting (name, value_json) VALUES ('model_config', ?)",
-            (json.dumps({"url": "http://model.example", "model": "served"}),),
-        )
-    assert SQLiteScenarioStorage(tmp_path).read_settings("math") == ScenarioSettings(training_mode="manual")
-    with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT name FROM scenario_setting").fetchall() == [("training_mode",)]
 
 
 def test_postgres_restart_on_an_empty_directory_finds_commits_and_settings(postgres_config, tmp_path):
@@ -129,33 +122,6 @@ def test_postgres_restart_on_an_empty_directory_finds_commits_and_settings(postg
             assert store.history() == (committed(), committed(2))
             assert store.training_run_position() == (0, 2)
             assert store.recover(checkpoint=None) == committed(2)
-
-
-def test_postgres_upgrade_from_version_15_drops_a_stored_model_setting(postgres_config, tmp_path):
-    url, schema = postgres_config
-    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
-        storage.write_settings("math", ScenarioSettings(training_mode="manual"))
-    with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-        settings = database.tables.settings
-        storage_id = database.active_storage_id("math")
-        with database.transaction() as connection:
-            # Write the row that version 15 kept for a scenario's model override.
-            connection.execute(
-                settings.insert().values(
-                    storage_id=storage_id,
-                    name="model_config",
-                    value_json=json.dumps({"url": "http://model.example", "model": "served"}),
-                )
-            )
-            version = settings.metadata.tables[f"{schema}.schema_version"]
-            connection.execute(version.update().values(version=15))
-    with closing(PostgresRecordDatabase(url, schema=schema)) as database, database.transaction() as connection:
-        names = connection.execute(select(database.tables.settings.c.name)).scalars().all()
-        version = database.tables.settings.metadata.tables[f"{schema}.schema_version"]
-        assert connection.execute(select(version.c.version)).scalar_one() == POSTGRES_SCHEMA_VERSION
-    assert names == ["training_mode"]
-    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
-        assert storage.read_settings("math") == ScenarioSettings(training_mode="manual")
 
 
 def test_postgres_commit_table_keeps_identical_retries_and_rejects_different_content(postgres_config, tmp_path):

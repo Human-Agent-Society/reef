@@ -11,11 +11,10 @@ Reproduction of [Self-Distillation Policy Optimization](https://arxiv.org/abs/26
 
 ```text
 sdpo/
-  recipe.py          SDPORecipe: training spec, pipeline spec, loss family "sdpo"; its report contract is report.SDPOReport
+  recipe.py          SDPORecipe: default objective, pipeline spec, loss family "sdpo"; its report contract is report.SDPOReport
   report.py          SDPOReport: TeacherContextReport plus the attempt's step, group and rollout
   processor.py       SDPOSamples and SDPOJobData: a whole sampling grid as one job's data
-  objective.py       selects the sdpo loss; one optimizer step per grid
-  slime/             the loss family: SDPO's defaults and hook names on the Slime backend's distillation base
+  slime/             the Slime objective and the loss family: SDPO's defaults and hook names on the Slime backend's distillation base
   examples/
     sciknoweval/     the Chemistry split of SciKnowEval on Qwen3-8B through reef-eval
 ```

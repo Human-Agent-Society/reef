@@ -30,6 +30,7 @@ from reef.service.deploy.service_config import (
         ("upstream_model", "00123", "00123"),
         ("upstream_model", "true", "true"),
         ("upstream_model", "null", "null"),
+        ("routing_manifest", "routing/manifest.yaml", "routing/manifest.yaml"),
         ("allow_implicit_scenario_creation", False, "false"),
         ("tokens", ["first", "second"], '["first", "second"]'),
         ("tokens", [], "[]"),
@@ -43,7 +44,8 @@ from reef.service.deploy.service_config import (
 )
 def test_yaml_and_cli_use_the_same_field_types(name, yaml_value, cli_value):
     yaml_values = parse_service_arguments({"reef": {name: yaml_value}})
-    cli_values = vars(build_serve_parser().parse_args([f"--{name.replace('_', '-')}={cli_value}"]))
+    flag = next(argument.flags[0] for argument in service_config_arguments() if argument.name == name)
+    cli_values = vars(build_serve_parser().parse_args([f"{flag}={cli_value}"]))
     assert yaml_values[name] == cli_values[name]
     assert type(yaml_values[name]) is type(cli_values[name])
 
@@ -51,30 +53,30 @@ def test_yaml_and_cli_use_the_same_field_types(name, yaml_value, cli_value):
 def test_parser_defaults_come_from_settings():
     defaults = parse_service_arguments({})
     for argument in service_config_arguments():
-        if argument.name in {"token", "recipe"}:
+        if argument.name in {"token", "recipe", "routing_deployment"}:
             continue
         field = next(field for field in fields(ServiceConfig) if field.name == argument.name)
         assert defaults[argument.name] == getattr(ServiceConfig(recipe="recipe"), field.name)
 
 
-def test_recipe_setting_and_reserved_launcher_flag_are_independent_arguments():
-    args = build_serve_parser().parse_args(["--recipe", "removed", "--reef.recipe", "custom-preset"])
-    assert args.recipe == "removed"
-    assert args.config_recipe == "custom-preset"
+def test_recipe_setting_has_one_flag():
+    args = build_serve_parser().parse_args(["--recipe.implementation", "custom-preset"])
+    assert args.recipe == "custom-preset"
+    with pytest.raises(SystemExit):
+        build_serve_parser().parse_args(["--recipe", "custom-preset"])
     assert parse_service_arguments({"reef": {"recipe": "custom-preset"}})["recipe"] == "custom-preset"
 
 
-@pytest.mark.parametrize("flag", ["--port", "--reef.port"])
-def test_cli_beats_yaml_and_omitted_cli_leaves_yaml_value(flag):
+def test_cli_beats_yaml_and_omitted_cli_leaves_yaml_value():
     config = {"reef": {"recipe": "recipe", "port": 9123}}
     assert service_config_from_mapping(config).port == 9123
-    updated = _apply_overrides(config, _parse_overrides([flag, "8123"]))
+    updated = _apply_overrides(config, _parse_overrides(["--reef.port", "8123"]))
     assert service_config_from_mapping(normalize_service_config(updated)).port == 8123
     assert config["reef"]["port"] == 9123
 
 
-def test_last_cli_alias_wins_even_when_a_previous_spelling_is_repeated():
-    overrides = _parse_overrides(["--port", "7000", "--reef.port", "8000", "--port", "9000"])
+def test_last_cli_occurrence_of_a_flag_wins():
+    overrides = _parse_overrides(["--reef.port", "7000", "--reef.port", "9000"])
     config = _apply_overrides({"reef": {"recipe": "recipe", "port": 6000}}, overrides)
     assert service_config_from_mapping(config).port == 9000
 
@@ -82,10 +84,10 @@ def test_last_cli_alias_wins_even_when_a_previous_spelling_is_repeated():
 @pytest.mark.parametrize(
     "arguments",
     [
-        ["--host"],
-        ["--port", "--tokens", "[]"],
-        ["--no-allow-implicit-scenario-creation=false"],
-        ["--no-allow-implicit-scenario-creation", "true"],
+        ["--reef.host"],
+        ["--reef.port", "--reef.tokens", "[]"],
+        ["--no-reef.allow-implicit-scenario-creation=false"],
+        ["--no-reef.allow-implicit-scenario-creation", "true"],
     ],
 )
 def test_declared_cli_options_reject_missing_or_unexpected_values(arguments):
@@ -96,10 +98,10 @@ def test_declared_cli_options_reject_missing_or_unexpected_values(arguments):
 @pytest.mark.parametrize(
     ("arguments", "expected"),
     [
-        (["--allow-implicit-scenario-creation"], True),
-        (["--allow_implicit_scenario_creation", "false"], False),
-        (["--no-allow-implicit-scenario-creation"], False),
-        (["--no-allow-implicit-scenario-creation", "--allow-implicit-scenario-creation"], True),
+        (["--reef.allow-implicit-scenario-creation"], True),
+        (["--reef.allow-implicit-scenario-creation", "false"], False),
+        (["--no-reef.allow-implicit-scenario-creation"], False),
+        (["--no-reef.allow-implicit-scenario-creation", "--reef.allow-implicit-scenario-creation"], True),
     ],
 )
 def test_boolean_flags_can_enable_and_disable_yaml_settings(arguments, expected):
@@ -112,7 +114,7 @@ def test_boolean_flags_can_enable_and_disable_yaml_settings(arguments, expected)
 def test_empty_container_overrides_replace_yaml_values_and_survive_child_serialization():
     config = _apply_overrides(
         {"reef": {"recipe": "recipe", "tokens": ["old"], "inference_handler_config": {"old": 1}}},
-        {"tokens": "[]", "inference-handler-config": "{}"},
+        {"reef.tokens": "[]", "inference.handler-config": "{}"},
     )
     normalized = normalize_service_config(config)
     child = yaml.safe_load(yaml.safe_dump(normalized))
@@ -131,7 +133,7 @@ def test_override_replaces_required_environment_reference_before_validation(monk
                 "inference_url": "http://localhost:${reef.port}",
             }
         },
-        {"port": "9000"},
+        {"reef.port": "9000"},
     )
     config = interpolate_environment(config, "stack.yaml")
     settings = service_config_from_mapping(normalize_service_config(config))
@@ -148,7 +150,7 @@ def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
     config = _apply_overrides(
         {"reef": {"recipe": "recipe"}},
         {
-            "training": '{"global_batch_size": 2}',
+            "training.config": '{"global_batch_size": 2}',
             "activation": '{"module": "example:Rule"}',
             "observability.wandb": '{"enabled": false}',
             "batch_size": "4",
@@ -195,8 +197,8 @@ def test_cli_help_exposes_public_fields_without_optional_runtimes():
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
-    assert "--upstream-model" in result.stdout
-    assert "--no-allow-implicit-scenario-creation" in result.stdout
+    assert "--inference.upstream-model" in result.stdout
+    assert "--no-reef.allow-implicit-scenario-creation" in result.stdout
 
 
 def test_launcher_passes_typed_cli_values_to_commands_and_child(tmp_path: Path, monkeypatch):
@@ -235,11 +237,11 @@ def test_launcher_passes_typed_cli_values_to_commands_and_child(tmp_path: Path, 
                 "serve",
                 "-c",
                 str(path),
-                "--port",
+                "--reef.port",
                 "8123",
-                "--upstream-model",
+                "--inference.upstream-model",
                 "001",
-                "--tokens",
+                "--reef.tokens",
                 "[]",
                 "--reef.console-origins",
                 json.dumps(["http://127.0.0.1:3000"]),
@@ -263,7 +265,7 @@ def test_invalid_cli_setting_fails_before_download_or_spawn(tmp_path, monkeypatc
     path = tmp_path / "stack.yaml"
     path.write_text("inference: {upstream-url: http://localhost:8000, upstream-model: demo}\n")
     with pytest.raises(SystemExit) as caught:
-        cli_main(["serve", "-c", str(path), "--port", "credential-like-invalid-port"])
+        cli_main(["serve", "-c", str(path), "--reef.port", "credential-like-invalid-port"])
     assert caught.value.code == 2
     error = capsys.readouterr().err
     assert "reef.port" in error
@@ -295,3 +297,12 @@ def test_scenario_limits_and_idle_unload_are_reef_settings():
 def test_invalid_scenario_admission_settings_are_refused(values, message):
     with pytest.raises(ValueError, match=message):
         service_config_from_mapping({"reef": {"recipe": "recipe", **values}})
+
+
+def test_a_routing_manifest_is_none_or_a_non_empty_path() -> None:
+    with pytest.raises(ValueError, match="routing_manifest must be a non-empty path"):
+        ServiceConfig(recipe="recipe", routing_manifest="")
+    # The public reader takes a blank value, such as an unset environment reference, as not supplied.
+    assert (
+        service_config_from_mapping({"reef": {"recipe": "recipe", "routing_manifest": " "}}).routing_manifest is None
+    )

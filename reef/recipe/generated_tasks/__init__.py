@@ -5,7 +5,8 @@ names the generator (:class:`reef.recipe.generated_tasks.TaskGenerator`) in
 ``pipeline.record2sample.config.generator``. The recipe does not depend on the
 generator's method:
 
-- ``generator``: the contract of the task generator: ``TaskGenerator``,
+- ``generator``: the contract of the task generator: ``TaskGenerator``, its
+  durable state ``GeneratorState``,
   ``TaskValidationResult`` and ``GeneratedTaskResult``, one of
   ``RejectedTask``, ``HeldOutTask``, ``RolledOutTask`` and ``FailedTask``. The request,
   ``TaskGenerationRequest``, is the generator service's
@@ -16,13 +17,11 @@ generator's method:
   ``GeneratedTaskJobData`` makes task jobs of the generated tasks, which the
   training component rolls out on its own sampler. ``GenerationRunner`` owns
   generation, validation, task publication and result delivery on the stage's worker.
+  ``StoredGeneratorState`` is the generator's state in the scenario's task store.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
-- ``objective``: group relative advantages per task group on the
-  ``importance_sampling`` loss family: Tinker's built-in loss, or on Slime
-  ``reef.train.slime_backend.importance_sampling``, whose reference this
-  package registers.
-- ``recipe``: the objective and the report contract.
+- ``recipe``: the report contract. The deployment names the objective in the
+  recipe's ``job_parameters``, as a dotted reference to a method that it provides.
 
 The generator service (``reef.record2sample.generator``) writes and checks the tasks; the training component
 runs their training rollouts.
@@ -31,22 +30,20 @@ runs their training rollouts.
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
+    GeneratorState,
     HeldOutTask,
     RejectedTask,
     RolledOutTask,
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.objective import TaskGroupObjective
-from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskSamples, GeneratedTaskSettings
-from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
-from reef.train.algos.registry import register_loss_family_ref
-
-# Slime's implementation of the objective's loss family, by reference: only the training driver and the workers
-# import the Slime code.
-register_loss_family_ref(
-    "importance_sampling", "reef.train.slime_backend.importance_sampling:ImportanceSamplingAlgorithm"
+from reef.recipe.generated_tasks.processor import (
+    GeneratedTaskJobData,
+    GeneratedTaskSamples,
+    GeneratedTaskSettings,
+    StoredGeneratorState,
 )
+from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
 
 __all__ = [
     "FailedTask",
@@ -55,10 +52,11 @@ __all__ = [
     "GeneratedTaskResult",
     "GeneratedTaskSamples",
     "GeneratedTaskSettings",
+    "GeneratorState",
     "HeldOutTask",
     "RejectedTask",
     "RolledOutTask",
+    "StoredGeneratorState",
     "TaskGenerator",
-    "TaskGroupObjective",
     "TaskValidationResult",
 ]

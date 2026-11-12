@@ -35,10 +35,12 @@ Implementation
   ``JudgedSamples`` (``reef/record2sample/``) and ``Sample2Job``
   (``reef/sample2job/``), and its record stage in the recipe module.
   Extend those contracts only when they do not already express it.
-- Put the method's backend-neutral training objective in
-  ``<method-package>/objective.py`` (``reef/train/algos/`` holds the
-  contract). Backend-specific payload
-  construction belongs to the concrete integration.
+- Put the method's training objective with the backend that it targets: a
+  ``SlimeObjective`` (``reef/train/slime_backend/objectives.py``) in
+  ``<method-package>/slime/__init__.py``, or a ``TinkerObjective``
+  (``reef/train/tinker_backend/objectives.py``) in its Tinker module. The
+  package's ``__init__.py`` refers to it with ``register_objective_ref``, so its
+  public half imports no backend. Name it in the recipe's ``default_parameters()``.
 - A method with its own tensor objective adds a loss family in
   ``<method-package>/slime/`` (spec in ``__init__.py``, hooks in
   ``objective.py``) and names it in the objective's ``loss_family``;
@@ -114,14 +116,14 @@ Implementation
   checkpoints; Reef submits jobs and reads their status. Derive from
   ``reef.train.local_jobs.LocalJobComponent`` to get durable job directories,
   one job at a time, and resumption after a restart.
-- Read the job's ``method`` and optional ``scheduling`` parameters with
-  ``reef.train.algos.registry.job_training``, and prepare each job's data
-  with the objective that ``method`` names. Cut the data into optimizer steps
-  with ``reef.train.algos.schedule.schedule_job_data`` under the objective's
-  ``rollout_unit``. Write each
+- Own the job's parameters: parse them into your own typed value, refuse an
+  unknown key with ``ValueError``, and declare them in
+  ``TrainingComponent.parameters_schema(kind)``. Reef reads none of them. Own your
+  objectives and their registry too. Cut the data into optimizer steps
+  with ``reef.train.algos.schedule.schedule_job_data`` when it fits. Write each
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
-- Implement ``import_start`` to load a published release as the start of the
+- Implement ``import_start`` to load a published snapshot as the start of the
   next job. Raise ``ValueError`` when the framework cannot do this; Reef then
   refuses a ``train-from`` for the scenario with HTTP 400.
 - Change these shared interfaces only when the
@@ -176,7 +178,7 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   they must not import a concrete integration or ``reef.train``. Implement
   ``InferenceBackend`` from ``reef/inference/interfaces.py``, including
   ``load_weight_files``, so that the serving runtimes in
-  ``reef/inference/serving.py`` can load published releases. Expose an inference
+  ``reef/inference/serving.py`` can load published snapshots. Expose an inference
   service factory through a dotted reference or the
   ``reef.inference_backends`` entry-point group, so the inference component
   can start the engines. Shared monitoring and engine recovery belong in
@@ -237,7 +239,7 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 - Declare the components in the owning recipe's ``build_components``; do not
   make a component choose a method or evaluate a candidate.
 - Test component behavior in ``tests/artifact/test_scenario_components.py`` or
-  ``tests/artifact/test_release_components.py``. Test storage backends against
+  ``tests/artifact/test_snapshot_components.py``. Test storage backends against
   the contracts in ``tests/artifact/test_reef_artifacts.py``.
 - Add scenario commit, activation, train-from, and recovery tests whenever
   persistence or activation ordering changes. Persisted-format changes require an RFC and a

@@ -13,7 +13,7 @@ from tests.support.serving import wait_for_serving
 from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepositoryBackend
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import AgentRecord, RequestType
-from reef.core.snapshot import RootSource
+from reef.core.snapshot import ItemIdentity, RootSource
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
@@ -48,7 +48,7 @@ def test_scenario_owns_recipe_derived_policy_and_its_root_release() -> None:
     ).get_or_create_scenario("math")
 
     assert not hasattr(scenario, "recipe")
-    # A new scenario is at its root release: a release with no parent, made from the recipe's default start.
+    # A new scenario is at its root snapshot: a snapshot with no parent, made from the recipe's default start.
     root = scenario.repository.start_artifact
     assert root.parent_revision is None
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact == root
@@ -93,7 +93,7 @@ def test_scenario_metadata_round_trips() -> None:
     metadata = scenario_metadata_for(name=scenario.name, source=source, scenario_step=scenario.scenario_step)
 
     assert metadata["format"] == "reef-scenario/7"
-    # The registration is carried by the root release, so it names no start_artifact.
+    # The registration is carried by the root snapshot, so it names no start_artifact.
     assert "start_artifact" not in metadata
     assert metadata["source"] == {"kind": "default", "inputs": {"seed": "s"}}
     assert metadata["scenario_step"] == 0
@@ -274,10 +274,10 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
 
     base = SnapshotRef("base-release", None)
     head = SnapshotRef("checkpoint-release", base.revision)
-    # Persisted reef-scenario/5 metadata contains registration and recovery
+    # Persisted reef-scenario/7 metadata contains registration and recovery
     # fields; the containing artifact supplies the checkpoint release identity.
     metadata = {
-        "format": "reef-scenario/5",
+        "format": "reef-scenario/7",
         "scenario": "math",
         "source": {"kind": "item", "item": "upload-1", "uri": "s3://bucket/upload-1/", "version": ""},
         "start_artifact": encode_snapshot_ref(base),
@@ -286,8 +286,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
         "record_progress": {
             "high_water_sequence": 7,
             "high_water_offset": 5,
-            "compacted_ids": ["old-record"],
-            "consumed_ids": ["trained-record"],
+            "consumed_ids": ["old-record", "trained-record"],
         },
         "metrics": {"loss": 0.25},
     }
@@ -398,7 +397,7 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
         # A scenario that an earlier Reef stored is refused, not read: it is created again.
         (
             {"format": "reef-scenario/4"},
-            r"format 'reef-scenario/4'; this Reef reads reef-scenario/7 and legacy reef-scenario/5 or reef-scenario/6",
+            r"format 'reef-scenario/4'; this Reef reads reef-scenario/7",
         ),
     ],
 )
@@ -408,7 +407,7 @@ def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) ->
 
     base = SnapshotRef("base", None)
     metadata = {
-        "format": "reef-scenario/5",
+        "format": "reef-scenario/7",
         "scenario": "math",
         "source": {"kind": "default", "inputs": {}},
         "start_artifact": encode_snapshot_ref(base),
@@ -521,7 +520,7 @@ def test_concurrent_creations_of_one_name_register_one_root(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> None:
-    """A registration in ``reef-scenario/4`` named a shared base release; this Reef refuses it with a clear error."""
+    """A registration in ``reef-scenario/4`` named a shared base snapshot; this Reef refuses it with a clear error."""
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     (tmp_path / "old-root").mkdir()
     stored = {"format": "reef-scenario/4", "scenario": "math", "base_artifact": {}, "scenario_step": 0}
@@ -532,14 +531,14 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
     try:
         with pytest.raises(
             ValueError,
-            match=r"'reef-scenario/4'; this Reef reads reef-scenario/7 and legacy reef-scenario/5 or reef-scenario/6, so create",
+            match=r"'reef-scenario/4'; this Reef reads reef-scenario/7",
         ):
             dispatcher.get_or_create_scenario("math")
     finally:
         dispatcher.close()
 
 
-class _NoReleaseStarts(_RootImportingComponent):
+class _NoArtifactStarts(_RootImportingComponent):
     """A component that, as Slime, starts only from its own default start."""
 
     def root_start(self, root: ScenarioRoot) -> str:
@@ -571,7 +570,7 @@ class ItemTreeRecipe(Recipe):
 def test_composite_item_roots_are_checked_before_registration(
     tmp_path: Path, component: str, accepts_item: bool
 ) -> None:
-    training = _RootImportingComponent("base-model") if accepts_item else _NoReleaseStarts("base-model")
+    training = _RootImportingComponent("base-model") if accepts_item else _NoArtifactStarts("base-model")
     weights = TestPolicyRecipe(**runtime_bindings(training, _SharedRuntime()))
     recipe = CompositeRecipe(components={"weights": weights, "harness": ItemTreeRecipe()})
     backend_factory = InMemoryRepositoryBackend.factory()
@@ -583,7 +582,10 @@ def test_composite_item_roots_are_checked_before_registration(
     else:
         (directory / "rules.md").write_text("imported rules")
     item = ItemStart(
-        "upload-1", directory.as_uri(), DirectorySource(directory, source_version="v1", link=False), component
+        ItemIdentity("upload-1"),
+        directory.as_uri(),
+        DirectorySource(directory, source_version="v1", link=False),
+        component,
     )
     dispatcher = Dispatcher(
         recipe,
@@ -613,7 +615,7 @@ def test_composite_item_roots_are_checked_before_registration(
 
 @pytest.mark.unit
 def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_is_registered(tmp_path) -> None:
-    """A creation from an item writes the item as the root release; an item that the layout or the training
+    """A creation from an item writes the item as the root snapshot; an item that the layout or the training
     component refuses registers nothing."""
     weights = tmp_path / "weights"
     weights.mkdir()
@@ -624,7 +626,9 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
     (notes / "notes.txt").write_text("no weights")
 
     def item(directory: Path) -> ItemStart:
-        return ItemStart("upload-1", directory.as_uri(), DirectorySource(directory, source_version="v1", link=False))
+        return ItemStart(
+            ItemIdentity("upload-1"), directory.as_uri(), DirectorySource(directory, source_version="v1", link=False)
+        )
 
     dispatcher = _weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:
@@ -641,7 +645,7 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
     finally:
         dispatcher.close()
 
-    component = _NoReleaseStarts("base-model")
+    component = _NoArtifactStarts("base-model")
     pinned = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, _SharedRuntime())),
         InMemoryRepositoryBackend.factory(),

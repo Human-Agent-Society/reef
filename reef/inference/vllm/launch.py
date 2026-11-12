@@ -1,16 +1,13 @@
-"""Ray placement, native vLLM launch and engine health, independent of any trainer."""
+"""Ray placement and native vLLM launch, independent of any trainer."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from contextlib import suppress
 from typing import Any
 
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from reef.inference.process import EngineGroup, EngineStartup
-from reef.inference.recovery import EngineHealthChecks, EngineHealthTarget
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.engine import ReefVLLMEngine
 
@@ -36,9 +33,7 @@ class VLLMEngineGroup(EngineGroup):
         self.config = config
         self.placement = placement
         self.all_engines: list[Any] = [None] * config.engine_count
-        self.nodes_per_engine = 1
         self.port_ranges: dict[int, tuple[str, range]] = {}
-        self.num_new_engines = 0
 
     @property
     def engines(self) -> list[Any]:
@@ -53,9 +48,6 @@ class VLLMEngineGroup(EngineGroup):
             raise ValueError("inference placement is smaller than its vLLM engines")
         return tuple(int(device) for device in selected)
 
-    def parallel_config(self) -> dict[str, int]:
-        return {"tp_size": self.config.gpus_per_engine, "pp_size": 1, "ep_size": 1, "moe_dp_size": 1}
-
     def start_engines(self, cursors: dict[str, int]) -> dict[int, Any]:
         """Launch an actor for every empty slot; return each new slot's pending ``init`` call.
 
@@ -66,7 +58,6 @@ class VLLMEngineGroup(EngineGroup):
         created = [index for index, engine in enumerate(self.all_engines) if engine is None]
         for index in created:
             self.all_engines[index] = self._launch_actor(index)
-        self.num_new_engines = len(created)
         return self.init_engines(created, cursors)
 
     def init_engines(self, slots: list[int], cursors: dict[str, int]) -> dict[int, Any]:
@@ -105,41 +96,3 @@ class VLLMEngineGroup(EngineGroup):
         startup = EngineStartup()
         startup.start(self)
         startup.wait()
-
-
-class VLLMEngineHealthChecks(EngineHealthChecks):
-    """Snapshot the live engine actors of one group."""
-
-    def __init__(self, group: VLLMEngineGroup) -> None:
-        self._group = group
-
-    def targets(self) -> Sequence[EngineHealthTarget]:
-        return [
-            _VLLMEngineHealthTarget(self._group, index, engine)
-            for index, engine in enumerate(self._group.all_engines)
-            if engine is not None
-        ]
-
-
-class _VLLMEngineHealthTarget(EngineHealthTarget):
-    def __init__(self, group: VLLMEngineGroup, index: int, engine: Any) -> None:
-        self._group = group
-        self._index = index
-        self._engine = engine
-
-    def check(self, timeout: float) -> None:
-        result = ray.get(self._engine.health_generate.remote(timeout=timeout), timeout=timeout)
-        if result is not True:
-            raise RuntimeError("inference health probe did not report success")
-
-    def retire(self, timeout: float) -> None:
-        current = self._group.all_engines
-        if self._index >= len(current) or current[self._index] is not self._engine:
-            return
-        with suppress(Exception):
-            ray.get(self._engine.shutdown.remote(), timeout=timeout)
-        # Kill the captured handle even if shutdown failed. Never replace it
-        # with the current occupant after waiting for an RPC.
-        ray.kill(self._engine, no_restart=True)
-        if current[self._index] is self._engine:
-            current[self._index] = None

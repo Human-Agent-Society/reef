@@ -21,15 +21,15 @@ Reef calls ``step`` once per training step. ``context.workspace`` holds a
 copy of the head tree, the component's training start, and the step's
 material; ``context.services`` are what Reef does for the method. The tree
 that the method leaves is the candidate: Reef checks it and evaluates it
-under the publication policy. A selected candidate becomes a new release, and
-the deployment's activation rule decides whether that release serves.
+under the publication policy. A selected candidate becomes a new snapshot, and
+the deployment's activation rule decides whether that snapshot serves.
 
 .. figure:: ../assets/harness-method-step-light.svg
    :alt: One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the activation rule
 
    Reef writes the workspace, calls step(context) once, and reads back the
    tree, the state and the output that the method left. Then Reef checks the
-   candidate and evaluates it; a selected candidate becomes a release, which
+   candidate and evaluates it; a selected candidate becomes a snapshot, which
    the activation rule activates or leaves inactive.
 
 An example: add a tool

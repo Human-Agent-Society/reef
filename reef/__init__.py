@@ -17,13 +17,11 @@ from reef.service.wire import ReportPayload, RequestHeaders, parse_request_heade
 from reef.storage.records import RecordStore
 from reef.evaluation import (
     ActivationRule,
-    AlwaysSelectMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     CandidateSelector,
     EvaluationResult,
     MadeArtifact,
-    RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,
 )
@@ -42,7 +40,6 @@ __all__ = [
     "SCENARIO_METADATA_KEY",
     "ActivationRule",
     "AgentRecord",
-    "AlwaysSelectMixin",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
@@ -50,18 +47,15 @@ __all__ = [
     "EvaluationResult",
     "InferenceRuntime",
     "MadeArtifact",
-    "PostgresRecordStore",
     "Recipe",
     "RecipeConfigError",
     "RecordStore",
     "ReefError",
-    "RegressionCheckMixin",
     "ReportBase",
     "ReportPayload",
     "ReportValidationError",
     "RequestHeaders",
     "RequestType",
-    "SQLiteRecordStore",
     "Sample2Job",
     "Scenario",
     "SelectionDecision",
@@ -74,16 +68,3 @@ __all__ = [
     "build_default_dispatcher",
     "parse_request_headers",
 ]
-
-
-def __getattr__(name: str) -> type:
-    # Preserve convenient root imports without loading databases for interface users.
-    if name == "SQLiteRecordStore":
-        from reef.storage.sqlite import SQLiteRecordStore
-
-        return SQLiteRecordStore
-    if name == "PostgresRecordStore":
-        from reef.storage.postgres import PostgresRecordStore
-
-        return PostgresRecordStore
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

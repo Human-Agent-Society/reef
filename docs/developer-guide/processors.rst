@@ -137,6 +137,14 @@ set ``s`` is the item ``<scenario>.<trainer>:<s>:<i>``, or
 and the sample's records. The samples of a unit with more than one sample share
 the item metadata ``group``, so they train in the same job.
 
+A sample that a sample processing task stores also has the metadata
+``stored_by_task``, the ID of that task, and ``read_by_task``, the ID of the
+task that read the last of its records (RFC #1267). The two differ when
+background work, such as a judgment, ends in a later task. A key is left out
+when the task is unknown, as for records read before a restart. A data query
+with ``group_key=stored_by_task`` or ``group_key=read_by_task`` finds the
+samples of one task.
+
 A restart never makes saved samples again: recovery skips the records that the
 trainer's stages consumed. Thus a nondeterministic stage, such as a judge, does
 not run a second time on the same records. A process that stops between the two
@@ -188,11 +196,12 @@ nothing:
   changes nothing, so a stage may return a sample again after a restart. A
   stored sample trains like every other sample.
 - ``job_ended(outcome)``: a training job ended, and the commit of its end is
-  durable. ``outcome`` is a ``JobOutcome`` (``reef.core.job_data``): the job
+  durable. The samples service calls it, also when control runs in another
+  process. ``outcome`` is a ``JobOutcome`` (``reef.core.job_data``): the job
   ID, the component name, ``event`` (``finished`` or ``failed``), the job's
   ``metrics``, and ``error``, which is set exactly when the job failed. A
   trainer that starts with no running job calls it again for the last job
-  that ended, before any other call to a new stage.
+  that ended, before it reads a record.
 
 The generated-task recipe trains its saved tasks this way (see `Task
 generation contract <#task-generation-contract>`__).
@@ -206,7 +215,8 @@ None. The samples service then runs the next selection at that time, without a
 new record. ``close()`` closes both stages.
 ``releasable_record_ids()`` returns
 the completed records that no held set references, and
-``release_records(ids)`` frees their memory after a successful commit. New
+``release_records(ids)`` frees their memory once a commit names them. The
+samples service calls both, and it reads the commits from the commit history. New
 commits retain the stored bodies; consumption progress prevents retraining
 on restart. Storage can independently evict any body under capacity pressure,
 with warnings and durable loss totals. In a scenario with one trainer per
@@ -333,9 +343,6 @@ directory that no job used for ``storage.job_directory_ttl_s`` (7 days by
 default). Keep this time above the longest job, since a component can read
 the directory again when it resumes the job.
 
-A queued job of an earlier Reef holds its data inline: the training service
-writes it to a temporary directory when it takes the job.
-
 Slow work
 ---------
 
@@ -373,12 +380,10 @@ The record-to-sample stage turns each upload into its training sample with
 as uploaded. A stage can override it to check the structure or add
 metadata: ``SFTSamples`` refuses a trajectory with no agent turn to train or
 with a part that is not text, and adds its ``max_tokens``. The method must be
-pure. Admission calls it from the request
-thread for each trajectory and each trainer that accepts uploads; a
-``ValueError`` refuses the whole upload with 400, and the message names the
-trajectory. The pipeline calls it again when it reads the upload. A
-trajectory that ``uploaded_sample`` refuses when the pipeline reads it is
-skipped with a warning and stays unconsumed. The training component renders
+pure. The pipeline calls it when it reads the upload. A trajectory that it
+refuses with ``ValueError`` is skipped with a warning and stays unconsumed. A
+data write does not call it: to add items to a scenario, Reef checks only that
+a trainer accepts uploads, and it does not read the trajectories. The training component renders
 the trajectory when a job trains it; a trajectory that cannot render, or that
 is longer than its ``max_tokens``, is left out of the job.
 
@@ -408,10 +413,15 @@ the staleness check. It places reports in their groups, and it ends units and
 records that can no longer train.
 
 A record that the stage ends, for example a report in a taken slot, appears
-in ``releasable_record_ids()``. The next commit
-names it, so the record never trains after a restart. The default bookkeeping
-keeps ended records until their release; a stage with its own record
-lifecycle overrides the lifecycle methods.
+in ``releasable_record_ids()``. The samples service stores its ID, and the
+next commit names it, so the record never trains after a restart. A restart
+before that commit reads the record again, so the stage makes the same decision
+again. The default bookkeeping keeps ended records until their release; a stage
+with its own record lifecycle overrides the lifecycle methods.
+
+Only the samples service feeds a stage. Control asks only ``is_stale`` and
+``uploaded_sample``, so these methods must depend only on their arguments and
+the stage's config.
 
 Staleness
 ~~~~~~~~~
@@ -439,14 +449,13 @@ The check has these steps:
    payload in ``extra.reef.records``, and ``TrajectorySample.artifact_id``
    reads the ``artifact_id`` of its last call. A task rollout of a training
    component names its artifact in ``training.artifact_id`` instead.
-2. When the scenario reserves job data, it gives the pipeline the
-   ``artifact_id`` of the artifact that serves it now
-   (``observe_serving_artifact_id``). The stage keeps these artifacts, oldest
-   first.
+2. When the scenario reserves job data, it gives the pipeline the artifacts
+   that it served, oldest first. The commit history holds them, so a reload or
+   a restart keeps them.
 3. Each time the pipeline selects the next automatic job, it asks the stage
    whether each sample that the trainer made from records has data more than
    ``max_staleness`` artifacts behind the current artifact
-   (``Record2Sample.is_stale``). The job leaves out a stale sample and
+   (``Record2Sample.is_stale(samples, served_artifact_ids)``). The job leaves out a stale sample and
    every other sample of its group. The sample stays in the store untrained.
 
 The lag counts only the artifacts that this scenario served. A publication of
@@ -699,7 +708,7 @@ a new recipe. SPADE (``recipes/beta/spade``) is one generator.
 
 ``TaskGenerator`` is in ``reef.recipe.generated_tasks``, and
 ``TaskGenerationRequest`` in ``reef.record2sample.generator``. Reef calls its class method
-``from_config(config, *, scenario, environ)`` once for each scenario. The
+``from_config(config, *, scenario, environ, state)`` once for each scenario. The
 generator gets what it needs from its ``config`` and from these calls only:
 
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``
@@ -716,6 +725,32 @@ generator gets what it needs from its ``config`` and from these calls only:
   before, and the process may have restarted since. A generator keeps what it
   needs for each open generation across a restart, and ignores a second call
   for a generation that it already closed. The default keeps nothing.
+
+``state`` is the ``GeneratorState`` of the scenario's generator
+(``reef.recipe.generated_tasks``). A generator keeps there what it must read
+again after a restart, such as its open generations, and keeps no file of its
+own. The state holds text documents by key, and saved directories:
+
+- ``read(key)`` returns the document of ``key``, or ``None``.
+- ``write(key, document)`` saves the document. It replaces an earlier document
+  of the key.
+- ``remove(key)`` removes the document. An unknown key changes nothing.
+- ``keys(prefix="")`` returns the keys that start with ``prefix``, in
+  increasing string order.
+- ``save_files(directory)`` saves a copy of a directory and returns the digest
+  of its files.
+- ``files(digest)`` returns a local directory with the saved files. Do not
+  change it.
+
+Each write is durable and atomic when it returns. The record-to-sample stage
+builds the state from its task store, so the documents are in the deployment's
+database and the saved directories are in the task file store. A restart on
+another machine reads the same state, and an archive of the scenario retires
+it. The generator gets no other part of the task store: it cannot publish a
+task or read the stage's own documents. For work that needs a directory for a
+short time, such as a task under validation, use a temporary directory. A
+config that names a generator is refused when the scenario has no task
+storage.
 
 Each ``GeneratedTaskResult`` is one of four cases, by the candidate's outcome:
 
@@ -772,16 +807,19 @@ rollouts.
 1. ``GeneratedTaskJobData`` makes one job's data of the next job's tasks: the
    ``TaskSample`` values. A job takes at least ``job_samples`` tasks, 1 by
    default, and at most ``buffer_size``, 4 by default.
-2. The trainer submits the job. Its ``rollout`` parameter (``recipe.config.job_parameters.rollout``)
-   tells the component how many rollouts of each task to run, and with which
-   agent and sandbox. The Tinker component runs them, assembles one sample
-   from each rollout that ran, scored with the task's verifier reward, and
-   trains on the groups of at least two samples. It reports each task's
-   rollout rewards in the job's metrics (``rollout_rewards``).
+2. The trainer submits the job. Its rollouts parameter (``rollout`` on Tinker, ``harbor`` on Slime, in ``recipe.config.job_parameters``)
+   tells the component with which agent and sandbox to run the rollouts of
+   each task. Their count is ``rollout.rollouts_per_task`` on Tinker and Slime's
+   ``n-samples-per-prompt`` on Slime. The component assembles one sample from each
+   rollout that ran, scored with the task's verifier reward. Tinker trains on the
+   groups of at least two samples, and Slime on the samples that its own loop
+   generates. It reports each task's rollout rewards in the job's metrics
+   (``rollout_rewards``).
 3. The commit of the submission counts the tasks trained in the sample
    store, as it does for every sample.
-4. When the commit of the job's end is durable, the trainer gives the job's
-   outcome to the record-to-sample stage (``Record2Sample.job_ended``). The
+4. When the commit of the job's end is durable, the samples service reads it
+   and gives the job's outcome to the record-to-sample stage
+   (``Record2Sample.job_ended``). The
    stage gives each task that a committed job trained and that has no result
    its rewards from ``rollout_rewards``. A task without rewards, for example
    in a job that failed or that a ``train-from`` cancelled, gets an
@@ -803,9 +841,8 @@ the next job, and later generations still go out.
 A generator can run rollouts of a task through the generator service, as
 SPADE does for its hint plays; those rollouts are not records, and do not
 train.
-The ``task_group`` objective centers and scales each reward within its task
-group, on the ``importance_sampling`` loss family (Tinker's built-in loss, or
-truncated importance sampling on Slime). The stage trains on no
+The deployment names the objective that trains the samples, as a dotted reference
+in ``recipe.config.job_parameters.objective``. The stage trains on no
 report: it holds the reports that are source sessions, and releases the others,
 such as a generator's own reports, without assembling them.
 
@@ -839,7 +876,8 @@ publication or rejection, so a retry of a generation uses the saved candidates
 and does not generate the tasks again. Tasks that share a source record get the
 same split, and a published task keeps its split. A task whose sources join
 tasks of both splits is rejected. The store also keeps each train task's first
-rollout result and the generations whose results the generator received. The
+rollout result and the generations whose results the generator received, and,
+as state documents, the generator's own state. The
 scenario's training state counts the tasks that trained.
 
 After a restart, the record-to-sample stage continues with the next generation number.

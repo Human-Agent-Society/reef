@@ -60,9 +60,7 @@ the prefix.
 
    reef serve --model ollama/gemma4:26b
 
-Reef bundles no deployment profiles. ``reef serve --recipe <name>`` exits
-with ``--recipe <name>: built in profiles were removed; pass -c <config file>``.
-Pass a recipe's deployment config with ``-c`` instead.
+Reef bundles no deployment profiles. Pass a recipe's deployment config with ``-c``.
 
 Overriding config values
 ------------------------
@@ -109,4 +107,4 @@ Where it writes
 
 Each service gets a log and a PID file under ``reef.run-dir``, which defaults
 to ``.reef/run``. Reef writes its own state, including records, commit histories,
-and the Git-backed release chain, to the ``storage.*`` paths in the config.
+and the Git-backed snapshot chain, to the ``storage.*`` paths in the config.

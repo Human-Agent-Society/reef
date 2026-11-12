@@ -12,7 +12,8 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher, seed_root
-from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
+from tests.support.harness_steps import COMPONENT, TreeArtifacts, changed_rules, harness_backend, harness_recipe
+from tests.support.records import memory_records
 from tests.support.samples_service import make_samples
 
 from reef.core.plugins import PluginReference
@@ -22,7 +23,6 @@ from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
 from reef.scenario import Scenario
 from reef.service.app import create_app
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.state import HarnessState
@@ -41,7 +41,7 @@ PLAIN = TreePatch(changed_rules("plain rules\n"))
 
 
 def train_request(text: str = TEXT, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
-    return {"text": text, "session": session, "release_id": release_id}
+    return {"text": text, "session": session, "artifact_id": release_id}
 
 
 async def post_request(client: TestClient, body: object, scenario: str = "agents"):
@@ -106,8 +106,6 @@ def test_a_request_needs_a_request_mode_and_commits_through_the_train_route(tmp_
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            response = await post_request(client, train_request("run tests first", release_id="rel-3"))
-            assert response.status == 400 and "training_mode='manual'" in await response.text()
             response = await client.post("/reef/scenarios/agents/update", json={"training_mode": "manual"})
             assert response.status == 200
             response = await post_request(client, train_request("run tests first", release_id="rel-3"))
@@ -133,7 +131,7 @@ def test_a_request_needs_a_request_mode_and_commits_through_the_train_route(tmp_
         dispatcher.close()
 
 
-# -- requires: what a release needs from the person ---------------------------------------------
+# -- requires: what a snapshot needs from the person ---------------------------------------------
 
 
 def test_training_request_parses_requires_and_names_the_first_bad_item() -> None:
@@ -356,7 +354,7 @@ def test_the_commit_carries_requires_and_merges_what_the_method_added_by_name(tm
             assert handed == [REQUIRES] * 4
             assert rows[0]["selected"] is True and rows[2]["selected"] is False
             assert rows[3]["skipped"] == "the method left the head tree unchanged"
-            # The releases the route serves carry the same lists.
+            # The snapshots the route serves carry the same lists.
             catalog = await (await client.get("/reef/harness/artifacts", headers={"x-reef-scenario": "agents"})).json()
             served = [
                 row["metrics"]["training_request"]["requires"] for row in catalog["artifacts"] if "metrics" in row
@@ -462,11 +460,11 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
     for index, (method, expected) in enumerate(((adding, merged), (keeping, REQUIRES))):
         (tmp_path / str(index)).mkdir()
         recipe = manual_recipe(tmp_path / str(index), method)
-        records = SQLiteRecordStore()
+        records = memory_records("agents")
         trainer = recipe.build(
             "agents",
             records,
-            releases=ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT),
+            artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT),
             root=seed_root(recipe),
         )
         try:
@@ -482,8 +480,8 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
 
 
 def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) -> None:
-    """The seed's root release requires nothing; the release a request with two items published carries them;
-    the manifest of each carries that release's own list."""
+    """The seed's root snapshot requires nothing; the snapshot a request with two items published carries them;
+    the manifest of each carries that snapshot's own list."""
 
     def method(workspace, services):
         return MARKER if workspace.request() is not None else None
@@ -518,8 +516,8 @@ def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) ->
 
 
 def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
-    """A request's items are per release: a release still needs what an earlier one named, so its manifest lists
-    the union over its chain, while each releases row keeps its own step's list."""
+    """A request's items are per snapshot: a snapshot still needs what an earlier one named, so its manifest lists
+    the union over its chain, while each snapshots row keeps its own step's list."""
     dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, adding_rules))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
@@ -542,7 +540,7 @@ def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
             assert len({base, r1, r2, r3}) == 4
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["artifact_id"] == r3 and head["parent_artifact_id"] == r2
-            # Step 3 named one item of its own; its release still needs what step 2 named.
+            # Step 3 named one item of its own; its snapshot still needs what step 2 named.
             assert head["evaluation"]["training_request"]["requires"] == [second] and head["requires"] == REQUIRES
             for artifact_id, requires in ((r2, [first]), (r1, []), (base, [])):
                 pinned = await client.get("/reef/harness", params={"artifact_id": artifact_id}, headers=headers)
@@ -563,7 +561,7 @@ def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
 
 def test_a_chain_union_past_one_requests_cap_is_still_the_manifests_requires(tmp_path: Path) -> None:
     """The cap of eight is per request: three published requests of three items each make a union of nine, which
-    the manifest carries; the cap never refuses a release for what its chain named."""
+    the manifest carries; the cap never refuses a snapshot for what its chain named."""
     dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, adding_rules))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
@@ -593,9 +591,9 @@ def test_a_chain_union_past_one_requests_cap_is_still_the_manifests_requires(tmp
 
 
 def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
-    """Under the never activation rule a release waits for a person to activate it; the activation serves that
-    release itself, so the served head lists what the release named and serves its tree."""
-    # The seed holds defaultTools; the release's setting leaves the built-in tools on.
+    """Under the never activation rule a snapshot waits for a person to activate it; the activation serves that
+    snapshot itself, so the served head lists what the snapshot named and serves its tree."""
+    # The seed holds defaultTools; the snapshot's setting leaves the built-in tools on.
     tuned = json.dumps({}) + "\n"
 
     def method(workspace, services):
@@ -621,7 +619,7 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
             rows = (await (await client.get("/reef/harness/artifacts", headers=headers)).json())["artifacts"]
             (inactive,) = [row for row in rows if row["operation"] == "training"]
             assert not inactive["active"] and inactive["metrics"]["training_request"]["requires"] == REQUIRES
-            # Nothing served yet: the head is still the base and needs nothing; the inactive release by id does.
+            # Nothing served yet: the head is still the base and needs nothing; the inactive artifact by id does.
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["artifact_id"] == base and head["requires"] == []
             waiting = await client.get(
@@ -629,10 +627,10 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
             )
             assert (await waiting.json())["requires"] == REQUIRES
             response = await client.post(
-                "/reef/scenarios/agents/activate", json={"artifact_id": inactive["artifact_id"]}
+                "/reef/scenarios/agents/update", json={"served": {inactive["artifact_id"]: 100}}
             )
             assert response.status == 200
-            assert (await response.json())["artifact_id"] == inactive["artifact_id"]
+            assert (await response.json())["served"] == {inactive["artifact_id"]: 100}
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["artifact_id"] == inactive["artifact_id"] and head["requires"] == REQUIRES
             assert head["evaluation"] == inactive["metrics"]
@@ -641,7 +639,7 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
                 (base, False),
                 (inactive["artifact_id"], True),
             ]
-            # The activation serves the release's source tree, the evolved setting included.
+            # The activation serves the snapshot's source tree, the evolved setting included.
             source = await client.get("/reef/harness", params={"form": "source"}, headers=headers)
             assert (await source.json())["files"]["config/primary.json"] == tuned
         finally:
@@ -661,16 +659,16 @@ def test_a_request_carries_the_clients_machine_and_drops_what_does_not_fit() -> 
         "commands": {"afplay": True, "ffplay": False},
         "hostname": "not asked for",
     }
-    request = TrainingRequest.from_dict({"text": "speak", "session": "s", "release_id": "r", "client": report})
+    request = TrainingRequest.from_dict({"text": "speak", "session": "s", "artifact_id": "r", "client": report})
     assert request.client == {k: v for k, v in report.items() if k != "hostname"}
     assert request.to_dict()["client"] == request.client
     # Advisory data never refuses a request: what does not fit is dropped, and none is none.
     odd = {"platform": "linux", "release": "#1 SMP; rm -rf", "commands": {"ok": True, "bad name": True, "x": "yes"}}
-    assert TrainingRequest.from_dict({"text": "t", "session": "s", "release_id": "r", "client": odd}).client == {
+    assert TrainingRequest.from_dict({"text": "t", "session": "s", "artifact_id": "r", "client": odd}).client == {
         "platform": "linux",
         "commands": {"ok": True},
     }
-    plain = TrainingRequest.from_dict({"text": "t", "session": "s", "release_id": "r", "client": "darwin"})
+    plain = TrainingRequest.from_dict({"text": "t", "session": "s", "artifact_id": "r", "client": "darwin"})
     assert plain.client == {} and "client" not in plain.to_dict()
 
 
@@ -699,19 +697,16 @@ def test_requirements_follow_component_artifact_parents_instead_of_snapshot_orde
         {
             "artifact_id": "artifact:root",
             "parent_artifact_id": None,
-            "release_id": "storage:root",
             "metrics": {"training_request": {"requires": [{"name": "ROOT", "kind": "env"}]}},
         },
         {
             "artifact_id": "artifact:sibling",
             "parent_artifact_id": "artifact:root",
-            "release_id": "storage:sibling",
             "metrics": {"training_request": {"requires": [{"name": "SIBLING", "kind": "env"}]}},
         },
         {
             "artifact_id": "artifact:selected",
             "parent_artifact_id": "artifact:root",
-            "release_id": "storage:selected",
             "parent_release_id": "storage:sibling",
             "metrics": {"training_request": {"requires": [{"name": "SELECTED", "kind": "env"}]}},
         },

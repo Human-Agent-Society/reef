@@ -17,8 +17,10 @@ from __future__ import annotations
 import shutil
 import tempfile
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from itertools import batched
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -28,6 +30,11 @@ from reef.storage.tasks import LocalTaskFileStore, SplitName
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
 CONSUMED_SAMPLE_PREFIX = "sample:"
+#: The prefix of a record ID in a ``TrainingState`` that a stage ended and no commit named when it was stored.
+ENDED_RECORD_PREFIX = "ended:"
+#: The task directories that ``SampleStore.task_paths`` reads from the task file store at the same time. A remote
+#: store downloads each directory, and one download at a time takes minutes for some thousand tasks.
+TASK_PATH_READERS = 8
 
 SampleKind = Literal["trajectory", "task"]
 SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
@@ -82,14 +89,17 @@ class ListedSample:
     """What a listing shows of one sample: the values of ``StoredSample`` without its content.
 
     Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component`` and ``group`` are those of
-    ``StoredSample``, and ``kind`` is the kind of its item.
+    ``StoredSample``. ``kind`` is the kind of its item, and ``digest`` is the digest of its item: of a task, the
+    digest of its files.
 
-    Purpose: ``SampleStore.listing`` makes it, and the listing routes read it.
+    Purpose: ``SampleStore.listing`` and ``SampleStore.listed_imported_tasks`` make it, and the listing routes read
+    it.
     """
 
     sequence: int
     sample_id: str
     kind: SampleKind
+    digest: str
     split: SplitName
     train_counts: Mapping[str, int]
     component: str | None
@@ -100,9 +110,9 @@ class TrainingState(ABC):
     """The training state of one scenario: what its trainers trained and consumed.
 
     Values: the train count of each sample ID and trainer, a positive int, and the IDs of the records that each
-    trainer's stages consumed. Only a commit changes a train count: the commit history adds one, for the commit's
-    trainer, for each sample that the commit lists (``consumed_sample_id``), in the commit's transaction. A train
-    count stays when its item leaves the scenario, so an item that comes back keeps it.
+    trainer's stages consumed. The train count of a sample and a trainer is the number of that trainer's commits that
+    list the sample (``consumed_sample_id``), so only a commit changes it. A train count stays when its item leaves
+    the scenario, so an item that comes back keeps it.
 
     Purpose: the scenario storage keeps it with the scenario's commits. ``SampleStore`` reads it.
     """
@@ -181,11 +191,14 @@ class SampleStore:
             after_sequence = uses[-1][0]
         return ()
 
-    def listing(self, *, after_sequence: int = 0, limit: int = 256) -> tuple[ListedSample, ...]:
+    def listing(
+        self, *, after_sequence: int = 0, limit: int = 256, kind: SampleKind | None = None
+    ) -> tuple[ListedSample, ...]:
         """The samples whose use sequence is above ``after_sequence``, in use order, at most ``limit``, without their
-        content: a scenario can hold more trajectories than a listing can read in time."""
+        content: a scenario can hold more trajectories than a listing can read in time. Only ``kind``'s if given."""
+        kinds = SAMPLE_KINDS if kind is None else (kind,)
         uses = self.data.scenario_items(
-            self.owner, self.scenario, kinds=SAMPLE_KINDS, after=after_sequence, limit=limit, content=False
+            self.owner, self.scenario, kinds=kinds, after=after_sequence, limit=limit, content=False
         )
         counts = self.state.train_counts([item.item_id for _, item in uses])
         return tuple(self.listed_sample(sequence, item, counts.get(item.item_id, {})) for sequence, item in uses)
@@ -196,6 +209,7 @@ class SampleStore:
             sequence,
             item.item_id,
             cast(SampleKind, item.kind),
+            item.digest,
             cast(SplitName, item.scenarios[self.scenario]),
             train_counts,
             None if own is None else own["component"],
@@ -208,16 +222,42 @@ class SampleStore:
         return origin if isinstance(origin, Mapping) and origin.get("scenario") == self.scenario else None
 
     def get(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
-        """The samples of ``sample_ids`` that the scenario uses, in the order of their items."""
+        """The samples of ``sample_ids`` that the scenario uses, in the order of their items. The store reads them
+        ``MAX_QUERY_LIMIT`` at a time: a request can name tens of thousands of samples, and one read for each would
+        hold the trainer's lock for minutes."""
         items = sorted(
             (
                 item
-                for item_id in dict.fromkeys(sample_ids)
-                if (item := self.data.read(self.owner, item_id)) is not None and self.scenario in item.scenarios
+                for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT)
+                for item in self.data.read_many(self.owner, batch)
+                if self.scenario in item.scenarios
             ),
             key=lambda item: item.sequence,
         )
-        return self.stored([(item.sequence, item) for item in items])
+        return tuple(
+            stored
+            for batch in batched(items, MAX_QUERY_LIMIT)
+            for stored in self.stored([(item.sequence, item) for item in batch])
+        )
+
+    def task_paths(self, sample_ids: Sequence[str]) -> tuple[Path, ...]:
+        """The task directories of the tasks of ``sample_ids`` that the scenario uses, in the order of their items.
+
+        It gives the directories that ``get`` gives for the same tasks, and reads ``TASK_PATH_READERS`` of them from
+        the task file store at the same time. An ID of a trajectory, or of an item that the scenario does not use,
+        gives no directory.
+        """
+        items = sorted(
+            (
+                item
+                for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT)
+                for item in self.data.read_many(self.owner, batch)
+                if self.scenario in item.scenarios and item.kind == "task"
+            ),
+            key=lambda item: item.sequence,
+        )
+        with ThreadPoolExecutor(max_workers=TASK_PATH_READERS) as readers:
+            return tuple(readers.map(self.data.task_path, items))
 
     def stored(self, uses: Sequence[tuple[int, StoredItem]]) -> tuple[StoredSample, ...]:
         """The samples of the uses ``uses`` that are trajectories or tasks, with their train counts."""
@@ -252,6 +292,16 @@ class SampleStore:
         after_sequence = 0
         while page := self.page(after_sequence=after_sequence, kind="task"):
             found.extend(stored for stored in page if stored.component is None and split in (None, stored.split))
+            after_sequence = page[-1].sequence
+        return tuple(found)
+
+    def listed_imported_tasks(self) -> tuple[ListedSample, ...]:
+        """The listing of ``imported_tasks()``: the same tasks in the same order. It reads no task files, so a
+        listing of many tasks does not wait for a remote task file store."""
+        found: list[ListedSample] = []
+        after_sequence = 0
+        while page := self.listing(after_sequence=after_sequence, limit=MAX_QUERY_LIMIT, kind="task"):
+            found.extend(listed for listed in page if listed.component is None)
             after_sequence = page[-1].sequence
         return tuple(found)
 
@@ -290,10 +340,17 @@ class TrainerSamples:
         return self.store.imported_tasks(split)
 
     def add_record_samples(
-        self, group: str | None, record_ids: Sequence[str], samples: Sequence[tuple[str, Sample]]
+        self,
+        group: str | None,
+        record_ids: Sequence[str],
+        samples: Sequence[tuple[str, Sample]],
+        *,
+        lineage: Mapping[str, str] | None = None,
     ) -> int:
         """Save the samples that the stages of ``trainer`` made from ``record_ids`` as items that the scenario uses,
-        then mark the records consumed; return the number of new items.
+        then mark the records consumed; return the number of new items. ``lineage`` adds top-level metadata that
+        names the sample processing tasks of the samples (``TrainingPipeline.lineage``), so a query by group finds
+        them.
 
         The sample named ``name`` is the item ``stage_item_id(scenario, name)``. An item that exists stays as it is,
         so a stage that makes a sample again, after a restart, changes nothing. ``record_ids`` is empty for samples
@@ -314,6 +371,7 @@ class TrainerSamples:
                 "scenarios": {store.scenario: "train"},
                 "origin": origin,
                 **({"group": group} if group is not None else {}),
+                **(lineage or {}),
             }
             try:
                 if isinstance(sample, TrajectorySample):
@@ -334,7 +392,29 @@ class TrainerSamples:
 
     def consumed_record_ids(self) -> frozenset[str]:
         """The records that the stages of ``trainer`` consumed."""
-        return self.store.state.consumed_record_ids(self.trainer)
+        return frozenset(
+            record_id
+            for record_id in self.store.state.consumed_record_ids(self.trainer)
+            if not record_id.startswith(ENDED_RECORD_PREFIX)
+        )
+
+    def end_records(self, record_ids: Iterable[str]) -> None:
+        """Store that the stages of ``trainer`` ended ``record_ids``, for its next commit to name.
+
+        An ended record is not consumed until a commit names it: a restart before that commit reads it again, so a
+        stage rebuilds what it decided about the record.
+        """
+        self.store.state.consume_records(
+            self.trainer, [f"{ENDED_RECORD_PREFIX}{record_id}" for record_id in sorted(record_ids)]
+        )
+
+    def ended_record_ids(self) -> frozenset[str]:
+        """The records that the stages of ``trainer`` ended (``end_records``), whether a commit names them or not."""
+        return frozenset(
+            record_id.removeprefix(ENDED_RECORD_PREFIX)
+            for record_id in self.store.state.consumed_record_ids(self.trainer)
+            if record_id.startswith(ENDED_RECORD_PREFIX)
+        )
 
 
 __all__ = [

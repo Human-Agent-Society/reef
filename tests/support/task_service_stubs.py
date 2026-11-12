@@ -1,4 +1,5 @@
-"""Test doubles for the generator service: a Harbor task document and a service in memory."""
+"""Test doubles for the generator service: a Harbor task document and a service in memory. Also the state of a task
+generator in a SQLite scenario storage."""
 
 from __future__ import annotations
 
@@ -8,7 +9,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
-from reef.harness.tasks.rollouts import RolloutTurn, TaskRollout
+from reef.harness.harbor.rollouts import RolloutTurn, TaskRollout
+from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, StoredGeneratorState
 from reef.record2sample.generator import (
     DesignerRequest,
     DuplicateTask,
@@ -20,6 +22,7 @@ from reef.record2sample.generator import (
     WrittenTask,
     content_hash,
 )
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 DOCUMENT = {
     "instruction": (
@@ -225,3 +228,12 @@ class StandInGenerator(Generator):
                 )
             )
         return tuple(rows)
+
+
+def generator_state(directory: Path, scenario: str = "tasks") -> StoredGeneratorState:
+    """The generator state of ``scenario`` in a SQLite scenario storage under ``directory``.
+
+    Each call opens the storage again, so a second call reads what the first one wrote, as a restart does.
+    """
+    session = SQLiteScenarioStorage(directory).open(scenario)
+    return StoredGeneratorState(session.tasks.open(TASK_STORE_NAME))

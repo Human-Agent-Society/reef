@@ -106,7 +106,7 @@ The keys go under `evolution.method.config`:
 [examples/serve.yaml](examples/serve.yaml) evolves the rules of pi from live sessions, with
 `evaluation.policy: none`: Reef runs no task and publishes every new playbook that passes validation. Its
 seed, [examples/seed/rules.md](examples/seed/rules.md), holds base rules that the agent reads from the first
-release; the method adds its block below them. Run it from the repository root:
+snapshot; the method adds its block below them. Run it from the repository root:
 
 ```bash
 export REEF_UPSTREAM_URL=http://127.0.0.1:8000 REEF_UPSTREAM_MODEL=qwen3-8b

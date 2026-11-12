@@ -21,23 +21,23 @@ def stage(job_parameters) -> DistillJobData:
 
 
 def test_a_job_gets_the_parameters_of_its_samples_kind() -> None:
-    parameters = {"trajectory": {"method": {"objective": "sft"}}, "task": {"method": {"objective": "task_group"}}}
+    parameters = {"trajectory": {"objective": "sft"}, "task": {"objective": "provided:Objective"}}
     jobs = stage(parameters)
-    assert jobs.job_parameters(JobData("s:1", (TRAJECTORY,))) == {"method": {"objective": "sft"}}
-    assert jobs.job_parameters(JobData("s:2", (TASK,))) == {"method": {"objective": "task_group"}}
+    assert jobs.job_parameters(JobData("s:1", (TRAJECTORY,))) == {"objective": "sft"}
+    assert jobs.job_parameters(JobData("s:2", (TASK,))) == {"objective": "provided:Objective"}
     # A harness step's data can hold no sample; it takes no parameters.
     assert jobs.job_parameters(JobData("s:3")) == {}
     assert jobs.experiment_config() == {"job_parameters": parameters}
 
 
 def training_request(**parameters: object) -> TrainingRequest:
-    payload = {"text": "train", "session": "s", "release_id": "r", "parameters": parameters}
+    payload = {"text": "train", "session": "s", "artifact_id": "r", "parameters": parameters}
     return TrainingRequest.from_dict(payload, request_id="train-1")
 
 
 def test_a_requests_parameters_merge_into_the_parameters_of_its_kind() -> None:
     recipe = {
-        "method": {"objective": "sft"},
+        "objective": "sft",
         "learning_rate": 1e-5,
         "slime": {"seq-length": "32768", "tensor-model-parallel-size": "4"},
         "env": {"TAGS": ["a", "b"]},
@@ -47,14 +47,14 @@ def test_a_requests_parameters_merge_into_the_parameters_of_its_kind() -> None:
     data = JobData("s:request:train-1", (TRAJECTORY,), request=training_request(**overrides))
     # Nested objects merge key by key; every other value of the request wins, a list included.
     assert jobs.job_parameters(data) == {
-        "method": {"objective": "sft"},
+        "objective": "sft",
         "learning_rate": 2e-5,
         "batch_size": 8,
         "slime": {"seq-length": "131072", "tensor-model-parallel-size": "4"},
         "env": {"TAGS": ["c"]},
     }
     # A kind that the recipe gives no parameters trains with the request's alone.
-    rl = {"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}
+    rl = {"objective": "provided:Objective", "rollout": {"rollouts_per_task": 4}}
     assert jobs.job_parameters(JobData("s:request:train-1", (TASK,), request=training_request(**rl))) == rl
 
 
@@ -66,10 +66,10 @@ def test_mixed_kinds_and_a_kind_without_parameters_are_refused() -> None:
 
 
 def test_the_context_keeps_its_own_copy_of_json_parameters_by_sample_kind() -> None:
-    parameters = {"method": {"objective": "sft"}}
+    parameters = {"objective": "sft"}
     context = PipelineContext("s", job_parameters={"trajectory": parameters})
-    parameters["method"] = "changed"
-    assert context.job_parameters == {"trajectory": {"method": {"objective": "sft"}}}
+    parameters["objective"] = "changed"
+    assert context.job_parameters == {"trajectory": {"objective": "sft"}}
     with pytest.raises(ValueError, match="maps sample kinds"):
         PipelineContext("s", job_parameters={"record": {}})
     with pytest.raises(ValueError):

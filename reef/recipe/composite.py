@@ -1,4 +1,4 @@
-"""One scenario served and evolved by several recipes, one per release component.
+"""One scenario served and evolved by several recipes, one per snapshot component.
 
 A composite recipe binds a recipe to each component name. It declares
 each recipe's component under that component's name, its default start keeps each
@@ -127,7 +127,7 @@ class ComponentTaskStorage(TaskStorage):
 
 
 def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
-    """``component``'s view of the composite's root ``root``: the component's directory of the root release, and,
+    """``component``'s view of the composite's root ``root``: the component's directory of the root snapshot, and,
     for a default start, the inputs of that component's own default start (``CompositeRecipe.default_start`` names
     them ``<component>.<input>``)."""
     source = root.source
@@ -144,7 +144,7 @@ def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
 
 @dataclass(frozen=True, kw_only=True)
 class CompositeRecipe(Recipe):
-    """Bind one recipe per release component; the scenario runs their trainers side by side."""
+    """Bind one recipe per snapshot component; the scenario runs their trainers side by side."""
 
     components: Mapping[str, Recipe] = field(default_factory=dict)
     name: str = "composite"
@@ -173,7 +173,9 @@ class CompositeRecipe(Recipe):
             name for name, recipe in self.components.items() if isinstance(recipe, WeightTrainingRecipe)
         ]
         if len(weight_components) > 1:
-            raise RecipeConfigError(f"components {weight_components} all train weights; a release loads one component")
+            raise RecipeConfigError(
+                f"components {weight_components} all train weights; a snapshot loads one component"
+            )
         object.__setattr__(self, "components", dict(self.components))
 
     @classmethod
@@ -236,7 +238,7 @@ class CompositeRecipe(Recipe):
     ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
         """The one component that trains weights, so the deployment connects its training component.
 
-        A release loads one component into a runtime, so two weight training
+        A snapshot loads one component into a runtime, so two weight training
         components are refused here, before any runtime is connected. The
         selected component's config is returned flat, as its recipe reads it.
         """
@@ -252,7 +254,7 @@ class CompositeRecipe(Recipe):
                 selected.append((str(name), weight_training))
         if len(selected) > 1:
             raise RecipeConfigError(
-                f"components {[name for name, _ in selected]} all train weights; a release loads one component"
+                f"components {[name for name, _ in selected]} all train weights; a snapshot loads one component"
             )
         return selected[0][1] if selected else None
 
@@ -340,15 +342,30 @@ class CompositeRecipe(Recipe):
         """Each recipe's one component under the name the composite binds it to."""
         specs: dict[str, ComponentSpec] = {}
         for component, recipe in self.components.items():
-            declared = recipe.scenario_components(scenario)
+            declared = recipe.build_components(scenario)
             if len(declared.components) > 1:
                 raise RecipeConfigError(f"component {component!r} serves several components of its own")
             served = next(iter(declared.components.values()), ComponentSpec())
-            # A recipe's own release check (a recipe serving no component admits its whole release with one) admits
-            # this component here: inside the composite, the component is that recipe's release.
+            # A recipe's own snapshot check (a recipe serving no component admits its whole snapshot with one) admits
+            # this component here: inside the composite, the component is that recipe's snapshot.
             checks = every_check(declared.validator, served.validator)
             specs[component] = served if checks is served.validator else replace(served, validator=checks)
         return ScenarioComponents(specs)
+
+    def for_record2sample_configs(
+        self, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
+    ) -> CompositeRecipe:
+        """This composite with the recipe of each component that ``configs`` names given those keys over its
+        record-to-sample config (``Recipe.with_record2sample_config``)."""
+        if not configs:
+            return self
+        return replace(
+            self,
+            components={
+                component: recipe.with_record2sample_config(configs.get(component, {}))
+                for component, recipe in self.components.items()
+            },
+        )
 
     def build_trainers(
         self,
@@ -359,7 +376,7 @@ class CompositeRecipe(Recipe):
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: CommittedArtifacts | None = None,
+        artifacts: CommittedArtifacts | None = None,
         samples: SampleStore | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
@@ -374,7 +391,7 @@ class CompositeRecipe(Recipe):
                 algorithm_state=algorithm_states.get(component),
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
-                releases=None if releases is None else ComponentArtifacts(releases, component),
+                artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
                 samples=None if samples is None else samples.for_trainer(component),
                 root=None if root is None else component_root(root, component),
             )

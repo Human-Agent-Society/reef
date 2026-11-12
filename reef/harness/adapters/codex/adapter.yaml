@@ -1,6 +1,6 @@
 # OpenAI Codex CLI, driven through its non-interactive exec mode.
 #
-# A release is a Codex plugin in plugin/, named reef, in the local marketplace
+# A snapshot is a Codex plugin in plugin/, named reef, in the local marketplace
 # reef at the root: its skills and commands load as reef:<name>. A plugin
 # carries no rules and no config keys, so a tree holds neither. A run's
 # render writes the plugin into CODEX_HOME as codex plugin add would; a
@@ -63,10 +63,22 @@ run:
       - --sandbox
       - workspace-write
       - --skip-git-repo-check
+      # "--" ends the options: an instruction that starts with "-" is the prompt, not an option.
+      - --
       - "{task}"
-  # How a person's machine runs Codex on a release: the person's own ~/.codex stays. register
+    # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
+    skills: codex/skills
+    # How the agent reads the MCP servers of a Harbor task (environment.mcp_servers): the config key, and the
+    # entry of a server of each transport.
+    # Codex reads no SSE server.
+    mcp:
+      target: primary
+      key: mcp_servers
+      stdio: {command: "{command}", args: "{args}"}
+      streamable-http: {url: "{url}"}
+  # How a person's machine runs Codex on a snapshot: the person's own ~/.codex stays. register
   # installs the plugin reef from the local marketplace reef at the install root, and again for
-  # each release, because Codex reads a copy in its plugin cache; the plugin then loads in every
+  # each snapshot, because Codex reads a copy in its plugin cache; the plugin then loads in every
   # Codex session of the person. A session that Reef starts also takes -c arguments that bind the
   # model, with the key in an environment variable rather than on the command line, and turn
   # plugins on.

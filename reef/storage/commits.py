@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
-from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
 from reef.core.snapshot import RootSource, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
 
@@ -33,14 +33,12 @@ class RecordProgress:
 
 
 def read_consumed_ids(value: Mapping[str, object], *, context: str) -> frozenset[str]:
-    """Normalize old progress into the current consumption-only contract."""
-    consumed: set[str] = set()
-    for key in ("compacted_ids", "consumed_ids"):
-        ids = value.get(key, [] if key == "compacted_ids" else None)
-        if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
-            raise ValueError(f"{context} record_progress.{key} must be a list of strings")
-        consumed.update(ids)
-    return frozenset(consumed)
+    """The ``consumed_ids`` of the stored ``record_progress`` mapping ``value``; ``ValueError`` unless it is a list
+    of strings."""
+    ids = value.get("consumed_ids")
+    if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
+        raise ValueError(f"{context} record_progress.consumed_ids must be a list of strings")
+    return frozenset(ids)
 
 
 def parse_record_progress(value: object, *, context: str) -> RecordProgress:
@@ -86,14 +84,14 @@ def to_json_value(value: Any) -> Any:
 
 #: What a commit record does: a training step, the activation of an artifact, a trainer's new training start, an
 #: import, a sync of a person's tree that is active and the training start at once, or the start or the end of
-#: serving an artifact beside the active release.
+#: serving an artifact beside the active selection.
 CommitOperation = Literal["training", "activate", "restore", "train_from", "import", "sync", "serve", "stop_serving"]
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
     """One committed step of a scenario: a training step, an activation, a new training start, an import, a sync,
-    or a change of the artifacts served beside the active release.
+    or a change of the artifacts served beside the active selection.
 
     Values: ``scenario`` is a non-empty name and ``step`` a positive int.
     ``snapshot`` is where the record's release is stored, for use in this process. ``to_dict`` stores it only for a
@@ -104,54 +102,56 @@ class CommitRecord:
     read from release metadata that names no operation. ``component`` is
     ``None`` or a non-empty name, and ``components`` is ``None`` or a
     mapping of non-empty component names to non-empty artifact ids
-    (``ReleaseComponents.artifact_ids``).
+    (``SnapshotComponents.artifact_ids``).
     ``selection`` is None for stored artifacts or an ``ArtifactSelection``
     mapping component names to the artifact IDs needed to rebuild a local view. When
     ``components`` is present, it equals the selection's artifact ids.
     ``high_water_sequence`` and ``high_water_offset`` are non-negative ints.
     Each operation adds its own conditions:
 
-    - ``"training"``: one trainer's step. ``snapshot`` is the release
-      the step made when ``checkpoint`` is true, and the active release when
+    - ``"training"``: one trainer's step. ``snapshot`` is the snapshot
+      the step made when ``checkpoint`` is true, and the active selection when
       the step made none. ``activated`` is true exactly when the scenario's
-      activation rule activated the release that the step made. A later
+      activation rule activated the snapshot that the step made. A later
       activation is an ``"activate"`` record. ``algorithm_state``, the
       high-water values, ``consumed_ids``, ``metrics`` and
       ``training_job_id`` are the
       trainer's state and the step's outcome. ``component`` names the
-      trainer in a scenario of several components.
+      trainer in a scenario of several components. ``train_from`` is
+      ``None``, or the ID of the artifact that the step's job named as its
+      start, on a step that made an artifact: that artifact then does not
+      become the trainer's training start (RFC #1324).
     - ``"activate"``: ``snapshot`` is the active view after selecting
       an existing artifact. One component uses its stored artifact directly,
       with ``component`` and ``components`` both None. Several components
       use a local view and persist its complete ``selection``; ``component``
       names the changed component and ``components`` lists every artifact.
-      Older records may instead refer to a stored combination.
     - ``"restore"``: restore a previous complete active selection.
       ``component`` is None, ``selection`` is present, and ``components``
       lists its artifact ids. The operation creates no artifact.
-    - ``"train_from"``: ``snapshot`` is the release that holds the new
+    - ``"train_from"``: ``snapshot`` is the snapshot that holds the new
       training start, as the row that made it records it. ``component``
       names the trainer as its training rows do (``None`` for a lone
       trainer), and ``components`` is ``None``.
-    - ``"import"``: ``snapshot`` is a release that the import published
+    - ``"import"``: ``snapshot`` is a snapshot that the import published
       beside the chain: it binds the imported artifact and the active
-      release's other components. ``checkpoint`` is true. ``component`` and
+      selection's other components. ``checkpoint`` is true. ``component`` and
       ``components`` are as for an ``"activate"`` record: ``None`` in a
       scenario of one component, else the imported component and the
-      release's manifest. ``metrics`` is ``{"source": {"uri", "version"}}``,
+      snapshot's manifest. ``metrics`` is ``{"source": {"uri", "version"}}``,
       where the content was read from, and ``source.item`` names the
       artifact item of an import of one; it is no part of the artifact's
       identity.
-    - ``"sync"``: ``snapshot`` is a release that the sync published
+    - ``"sync"``: ``snapshot`` is a snapshot that the sync published
       beside the chain from a person's merged tree. ``checkpoint`` is true.
       ``component`` and ``components`` are as for an ``"import"`` record.
-      In this one commit the release becomes the active release and the
+      In this one commit the snapshot becomes the active selection and the
       training start of the component's trainer. ``metrics`` is the sync's
       own description (``None`` or an object), not trainer state.
-    - ``"serve"``: Reef serves one artifact beside the active release from
-      now on. ``snapshot`` is the release that serves it, and the served
+    - ``"serve"``: Reef serves one artifact beside the active selection from
+      now on. ``snapshot`` is the snapshot that serves it, and the served
       artifact is the one that it binds as ``component``. In a scenario of
-      one component, it is the release that made the artifact, and
+      one component, it is the snapshot that made the artifact, and
       ``component`` and ``components`` are ``None``. In a scenario of
       several, it is a local view with the complete ``selection``, and
       ``component`` and ``components`` are as for an ``"activate"`` record.
@@ -174,7 +174,7 @@ class CommitRecord:
 
     Purpose: the scenario committer makes the records and appends them to the
     commit history. Recovery reads them back: trainer state from training
-    records, the active release from :func:`active_record`, and each
+    records, the active selection from :func:`active_record`, and each
     trainer's training start from its newest record that
     ``sets_training_start``.
     """
@@ -193,17 +193,16 @@ class CommitRecord:
     activated: bool = False
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
+    #: The artifact that the job of this training step named as its start, or None.
+    train_from: str | None = None
     #: The component of the trainer that committed this step or takes this training start, or the activated
     #: component; ``None`` in a scenario of one component.
     component: str | None = None
-    #: The artifact id of every component the published release or local view binds, by
-    #: name; ``None`` for a flat release and for a step that published none.
+    #: The artifact id of every component the published snapshot or local view binds, by
+    #: name; ``None`` for a flat snapshot and for a step that published none.
     components: Mapping[str, str] | None = None
     #: Complete component selection for a locally materialized view. These IDs survive cache loss.
     selection: ArtifactSelection | None = None
-    #: The storage snapshots that an older record's ``selection`` named, by component; empty for the current
-    #: format. ``from_dict`` reads them for recovery, and ``to_dict`` does not write them.
-    legacy_locators: Mapping[str, SnapshotRef] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.selection is not None:
@@ -247,6 +246,10 @@ class CommitRecord:
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
             raise CommitHistoryError("commit record training_job_id must be a non-empty string or null")
+        if self.train_from is not None and not (
+            isinstance(self.train_from, str) and self.train_from and self.operation == "training" and self.checkpoint
+        ):
+            raise CommitHistoryError("only a training commit that made an artifact names train_from, an artifact ID")
         if self.operation != "training":
             publishes = self.operation in ("import", "sync")
             if self.checkpoint != publishes:
@@ -283,7 +286,7 @@ class CommitRecord:
                     'an import commit\'s metrics are {"source": {"uri", "version"}}, with "item" for an artifact item'
                 )
         if self.operation == "train_from" and self.components is not None:
-            raise CommitHistoryError("a train_from commit publishes no release and carries no components")
+            raise CommitHistoryError("a train_from commit publishes no snapshot and carries no components")
         if self.operation == "restore" and (
             self.component is not None or self.selection is None or self.components != self.selection.artifact_ids
         ):
@@ -314,7 +317,7 @@ class CommitRecord:
     def artifact_ids(self) -> Mapping[str, str] | None:
         """The artifact ID of each component that ``snapshot`` binds, from ``selection`` or ``components``.
 
-        None for a record that names no component IDs, such as a legacy flat release.
+        None for a record of a local snapshot, which names no component IDs.
         """
         return self.selection.artifact_ids if self.selection is not None else self.components
 
@@ -326,20 +329,19 @@ class CommitRecord:
 
     @property
     def trained_artifact(self) -> bool:
-        """Whether a training step saved this record's artifact: its release is the new chain tip, and the
-        training start moves to it."""
+        """Whether a training step saved this record's artifact: its snapshot is the new chain tip."""
         return self.operation == "training" and self.checkpoint
 
     @property
     def sets_training_start(self) -> bool:
         """Whether ``snapshot`` becomes the training start of the record's trainer: a new training start, a
-        sync, or a training step that saved an artifact."""
-        return self.operation in ("train_from", "sync") or self.trained_artifact
+        sync, or a training step that saved an artifact and whose job named no start of its own."""
+        return self.operation in ("train_from", "sync") or (self.trained_artifact and self.train_from is None)
 
     @property
     def activates(self) -> bool:
-        """Whether ``snapshot`` is the active release after this record: an activation, a sync, or a training
-        step whose release the activation rule activated."""
+        """Whether ``snapshot`` is the active selection after this record: an activation, a sync, or a training
+        step whose snapshot the activation rule activated."""
         return self.operation in ("activate", "restore", "sync") or self.activated
 
     def to_dict(self) -> dict[str, Any]:
@@ -367,6 +369,8 @@ class CommitRecord:
             value["metrics"] = deepcopy(self.metrics)
         if self.training_job_id is not None:
             value["training_job_id"] = self.training_job_id
+        if self.train_from is not None:
+            value["train_from"] = self.train_from
         if self.component is not None:
             value["component"] = self.component
         if self.components is not None:
@@ -379,15 +383,17 @@ class CommitRecord:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CommitRecord:
-        if value.get("record") not in ("reef-commit/5", "reef-commit/6", "reef-commit/7", RECORD_KIND):
-            raise CommitHistoryError(f"unknown commit record kind: {value.get('record')!r}")
+        if value.get("record") != RECORD_KIND:
+            raise CommitHistoryError(
+                f"commit record kind {value.get('record')!r} is not {RECORD_KIND}: this Reef reads no older record"
+            )
         scenario = value.get("scenario")
         if not isinstance(scenario, str) or not scenario:
             raise CommitHistoryError("commit record requires scenario")
         step = value.get("step")
         if not isinstance(step, int):
             raise CommitHistoryError("commit record step must be an integer")
-        raw_ref = value.get("snapshot", value.get("artifact_ref"))
+        raw_ref = value.get("snapshot")
         if not isinstance(raw_ref, Mapping) and (raw_ref is not None or value.get("selection") is None):
             raise CommitHistoryError("commit record requires snapshot or selection")
         checkpoint = value.get("checkpoint")
@@ -402,7 +408,6 @@ class CommitRecord:
         try:
             snapshot = UNLOCATED_SNAPSHOT if raw_ref is None else decode_snapshot_ref(raw_ref)
             selection = None if value.get("selection") is None else ArtifactSelection.from_dict(value["selection"])
-            legacy_locators = {} if value.get("selection") is None else legacy_selection_locators(value["selection"])
         except ValueError as exc:
             raise CommitHistoryError(f"commit record {exc}") from exc
         try:
@@ -429,10 +434,10 @@ class CommitRecord:
             operation_verified=operation_verified,
             metrics=value.get("metrics"),
             training_job_id=value.get("training_job_id"),
+            train_from=value.get("train_from"),
             component=value.get("component"),
             components=value.get("components"),
             selection=selection,
-            legacy_locators=legacy_locators,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -457,18 +462,23 @@ class CommitSnapshots(ABC):
     def locate(self, records: Sequence[CommitRecord]) -> tuple[CommitRecord, ...]: ...
 
 
+def encode_commit(record: CommitRecord) -> str:
+    """The JSON text that a commit history stores for ``record``."""
+    return json.dumps(record.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 def active_record(records: Sequence[CommitRecord]) -> CommitRecord | None:
-    """The newest record of ``records``, a commit history in step order, that activates a release; ``None`` when
+    """The newest record of ``records``, a commit history in step order, that activates a snapshot; ``None`` when
     no record does (the creation artifact is active)."""
     return next((record for record in reversed(records) if record.activates), None)
 
 
 def active_snapshot(records: Sequence[CommitRecord], fallback: SnapshotRef) -> SnapshotRef:
-    """The release that is active after ``records``: the one :func:`active_record` names, else ``fallback``.
+    """The snapshot that is active after ``records``: the one :func:`active_record` names, else ``fallback``.
 
-    ``fallback`` is the release that is active when no record activates one:
+    ``fallback`` is the snapshot that is active when no record activates one:
     the creation artifact, or, for a store that keeps no history across a
-    restart, the release that the artifact head's metadata names
+    restart, the snapshot that the artifact head's metadata names
     (:func:`served_snapshot`).
     """
     record = active_record(records)
@@ -495,8 +505,8 @@ def scenario_metadata_for(
 ) -> dict[str, object]:
     """The scenario metadata of a registration (step zero) or of the artifact a training step made.
 
-    ``source`` is where the scenario's root release came from. ``start_artifact`` is the root release. The root
-    release carries the registration itself, so a registration names no ``start_artifact`` and every later step
+    ``source`` is where the scenario's root snapshot came from. ``start_artifact`` is the root snapshot. The root
+    snapshot carries the registration itself, so a registration names no ``start_artifact`` and every later step
     names it. ``active_artifact`` is None when the activation rule activated the step's own artifact. Otherwise it names
     the artifact that serves after the step. A recovery without the commit history reads it to find the active
     artifact.
@@ -546,17 +556,16 @@ def scenario_metadata_for(
 def parse_scenario_metadata(
     value: Mapping[str, Any], *, checkpoint_head: SnapshotRef, components: Mapping[str, str] | None = None
 ) -> tuple[str, SnapshotRef, RootSource, CommitRecord | None]:
-    """Read the metadata ``value`` that the release ``checkpoint_head`` carries: the scenario name, the root release,
+    """Read the metadata ``value`` that the snapshot ``checkpoint_head`` carries: the scenario name, the root snapshot,
     the root's source, and the checkpoint commit (``None`` at step zero, which has no commit).
 
-    At step zero ``checkpoint_head`` is the root release. ``components`` is the manifest of ``checkpoint_head``,
-    read from the same release metadata, so a commit rebuilt from it carries what a recorded one does. Raise
-    ``ValueError`` for metadata of another format, such as ``reef-scenario/4``, or a malformed value.
+    At step zero ``checkpoint_head`` is the root snapshot. ``components`` is the manifest of ``checkpoint_head``,
+    read from the same snapshot metadata, so a commit rebuilt from it carries what a recorded one does. Raise
+    ``ValueError`` for metadata of another format, or a malformed value.
     """
-    if value.get("format") not in ("reef-scenario/5", "reef-scenario/6", SCENARIO_METADATA_KIND):
+    if value.get("format") != SCENARIO_METADATA_KIND:
         raise ValueError(
-            f"scenario metadata has the format {value.get('format')!r}; this Reef reads {SCENARIO_METADATA_KIND} "
-            "and legacy reef-scenario/5 or reef-scenario/6, "
+            f"scenario metadata has the format {value.get('format')!r}; this Reef reads {SCENARIO_METADATA_KIND}, "
             "so create the scenario again"
         )
     scenario = value.get("scenario")
@@ -588,7 +597,7 @@ def parse_scenario_metadata(
     raw_start = value.get("start_artifact")
     if scenario_step == 0:
         if raw_start is not None:
-            raise ValueError("a registration's scenario metadata names no start_artifact: it is the root release")
+            raise ValueError("a registration's scenario metadata names no start_artifact: it is the root snapshot")
         return scenario, checkpoint_head, source, None
     if not isinstance(raw_start, Mapping):
         raise ValueError("scenario metadata after step zero requires start_artifact")
@@ -620,7 +629,7 @@ def parse_scenario_metadata(
 def served_snapshot(value: Mapping[str, Any], *, checkpoint_head: SnapshotRef) -> SnapshotRef:
     """The artifact that serves after the commit whose scenario metadata is ``value``.
 
-    ``checkpoint_head`` is the release that carries ``value``. It serves when ``value`` names no
+    ``checkpoint_head`` is the snapshot that carries ``value``. It serves when ``value`` names no
     ``active_artifact``: a registration, or a step whose artifact the activation rule activated. Otherwise the
     named artifact serves. Raise ``ValueError`` when ``active_artifact`` is not an artifact reference.
     """

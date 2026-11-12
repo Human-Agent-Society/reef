@@ -13,18 +13,16 @@ from reef.service.routes.payload import read_object
 
 
 def register_harness_routes(app: web.Application, *, request_service: RequestService, imports: HarnessImports) -> None:
-    """The routes that a harness client calls: the active tree, the releases, the import of a person's files, and the
+    """The routes that a harness client calls: the active tree, the snapshots, the import of a person's files, and the
     adapters. Control's app and the harness service's app both serve them; ``imports`` commits an import."""
 
     async def harness(request: web.Request) -> web.Response:
-        release_id = request.query.get("release_id") or None
         form = request.query.get("form", "rendered")
         service_url = request.query.get("service_url") or None
         root = request.query.get("root") or None
         manifest = await asyncio.to_thread(
             request_service.harness_manifest,
             request.headers,
-            release_id,
             form,
             service_url,
             root,

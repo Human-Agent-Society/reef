@@ -1,15 +1,13 @@
-"""PostgreSQL records, commits, settings, samples, tasks, evaluations, pooled transactions, and storage lifecycle.
+"""PostgreSQL commits, settings, samples, tasks, evaluations, pooled transactions, and storage lifecycle.
 
-Every per-scenario table is keyed by a store generation, so archiving a
-scenario retires its records, commits, settings, samples and tasks together. The database
+Every per-scenario table is keyed by a store generation, so archiving a scenario retires its commits, settings,
+samples and tasks together. Its records are record items in the storage's data store (RFC #1219). The database
 alone holds a scenario's state; the local directory holds no scenario state.
 """
 
 from __future__ import annotations
 
 import hashlib
-import logging
-import re
 import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -19,152 +17,32 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Self
 
-from sqlalchemy import (
-    BigInteger,
-    Column,
-    Float,
-    ForeignKey,
-    Identity,
-    Index,
-    Integer,
-    MetaData,
-    String,
-    Table,
-    Text,
-    UniqueConstraint,
-    create_engine,
-    func,
-    select,
-)
+from sqlalchemy import Column, Float, ForeignKey, Integer, MetaData, String, Table, Text, create_engine, func, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.engine import URL, Connection, make_url
-from sqlalchemy.exc import ArgumentError
+from sqlalchemy.engine import Connection
 from sqlalchemy.schema import CreateSchema
 
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.migrations import (
-    migrate_manual_buffers,
-    migrate_published_tasks,
-    migrate_record_storage,
-    migrate_record_trajectories,
-    migrate_scenario_settings,
-    migrate_training_samples,
-)
-from reef.storage.records import RecordLoss, RecordRetention
+from reef.storage.data import DataStore
+from reef.storage.record_items import ItemRecordStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
+from reef.storage.sql_data import PostgresDataStore
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
-from reef.storage.sql_records import (
-    RecordTables,
-    ScopedTable,
-    SQLRecordRetention,
-    SQLRecordStore,
-    trajectory_node_table,
-)
-from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
+from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase, batches
+from reef.storage.sql_samples import SQLTrainingState, stage_record_table
+from reef.storage.sql_setup import postgres_url, validate_postgres_schema
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
-#: The version of the record schema that this adapter writes; it upgrades every older version.
-POSTGRES_SCHEMA_VERSION = 19
+#: The most parameters that one PostgreSQL statement takes.
+MAX_PARAMETERS = 65535
 
-
-def postgres_url(database_url: str) -> URL:
-    """Validate a PostgreSQL URL and select psycopg 3 without exposing credentials."""
-    try:
-        url = make_url(database_url)
-        if url.drivername not in {"postgres", "postgresql", "postgresql+psycopg"}:
-            raise ValueError
-        # Force validation here; malformed ports otherwise fail during engine setup.
-        if url.port is not None and not 0 < url.port < 65536:
-            raise ValueError
-    except (TypeError, ValueError, AttributeError, ArgumentError):
-        raise ValueError("record_database_url must be a PostgreSQL URL using psycopg 3") from None
-    return url.set(drivername="postgresql+psycopg")
-
-
-def validate_postgres_schema(schema: str) -> None:
-    """Require a dedicated, portable SQL schema name for deployment isolation."""
-    if not isinstance(schema, str) or re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", schema) is None:
-        raise ValueError("record_database_schema must be a lowercase SQL identifier of at most 63 characters")
-    if schema == "public" or schema == "information_schema" or schema.startswith("pg_"):
-        raise ValueError("record_database_schema must be a dedicated Reef schema")
-
-
-def _record_tables(metadata: MetaData) -> RecordTables:
-    records = Table(
-        "agent_record",
-        metadata,
-        Column("sequence", BigInteger, Identity(), primary_key=True),
-        Column("storage_id", String(32), ForeignKey("record_store.storage_id"), nullable=False),
-        Column("agent_record_id", Text, nullable=False),
-        Column("scenario", Text, nullable=False),
-        Column("request_type", Text, nullable=False),
-        Column("created_at", Float(53), nullable=False),
-        Column("payload_json", Text, nullable=False),
-        Column("references_json", Text, nullable=False),
-        Column("artifact_json", Text),
-        Column("body_bytes", BigInteger, nullable=False),
-        # A payload with a message list lives as ATIF in the record's node in record_node (RFC #1054).
-        Column("message_field", Text),
-        Column("payload_sha256", String(64)),
-        UniqueConstraint("storage_id", "agent_record_id"),
-    )
-    nodes = trajectory_node_table(
-        metadata,
-        "record_node",
-        Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
-    )
-    consumed = Table(
-        "consumed_agent_record",
-        metadata,
-        Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
-        Column("agent_record_id", Text, primary_key=True),
-        Column("content_sha256", String(64), nullable=False),
-    )
-    receipts = Table(
-        "record_consumption",
-        metadata,
-        Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
-        Column("scenario", Text, primary_key=True),
-        Column("receipt_id", Text, primary_key=True),
-        # Large id sets cannot be PostgreSQL btree keys. Shared SQL operations
-        # still compare the complete canonical ids and metadata after insertion.
-        Column("consumed_ids_sha256", String(64), primary_key=True),
-        Column("consumed_ids_json", Text, nullable=False),
-        Column("metadata_json", Text, nullable=False),
-        Column("recorded_at", Float(53), nullable=False),
-    )
-    Index("agent_record_scenario_sequence", records.c.storage_id, records.c.scenario, records.c.sequence)
-    Index(
-        "agent_record_type_sequence",
-        records.c.storage_id,
-        records.c.scenario,
-        records.c.request_type,
-        records.c.sequence,
-    )
-    eviction = Table(
-        "record_eviction",
-        metadata,
-        Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
-        Column("scenario", Text, primary_key=True),
-        Column("record_count", BigInteger, nullable=False),
-        Column("body_bytes", BigInteger, nullable=False),
-        Column("first_sequence", BigInteger, nullable=False),
-        Column("last_sequence", BigInteger, nullable=False),
-    )
-    Index("agent_record_capacity", records.c.created_at, records.c.sequence)
-    settings = Table(
-        "scenario_setting",
-        metadata,
-        Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
-        Column("name", Text, primary_key=True),
-        Column("value_json", Text, nullable=False),
-    )
-    return RecordTables(records, consumed, receipts, eviction, settings, nodes)
+#: The version of the record schema that this adapter writes and reads; it opens no other version.
+POSTGRES_SCHEMA_VERSION = 22
 
 
 class PostgresRecordDatabase:
@@ -189,10 +67,15 @@ class PostgresRecordDatabase:
             Column("archived_at", Float(53)),
         )
         version = Table("schema_version", metadata, Column("version", Integer, primary_key=True))
-        self.tables = _record_tables(metadata)
+        self.settings_table = Table(
+            "scenario_setting",
+            metadata,
+            Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
+            Column("name", Text, primary_key=True),
+            Column("value_json", Text, nullable=False),
+        )
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
         self.stage_record_table = stage_record_table(metadata, foreign_key="record_store.storage_id")
-        self.sample_train_count_table = sample_train_count_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
@@ -209,41 +92,10 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
-                if versions and (len(versions) != 1 or not 1 <= versions[0] <= POSTGRES_SCHEMA_VERSION):
-                    raise ReefError("unsupported PostgreSQL record schema version")
-                # Version 4 adds the commit and settings tables. Version 5 adds the task tables.
-                # Version 6 adds the uploaded trajectory table. Version 7 replaces task_candidate and
-                # generated_task with candidate_task and published_task, which keep each task by the digest
-                # of its directory, and no longer uses task_store. Version 8 adds task_trained and task_document, the
-                # trained marks and the stage documents of a task store. Version 9 adds artifact_evaluation, the
-                # evaluations that clients ask for. Version 10 replaces uploaded_trajectory with training_sample and
-                # sample_train_count, which counts the committed jobs of each trainer that trained a sample. create_all adds them to an older
-                # schema, migrate_uploaded_trajectories moves the uploaded trajectories, and migrate_imported_tasks
-                # moves the tasks of the imported-tasks task store. Version 11 adds component, group_key and
-                # record_ids_json to training_sample (migrate_sample_columns): the samples that the record-to-sample stages make.
-                # Version 12 adds manual_buffer, the samples of each trainer's manual buffer. Version 13 drops
-                # task_trained (migrate_generated_task_marks): the sample store counts the trained generated tasks.
-                # Version 14 adds record_node, the trajectory node of each record with a message list: the record's
-                # payload as ATIF, with only the entries after its parent's (migrate_record_trajectories).
-                # Version 15 adds sample_record, the records whose trajectory nodes a stored sample renders from.
-                # Version 16 deletes the model_config scenario settings (migrate_scenario_settings): a scenario has no
-                # model override of its own (RFC #1062). Version 17 drops manual_buffer (migrate_manual_buffers): a
-                # training request names its samples (RFC #1140). Version 18 drops training_sample and
-                # sample_record, and adds stage_record (migrate_training_samples): every training sample is a data
-                # item, and the scenario keeps only its training state (RFC #1140). Version 19 drops published_task
-                # (migrate_published_tasks): a published task is a candidate with a split.
-                metadata.create_all(connection)
-                migrate_record_storage(connection, self.tables.records, self.tables.consumption)
-                migrate_record_trajectories(connection, self.tables.records, self.tables.nodes)
-                migrate_training_samples(connection, self.sample_train_count_table)
-                migrate_scenario_settings(connection, self.tables.settings)
-                migrate_manual_buffers(connection, schema)
-                migrate_published_tasks(connection, schema)
-                for index in self.tables.records.indexes:
-                    index.create(connection, checkfirst=True)
                 if versions and versions != [POSTGRES_SCHEMA_VERSION]:
-                    connection.execute(version.update().values(version=POSTGRES_SCHEMA_VERSION))
-                elif not versions:
+                    raise ReefError("unsupported PostgreSQL record schema version")
+                metadata.create_all(connection)
+                if not versions:
                     connection.execute(version.insert().values(version=POSTGRES_SCHEMA_VERSION))
         except BaseException:
             self._engine.dispose()
@@ -313,63 +165,18 @@ class PostgresRecordDatabase:
                 )
             return storage_id
 
-    def prune(self, retention: RecordRetention) -> int:
-        """Evict oldest bodies across generations when the capacity budget is exceeded."""
-        queries = SQLRecordRetention(self.tables)
-        losses: list[tuple[str, RecordLoss]] = []
-        removed = 0
-        with self.transaction() as connection:
-            # Concurrent maintenance must not count the same deletion twice.
-            key = int.from_bytes(
-                hashlib.sha256(f"reef-record-retention:{self._schema}".encode()).digest()[:8], "big", signed=True
-            )
-            connection.execute(select(func.pg_advisory_xact_lock(key)))
-            # Use the same namespace locks as append/eviction to protect retry hashes.
-            connection.execute(
-                select(self._stores.c.storage_id).order_by(self._stores.c.storage_id).with_for_update()
-            ).all()
-            retained = queries.retained_bytes(connection)
-            # Select before deleting: the size of a record counts the nodes that the records before it release.
-            sizes = queries.eviction_sizes()
-            selected: list[int] = []
-            after_time, after_sequence = float("-inf"), 0
-            while retained > retention.max_bytes:
-                page = queries.page(connection, sizes, after_time=after_time, after_sequence=after_sequence)
-                if not page:
-                    break
-                for created_at, sequence, size in page:
-                    selected.append(sequence)
-                    retained -= size
-                    after_time, after_sequence = created_at, sequence
-                    if retained <= retention.max_bytes:
-                        break
-            for start in range(0, len(selected), 256):
-                batch_losses = queries.evict(connection, selected[start : start + 256])
-                losses.extend(batch_losses)
-                removed += sum(loss.record_count for _, loss in batch_losses)
-        for scenario, loss in losses:
-            logging.getLogger(__name__).warning(
-                "Record capacity exceeded: evicted %d records (%d body bytes), scenario=%s, sequence=%d..%d; "
-                "training data may be incomplete",
-                loss.record_count,
-                loss.body_bytes,
-                scenario,
-                loss.first_sequence,
-                loss.last_sequence,
-            )
-        return removed
-
     def close(self) -> None:
         if not self._closed:
             self._closed = True
             self._engine.dispose()
 
 
-class PostgresRecordStore(SQLRecordStore):
-    """Reuse SQL record operations with PostgreSQL transactions and conflict insertion.
+class PostgresScenarioDatabase(SQLScenarioDatabase):
+    """The state of one scenario generation in the PostgreSQL record database, with its transactions and conflict
+    insertion.
 
     A URL creates an owned pool; a PostgresRecordDatabase shares its pool with
-    other sessions. ``name`` identifies the store across restarts, and ``schema``
+    other sessions. ``name`` identifies the scenario across restarts, and ``schema``
     isolates deployments when constructing from a URL.
     """
 
@@ -382,7 +189,7 @@ class PostgresRecordStore(SQLRecordStore):
         self._closed = False
         try:
             self.storage_id = self._database.storage_id(name)
-            super().__init__(replace(self._database.tables, scope={"storage_id": self.storage_id}))
+            super().__init__(self._database.settings_table, {"storage_id": self.storage_id})
         except BaseException:
             if self._owns_database:
                 self._database.close()
@@ -392,7 +199,7 @@ class PostgresRecordStore(SQLRecordStore):
     def _transaction(self, *, write: bool) -> Iterator[Connection]:
         with self._lock:
             if self._closed:
-                raise RuntimeError("PostgreSQL record store is closed")
+                raise RuntimeError("PostgreSQL scenario database is closed")
             with self._database.transaction(read_only=not write) as connection:
                 self._database.check_store(connection, self.storage_id, write=write)
                 yield connection
@@ -401,8 +208,13 @@ class PostgresRecordStore(SQLRecordStore):
         self, connection: Connection, table: Table, values: Mapping[str, object] | Sequence[Mapping[str, object]]
     ) -> bool:
         rows = [dict(values)] if isinstance(values, Mapping) else [dict(row) for row in values]
-        statement = insert(table).values(rows).on_conflict_do_nothing().returning(next(iter(table.primary_key)))
-        return connection.execute(statement).first() is not None
+        inserted = False
+        # One statement takes at most MAX_PARAMETERS parameters, and each row gives one for each of its columns.
+        for batch in batches(rows, MAX_PARAMETERS // len(rows[0]) if rows else 1):
+            statement = insert(table).values(batch).on_conflict_do_nothing().returning(next(iter(table.primary_key)))
+            if connection.execute(statement).first() is not None:
+                inserted = True
+        return inserted
 
     def task_storage(self, files: TaskFileStore, scenario: str) -> SQLTaskStorage:
         """Open the task stores of this store generation, with their task files in ``files``."""
@@ -414,7 +226,7 @@ class PostgresRecordStore(SQLRecordStore):
         scope = {"storage_id": self.storage_id}
         return SQLTrainingState(
             self,
-            ScopedTable(self._database.sample_train_count_table, scope=scope),
+            ScopedTable(self._database.commit_table, scope=scope),
             ScopedTable(self._database.stage_record_table, scope=scope),
         )
 
@@ -429,7 +241,6 @@ class PostgresRecordStore(SQLRecordStore):
         return SQLCommitHistory(
             self,
             ScopedTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
-            ScopedTable(self._database.sample_train_count_table, scope={"storage_id": self.storage_id}),
             label=f"postgres://{self._database.schema}/record-store/{self.storage_id}/commits",
             durable=True,
         )
@@ -438,7 +249,6 @@ class PostgresRecordStore(SQLRecordStore):
         with self._lock:
             if not self._closed:
                 self._closed = True
-                self._live_records.clear()
                 if self._owns_database:
                     self._database.close()
 
@@ -452,11 +262,14 @@ class PostgresStorageSettings(PluginSettings):
 
 
 class PostgresScenarioStorage(ScenarioStorage):
-    """Keep every scenario's records, commits, settings and tasks in one PostgreSQL schema.
+    """Keep every scenario's commits, settings and tasks in one PostgreSQL schema, and its records as record items in
+    ``data`` (``ItemRecordStore``).
 
-    It keeps no scenario state in files under ``directory``.
-    ``task_files`` keeps the files of published tasks. The default is a
-    ``LocalTaskFileStore`` in ``directory/task-files``.
+    It keeps no scenario state in files under ``directory``. ``task_files`` keeps the files of published tasks. The
+    default is a ``LocalTaskFileStore`` in ``directory/task-files``. ``data`` is the data store. The default is a
+    ``PostgresDataStore`` in the schema ``<schema>_data`` of the same database, so that two record schemas do not
+    share records; the storage closes a default data store with itself.
+    Deployment assembly gives its data store.
     """
 
     def __init__(
@@ -466,6 +279,7 @@ class PostgresScenarioStorage(ScenarioStorage):
         *,
         schema: str = "reef_records",
         task_files: TaskFileStore | None = None,
+        data: DataStore | None = None,
     ) -> None:
         self._directory = Path(directory)
         self._directory.mkdir(parents=True, exist_ok=True)
@@ -474,11 +288,21 @@ class PostgresScenarioStorage(ScenarioStorage):
         self._lock = RLock()
         self._closed = False
         self.task_files = LocalTaskFileStore(self._directory / "task-files") if task_files is None else task_files
+        self._owns_data = data is None
+        try:
+            self.data = (
+                PostgresDataStore(database_url, self.task_files, schema=f"{schema}_data") if data is None else data
+            )
+        except BaseException:
+            self._database.close()
+            raise
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
         settings = PostgresStorageSettings.parse(config, plugin_class=cls)
-        return cls(settings.database_url, directory, schema=settings.schema, task_files=task_files)
+        return cls(settings.database_url, directory, schema=settings.schema, task_files=task_files, data=data)
 
     @property
     def durable(self) -> bool:
@@ -487,18 +311,21 @@ class PostgresScenarioStorage(ScenarioStorage):
     def open(self, scenario: str) -> CommitHistoryScenarioStore:
         with self._lock:
             self._ensure_open()
-            records = PostgresRecordStore(self._database, name=scenario)
+            database = PostgresScenarioDatabase(self._database, name=scenario)
             try:
+                owner = database.read_settings().owner or scenario
+                records = ItemRecordStore(self.data, owner, scenario, self.data.scenario_generation(owner, scenario))
                 return CommitHistoryScenarioStore(
                     scenario,
                     records,
-                    records.commit_history(),
-                    tasks=records.task_storage(self.task_files, scenario),
-                    training_state=records.training_state(),
-                    evaluations=records.evaluation_store(),
+                    database.commit_history(),
+                    tasks=database.task_storage(self.task_files, scenario),
+                    training_state=database.training_state(),
+                    evaluations=database.evaluation_store(),
+                    database=database,
                 )
             except BaseException:
-                records.close()
+                database.close()
                 raise
 
     def read_settings(self, scenario: str) -> ScenarioSettings:
@@ -506,28 +333,24 @@ class PostgresScenarioStorage(ScenarioStorage):
             self._ensure_open()
             if self._database.active_storage_id(scenario) is None:
                 return ScenarioSettings()
-            with closing(PostgresRecordStore(self._database, name=scenario)) as records:
-                return records.read_settings()
+            with closing(PostgresScenarioDatabase(self._database, name=scenario)) as database:
+                return database.read_settings()
 
     def write_settings(self, scenario: str, settings: ScenarioSettings) -> None:
         with self._lock:
             self._ensure_open()
-            with closing(PostgresRecordStore(self._database, name=scenario)) as records:
-                records.write_settings(settings)
+            with closing(PostgresScenarioDatabase(self._database, name=scenario)) as database:
+                database.write_settings(settings)
 
     def archive(self, scenario: str) -> tuple[str, ...]:
         with self._lock:
             self._ensure_open()
+            self.data.remove_scenario(self.read_settings(scenario).owner or scenario, scenario)
             storage_id = self._database.archive(scenario)
             archived_files = self.task_files.archive(scenario)
             if storage_id is None:
                 return archived_files
             return (f"postgres://{self._schema}/record-store/{storage_id}", *archived_files)
-
-    def prune(self, *, max_bytes: int) -> int:
-        with self._lock:
-            self._ensure_open()
-            return self._database.prune(RecordRetention(max_bytes=max_bytes))
 
     def close(self) -> None:
         with self._lock:
@@ -535,6 +358,9 @@ class PostgresScenarioStorage(ScenarioStorage):
                 self._closed = True
                 try:
                     self._database.close()
+                    if self._owns_data:
+                        # The data store shares the task file store, so it closes first.
+                        self.data.close()
                 finally:
                     self.task_files.close()
 

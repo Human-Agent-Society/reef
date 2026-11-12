@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import threading
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text, inspect
 from tests.support.samples import made_task
 from tests.support.task_service_stubs import task_for
 
@@ -17,7 +17,7 @@ from reef.core.tasks import write_harbor_task
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, MemoryDataStore, NewItem
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
+from reef.storage.samples import TASK_PATH_READERS, SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -196,6 +196,15 @@ def test_a_commit_counts_each_sample_it_consumed_once_for_its_trainer(scenario):
     assert (second.train_count(""), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
 
 
+def test_a_commit_counts_more_samples_than_one_statement_can_name(scenario):
+    # PostgreSQL takes at most 65535 parameters in one statement, and each count row has several.
+    sample_ids = [f"t{index}" for index in range(20_000)]
+    commit = training_commit(1, *(consumed_sample_id(sample_id) for sample_id in sample_ids))
+    scenario.session.commit_step(expected_step=0, commit=commit)
+    counts = scenario.session.training_state.train_counts(sample_ids)
+    assert len(counts) == len(sample_ids) and counts["t19999"] == {"": 1}
+
+
 def test_train_counts_survive_an_item_that_leaves_and_comes_back(scenario):
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2", math="train")])
     scenario.session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), component="a"))
@@ -245,82 +254,55 @@ def test_imported_tasks_are_the_tasks_that_no_stage_made(scenario):
     assert scenario.ids(kind="task") == ["task-a", "held", "math.generated-tasks.g"]
 
 
-def legacy_sample_tables(connection, schema: str | None, storage_id: str | None) -> None:
-    """Make the ``training_sample`` and ``sample_record`` tables of the sample store before RFC #1140, with an upload
-    and a sample that the trainer ``a`` made."""
-
-    def scope() -> list[Column]:
-        return [] if storage_id is None else [Column("storage_id", String(32), nullable=False)]
-
-    samples = Table(
-        "training_sample",
-        MetaData(schema=schema),
-        Column("sequence", Integer, primary_key=True),
-        *scope(),
-        Column("sample_id", Text, nullable=False),
-        Column("kind", String(16), nullable=False),
-        Column("split", String(8), nullable=False),
-        Column("content_json", Text, nullable=False),
-        Column("content_sha256", String(64), nullable=False),
-        Column("component", Text, nullable=True),
-        Column("group_key", Text, nullable=True),
-        Column("record_ids_json", Text, nullable=False, server_default="[]"),
+def test_the_listing_of_the_imported_tasks_reads_no_task_files(scenario, monkeypatch):
+    samples = scenario.samples
+    scenario.task("task-a", "train")
+    scenario.task("held", "eval", 9001)
+    samples.for_trainer("").add_record_samples(
+        None, (), (("generated-tasks/g", made_task("g", metadata={"task": {"name": "g"}})),)
     )
-    records = Table(
-        "sample_record",
-        MetaData(schema=schema),
-        *scope(),
-        Column("sample_id", Text, primary_key=True),
-        Column("agent_record_id", Text, primary_key=True),
-    )
-    samples.create(connection)
-    records.create(connection)
-    key = {} if storage_id is None else {"storage_id": storage_id}
-    row = {"kind": "trajectory", "split": "train", "content_json": "{}", "content_sha256": "0" * 64}
-    connection.execute(
-        samples.insert(),
-        [
-            {**key, **row, "sample_id": "upload", "component": None},
-            {**key, **row, "sample_id": "a:r1:0", "component": "a"},
-        ],
-    )
-    connection.execute(records.insert().values(**key, sample_id="a:r1:0", agent_record_id="r1"))
+    imported = samples.imported_tasks()
+
+    def refuse(item):
+        raise AssertionError(f"the listing read the files of {item.item_id}")
+
+    monkeypatch.setattr(scenario.data, "task_path", refuse)
+    listed = samples.listed_imported_tasks()
+    assert [(task.sample_id, task.split, task.digest, task.train_counts) for task in listed] == [
+        (task.sample_id, task.split, task.sample.metadata["task"]["files_digest"], task.train_counts)
+        for task in imported
+    ]
 
 
-def test_a_start_drops_the_sample_store_and_the_train_counts_of_its_stage_samples(open_durable_storage):
+def test_the_task_directories_of_many_tasks_are_read_at_the_same_time(scenario, monkeypatch):
+    samples = scenario.samples
+    names = [f"task-{index}" for index in range(TASK_PATH_READERS)]
+    for name in names:
+        scenario.task(name, "eval")
+    scenario.data.create("acme", [upload("trajectory", math="train")])
+    expected = tuple(stored.sample.task_path for stored in samples.get(names))
+
+    # Each read waits until every reader has started one: a store that reads one directory at a time never ends.
+    started = threading.Barrier(TASK_PATH_READERS, timeout=10)
+    task_path = scenario.data.task_path
+
+    def slow_task_path(item):
+        started.wait()
+        return task_path(item)
+
+    monkeypatch.setattr(scenario.data, "task_path", slow_task_path)
+    assert samples.task_paths([*reversed(names), "trajectory", "missing"]) == expected
+
+
+def test_a_restart_counts_the_trained_samples_from_the_commits(open_durable_storage):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         consumed = (consumed_sample_id("upload"), consumed_sample_id("a:r1:0"))
         session.commit_step(expected_step=0, commit=training_commit(1, *consumed, component="a"))
-        state = session.training_state
-        schema = state.counts.table.schema
-        with state.records._transaction(write=True) as connection:
-            storage_id = state.counts.scope.get("storage_id")
-            legacy_sample_tables(connection, schema, storage_id)
 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
-        assert state.train_counts(["upload", "a:r1:0"]) == {"upload": {"a": 1}}
-        with state.records._transaction(write=False) as connection:
-            assert not inspect(connection).has_table("training_sample", schema=schema)
-            assert not inspect(connection).has_table("sample_record", schema=schema)
-
-
-def test_a_start_drops_the_manual_buffers_of_the_older_schema(open_durable_storage):
-    with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
-        state = session.training_state
-        schema = state.counts.table.schema
-        with state.records._transaction(write=True) as connection:
-            legacy = Table(
-                "manual_buffer",
-                MetaData(schema=schema),
-                *(Column(key, Text, primary_key=True) for key in ("trainer", "sample_id")),
-            )
-            legacy.create(connection)
-            connection.execute(legacy.insert().values(trainer="", sample_id="t1"))
-
-    with (
-        closing(open_durable_storage()) as storage,
-        closing(storage.open("math")) as session,
-        session.training_state.records._transaction(write=False) as connection,
-    ):
-        assert not inspect(connection).has_table("manual_buffer", schema=schema)
+        assert state.train_counts(["upload", "a:r1:0", "untrained"]) == {"upload": {"a": 1}, "a:r1:0": {"a": 1}}
+        # A later commit of the same trainer counts again, and one of another trainer counts for that trainer.
+        session.commit_step(expected_step=1, commit=training_commit(2, consumed_sample_id("upload"), component="a"))
+        session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("upload"), component="b"))
+        assert state.train_counts(["upload"]) == {"upload": {"a": 2, "b": 1}}

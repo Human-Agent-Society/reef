@@ -20,7 +20,7 @@ from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSetti
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.record2sample.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
-from reef.record2sample.staleness import ServedArtifacts, is_stale, producing_artifact_ids
+from reef.record2sample.staleness import is_stale, producing_artifact_ids
 
 
 class SampleStatus(Enum):
@@ -102,15 +102,20 @@ class Record2Sample(ABC, Plugin):
     and the stage ends it (``consume``). The stage never calls the pipeline.
 
     The stage also runs the staleness check. No other part of Reef checks how far the training data lags behind the
-    weights. The pipeline gives the stage each artifact that the scenario serves (``observe_serving_artifact_id``).
-    Then the pipeline asks the stage whether the data of a stored sample is more than ``max_staleness`` artifacts
-    behind (``is_stale``) before job data takes it. ``max_staleness`` is a non-negative int, from
-    ``Record2SampleSettings``; the constructor refuses other values.
+    weights. The pipeline asks the stage whether the data of a stored sample is more than ``max_staleness`` artifacts
+    behind the artifacts that the scenario served (``is_stale``) before job data takes it. ``max_staleness`` is a
+    non-negative int, from ``Record2SampleSettings``; the constructor refuses other values.
 
     A record that the stage ends, for example a record that can no longer train, appears in
-    ``releasable_record_ids``. The trainer adds those IDs to the next commit, so the record never trains after a
-    restart. The default bookkeeping keeps the ended records in ``terminal`` until their release; a stage with its
-    own record lifecycle overrides the lifecycle methods.
+    ``releasable_record_ids``. The samples service stores those IDs, and the trainer's next commit names them, so the
+    record never trains after a restart. Once that commit is durable, the samples service releases them. A restart
+    before that commit reads the records again, so the stage rebuilds what it decided. The default bookkeeping keeps
+    the ended records in ``terminal`` until their release; a stage with its own record lifecycle overrides the
+    lifecycle methods.
+
+    Only the samples service feeds a stage (``push``, ``advance``, ``job_ended``), and a stage that holds records or
+    runs background work keeps that state there. Control asks only ``is_stale`` and ``uploaded_sample``, which depend
+    on their arguments and the stage's config.
 
     ``push``, ``advance``, and ``make_samples`` run on the trainer thread and must not block on network or model
     calls. A stage with slow work runs it on a worker that it owns, forms sets when the work ends, and ``close``
@@ -149,8 +154,6 @@ class Record2Sample(ABC, Plugin):
         self.terminal: set[str] = set()
         #: The set ID of each record that a formed set holds, until the record's release.
         self.set_of_record: dict[str, Hashable] = {}
-        #: The versions that the scenario served, oldest first. The last one is the version that it serves now.
-        self.served_artifacts = ServedArtifacts()
 
     @abstractmethod
     def push(self, record: AgentRecord) -> None:
@@ -225,19 +228,16 @@ class Record2Sample(ABC, Plugin):
 
     # ------------------------------------------------------------- staleness
 
-    def observe_serving_artifact_id(self, artifact_id: str) -> None:
-        """Add the artifact that the scenario serves now, if it changed (``ServedArtifacts.observe``)."""
-        self.served_artifacts.observe(artifact_id)
-
-    def is_stale(self, samples: Sequence[Sample]) -> bool:
+    def is_stale(self, samples: Sequence[Sample], served_artifact_ids: Sequence[str]) -> bool:
         """Whether the training data of ``samples`` is more than ``max_staleness`` artifacts behind the served one.
 
-        ``is_stale`` of the artifacts that produced the samples (``producing_artifact_ids``) and the artifacts that
-        the scenario served. The pipeline asks it for each sample that the stage made before job data takes it. A
+        ``served_artifact_ids`` holds the artifacts that the scenario served, oldest first. The result is ``is_stale``
+        of the artifacts that produced the samples (``producing_artifact_ids``) and ``served_artifact_ids``. It depends
+        on nothing else. The pipeline asks it for each sample that the stage made before job data takes it. A
         stage whose samples do not depend on the version that produced them, such as fixed SFT targets, returns
         False.
         """
-        return is_stale(producing_artifact_ids(samples), self.served_artifacts.artifact_ids, self.max_staleness)
+        return is_stale(producing_artifact_ids(samples), served_artifact_ids, self.max_staleness)
 
     def consume(self, unit: RecordSetUnit) -> None:
         """End ``unit``, whose samples the pipeline stored: its records are releasable."""
@@ -273,10 +273,10 @@ class Record2Sample(ABC, Plugin):
 
         The default fits a backend that reads ATIF trajectories as they are. A stage whose backend trains
         token-level data, and whose sample-to-job stage accepts uploaded trajectories, overrides it to render the
-        trajectory as its backend trains it, such as ``SFTSamples``. The pipeline calls it at upload, from a request
-        thread, to refuse a trajectory that cannot train, and again when it reads the upload. It must be pure: the
-        same trajectory gives the same sample, and the stage's state does not change. A trajectory that cannot
-        become a sample raises ``ValueError`` with the reason.
+        trajectory as its backend trains it, such as ``SFTSamples``. The pipeline calls it when it reads the upload,
+        and skips a trajectory that it refuses. It must be pure: the same trajectory gives the same sample, and the
+        stage's state does not change. A trajectory that cannot become a sample raises ``ValueError`` with the
+        reason.
         """
         return trajectory
 
@@ -293,9 +293,10 @@ class Record2Sample(ABC, Plugin):
     def job_ended(self, outcome: JobOutcome) -> None:
         """A training job ended and the commit of its end is durable; the default does nothing.
 
-        A stage that made tasks reads their results from ``outcome``. A trainer that starts with no running job
-        calls it again for the last job that ended, before any other call of a new stage, so a stage that starts
-        in that process takes it as the end of the last job that may have trained its samples.
+        The samples service calls it, also when control runs in another process. A stage that made tasks reads their
+        results from ``outcome``. A trainer that starts with no running job calls it again for the last job that
+        ended, before it reads a record, so a stage that starts in that process takes it as the end of the last job
+        that may have trained its samples.
         """
         return
 

@@ -317,3 +317,53 @@ def test_provider_without_local_model_rejects_gpu_request(tmp_path):
     }
     with pytest.raises(DeployConfigError, match=r"require --inference\.model-path"):
         orchestrator.resolve_deployment_config(raw, None, tmp_path / "c")
+
+
+def test_the_evaluation_section_sets_the_agent_host_of_a_task_container() -> None:
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"agent_host": "10.0.0.5"}})
+
+    assert service_config_from_mapping(resolved).evaluation_agent_host == "10.0.0.5"
+
+
+@pytest.mark.parametrize(("sandboxes", "valid"), [(32, True), (0, False), (True, False)])
+def test_the_evaluation_section_sets_the_sandboxes_that_one_process_holds_at_once(sandboxes, valid) -> None:
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"max_sandboxes": sandboxes}})
+
+    if not valid:
+        with pytest.raises(ValueError, match=r"evaluation\.max_sandboxes"):
+            service_config_from_mapping(resolved)
+        return
+    assert service_config_from_mapping(resolved).evaluation_max_sandboxes == sandboxes
+
+
+@pytest.mark.parametrize(("jobs", "valid"), [(4, True), (0, False), (True, False)])
+def test_the_training_section_sets_the_jobs_that_one_process_runs_at_once(jobs, valid) -> None:
+    resolved = translate_layout({"reef": {"token": "t"}, "training": {"max_jobs": jobs}})
+
+    if not valid:
+        with pytest.raises(ValueError, match=r"training\.max_jobs"):
+            service_config_from_mapping(resolved)
+        return
+    assert service_config_from_mapping(resolved).training_max_jobs == jobs
+    assert service_config_from_mapping(translate_layout({"reef": {"token": "t"}})).training_max_jobs == 1
+
+
+def test_the_training_section_names_a_training_manager_plugin() -> None:
+    reference = "tests.train.test_manager:TrainThenFail"
+    resolved = translate_layout({"reef": {"token": "t"}, "training": {"manager": reference}})
+    assert service_config_from_mapping(resolved).training_manager == reference
+    assert service_config_from_mapping(translate_layout({"reef": {"token": "t"}})).training_manager is None
+    with pytest.raises(ValueError, match=r"training\.manager"):
+        service_config_from_mapping(translate_layout({"reef": {"token": "t"}, "training": {"manager": 3}}))
+
+
+def test_the_evaluation_section_names_a_trial_observer_plugin() -> None:
+    observer = "tests.evaluation.test_rollout_worker:ReadingObserver"
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"trial_observer": observer}})
+    assert service_config_from_mapping(resolved).evaluation_trial_observer == observer
+
+    resolved = translate_layout({"reef": {"token": "t"}, "evaluation": {"trial_observer": "json:loads"}})
+    with pytest.raises(
+        ValueError, match=r"evaluation\.trial_observer .* must name a class that inherits TrialObserver"
+    ):
+        service_config_from_mapping(resolved)

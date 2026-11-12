@@ -1,4 +1,4 @@
-"""The serving runtimes: the control plane loads each published release into the serving engines."""
+"""The serving runtimes: the control plane loads each published snapshot into the serving engines."""
 
 from __future__ import annotations
 
@@ -135,7 +135,7 @@ def saved_full_weights(path: Path) -> Path:
 
 
 def release(path: Path, artifact_id: str) -> Artifact:
-    return Artifact(SnapshotRef(artifact_id, None), None, local_path=path)
+    return Artifact(SnapshotRef(artifact_id, None), None, artifact_id=artifact_id, local_path=path)
 
 
 @pytest.fixture
@@ -195,7 +195,7 @@ def test_an_activation_loads_another_release_and_the_default_start_loads_as_any_
     first = serving.activate_checkpoint(release(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
     older = serving.activate_checkpoint(release(saved_adapter(tmp_path / "older"), "o"), scenario="math")
     assert older != first and serving.serving_adapter_runtime_load_id("math") == older
-    # A root release made from the default start holds the untrained adapter, which loads under a version of its own.
+    # A root snapshot made from the default start holds the untrained adapter, which loads under a version of its own.
     base = serving.activate_checkpoint(release(saved_adapter(tmp_path / "untrained"), "base"), scenario="math")
     assert base not in (first, older, serving.base_version)
     assert serving.serving_adapter_runtime_load_id("math") == base
@@ -246,7 +246,7 @@ def test_a_failed_load_that_took_the_scenarios_own_slot_leaves_it_serving_no_ada
     # The new adapter evicted the first one, so requests sample the base model rather than name a gone adapter.
     assert ("unload", adapter_name("math", first)) in engines.events
     assert serving.serving_adapter_runtime_load_id("math") is None
-    # The first release is not served any more, so activating it again loads it under a new version.
+    # The first snapshot is not served any more, so activating it again loads it under a new version.
     engines.misreport = None
     again = serving.activate_checkpoint(release(tmp_path / "m1", "m1"), scenario="math")
     assert again != first and serving.serving_adapter_runtime_load_id("math") == again
@@ -328,7 +328,7 @@ def test_engines_that_report_another_version_after_a_full_load_fail_it_and_keep_
     with pytest.raises(RuntimeContractError, match=r"report \['stale:1'\] after loading"):
         serving.activate_checkpoint(release(weights, "w1"))
     assert engines.events[-1] == "resume"
-    # The release is not recorded as served: a retry loads it again under a new version.
+    # The snapshot is not recorded as served: a retry loads it again under a new version.
     engines.misreport = None
     retried = serving.activate_checkpoint(release(weights, "w1"))
     assert len(engines.loads()) == 2 and retried not in (initial, "stale:1")
@@ -481,7 +481,7 @@ def test_a_restarted_runtime_takes_over_the_adapter_the_engines_kept_and_stops_a
     assert len(engines.loads()) == loads
     assert restarted.served_model_name("math") == served.model_name
 
-    # A newer release replaces it; when its stop is due, the engines unload the old adapter.
+    # A newer snapshot replaces it; when its stop is due, the engines unload the old adapter.
     restarted.activate_checkpoint(release(saved_adapter(tmp_path / "newer"), "n"), scenario="math")
     restarted.stop_serving(served)
     assert ("unload", served.model_name) in engines.events

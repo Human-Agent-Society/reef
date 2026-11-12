@@ -14,7 +14,7 @@ from reef.core.records_types import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
-from reef.inference.interfaces import EngineClients, InferenceHandler
+from reef.inference.interfaces import EngineClients, InferenceHandler, StartupStep, StartupSteps
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
 from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
@@ -142,6 +142,54 @@ def test_an_answer_without_its_record_is_never_returned_and_a_dead_engine_is_a_b
     assert asyncio.run(ask_failing(tmp_path / "engine", engine_url="http://127.0.0.1:9", refuse_records=False)) == 502
 
 
+#: An engine's refusal of a prompt that fills the model's context window, in Tinker's words.
+CONTEXT_ERROR = (
+    "context_length_exceeded: the prompt exceeds this model's maximum context length. "
+    "66527 prompt tokens fill the context window of 65536"
+)
+
+
+def refusing_engine_app(status: int, message: str) -> web.Application:
+    """An engine that answers every request with ``status`` and the error ``message``."""
+    app = web.Application()
+
+    async def refuse(request: web.Request) -> web.Response:
+        return web.json_response({"error": {"message": message}}, status=status)
+
+    app.router.add_post("/v1/chat/completions", refuse)
+    return app
+
+
+async def ask_refused(tmp_path: Path, status: int, message: str, *, stream: bool) -> tuple[int, str]:
+    storage = SQLiteScenarioStorage(tmp_path / "records")
+    storage.open("math").commit_step(expected_step=0, commit=commit("release-1"))
+    coordination = memory_coordination()
+    table = coordination.served_models
+    number = coordination.control_lease.acquire("control-1").number
+    async with TestServer(refusing_engine_app(status, message)) as engine:
+        served = ServedArtifact("release-1", str(engine.make_url("/")), "math-v1")
+        table.write(ScenarioModel("math", ACTIVE), served, control_lease_number=number)
+        async with TestClient(TestServer(build_inference_app(table, storage, Engines(), tokens=TOKEN))) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers=HEADERS,
+                json={"model": "any", "messages": [{"role": "user"}], "stream": stream},
+            )
+            return response.status, await response.text()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stream", [False, True])
+def test_an_engine_that_refuses_a_request_answers_with_its_own_status_and_one_that_fails_is_a_bad_gateway(
+    tmp_path: Path, stream: bool
+) -> None:
+    # An agent reads the refusal to repair its run: Harbor's terminus-2 ends or compacts on a context error.
+    status, body = asyncio.run(ask_refused(tmp_path / "refused", 400, CONTEXT_ERROR, stream=stream))
+    assert status == 400 and "context_length_exceeded" in body
+    status, body = asyncio.run(ask_refused(tmp_path / "failed", 500, "the engine ran out of memory", stream=stream))
+    assert status == 502 and "the engine ran out of memory" in body
+
+
 @pytest.mark.unit
 def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path) -> None:
     async def check() -> None:
@@ -153,9 +201,8 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
             "math",
             {
                 "artifact_id": "release-1",
-                "release_id": "release-1",
                 "aliases": ["release-1:weights"],
-                "beside": {"release-0": {"component": "weights", "release_id": "release-0"}},
+                "beside": {"release-0": {"component": "weights", "artifact_id": "release-0"}},
             },
             control_lease_number=lease.number,
         )
@@ -166,7 +213,20 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                 assert (await client.get(path)).status == 401
                 before = table.current_request("math")
                 response = await client.get(path, headers=HEADERS)
-                assert await response.json() == {"artifact_id": "release-1", "state": "pending", "error": None}
+                assert await response.json() == {
+                    "artifact_id": "release-1",
+                    "state": "pending",
+                    "error": None,
+                    "engine": None,
+                    "engine_detail": None,
+                    # RFC #1283: a startup that waits is in its prepare phase from the request.
+                    "startup": {
+                        "steps": [
+                            {"phase": "prepare", "started_at": before.created_at, "ended_at": None, "detail": None}
+                        ],
+                        "estimate_seconds": None,
+                    },
+                }
                 assert response.headers["Cache-Control"] == "no-store"
                 assert table.current_request("math") == before
                 alias = await client.get(path + "?model=release-1:weights", headers=HEADERS)
@@ -198,7 +258,15 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     stop_delay_seconds=60,
                 )
                 response = await client.get(path, headers=HEADERS)
-                assert await response.json() == {"artifact_id": "release-1", "state": "ready", "error": None}
+                # The plain HTTP handler cannot tell its engine's state.
+                assert await response.json() == {
+                    "artifact_id": "release-1",
+                    "state": "ready",
+                    "error": None,
+                    "engine": None,
+                    "engine_detail": None,
+                    "startup": None,
+                }
         finally:
             storage.close()
             coordination.close()
@@ -225,6 +293,9 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
                     "artifact_id": "release-1",
                     "state": "failed",
                     "error": "The inference engine did not start. Check the service logs.",
+                    "engine": None,
+                    "engine_detail": None,
+                    "startup": None,
                 }
                 response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                 assert response.status == 503
@@ -235,6 +306,50 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
                 assert (await client.get("/reef/scenarios/unknown/inference/status", headers=HEADERS)).status == 404
                 response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                 assert response.status == 404
+        finally:
+            storage.close()
+            coordination.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
+def test_an_artifact_that_serves_already_stays_ready_while_another_one_starts_or_fails(tmp_path: Path) -> None:
+    """One request serves the active artifact and each beside one: the start of a beside artifact, and its failure,
+    do not change the state of the active artifact that a route serves already."""
+
+    async def check() -> None:
+        coordination = memory_coordination()
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        table, queue = coordination.served_models, coordination.work_queue
+        lease = coordination.control_lease.acquire("control")
+        table.write(
+            ScenarioModel("math", ACTIVE),
+            ServedArtifact("release-1", "http://127.0.0.1:9", "math-v1"),
+            control_lease_number=lease.number,
+        )
+        payload = {
+            "artifact_id": "release-1",
+            "aliases": [],
+            "beside": {"release-0": {"component": "weights", "artifact_id": "release-0"}},
+        }
+        table.request("math", payload, control_lease_number=lease.number)
+        app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
+        try:
+            async with TestClient(TestServer(app)) as client:
+                path = "/reef/scenarios/math/inference/status"
+
+                async def states() -> tuple[str, str]:
+                    active = await (await client.get(path, headers=HEADERS)).json()
+                    beside = await (await client.get(path + "?model=release-0", headers=HEADERS)).json()
+                    return active["state"], beside["state"]
+
+                assert await states() == ("ready", "pending")
+                taken = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND])
+                queue.start(SERVING_QUEUE, taken.id, "worker")
+                assert await states() == ("ready", "starting")
+                queue.fail(SERVING_QUEUE, taken.id, "worker", "the beside engine did not start", retryable=False)
+                assert await states() == ("ready", "failed")
         finally:
             storage.close()
             coordination.close()
@@ -283,7 +398,16 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
                 app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
                 async with TestClient(TestServer(app)) as client:
                     response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
-                    assert await response.json() == {"artifact_id": "release-2", "state": "pending", "error": None}
+                    created_at = table.current_request("math").created_at
+                    prepare = {"phase": "prepare", "started_at": created_at, "ended_at": None, "detail": None}
+                    assert await response.json() == {
+                        "artifact_id": "release-2",
+                        "state": "pending",
+                        "error": None,
+                        "engine": None,
+                        "engine_detail": None,
+                        "startup": {"steps": [prepare], "estimate_seconds": None},
+                    }
                     response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                     assert response.status == 200
                     assert response.headers[ARTIFACT_HEADER] == "release-1"
@@ -319,3 +443,59 @@ def test_inference_records_do_not_need_snapshot_history(tmp_path):
     finally:
         storage.close()
         coordination.close()
+
+
+class ColdHandler(HttpInferenceHandler):
+    """A handler whose engine scales to zero: it reports a state and never calls the engine."""
+
+    state: Any = "idle"
+
+    def engine_state(self, served: ServedArtifact) -> Any:
+        return self.state
+
+    def engine_detail(self, served: ServedArtifact) -> str:
+        return "Loading weights · 0:42"
+
+    def engine_steps(self, served: ServedArtifact) -> StartupSteps:
+        return StartupSteps((StartupStep("start", 100.0, 108.0), StartupStep("load", 108.0, detail="5 of 6")), 60.0)
+
+
+@pytest.mark.unit
+def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path: Path) -> None:
+    """RFC #1269: a ready artifact's status names its engine's state, and the read asks the handler only."""
+
+    class ColdEngines(EngineClients):
+        def handler(self, served: ServedArtifact) -> InferenceHandler:
+            return ColdHandler(served.url)
+
+    async def check() -> None:
+        coordination = memory_coordination()
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        table, queue = coordination.served_models, coordination.work_queue
+        lease = coordination.control_lease.acquire("control")
+        table.request("math", {"artifact_id": "release-1"}, control_lease_number=lease.number)
+        taken = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND])
+        queue.start(SERVING_QUEUE, taken.id, "worker")
+        served = ServedArtifact("release-1", "http://127.0.0.1:9", "math")
+        table.complete_request(taken, "worker", {ACTIVE: served}, serving_config={}, stop_delay_seconds=60)
+        app = build_inference_app(table, storage, ColdEngines(), tokens=TOKEN)
+        try:
+            async with TestClient(TestServer(app)) as client:
+                for state in ("idle", "starting", "warm"):
+                    ColdHandler.state = state
+                    response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
+                    status = await response.json()
+                    assert status["engine"] == state
+                    # Only a starting engine says what it does now.
+                    assert status["engine_detail"] == ("Loading weights · 0:42" if state == "starting" else None)
+                    # RFC #1283: and its phases, with their times.
+                    load = {"phase": "load", "started_at": 108.0, "ended_at": None, "detail": "5 of 6"}
+                    start = {"phase": "start", "started_at": 100.0, "ended_at": 108.0, "detail": None}
+                    expected = {"steps": [start, load], "estimate_seconds": 60.0}
+                    assert status["startup"] == (expected if state == "starting" else None)
+        finally:
+            ColdHandler.state = "idle"
+            storage.close()
+            coordination.close()
+
+    asyncio.run(check())

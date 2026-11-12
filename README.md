@@ -35,6 +35,14 @@ to train model weights with Slime and SGLang, or improve an agent's harness, inc
 </div>
 
 
+## 📰 News
+
+- **2026-11:** We are refactoring Reef to a control plane + workers architecture. Some recipes and examples can fail on `main` until the refactor is complete. If a recipe fails, please [open an issue](https://github.com/Human-Agent-Society/reef/issues/new/choose).
+- **2026-11:** A scenario can split its traffic across its served artifacts [#1227](https://github.com/Human-Agent-Society/reef/pull/1227), also through [Semantic Router](https://github.com/vllm-project/semantic-router) [#859](https://github.com/Human-Agent-Society/reef/pull/859). The new `python` harness adapter evolves a Python program [#1242](https://github.com/Human-Agent-Society/reef/pull/1242).
+- **2026-10:** Tinker runs as a training component [#901](https://github.com/Human-Agent-Society/reef/pull/901). Episodes and agents can run in Modal Sandboxes [#942](https://github.com/Human-Agent-Society/reef/pull/942). The artifact repository can live on Hugging Face [#1003](https://github.com/Human-Agent-Society/reef/pull/1003). New recipe: [OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) [#683](https://github.com/Human-Agent-Society/reef/pull/683).
+- **2026-09:** [`reef-infra` v0.1.0](https://github.com/Human-Agent-Society/reef/releases/tag/v0.1.0) is on PyPI. New recipes: [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/), [SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/) and [Meta-Harness](recipes/meta_harness/README.md). Reef serves the OpenAI Responses API at `/v1/responses` [#528](https://github.com/Human-Agent-Society/reef/pull/528).
+- **2026-08:** Reef is open source. Read the [launch post](https://x.com/ao_qu18465/status/2094867930081337730).
+
 ## 🎯 When to use Reef
 
 Use Reef when you want your agent to keep improving simply by learning from how you interact with your agent.
@@ -198,7 +206,7 @@ for recipes that read more than a scalar. The endpoint will validate the
 
 Once the recipe has enough feedback, Reef submits a training job to the
 training component. When a checkpoint that the job saved passes evaluation,
-the inference runtime loads it as the new release. Later inference requests
+the inference runtime loads it as the new snapshot. Later inference requests
 use the current version without restarting Reef.
 
 ### Harness-evolving deployment
@@ -210,7 +218,7 @@ A harness deployment serves `reef.recipe.harness:HarnessEvolutionRecipe`. The
 recipe keeps the agent harness as a tree of text files. At each step, a method
 edits a copy of that tree from the step's traces, the evaluation runs the real
 agent on tasks with the candidate, and a candidate that wins publishes as a
-release that any client can pull. The
+snapshot that any client can pull. The
 [harness evolution tutorial](tutorials/evolve-your-harness/README.md) runs the
 smallest full loop on pi. It needs an OpenAI-compatible endpoint, and Node.js
 and npm for pi. From your Reef checkout and activated Python environment:
@@ -225,7 +233,7 @@ suffix) and the model (`inference.upstream-model`). Edit them to point at your
 own provider, and set `REEF_UPSTREAM_API_KEY` if the endpoint needs a key.
 `run.sh` starts Reef on `127.0.0.1:8900`, sends the tasks through it, reports
 each score, and pulls the published tree. Each run writes `work/replay.html`
-with the release chain and the files each step changed.
+with the snapshot chain and the files each step changed.
 
 `GET /reef/harness` serves the published tree, rendered for the deployment's
 adapter. The files carry no endpoint, key, or model: a client writes them
@@ -267,7 +275,7 @@ limitations.
 <div align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/architecture-dark.svg">
-  <img src="docs/assets/architecture-light.svg" alt="Reef architecture: harness requests flow through a scenario to inference. Receipt-linked feedback feeds records and recipe training; artifact evaluation selects updates for versioned publication. Rejected candidates leave the current release serving." width="1200">
+  <img src="docs/assets/architecture-light.svg" alt="Reef architecture: harness requests flow through a scenario to inference. Receipt-linked feedback feeds records and recipe training; artifact evaluation selects updates for versioned publication. Rejected candidates leave the current snapshot serving." width="1200">
 </picture>
 </div>
 

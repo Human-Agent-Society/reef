@@ -3,23 +3,25 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
-from dataclasses import replace
 from threading import Event
 
 import pytest
 from aiohttp import web
 from sqlalchemy.exc import OperationalError
-from tests.support.consumption_receipts import write_consumption_receipt
-from tests.support.conversations import conversation
 
+from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.dispatcher import build_default_dispatcher
+from reef.dispatcher import Dispatcher
+from reef.recipe import Recipe
 from reef.service import assembly
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
-from reef.storage.records import RecordConflict, RecordRetention
+from reef.storage.data import DataStore
+from reef.storage.record_items import record_item
+from reef.storage.records import RecordRetention
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.sql_data import SQLiteDataStore
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 
 def trace(record_id: str, scenario: str = "math") -> AgentRecord:
@@ -28,111 +30,15 @@ def trace(record_id: str, scenario: str = "math") -> AgentRecord:
     )
 
 
-BODY_BYTES = len('{"text":"海"}[]'.encode())
-
-
-@pytest.fixture
-def store_factory(tmp_path):
-    with closing(SQLiteScenarioStorage(tmp_path)) as factory:
-        yield factory
-
-
-def test_capacity_evicts_unconsumed_and_consumed_records_across_archives(tmp_path, store_factory, caplog):
-    archive = tmp_path / "archived" / "removed" / "archived.sqlite3"
-    oldest = replace(trace("old"), created_at=10.0)
-    with SQLiteRecordStore(tmp_path / "a.sqlite3") as first, SQLiteRecordStore(tmp_path / "b.sqlite3") as second:
-        with SQLiteRecordStore(archive) as removed:
-            first.append(oldest)
-            removed.append(replace(trace("archived"), created_at=15.0))
-            second.append(replace(trace("middle", "code"), created_at=20.0))
-            first.append(replace(trace("new"), created_at=30.0))
-            write_consumption_receipt(first, "math", frozenset({"old"}), receipt_id="skip", metadata={})
-        assert store_factory.prune(max_bytes=2 * BODY_BYTES) == 2
-        assert first.get_for_audit("math", "old") is None
-        assert first.get("math", "new") is not None
-        assert second.get("code", "middle") is not None
-        assert first.loss("math").record_count == 1
-        assert first.loss("other").record_count == 0
-        assert first.append_result(oldest).inserted is False
-        with pytest.raises(RecordConflict):
-            first.append(replace(oldest, payload={"text": "changed"}))
-    with SQLiteRecordStore(archive) as removed:
-        assert removed.get("math", "archived") is None
-        assert removed.loss("math").record_count == 1
-    with SQLiteRecordStore(tmp_path / "a.sqlite3") as reopened:
-        assert reopened.loss("math").body_bytes == BODY_BYTES
-        assert reopened.loss("math").first_sequence == reopened.loss("math").last_sequence == 1
-    assert "Record capacity exceeded" in caplog.text
-    assert "scenario=math" in caplog.text
-    assert "sequence=1..1" in caplog.text
-
-
-def stored_bytes(database, where: str = "1") -> int:
-    """The body bytes of the record rows that match ``where``, plus, without a condition, every trajectory node."""
-    with closing(sqlite3.connect(database)) as connection:
-        rows = connection.execute(f"SELECT COALESCE(SUM(body_bytes), 0) FROM agent_record WHERE {where}").fetchone()
-        nodes = connection.execute("SELECT COALESCE(SUM(body_bytes), 0) FROM record_node").fetchone()
-    return rows[0] + (nodes[0] if where == "1" else 0)
-
-
-def test_eviction_frees_exactly_the_nodes_that_no_remaining_record_needs(tmp_path, store_factory):
-    database = tmp_path / "records.sqlite3"
-    alone = conversation("alone", 1, filler="y" * 5000, created_at=10.0)
-    first, second = (
-        conversation(name, turns, created_at=20.0 + turns) for name, turns in (("first", 1), ("second", 2))
+def retention_dispatcher(tmp_path, data: DataStore, task_files: TaskFileStore) -> Dispatcher:
+    """A dispatcher whose scenario storage keeps its records in ``data``, which the dispatcher prunes."""
+    return Dispatcher(
+        Recipe(),
+        InMemoryRepositoryBackend.factory(),
+        scenario_storage=SQLiteScenarioStorage(tmp_path, task_files=task_files, data=data),
+        data_store=data,
+        coordination=memory_coordination(),
     )
-    with SQLiteRecordStore(database) as records:
-        for call in (alone, first, second):
-            records.append(call)
-    with closing(sqlite3.connect(database)) as connection:
-        alone_node = connection.execute(
-            "SELECT body_bytes FROM record_node WHERE agent_record_id = 'alone'"
-        ).fetchone()
-    alone_bytes = stored_bytes(database, "agent_record_id = 'alone'") + alone_node[0]
-    first_bytes = stored_bytes(database, "agent_record_id = 'first'")
-
-    # No other call needs the node of "alone", so evicting it alone brings the store under the budget.
-    assert store_factory.prune(max_bytes=stored_bytes(database) - alone_bytes) == 1
-    # "second" continues "first", so evicting "first" frees only its row and its node stays.
-    assert store_factory.prune(max_bytes=stored_bytes(database) - first_bytes) == 1
-    with SQLiteRecordStore(database) as records:
-        assert records.replay("math") == (second,)
-        assert records.trajectory("math", "second") == ("first", "second")
-        assert records.loss("math").body_bytes == alone_bytes + first_bytes
-        assert records.append_result(alone).inserted is False
-    with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT COUNT(*), SUM(record_count) FROM record_node").fetchone() == (2, 2)
-    assert store_factory.prune(max_bytes=1) == 1
-    assert stored_bytes(database) == 0
-
-
-def test_record_age_and_training_completion_do_not_trigger_deletion(tmp_path, store_factory):
-    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
-        records.append(replace(trace("old"), created_at=1.0))
-        write_consumption_receipt(records, "math", frozenset({"old"}), receipt_id="skip", metadata={})
-        assert store_factory.prune(max_bytes=BODY_BYTES) == 0
-        assert records.get_for_audit("math", "old") is not None
-        assert records.loss("math").record_count == 0
-
-
-def test_budget_purge_pages_across_equal_timestamps_without_skipping_rows(tmp_path, monkeypatch, store_factory):
-    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
-        for index in range(600):
-            records.append(trace(str(index)))
-        monkeypatch.setattr("time.time", lambda: 100.0)
-        assert store_factory.prune(max_bytes=3 * BODY_BYTES) == 597
-        assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["597", "598", "599"]
-
-
-def test_retention_skips_unmigrated_stores_and_empty_directories(tmp_path, store_factory):
-    retention = RecordRetention()
-    assert store_factory.prune(max_bytes=retention.max_bytes) == 0
-    with sqlite3.connect(tmp_path / "legacy.sqlite3") as connection:
-        connection.execute("CREATE TABLE agent_record (sequence INTEGER PRIMARY KEY, payload_json TEXT)")
-        connection.execute("INSERT INTO agent_record VALUES (1, 'original')")
-    assert store_factory.prune(max_bytes=retention.max_bytes) == 0
-    with sqlite3.connect(tmp_path / "legacy.sqlite3") as connection:
-        assert connection.execute("SELECT payload_json FROM agent_record").fetchone() == ("original",)
 
 
 @pytest.mark.parametrize("size", [0, -1, 1.5, True])
@@ -152,9 +58,9 @@ def test_service_config_defaults_to_twenty_gib_and_accepts_overrides():
 
 
 def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, monkeypatch, caplog):
-    dispatcher = build_default_dispatcher(
-        scenario_storage=SQLiteScenarioStorage(tmp_path), coordination=memory_coordination()
-    )
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    data = SQLiteDataStore(tmp_path / "data", task_files)
+    dispatcher = retention_dispatcher(tmp_path, data, task_files)
     monkeypatch.setattr(assembly, "build_dispatcher", lambda *args, **kwargs: dispatcher)
     monkeypatch.setattr("reef.service.app._RECORD_RETENTION_INTERVAL_SECONDS", 0.005)
     original = dispatcher.prune_record_archives
@@ -164,57 +70,56 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
         attempts.append(retention)
         if len(attempts) == 1:
             raise OperationalError(
-                "DELETE FROM agent_record", None, sqlite3.OperationalError("temporary storage failure")
+                "DELETE FROM data_item", None, sqlite3.OperationalError("temporary storage failure")
             )
         return original(retention)
 
     monkeypatch.setattr(dispatcher, "prune_record_archives", flaky)
-    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
-        records.append(trace("expired"))
+    data.create("math", [record_item(trace("expired"))])
 
-        async def run():
-            app = assembly.build_app(
-                ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), agent_record_retention_max_bytes=1)
-            )
-            runner = web.AppRunner(app)
-            await runner.setup()
-            try:
+    async def run():
+        app = assembly.build_app(
+            ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), agent_record_retention_max_bytes=1)
+        )
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
 
-                async def wait_for_purge():
-                    while records.get_for_audit("math", "expired") is not None:
-                        await asyncio.sleep(0.005)
+            async def wait_for_purge():
+                while data.read("math", "math/expired") is not None:
+                    await asyncio.sleep(0.005)
 
-                await asyncio.wait_for(wait_for_purge(), timeout=2)
-            finally:
-                await runner.cleanup()
-            count = len(attempts)
-            await asyncio.sleep(0.02)
-            assert len(attempts) == count
+            await asyncio.wait_for(wait_for_purge(), timeout=2)
+        finally:
+            await runner.cleanup()
+        count = len(attempts)
+        await asyncio.sleep(0.02)
+        assert len(attempts) == count
 
-        asyncio.run(run())
+    asyncio.run(run())
     assert len(attempts) >= 2
     assert attempts[0] == RecordRetention(max_bytes=1)
     assert "record retention failed" in caplog.text
 
 
 def test_retention_serializes_with_scenario_file_archival(tmp_path, monkeypatch):
-    dispatcher = build_default_dispatcher(
-        scenario_storage=SQLiteScenarioStorage(tmp_path), coordination=memory_coordination()
-    )
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    data = SQLiteDataStore(tmp_path / "data", task_files)
+    dispatcher = retention_dispatcher(tmp_path, data, task_files)
     dispatcher.get_or_create_scenario("math")
     started, release, deleting = Event(), Event(), Event()
-    original = SQLiteScenarioStorage.prune
+    original = SQLiteDataStore.prune_records
 
-    def held(factory, *, max_bytes):
+    def held(store, max_bytes):
         started.set()
         assert release.wait(3)
-        return original(factory, max_bytes=max_bytes)
+        return original(store, max_bytes)
 
     def remove():
         deleting.set()
         return dispatcher.delete_scenario("math")
 
-    monkeypatch.setattr(SQLiteScenarioStorage, "prune", held)
+    monkeypatch.setattr(SQLiteDataStore, "prune_records", held)
     try:
         with ThreadPoolExecutor(max_workers=2) as executor:
             pruning = executor.submit(dispatcher.prune_record_archives, RecordRetention())
@@ -230,37 +135,3 @@ def test_retention_serializes_with_scenario_file_archival(tmp_path, monkeypatch)
             assert deletion.result(timeout=3)["archived"]
     finally:
         dispatcher.close()
-
-
-def test_sqlite_upgrade_preserves_records_and_adds_capacity_metadata(tmp_path):
-    database = tmp_path / "records.sqlite3"
-    original = trace("original")
-    with SQLiteRecordStore(database) as records:
-        records.append(original)
-    with sqlite3.connect(database) as connection:
-        connection.execute("DROP TABLE record_eviction")
-        connection.execute("DROP INDEX agent_record_capacity")
-    with SQLiteRecordStore(database) as records:
-        assert records.get("math", "original") == original
-        assert records.loss("math").record_count == 0
-    with closing(SQLiteScenarioStorage(tmp_path)) as storage:
-        assert storage.prune(max_bytes=1) == 1
-    with SQLiteRecordStore(database) as records:
-        assert records.loss("math").record_count == 1
-        assert not records.append_result(original).inserted
-
-
-def test_capacity_eviction_rolls_back_bodies_hashes_and_loss_totals(tmp_path):
-    from reef.storage.sql_records import SQLRecordRetention
-
-    original = trace("original")
-    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
-        records.append(original)
-        with pytest.raises(RuntimeError, match="rollback"), records._transaction(write=True) as connection:
-            SQLRecordRetention(records._tables).evict(connection, [1])
-            raise RuntimeError("rollback")
-        assert records.get("math", "original") == original
-        assert records.loss("math").record_count == 0
-        assert not records.append_result(original).inserted
-        with records._transaction(write=False) as connection:
-            assert connection.exec_driver_sql("SELECT count(*) FROM consumed_agent_record").scalar_one() == 0

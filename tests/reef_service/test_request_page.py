@@ -83,7 +83,7 @@ def _row(metrics: dict, *, artifact_id: str = "rel-1", parent: str | None = "rel
 
 
 CREATION = _row({}, artifact_id="rel-0", parent=None, operation="creation")
-#: The creation while it serves: a newer release that passed the checks then waits for activation.
+#: The creation while it serves: a newer snapshot that passed the checks then waits for activation.
 SERVED_CREATION = {**CREATION, "active": True}
 
 
@@ -131,7 +131,7 @@ def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> 
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
     for href in re.findall(r'href="([^"]+)"', page):
         assert re.match(r"^/reef/harness/artifacts/\d+/page(\?|$)", href.replace("&amp;", "&")), href
-    # A catalog with no active release leaves the crumb as text rather than a broken link.
+    # A catalog with no active selection leaves the crumb as text rather than a broken link.
     inactive_only = [_row(_answered(selected=True), artifact_id="rel-0", parent=None, activated=False)]
     bare = request_page(_record(), inactive_only, now=1_100.0)
     assert '<div class="brand">' in bare and "<span>Harness</span>" in bare
@@ -250,15 +250,15 @@ def test_an_inactive_request_names_the_activation_and_reads_published_once_it_is
     assert "Artifact 12345678 is ready but does not serve yet." in page
     assert "storage:unrelated" not in page
     assert REFRESH not in page
-    # The next action is the activate call, runnable as it stands with the scenario header.
-    activate_call = html.escape(
-        f'POST /reef/scenarios/{SCENARIO}/activate {json.dumps({"artifact_id": "artifact:123456789abc"})}'
+    # The next action is the update call that serves the artifact alone, runnable as it stands.
+    serve_call = html.escape(
+        f'POST /reef/scenarios/{SCENARIO}/update {json.dumps({"served": {"artifact:123456789abc": 100}})}'
     )
-    assert f"<h3>Read this page, then activate it</h3><code>{activate_call}</code>" in page
+    assert f"<h3>Read this page, then serve it</h3><code>{serve_call}</code>" in page
     page = request_page(_record(), [CREATION, {**inactive, "active": True, "activated": True}], now=1_100.0)
     assert '<span class="selected">Published</span>' in page
     assert "Published as artifact 12345678" in page
-    assert "What changed" in _sections(page) and "activate it</h3>" not in page
+    assert "What changed" in _sections(page) and "serve it</h3>" not in page
 
 
 def test_a_rejected_request_names_the_missed_run_on_both_pages() -> None:

@@ -10,27 +10,27 @@ from typing import Any, Self
 
 import pytest
 import sqlalchemy.exc
-from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
+from reef.core.job_data import JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import HarborTask, write_harbor_task
+from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.training_request import TrainingRequest
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecipe, TaskGroupObjective
+from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecipe
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
+    GeneratorState,
     HeldOutTask,
     RejectedTask,
     RolledOutTask,
@@ -43,6 +43,7 @@ from reef.recipe.generated_tasks.processor import (
     GeneratedTaskSettings,
     GenerationJob,
     GenerationOutcome,
+    StoredGeneratorState,
     train_task_names,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
@@ -53,7 +54,6 @@ from reef.storage.commits import CommitRecord
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.tasks import TaskStorage
-from reef.train.algos.registry import resolve_objective
 from reef.train.component import TrainingComponent
 from reef.train.pipeline import TrainingPipeline
 
@@ -144,32 +144,6 @@ def handed_out_names(p: TrainingPipeline) -> list[str]:
     return [sample.metadata["task"]["name"] for _, sample in entries]
 
 
-def sample(task: str, index: int, reward: float) -> TrajectorySample:
-    """One rollout's sample in the task group ``task``, as the training component's rollout makes it."""
-    trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, artifact_id="r1")
-    return dataclasses.replace(trajectory, group_id=task)
-
-
-def test_the_objective_centers_and_scales_rewards_within_each_task_group() -> None:
-    first, second = "harbor-00000-000", "harbor-00000-001"
-    data = JobData("d", (sample(first, 0, 1.0), sample(first, 1, 0.0), sample(second, 0, 0.5), sample(second, 1, 0.5)))
-    objective = resolve_objective("task_group")
-    assert isinstance(objective, TaskGroupObjective) and objective.loss_family == "importance_sampling"
-    signal = objective.prepare(data, {})
-    assert signal.action == "train"
-    assert signal.advantages == (1.0, -1.0, 0.0, 0.0)
-    assert signal.metrics["constant_groups"] == 1
-
-
-def test_a_batch_whose_groups_are_all_constant_is_skipped_and_keeps_the_step_count() -> None:
-    tasks = ("harbor-00000-000", "harbor-00000-001")
-    data = JobData("d", tuple(sample(task, index, 1.0) for task in tasks for index in range(2)))
-    signal = resolve_objective("task_group").prepare(data, {"steps": 3})
-    assert signal.action == "skip" and signal.advantages is None
-    assert signal.next_algorithm_state == {"steps": 3}
-    assert signal.metrics == {"constant_groups": 2, "skipped": "every group is constant"}
-
-
 # ------------------------------------------------------------------------------------------------- the rounds
 
 
@@ -199,7 +173,7 @@ def test_in_manual_mode_a_client_chooses_the_generated_tasks_that_train(tmp_path
     payload = {
         "text": "train it",
         "session": "s-1",
-        "release_id": "r-1",
+        "artifact_id": "r-1",
         "samples": [stage_item_id("tasks", "generated-tasks/harbor-00000-001")],
     }
     p.queue_requests([TrainingRequest.from_dict(payload, request_id="train-1")])
@@ -243,8 +217,10 @@ class ScriptedGenerator(TaskGenerator):
         self.result_generations: list[int] = []
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
-        cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ)})
+    def from_config(
+        cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
+    ) -> Self:
+        cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ), "state": state})
         return cls()
 
     async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
@@ -867,22 +843,25 @@ def test_a_source_sessions_records_stay_until_the_round_that_uses_it_finishes(tm
     p, _ = rounds(tmp_path, ScriptedGenerator(), worker=worker, **SOURCES)
     sessions(p, "a")
     sessions(p, "untagged", tags={})
-    assert {"rec-untagged", "rep-untagged"} <= p.releasable_record_ids(), "an untagged session is released"
-    assert not {"rec-a", "rep-a"} & p.releasable_record_ids()
+    assert {
+        "rec-untagged",
+        "rep-untagged",
+    } <= p.record2sample.releasable_record_ids(), "an untagged session is released"
+    assert not {"rec-a", "rep-a"} & p.record2sample.releasable_record_ids()
     assert p.operational_metrics()["waiting_source_sessions"] == 1
     p.ready(BATCH_SIZE)
     assert [record.agent_record_id for record in worker.submitted[0].source_records] == ["rec-a", "rep-a"]
-    assert not {"rec-a", "rep-a"} & p.releasable_record_ids(), "the round runs"
+    assert not {"rec-a", "rep-a"} & p.record2sample.releasable_record_ids(), "the round runs"
     worker.finish()
     p.ready(BATCH_SIZE)
-    assert {"rec-a", "rep-a"} <= p.releasable_record_ids()
+    assert {"rec-a", "rep-a"} <= p.record2sample.releasable_record_ids()
 
 
 def test_without_a_share_of_sessions_the_rounds_read_only_the_description(tmp_path: Path) -> None:
     task_generator = ScriptedGenerator()
     p, _ = rounds(tmp_path, task_generator, rounds=1, source_tag="source=session")
     sessions(p, "a")
-    assert {"rec-a", "rep-a"} <= p.releasable_record_ids()
+    assert {"rec-a", "rep-a"} <= p.record2sample.releasable_record_ids()
     looked(p)
     assert task_generator.requests == [TaskGenerationRequest((), DESCRIPTION)]
 
@@ -893,7 +872,7 @@ def test_no_session_waits_once_the_rounds_are_over(tmp_path: Path) -> None:
     for _ in range(3):
         looked(p)
     sessions(p, "late")
-    assert {"rec-late", "rep-late"} <= p.releasable_record_ids()
+    assert {"rec-late", "rep-late"} <= p.record2sample.releasable_record_ids()
     assert len(task_generator.requests) == 1
 
 
@@ -960,10 +939,8 @@ def training_recipe(**fields: Any) -> GeneratedTaskRecipe:
 
 
 def test_the_recipe_binds_the_objective_and_its_stages() -> None:
-    spec = GeneratedTaskRecipe.training_spec()
-    assert GeneratedTaskRecipe.pipeline_spec().sample2job is GeneratedTaskJobData and spec.objective == "task_group"
-    assert spec.loss_family == "importance_sampling"
-    assert TaskGroupObjective.rollout_unit == "sample"
+    assert GeneratedTaskRecipe.pipeline_spec().sample2job is GeneratedTaskJobData
+    assert GeneratedTaskRecipe.default_parameters() == {}, "the deployment names the objective"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
     recipe = training_recipe()
     assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"
@@ -1032,11 +1009,39 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     built = recipe.build_pipeline(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
     assert isinstance(built.record2sample, GeneratedTaskSamples)
     assert isinstance(built.record2sample.task_generator, ScriptedGenerator)
-    assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
-    assert built.record2sample.task_store is not None
+    [generator_arguments] = ScriptedGenerator.built
+    state = generator_arguments.pop("state")
+    assert generator_arguments == {"config": {"count": 3}, "scenario": "one", "environ": environ}
+    store = built.record2sample.task_store
+    assert store is not None
     batches = built.sample2job
     assert isinstance(batches, GeneratedTaskJobData) and batches.buffer_size == 2
+
+    # The generator's state is in the stage's task store, apart from the stage's own documents.
+    assert isinstance(state, StoredGeneratorState)
+    store.write_document(key="delivered/0", document="the stage's document")
+    state.write("cursor", "1")
+    state.write("cursor", "2")
+    state.write("open/00000", "open")
+    assert (state.read("cursor"), state.read("delivered/0")) == ("2", None)
+    assert state.keys() == ("cursor", "open/00000") and state.keys("open/") == ("open/00000",)
+    state.remove("open/00000")
+    state.remove("open/00000")
+    assert store.state_document_keys() == ("cursor",) and store.documents() == {"delivered/0": "the stage's document"}
+    directory = write_harbor_task(task_for("t-parent", "r", 1), tmp_path / "written")
+    assert read_harbor_task(state.files(state.save_files(directory))) == read_harbor_task(directory)
+    assert store.generations() == (), "the generator's saved files are no candidates"
     built.close()
+
+
+def test_a_generator_without_the_task_storage_of_a_scenario_session_is_refused() -> None:
+    generator = {"module": f"{MODULE}:ScriptedGenerator"}
+    record2sample = {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {"generator": generator}}
+    recipe = generated_pipeline_recipe({}, {"record2sample": record2sample})
+    ScriptedGenerator.built.clear()
+    with pytest.raises(RecipeConfigError, match="generator needs the task storage of a scenario session"):
+        recipe.build_pipeline(PipelineContext("one"))
+    assert ScriptedGenerator.built == []
 
 
 @pytest.mark.parametrize(

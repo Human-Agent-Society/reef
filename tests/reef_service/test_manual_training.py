@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from contextlib import closing
 from dataclasses import dataclass, replace
@@ -14,12 +15,14 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import threshold_pipeline
 from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
-from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeReleases, changed_rules, harness_recipe
+from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeArtifacts, changed_rules, harness_recipe
+from tests.support.records import item_records, memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples_service import make_samples as produce_samples
 from tests.support.serving import wait_for_serving
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 
+from reef.artifact.artifact import ArtifactNotFound
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
@@ -35,12 +38,14 @@ from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.job_data import read_job_data
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
-from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.sql_data import SQLiteDataStore
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
-from reef.train.jobs import JobLoop
+from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.manager import MANAGER_REQUEST_PREFIX, MANAGER_SESSION, Train, TrainFrom, TrainingManager
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.training_requests import ScenarioTrainingRequests
@@ -51,9 +56,9 @@ def commit_running_job(trainer):
     """Commit the end of the job whose submission ``trainer`` committed, when one runs: a ``RecordingComponent`` job
     ends in ``submit``, so its end is the trainer's next result."""
     while trainer.job_running:
-        ended = trainer.run_once()
+        ended = trainer.advance_job()
         assert ended is not None, "the running job has its end to commit"
-        trainer.commit(trainer.prepare_commit(ended))
+        trainer.settle_commit(trainer.prepare_commit(ended))
 
 
 def inference(receipt, scenario="s"):
@@ -67,7 +72,7 @@ def inference(receipt, scenario="s"):
 
 def train_body(receipt, samples=()):
     """The ``POST /reef/train`` body of the request ``receipt``, which names the sample IDs ``samples``."""
-    body = {"text": receipt, "session": "session-1", "release_id": "release-1"}
+    body = {"text": receipt, "session": "session-1", "artifact_id": "release-1"}
     return {**body, "samples": list(samples)} if samples else body
 
 
@@ -128,7 +133,7 @@ def stored_samples_of(dispatcher, *receipts):
 
 @pytest.fixture
 def records():
-    store = SQLiteRecordStore()
+    store = memory_records("s")
     yield store
     store.close()
 
@@ -196,7 +201,7 @@ def _wait(predicate, seconds=10.0):
     return False
 
 
-def _release_texts(dispatcher, scenario="s"):
+def _artifact_texts(dispatcher, scenario="s"):
     rows = catalog(dispatcher.get_or_create_scenario(scenario))
     return [row.get("metrics", {}).get("training_request", {}).get("text") for row in rows]
 
@@ -209,7 +214,7 @@ def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
 def _trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
     """The recipe's trainer over an in-memory commit history whose base is the recipe's seed."""
     return recipe.build(
-        "s", records, releases=ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
+        "s", records, artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT), root=seed_root(recipe)
     )
 
 
@@ -229,7 +234,7 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
     )
     # Stored samples start no job in manual, however many there are, and the pipeline keeps none of them in memory.
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert not trainer.job_data_ready()
     assert not trainer.pipeline.held
     held = [source_record_id(stored.sample) for stored in trainer.pipeline.store.page()]
@@ -238,7 +243,7 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
     chosen = held[-2:]
     file(training_requests, "request-1", sample_ids_of(trainer.pipeline, *chosen))
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result is not None
     batch = backend.batches[0]
     assert batch.request_id == "request-1"
@@ -248,16 +253,16 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
     # The job data consumes the samples it takes; the samples that the client did not choose wait.
     assert len({item for item in prepared.consumed_ids if item.startswith(CONSUMED_SAMPLE_PREFIX)}) == len(chosen)
     assert prepared.metrics["training_request"]["text"] == "request-1"
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     commit_running_job(trainer)
     assert not trainer.pipeline.held
     assert records.get("s", "turn-1") is not None
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     # A retry of the request returns its queue item and does not train again.
     assert file(training_requests, "request-1", sample_ids_of(trainer.pipeline, *chosen)).final
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
 
 
 def test_auto_keeps_recipe_batching(records, build):
@@ -265,37 +270,37 @@ def test_auto_keeps_recipe_batching(records, build):
     trainer = build(backend, mode="auto", job_samples=2)
     records.append(inference("a"))
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     records.append(inference("b"))
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     assert [source_record_id(sample) for sample in backend.batches[0].samples] == ["a", "b"]
     assert backend.batches[0].request_id is None
 
 
 def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_path, build, training_requests):
-    path = tmp_path / "records.sqlite"
-    records, backend = SQLiteRecordStore(path), RecordingComponent()
+    data, backend = SQLiteDataStore(tmp_path / "data", LocalTaskFileStore(None)), RecordingComponent()
+    records = item_records(data, "s")
     first = build(backend, store=records)
     records.append(inference("a"))
     file(training_requests, "committed")
     make_samples(first)
-    result = first.run_once()
+    result = first.advance_job()
     prepared = first.prepare_commit(result)
-    first.commit(prepared)
+    first.settle_commit(prepared)
     # Simulate a crash after the commit history landed but before compaction.
     file(training_requests, "pending")
     first.close()
-    records.close()
-    records = SQLiteRecordStore(path)
+    data.close()
+    data = SQLiteDataStore(tmp_path / "data", LocalTaskFileStore(None))
+    records = item_records(data, "s")
     recovered = build(backend, store=records)
-    recovered.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
-    recovered.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+    recovered.restore_consumed_records(prepared.consumed_ids)
     make_samples(recovered)
-    assert recovered.run_once() is not None
+    assert recovered.advance_job() is not None
     assert [batch.request_id for batch in backend.batches] == ["committed", "pending"]
     recovered.close()
-    records.close()
+    data.close()
 
 
 def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path, open_dispatcher):
@@ -315,8 +320,8 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
                 {},
                 {"text": ""},
                 {"text": "x", "session": "s"},
-                {"text": "x", "session": 1, "release_id": "r"},
-                {"text": "x" * 4001, "session": "s", "release_id": "r"},
+                {"text": "x", "session": 1, "artifact_id": "r"},
+                {"text": "x" * 4001, "session": "s", "artifact_id": "r"},
             ):
                 response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
                 assert response.status == 400, await response.text()
@@ -325,7 +330,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
                 "agent_record_id": "request-1",
                 "text": "Prefer tests first",
                 "session": "session-1",
-                "release_id": "release-1",
+                "artifact_id": "release-1",
             }
             response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
             assert response.status == 200, await response.text()
@@ -346,11 +351,13 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
     assert len(seen) == 1
 
 
-def test_auto_rejects_manual_requests(tmp_path, open_dispatcher):
+def test_auto_takes_a_request(tmp_path, open_dispatcher):
     dispatcher = open_dispatcher(harness_recipe(tmp_path, lambda workspace, services: None))
-    dispatcher.get_or_create_scenario("s")
-    with pytest.raises(ValueError, match="training_mode='manual'"):
-        file_request(dispatcher, "one")
+    scenario = dispatcher.get_or_create_scenario("s")
+    assert scenario.training_mode == "auto"
+    assert file_request(dispatcher, "one") == "one"
+    # The request's step commits in auto mode: a request trains before the waiting samples.
+    assert _wait(lambda: _committed_row(dispatcher, "one") is not None)
 
 
 def test_manual_runs_the_request_of_a_stage_that_reads_requests(records, build, training_requests):
@@ -371,7 +378,7 @@ def test_manual_runs_the_request_of_a_stage_that_reads_requests(records, build, 
     trainer = build(backend, request_pipeline)
     file(training_requests, "change")
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     # The job of the request has the request's data ID; with nothing held it has no samples.
     assert backend.batches[0].data_id == "s:request:change"
     assert backend.batches[0].request_id == "change"
@@ -442,9 +449,9 @@ def test_a_weight_stage_in_manual_trains_the_samples_that_a_request_names():
 def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
     """A batch that will never fill has to look different from one that is still filling.
 
-    An on-policy producer waits on the release its batch makes. If the record stream picks up rows the
+    An on-policy producer waits on the snapshot its batch makes. If the record stream picks up rows the
     producer did not send, the batch boundary shifts and the scenario settles below the batch size with the
-    producer waiting for a release that cannot come. Nothing else in the status distinguishes that from
+    producer waiting for a snapshot that cannot come. Nothing else in the status distinguishes that from
     training that is merely slow.
     """
 
@@ -490,15 +497,15 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
     trainer = build(backend, trajectory_pipeline, mode=mode, job_samples=2)
     records.append(inference("first"))
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     records.append(inference("second"))
     if mode == "manual":
         # The job samples are held, and manual still waits for a request.
         make_samples(trainer)
-        assert trainer.run_once() is None
+        assert trainer.advance_job() is None
         file(training_requests, "use-the-trajectory", sample_ids_of(trainer.pipeline, "first", "second"))
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     # The same hook shapes the job data of both modes.
     assert [source_record_id(sample) for sample in backend.batches[0].samples] == ["first", "second"]
     assert (backend.batches[0].request_id is None) == (mode == "auto")
@@ -510,10 +517,10 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
         {"use-the-trajectory"} if mode == "manual" else set()
     )
     assert prepared.consumed_ids == frozenset(expected)
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     commit_running_job(trainer)
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
 
 
 def test_factory_cannot_silently_change_the_processor_mode(build):
@@ -529,7 +536,7 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(records, bu
     else:
         file(training_requests, "first")
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     original = trainer.pending_job_data
     target = "manual" if mode == "auto" else "auto"
     processor = trainer.pipeline
@@ -539,48 +546,40 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(records, bu
     assert trainer.pending_job_data is original
     prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == ({"first", "sample:s.first:0"} if mode == "auto" else {"first"})
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     commit_running_job(trainer)
     if target == "manual":
         file(training_requests, "next")
     else:
         records.append(inference("next"))
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     following = trainer.pending_job_data
     assert (following.request is not None) == (target == "manual")
 
 
-def test_switch_preserves_incomplete_auto_batch_and_unread_manual_requests(records, build, training_requests):
+def test_a_request_trains_in_auto_before_the_waiting_samples_and_leaves_them(records, build, training_requests):
     backend = RecordingComponent()
     trainer = build(backend, mode="auto", job_samples=2)
     records.append(inference("a"))
     make_samples(trainer)
-    assert trainer.run_once() is None
-    trainer.set_training_mode("manual")
+    assert trainer.advance_job() is None
+    # One sample waits, fewer than a job's samples. A request trains at once, in auto too.
     file(training_requests, "change")
-    # Change back before the accepted request has been read.
-    trainer.set_training_mode("auto")
     make_samples(trainer)
-    assert trainer.run_once() is None
+    result = trainer.advance_job()
+    assert backend.batches[-1].request_id == "change"
+    trainer.settle_commit(trainer.prepare_commit(result))
+    commit_running_job(trainer)
+    make_samples(trainer)
+    assert training_requests.get("change").final
+    assert trainer.advance_job() is None
+    # The waiting sample still trains in the automatic job, once a second one arrives.
     records.append(inference("b"))
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert [source_record_id(item) for item in backend.batches[-1].samples] == ["a", "b"]
-    trainer.commit(trainer.prepare_commit(result))
-    commit_running_job(trainer)
-    # The automatic job did not consume the request: it stays queued for manual.
-    make_samples(trainer)
-    assert not training_requests.get("change").final
-    trainer.set_training_mode("manual")
-    make_samples(trainer)
-    result = trainer.run_once()
-    assert backend.batches[-1].request_id == "change"
-    trainer.commit(trainer.prepare_commit(result))
-    commit_running_job(trainer)
-    trainer.set_training_mode("auto")
-    make_samples(trainer)
-    assert trainer.run_once() is None
+    assert backend.batches[-1].request_id is None
 
 
 @pytest.mark.parametrize("takes_requests", [False, True], ids=["record-only", "harness"])
@@ -686,26 +685,10 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     assert "keeps its default training mode" in caplog.text
 
 
-def test_a_stored_hybrid_mode_loads_the_scenario_with_the_recipe_default(tmp_path, open_dispatcher, caplog):
-    def method(workspace, services):
-        return None
-
-    dispatcher = open_dispatcher(harness_recipe(tmp_path, method))
-    dispatcher.get_or_create_scenario("s")
-    dispatcher.close()
-    # The setting of a scenario that selected hybrid before Reef removed the mode.
-    with closing(SQLiteScenarioStorage(tmp_path / "agent-record")) as storage:
-        storage.write_settings("s", ScenarioSettings(training_mode="hybrid"))
-    restarted = open_dispatcher(recipe_in("manual", tmp_path, method))
-    with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
-        assert restarted.get_or_create_scenario("s").trainer.pipeline.training_mode == "manual"
-    assert "keeps its default training mode: the stored mode 'hybrid' is not supported" in caplog.text
-
-
 def _committed_row(dispatcher, text):
     """The metrics of the step that answered the request ``text``, newest first; a job's submission names the
     request too, and is passed over."""
-    for row in dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+    for row in dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
         dispatcher.get_or_create_scenario("s").scenario_step
     ):
         metrics = row.get("metrics") or {}
@@ -824,7 +807,7 @@ def test_a_failed_request_is_skipped_with_its_error_and_the_queue_moves_on(tmp_p
         assert "error" not in _committed_row(dispatcher, "fine")
         current = dispatcher.get_or_create_scenario("s")
         assert current.pending_requests() == 0
-        assert current.trainer.request_failures() == {}
+        assert current.trainer.pipeline.failed_requests == {}
         assert _wait(lambda: current.training_requests.get("poison").final)
         assert current.trainer.pipeline.training_mode == "manual"
     finally:
@@ -859,7 +842,7 @@ def test_a_failed_request_is_skipped_alone_and_its_units_wait_for_the_next_reque
         assert not any(item.startswith(CONSUMED_SAMPLE_PREFIX) for item in skip.consumed_ids)
         assert current.records.get("s", "report-a") is not None
         assert current.pending_requests() == 0
-        assert current.trainer.request_failures() == {}
+        assert current.trainer.pipeline.failed_requests == {}
     finally:
         release.set()
     dispatcher.close()
@@ -920,7 +903,7 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
         assert _wait(lambda: scenario.scenario_step == 4)
         assert _last_committed(scenario).get("skipped") == UNCHANGED
         assert scenario.pending_requests() == 0
-        assert scenario.trainer.request_failures() == {}
+        assert scenario.trainer.pipeline.failed_requests == {}
         assert _wait(lambda: scenario.training_requests.get("poison").final)
     finally:
         release.set()
@@ -968,7 +951,7 @@ class _RequestJobRecipe(WeightTrainingRecipe):
         algorithm_state=None,
         experiment_logger=None,
         task_storage=None,
-        releases=None,
+        artifacts=None,
         samples=None,
         root=None,
     ):
@@ -989,7 +972,7 @@ class _RequestJobRecipe(WeightTrainingRecipe):
 def _job_events(dispatcher):
     """The (request text, job event) of every committed row, oldest first."""
     rows = reversed(
-        dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+        dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
             dispatcher.get_or_create_scenario("s").scenario_step
         )
     )
@@ -1029,14 +1012,14 @@ def test_a_job_trainer_runs_each_request_as_a_job_and_a_failed_job_does_not_stop
         (job.request_id, [source_record_id(sample) for sample in read_job_data(job.data_dir).samples])
         for job in component.submitted
     ] == [("one", ["a"]), ("two", ["b"])]
-    releases = dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+    artifacts = dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
         dispatcher.get_or_create_scenario("s").scenario_step
     )
     failed = next(
-        row["metrics"] for row in releases if row.get("metrics", {}).get("training_job", {}).get("event") == "failed"
+        row["metrics"] for row in artifacts if row.get("metrics", {}).get("training_job", {}).get("event") == "failed"
     )
     assert failed["training_job"]["error"] == "RuntimeError: job failed"
-    # Only the second job saved a checkpoint, and its release now serves.
+    # Only the second job saved a checkpoint, and its snapshot now serves.
     wait_for_serving(dispatcher, "s")
     scenario = dispatcher.get_or_create_scenario("s")
     assert runtime.served == "w2"
@@ -1062,7 +1045,7 @@ def test_the_job_of_a_request_lists_the_requests_parameters_and_its_times(tmp_pa
         "agent_record_id": "train-1",
         "text": "Prefer tests first",
         "session": "session-1",
-        "release_id": "release-1",
+        "artifact_id": "release-1",
         "parameters": {"learning_rate": 0.5},
         "samples": list(stored_samples_of(dispatcher, "a")),
     }
@@ -1133,6 +1116,204 @@ def test_each_job_lists_the_artifact_that_it_started_from(tmp_path, open_dispatc
     assert [job["train_from_artifact_id"] for job in asyncio.run(listing())] == [creation, creation, third_start]
 
 
+def test_a_request_that_names_train_from_starts_its_job_there_and_leaves_the_training_start(tmp_path, open_dispatcher):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    for receipt in ("a", "b", "c"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    component_name = scenario.trainers[0].component
+
+    def training_start():
+        return scenario.artifact_status()[component_name]["training_start"]
+
+    def finished(count):
+        return _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == count)
+
+    creation = training_start()
+    file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
+    assert finished(1)
+    checkpoint = training_start()
+    assert checkpoint != creation
+
+    async def file_with_train_from(receipt, sample_receipt, train_from):
+        body = {**train_body(receipt, stored_samples_of(dispatcher, sample_receipt)), "train_from": train_from}
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
+            return response.status, await response.text()
+
+    status, text = asyncio.run(file_with_train_from("missing", "b", "no-such-artifact"))
+    assert status == 400 and "train_from names no artifact of the scenario" in text
+    status, text = asyncio.run(file_with_train_from("two", "b", creation))
+    assert status == 200, text
+    assert finished(2)
+
+    # The job starts from what the component imported of the named artifact, not from the first job's checkpoint.
+    first, second = component.submitted
+    [imported] = component.imported
+    assert (second.start, second.train_from_artifact_id) == (str(imported), creation)
+    assert second.start != JobLoopState.from_dict(scenario.trainer.state).start
+    # Its checkpoint names the start: the training start stays, and the new artifact's parent is the named artifact.
+    [record] = [record for record in scenario.store.history() if record.train_from is not None]
+    assert (record.train_from, record.checkpoint, record.sets_training_start) == (creation, True, False)
+    assert training_start() == checkpoint
+    newest = dispatcher.list_artifacts("s")[0]
+    assert newest["parent_artifact_id"] == creation
+    # The next request names no start, so its job continues the training start: the first job's checkpoint.
+    file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
+    assert finished(3)
+    third = component.submitted[2]
+    assert third.train_from_artifact_id == checkpoint and third.start not in (first.start, second.start)
+    assert dispatcher.list_artifacts("s")[0]["parent_artifact_id"] == checkpoint
+
+
+def test_a_request_whose_start_the_component_refuses_fails_and_the_next_request_trains(
+    tmp_path, open_dispatcher, monkeypatch
+):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    for receipt in ("a", "b"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    creation = scenario.artifact_status()[scenario.trainers[0].component]["training_start"]
+
+    def refuse(artifact_dir):
+        raise ValueError("these weights do not load")
+
+    monkeypatch.setattr(component, "import_start", refuse)
+    refused = {**train_body("one", stored_samples_of(dispatcher, "a")), "train_from": creation}
+    dispatcher.accept_request("s", refused, request_id="one")
+    file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
+
+    # The refused request ends with a skip row and no job; the request after it trains. The failed step reloads
+    # the scenario, so the rows are read once the second job ran.
+    assert _wait(lambda: [job.request_id for job in component.submitted] == ["two"])
+    assert _wait(lambda: dispatcher.get_or_create_scenario("s").pending_requests() == 0)
+    skipped = _committed_row(dispatcher, "one")
+    assert skipped["skipped"] == "request failed" and "these weights do not load" in skipped["error"]
+
+
+class GatedManager(TrainingManager):
+    """Trains every untrained sample in one job once ``open`` is set and no request or job waits."""
+
+    def __init__(self) -> None:
+        self.open = threading.Event()
+
+    def actions(self, view):
+        if not self.open.is_set() or not view.untrained_samples or view.waiting_requests or view.jobs:
+            return ()
+        return (Train(view.untrained_samples, "train what waits"),)
+
+
+def managed_dispatcher(tmp_path, component, manager, **options):
+    """A dispatcher whose scenarios train in ``auto`` mode, one job for each sample by Reef's own rule, under
+    ``manager``; with two reported records of scenario "s", which its active artifact answered, stored as samples."""
+    recipe = _RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="auto")
+    dispatcher = harness_dispatcher(tmp_path, recipe, training_manager=manager, **options)
+    answered_by = dispatcher.get_or_create_scenario("s").serving_artifact_id()
+    for receipt in ("a", "b"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+                artifact_id=answered_by,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    return dispatcher
+
+
+def test_a_training_manager_decides_the_jobs_of_a_scenario_in_auto_mode(tmp_path):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    manager = GatedManager()
+    dispatcher = managed_dispatcher(tmp_path, component, manager)
+    try:
+        scenario = dispatcher.get_or_create_scenario("s")
+        samples = stored_samples_of(dispatcher, "a", "b")
+        # Reef starts no job by its own rule, although the samples of a job wait: one sample, the stage's job size.
+        assert _wait(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
+        [view] = dispatcher.manager_views()
+        assert (view.scenario, view.job_samples, view.selection_serves, view.jobs) == ("s", 1, True, ())
+        assert view.training_start is not None and component.submitted == []
+
+        manager.open.set()
+        assert _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") >= 1)
+        first = component.submitted[0]
+        assert first.request_id.startswith(MANAGER_REQUEST_PREFIX) and first.sample_count == 1
+        requests = [(record.metrics or {}).get("training_request") for record in scenario.store.history()]
+        assert {request["session"] for request in requests if request} == {MANAGER_SESSION}
+        # The trained sample no longer waits.
+        assert _wait(lambda: samples[0] not in dispatcher.manager_views()[0].untrained_samples)
+    finally:
+        dispatcher.close()
+
+
+def test_reef_runs_a_managers_actions_and_drops_a_request_above_its_job_limit(tmp_path):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    # The cycles are held, so a filed request stays queued.
+    dispatcher = managed_dispatcher(tmp_path, component, GatedManager(), hold_local_cycles=True)
+    try:
+        scenario = dispatcher.get_or_create_scenario("s")
+        samples = stored_samples_of(dispatcher, "a", "b")
+        assert _wait(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
+        [view] = dispatcher.manager_views()
+        dispatcher.run_manager_action(view, Train(samples[:1], "first"), job_limit=1)
+        dispatcher.run_manager_action(view, Train(samples[1:], "second"), job_limit=1)
+        assert [request.text for request in scenario.training_requests.queued()] == ["first"]
+        dispatcher.run_manager_action(view, Train(samples[1:], "second", train_from=view.training_start), job_limit=2)
+        second = scenario.training_requests.queued()[1]
+        assert (second.text, second.train_from) == ("second", view.training_start)
+        [view] = dispatcher.manager_views()
+        assert view.waiting_requests == 2
+
+        step = scenario.scenario_step
+        dispatcher.run_manager_action(view, TrainFrom(view.training_start), job_limit=1)
+        assert scenario.store.history()[-1].operation == "train_from" and scenario.scenario_step == step + 1
+        with pytest.raises(ArtifactNotFound):
+            dispatcher.run_manager_action(view, TrainFrom("no-such-artifact"), job_limit=1)
+    finally:
+        dispatcher.close()
+
+
+def test_a_running_jobs_step_takes_no_commit_lock(tmp_path, open_dispatcher, monkeypatch):
+    """A poll of a running job can wait on the training service, so an activation does not wait for the poll. The
+    step ends without the commit lock while the running job leaves no room for the next one."""
+    component = SubmitRaisesForRequestOne(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    scenario = dispatcher.get_or_create_scenario("s")
+    trainer = scenario.trainers[0].trainer
+    polled = threading.Event()
+
+    def poll():
+        polled.set()
+
+    monkeypatch.setattr(trainer, "poll_jobs", poll)
+    monkeypatch.setattr(trainer, "job_slot_free", lambda: False)
+    with scenario._committer.lock:
+        step = threading.Thread(target=scenario.next_commit, daemon=True)
+        step.start()
+        step.join(10)
+        assert polled.is_set() and not step.is_alive(), "the step waited for the commit lock"
+
+
 def test_a_job_trainer_skips_a_failed_request_instead_of_submitting_it_again(tmp_path, records, training_requests):
     component = SubmitRaisesForRequestOne(tmp_path / "checkpoints")
     trainer = Trainer.build(
@@ -1145,25 +1326,25 @@ def test_a_job_trainer_skips_a_failed_request_instead_of_submitting_it_again(tmp
     )
     failure(records, "a")
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     file(training_requests, "one", sample_ids_of(trainer.pipeline, "a"))
     with pytest.raises(RuntimeError, match="submit failed"):
         make_samples(trainer)
-        trainer.run_once()
+        trainer.advance_job()
     # What the dispatcher does when a request's step raises.
     assert trainer.fail_pending_request("RuntimeError: submit failed")
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result.metrics["skipped"] == "request failed"
     assert result.metrics["error"] == "RuntimeError: submit failed"
     prepared = trainer.prepare_commit(result)
     # The skip consumes the request and the records whose sample is stored; it trains no sample.
     assert prepared.consumed_ids == frozenset({"one", "a", "report-a"})
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     # The skipped request trained no sample, so the next request can name it.
     file(training_requests, "two", sample_ids_of(trainer.pipeline, "a"))
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     assert component.submit_texts == ["one", "two"]
     assert [source_record_id(sample) for sample in read_job_data(component.submitted[-1].data_dir).samples] == ["a"]
     trainer.close()
@@ -1190,7 +1371,7 @@ def test_a_request_runs_past_the_step_budget_and_the_failure_streak(tmp_path, re
     assert [row["training_request"]["text"] for row in rows] == ["one", "two"]
     assert [row["skipped"] for row in rows] == [UNCHANGED, UNCHANGED]
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
 
     # An automatic step past the budget skips; the two requests above ran past it.
     backend = job_backend(trainer)
@@ -1226,12 +1407,12 @@ def test_manual_traffic_is_available_to_auto_without_a_replay(records, build, pr
                 )
             )
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     original = trainer.pipeline
     offset = trainer.data_offset
     trainer.set_training_mode("auto")
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     assert trainer.pipeline is original
     assert trainer.data_offset == offset
     assert [source_record_id(sample) for sample in backend.batches[-1].samples] == ["a", "b"]
@@ -1255,10 +1436,10 @@ def test_manual_runs_a_harness_request_alone_when_no_units_are_held(records, bui
     backend = RecordingComponent()
     trainer = build(backend, processor, job_samples=2)
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     file(training_requests, "alone")
     make_samples(trainer)
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result is not None
     batch = backend.batches[0]
     assert batch.data_id == "s:request:alone"
@@ -1267,12 +1448,12 @@ def test_manual_runs_a_harness_request_alone_when_no_units_are_held(records, bui
     prepared = trainer.prepare_commit(result)
     assert prepared.consumed_ids == frozenset({"alone"})
     assert prepared.metrics["training_request"]["id"] == "alone"
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     commit_running_job(trainer)
     make_samples(trainer)
     assert training_requests.get("alone").final
     make_samples(trainer)
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert trainer.pipeline.training_mode == "manual"
 
 
@@ -1298,10 +1479,10 @@ def test_manual_gives_each_request_the_failures_that_it_names(records, build, tr
 
     def step():
         make_samples(trainer)
-        result = trainer.run_once()
+        result = trainer.advance_job()
         if result is None:
             return None
-        trainer.commit(trainer.prepare_commit(result))
+        trainer.settle_commit(trainer.prepare_commit(result))
         commit_running_job(trainer)
         batch = backend.batches[-1]
         return batch.request_id, [source_record_id(sample) for sample in batch.samples]
@@ -1343,7 +1524,7 @@ def test_every_mode_keeps_the_samples_beyond_the_next_job_for_later_jobs(caplog,
                 fail(index)
         # Every ready unit is saved as items, which consumes its records; nothing is released untrained.
         assert processor.record2sample.ready_units == {}
-        retention = processor.releasable_record_ids()
+        retention = processor.record2sample.releasable_record_ids()
         assert {f"inf-{i}" for i in range(20)} | {f"rep-{i}" for i in range(20)} <= retention
         assert not [record for record in caplog.records if record.name == "reef.train.pipeline"]
         if mode == "manual":
@@ -1409,3 +1590,60 @@ def test_manual_collects_the_failures_each_request_step_carries(tmp_path, open_d
             assert calls[1] == ("again", ("fails-2", "fails-3"))
 
     asyncio.run(run())
+
+
+class _FirstJobWaits(StubTrainingComponent):
+    """Holds the job of the request ``one`` until ``release`` is set."""
+
+    def __init__(self, checkpoint_root):
+        super().__init__(checkpoint_root)
+        self.started, self.release = Event(), Event()
+
+    def train(self, job):
+        if job.request_id == "one":
+            self.started.set()
+            assert self.release.wait(10)
+        return super().train(job)
+
+
+def test_a_client_cancels_a_queued_request_and_the_job_of_a_request(tmp_path, open_dispatcher):
+    component = _FirstJobWaits(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    for receipt in ("a", "b", "c"):
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="s",
+                request_type=RequestType.INFERENCE,
+                payload={"response": {"training": {}}},
+                agent_record_id=receipt,
+            )
+        )
+        dispatcher.accept_record(report(receipt))
+    file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
+    assert component.started.wait(10)
+    file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
+    file_request(dispatcher, "three", stored_samples_of(dispatcher, "c"))
+
+    async def cancel(request_id):
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            response = await client.post(f"/reef/scenarios/s/requests/{request_id}/cancel")
+            return response.status, await response.json() if response.status == 200 else None
+
+    try:
+        # A queued request fails, and has no job.
+        assert asyncio.run(cancel("two")) == (200, {"scenario": "s", "request_id": "two", "queued": True, "job": None})
+        # The job of a request that a commit consumed is cancelled.
+        status, body = asyncio.run(cancel("one"))
+        assert (status, body["queued"]) == (200, False)
+        assert (body["job"]["state"], body["job"]["error"]) == ("failed", "cancelled by request")
+        assert asyncio.run(cancel("missing"))[0] == 404
+    finally:
+        component.release.set()
+    assert _wait(lambda: _committed_skip(dispatcher, "two") == "request failed"), _job_events(dispatcher)
+    assert _committed_row(dispatcher, "two")["error"] == "cancelled by request"
+    # The queue moves on to the next request, and the cancelled one never got a job.
+    assert _wait(lambda: ("three", "submitted") in _job_events(dispatcher)), _job_events(dispatcher)
+    assert _wait(lambda: dispatcher.get_or_create_scenario("s").pending_requests() == 0)
+    assert _wait(lambda: [job.request_id for job in component.submitted] == ["one", "three"]), component.submitted
+    # A second cancel changes nothing.
+    assert asyncio.run(cancel("two")) == (200, {"scenario": "s", "request_id": "two", "queued": False, "job": None})

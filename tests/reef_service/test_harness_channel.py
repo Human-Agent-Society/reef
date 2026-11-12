@@ -1,4 +1,4 @@
-"""Read-channel guarantees of the harness routes: the release catalog with each step's evaluation metrics,
+"""Read-channel guarantees of the harness routes: the snapshot catalog with each step's evaluation metrics,
 version-addressed pulls, served files that are byte for byte the evaluated source tree rendered for the
 adapter, the source form, and the routes the wrapper used that are gone. Hermetic: tasks run a fake pi
 binary through the real adapter path, and the reads go through the real HTTP app."""
@@ -59,7 +59,7 @@ def channel_dispatcher(
     inference_stages: bool = False,
     job_samples: int = 1,
 ) -> Dispatcher:
-    """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its root release is
+    """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its root snapshot is
     ``seed``, and each step takes ``job_samples`` traces."""
     candidates = iter(patches)
     stages: dict = (
@@ -128,7 +128,7 @@ async def committed_step(client: TestClient) -> dict:
 
 
 async def evaluated_step(client: TestClient) -> dict:
-    """Drive one evaluated step through the wire; the manifest of the release it published."""
+    """Drive one evaluated step through the wire; the manifest of the snapshot it published."""
     response = await client.get("/reef/harness", headers=HEADERS)
     previous = (await response.json())["artifact_id"] if response.status == 200 else None
     await scored_exchange(client)
@@ -226,7 +226,7 @@ def test_a_published_step_reaches_the_served_files_and_the_catalog(tmp_path) -> 
             catalog = await response.json()
             assert catalog["scenario"] == "delivery"
             rows = catalog["artifacts"]
-            # Newest last: the creation release opens the catalog, the published head closes it with the
+            # Newest last: the creation snapshot opens the catalog, the published head closes it with the
             # manifest's evaluation.
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
@@ -271,7 +271,7 @@ def test_an_unknown_version_is_a_404_naming_it_and_the_install_route_is_gone(tmp
 
     async def run() -> None:
         async with served(channel_dispatcher(tmp_path, ())) as client:
-            response = await client.get("/reef/harness", params={"release_id": "no-such-version"}, headers=HEADERS)
+            response = await client.get("/reef/harness", params={"artifact_id": "no-such-version"}, headers=HEADERS)
             assert response.status == 404 and "no-such-version" in await response.text()
             response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=HEADERS)
             assert response.status == 404
@@ -303,7 +303,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 second_step = asyncio.create_task(evaluated_step(client))
                 assert await asyncio.to_thread(evaluation_started.wait, UPDATE_TIMEOUT_S)
 
-                async def read_release(path: str, artifact_id: str | None = None) -> dict:
+                async def read_artifact(path: str, artifact_id: str | None = None) -> dict:
                     params = {} if artifact_id is None else {"artifact_id": artifact_id}
                     response = await client.get(path, params=params, headers=HEADERS)
                     assert response.status == 200
@@ -312,9 +312,9 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 # A resident client keeps seeing the committed tree and its evaluation while the next candidate runs.
                 catalog, current, pinned = await asyncio.wait_for(
                     asyncio.gather(
-                        read_release("/reef/harness/artifacts"),
-                        read_release("/reef/harness"),
-                        read_release("/reef/harness", first["artifact_id"]),
+                        read_artifact("/reef/harness/artifacts"),
+                        read_artifact("/reef/harness"),
+                        read_artifact("/reef/harness", first["artifact_id"]),
                     ),
                     timeout=1.0,
                 )
@@ -325,14 +325,14 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 
                 finish_evaluation.set()
                 second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
-                updated = await read_release("/reef/harness/artifacts")
+                updated = await read_artifact("/reef/harness/artifacts")
                 assert len(updated["artifacts"]) == len(catalog["artifacts"]) + 1
                 assert updated["artifacts"][-2]["active"] is False
                 head = updated["artifacts"][-1]
                 assert head["active"] is True and head["artifact_id"] == second["artifact_id"] != first["artifact_id"]
                 assert head["artifact_id"] == second["artifact_id"] and head["metrics"] == second["evaluation"]
                 assert second["files"] == render_tree(TREE_V2, PI)
-                assert await read_release("/reef/harness", first["artifact_id"]) == first
+                assert await read_artifact("/reef/harness", first["artifact_id"]) == first
             finally:
                 finish_evaluation.set()
                 if second_step is not None:

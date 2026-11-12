@@ -31,7 +31,7 @@ pi's ``adapter.yaml``, shortened:
    binary: pi
    install: {kind: npm, package: "@earendil-works/pi-coding-agent", version: "0.84.2",
              binary_path: node_modules/.bin/pi}
-   evolve:                                  # what Reef may evolve: its path in the release's pi package
+   evolve:                                  # what Reef may evolve: its path in the snapshot's pi package
      rules: {renders: plugin/rules.md, holds: ...}
      skill: plugin/skills/{name}/SKILL.md
      command: plugin/prompts/{name}.md
@@ -60,8 +60,9 @@ pi's ``adapter.yaml``, shortened:
    * - Section
      - Says
    * - ``install``
-     - the vendor's package and pinned version (``npm``, or ``git`` with
-       ``repository`` and ``ref``); ``version`` is what ``--version`` reports
+     - the vendor's package and pinned version (``npm``, ``uv``, or ``git``
+       with ``repository`` and ``ref``); ``version`` is what ``--version``
+       reports
    * - ``evolve``
      - each part Reef may evolve, and where the agent reads it (`Tree parts`_)
    * - ``dirs``
@@ -74,7 +75,10 @@ pi's ``adapter.yaml``, shortened:
      - config templates per dialect (``openai``, ``responses``,
        ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``
    * - ``run.task``
-     - the headless command (``{task}``, ``{root}``) and its variables
+     - the headless command (``{task}``, ``{root}``) and its variables;
+       optionally ``skills``, the directory under the root where the agent
+       reads the skills of a Harbor task, and ``mcp``, how the agent reads
+       the MCP servers of a Harbor task (`Task MCP servers`_)
    * - ``run.layer``
      - a person's machine: the agent's own commands that install the plugin
        and remove it (``register``, ``unregister``), and the ``args`` and
@@ -109,15 +113,67 @@ How Reef runs an agent
        session log, and removes the root.
      - ``dirs``, ``model``, ``run.task``, ``sessions``
    * - Harbor task
-     - Starts the task's container, installs the pinned agent with npm,
-       copies in the tree, runs ``run.task`` with the instruction, and
-       scores the tests' reward.
-     - an npm ``install``
+     - Starts the task's container, puts the pinned agent in it, copies in the
+       tree, runs ``run.task`` with the instruction, and scores the tests'
+       reward. Reef prepares an npm agent on its own host: npm installs the
+       package there for the container's CPU and C library, and Reef keeps the
+       result in ``~/.cache/reef/agents`` and uploads it. The container unpacks
+       it under ``/opt/reef`` and reaches no package registry, so a task can
+       break its network or keep the user's home small. Reef also uploads
+       Node (from ``nodejs.org``) into a glibc container; a musl container
+       uses the Node of its packages. Reef uploads uv the same way (a static
+       build from ``github.com/astral-sh/uv``); a git agent installs from its
+       checkout into a venv in the container. A task that sets ``environment.skills_dir``
+       needs an adapter with ``run.task.skills``: Reef copies the task's
+       skills there before the tree, so the tree's file wins on one path. A
+       task that sets ``environment.mcp_servers`` needs an adapter with
+       ``run.task.mcp`` (`Task MCP servers`_). An evaluation refuses a task
+       that needs what the adapter does not give its agent. The verifier can read the run as ATIF in
+       ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
+     - an npm, uv or git ``install``, ``run.task.skills``,
+       ``run.task.mcp``
    * - A person's machine
-     - ``reef-client harness`` installs the release as the agent's plugin,
+     - ``reef-client harness`` installs the snapshot as the agent's plugin,
        with the agent's own command, and routes the sessions it starts to
        Reef.
      - ``run.layer``
+
+Task MCP servers
+~~~~~~~~~~~~~~~~
+
+A Harbor task can name MCP servers for its agent
+(``environment.mcp_servers``). ``run.task.mcp`` says how the adapter's agent
+reads them. Reef writes the servers of the task into the agent's config when
+it renders the tree for that task.
+
+.. code-block:: yaml
+
+   run:
+     task:
+       mcp:
+         target: agent
+         key: mcp
+         stdio: {type: local, command: "{argv}"}
+         sse: {type: remote, url: "{url}", oauth: false}
+         streamable-http: {type: remote, url: "{url}", oauth: false}
+
+- ``target`` names a config target, and ``key`` is the key of that file that
+  maps each server's name to its entry.
+- ``stdio``, ``sse`` and ``streamable-http`` give the entry of a server of
+  that transport. Name only the transports that the agent can use.
+- A value that is exactly ``{command}``, ``{args}``, ``{argv}`` or ``{url}``
+  stands for the server's command, its argument list, its command with its
+  arguments as one list, or its URL. Every other value is literal.
+
+The servers merge into the config file after the target's checks
+(`Config checks`_). A check can thus refuse the key from a tree, and Reef
+still writes it for a task.
+
+An evaluation refuses a task before any rollout when the adapter has no
+``run.task.mcp``, when it names no entry for the transport of one of the
+task's servers, or when a server has HTTP headers. Of the bundled adapters,
+``claude``, ``codex``, ``hermes`` and ``opencode`` declare ``run.task.mcp``;
+``codex`` reads no ``sse`` server.
 
 Tree parts
 ----------
@@ -158,6 +214,10 @@ path:
      - ``native/tools/{name}.py`` and so on (`Native runner`_)
      - the kind
      - by file
+   * - ``program``
+     - ``program/{name}.py``; ``main`` is the entry point
+     - ``program``
+     - by file
    * - ``config``
      - ``config/<target>.json``, on every adapter
      - ``config``
@@ -175,7 +235,7 @@ Each part also has ``holds``, one line on what the file holds, which a method
 reads in ``material/host.json``, and optionally ``review: true``: the
 activation rule then leaves every kept tree that changes the part inactive
 until a person activates it, whatever the ``always`` rule's ``review_kinds``
-lists. Native's ``native_loop`` is such a kind. Other settings and records
+lists. Native's ``native_loop`` and Python's ``program`` are such kinds. Other settings and records
 name kinds too: the ``review_kinds`` of the ``always`` activation rule, the
 ``changed_kinds`` of a kept tree, and the ``patch_parts`` of a step's commit
 metrics. The harness recipe refuses a ``review_kinds`` name that the adapter
@@ -250,6 +310,11 @@ settings or memory.
      - ``native/skills/<name>/SKILL.md``
      - none
      - none
+   * - ``python``
+     - none
+     - none
+     - none
+     - none; its ``program`` part renders at ``program/<name>.py``
 
 Config targets and a person's machine
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -257,8 +322,8 @@ Config targets and a person's machine
 A tree's ``config/<target>.json`` merges into the target's file and must pass
 the target's checks (`Config checks`_). A key that the model binding writes
 never comes from a tree: validation refuses it. The last column says whether
-the adapter has a ``run.layer``, so that ``reef-client`` runs its releases on a
-person's machine (`A person's machine`_). Without one, a release runs only in
+the adapter has a ``run.layer``, so that ``reef-client`` runs its snapshots on a
+person's machine (`A person's machine`_). Without one, a snapshot runs only in
 Reef's runs.
 
 .. list-table::
@@ -304,6 +369,11 @@ Reef's runs.
    * - ``native``
      - ``primary`` (``native/config.json``): no checks. ``models``
        (``native/models.json``): no checks besides the binding's keys.
+     - no
+   * - ``python``
+     - ``primary`` (``program/config.json``): the program's own settings, no
+       checks. ``model`` (``program/model.json``): nothing; the binding
+       writes it.
      - no
 
 Bundled adapters
@@ -355,6 +425,16 @@ campaign adds ``terminus`` (`its README
    * - ``native``
      - ships with Reef; ``reef-native -p``
      - Reef's own loop (`Native runner`_).
+   * - ``python``
+     - uv 0.13.4; ``uv run --script {root}/program/main.py``
+     - The tree is a Python program that owns its loop and every model
+       call. It gets the instruction as its argument and reads the binding
+       (``api``, ``base_url`` ending in ``/v1``, ``api_key``, ``model``) from
+       ``program/model.json``. It declares its dependencies as inline script
+       metadata (PEP 723). Only the ``openai`` dialect. To give a task's
+       verifier the run as ATIF, the program writes one JSONL line for each
+       model call under ``REEF_PROGRAM_SESSION_DIR``: the request body, with
+       the response body as ``response``.
 
 The comments in each ``adapter.yaml`` explain its defaults and checks.
 
@@ -460,7 +540,7 @@ Prefer a check to a step for a rule on config values.
 A person's machine
 ------------------
 
-On a person's machine, the release is the agent's own plugin, installed
+On a person's machine, the snapshot is the agent's own plugin, installed
 with the agent's own command. The agent then loads it in every session,
 beside the person's own configuration, which Reef never reads. A session
 that Reef starts also sends its model calls to Reef.
@@ -471,7 +551,7 @@ that Reef starts also sends its model calls to Reef.
 
    * - Agent
      - ``register``
-     - Loads a new release
+     - Loads a new snapshot
    * - ``claude``
      - ``claude plugin marketplace add <install>``, ``claude plugin install
        reef@reef``
@@ -489,8 +569,8 @@ that Reef starts also sends its model calls to Reef.
 
 ``reef-client harness`` asks ``GET /reef/harness?form=client&root=<install>``
 and installs the files under ``<install>``. It runs ``register`` once per
-installed release, and ``unregister`` on ``disconnect``. A release that a
-person activates (``POST /reef/scenarios/<scenario>/activate``) installs at
+installed artifact, and ``unregister`` on ``disconnect``. A snapshot that a
+person activates (``served`` of ``POST /reef/scenarios/<scenario>/update``) installs at
 the client's next sync. The layer's render starts each config target from
 nothing and skips the checks; ``layer_files`` adds what ``register`` names
 and the tree lacks, such as a marketplace, and drops files the install keeps
@@ -512,7 +592,9 @@ Connect a new agent
       at first.
    #. Add a ``TrajectoryReader`` with ``@register_trajectory_reader`` when the
       session log has a new format (`trajectory.py
-      <../../reef/harness/tasks/trajectory.py>`__).
+      <../../reef/harness/tasks/trajectory.py>`__). Give it ``to_atif``, so
+      that a task's verifier can read the run. Wrap Harbor's converter for
+      the agent when Harbor has one.
    #. Add the name to ``BUILTIN_ADAPTERS``, or register through the
       ``reef.harness_adapters`` entry point.
    #. Add ``render.py`` only for what the file cannot state.

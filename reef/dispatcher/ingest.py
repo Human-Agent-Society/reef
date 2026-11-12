@@ -10,7 +10,6 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
@@ -46,18 +45,16 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
 def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any]) -> WorkItem:
     """Check a training request and queue it in ``current``'s requests; return its queue item.
 
-    A retry of a request that the scenario queued before returns its item, whatever the training mode now.
-    Otherwise the scenario must train in ``manual`` mode, the text and ``requires`` must pass the screens
-    (``training_request_refusal``), and a trainer that trains must take the request's samples
-    (``Trainer.check_request``). Raise ``ValueError`` for a refused request, and
+    A retry of a request that the scenario queued before returns its item. Otherwise the text and ``requires``
+    must pass the screens (``training_request_refusal``), a trainer that trains must take the request's samples
+    (``Trainer.check_request``), and ``train_from`` must name an artifact of the scenario. The training mode does
+    not matter: a request trains in ``auto`` too. Raise ``ValueError`` for a refused request, and
     ``RecordConflict`` for an ID that the scenario queued with another payload.
     """
     if current.training_requests is None:
         raise ValueError(f"scenario {current.name!r} takes no training requests: it has no training request queue")
     try:
         retry = current.training_requests.get(request_id) is not None
-        if not retry and current.training_mode == "auto":
-            raise ValueError("explicit training requests require training_mode='manual'")
         trainers = [
             component_trainer.trainer for component_trainer in current.trainers if component_trainer.trainer.trains
         ]
@@ -68,7 +65,12 @@ def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any])
             refusal = training_request_refusal(request["text"], request["requires"])
             if refusal is not None:
                 raise ValueError(refusal)
-            check_request(trainers, TrainingRequest.from_dict(request))
+            parsed = TrainingRequest.from_dict(request)
+            check_request(trainers, parsed)
+            if parsed.train_from is not None and not any(
+                row["artifact_id"] == parsed.train_from for row in current.artifact_rows()
+            ):
+                raise ValueError(f"train_from names no artifact of the scenario: {parsed.train_from!r}")
         return current.training_requests.file(request_id, request)
     except RecordConflict:
         current.operations.increment("ingest/rejected_conflict_total")
@@ -112,7 +114,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
                 source = preceding.get(reference)
                 if source is None:
                     stored_reference = current.records.get_for_audit(item.scenario, reference)
-                    source = stored_reference.item if stored_reference is not None else None
+                    source = stored_reference.item if stored_reference is not None else current.used_record(reference)
                 if source is None or source.request_type is not RequestType.INFERENCE:
                     raise ReportValidationError(
                         f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
@@ -181,30 +183,20 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     return tuple(result.item for result in appended), any(result.inserted for result in appended)
 
 
-def check_use(current: Scenario, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool) -> None:
+def check_use(current: Scenario, trajectories: bool, train_tasks: bool) -> None:
     """Raise ``ValueError`` unless ``current`` can train on the data items that it is to use.
 
-    ``trajectories`` are the ``(item_id, trajectory)`` pairs of the trajectory items, and ``train_tasks`` says
-    whether one or more task item is to be in the ``train`` split. A trajectory needs a trainer that accepts
-    uploaded trajectories (``TrainingPipeline.accepts_trajectories``), and each such trainer must render it;
-    otherwise every trainer would skip it. A train task needs a trainer that reads imported tasks
-    (``Trainer.accepts_imported_tasks``). The ``eval`` split is always open: an artifact evaluation
-    runs its tasks.
+    ``trajectories`` says whether one or more trajectory item is new to it, and ``train_tasks`` whether one or more
+    task item is to be in the ``train`` split. A trajectory needs a trainer that accepts uploaded trajectories
+    (``TrainingPipeline.accepts_trajectories``). The check does not read the trajectories: the pipeline renders each
+    one when it reads it, and skips one that cannot train (``TrainingPipeline.trainable``). A train task needs a
+    trainer that reads imported tasks (``Trainer.accepts_imported_tasks``). The ``eval`` split is always open: an
+    artifact evaluation runs its tasks.
     """
-    if trajectories:
-        trainers = [
-            component_trainer.trainer
-            for component_trainer in current.trainers
-            if component_trainer.trainer.pipeline.accepts_trajectories
-        ]
-        if not trainers:
-            raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
-        for item_id, trajectory in trajectories:
-            for trainer in trainers:
-                try:
-                    trainer.uploaded_sample(trajectory)
-                except ValueError as exc:
-                    raise ValueError(f"trajectory {item_id!r} cannot train: {exc}") from exc
+    if trajectories and not any(
+        component_trainer.trainer.pipeline.accepts_trajectories for component_trainer in current.trainers
+    ):
+        raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
     if train_tasks and not any(
         component_trainer.trainer.accepts_imported_tasks for component_trainer in current.trainers
     ):

@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import open_sample_store
 from tests.support.samples_service import make_samples
@@ -25,7 +26,7 @@ from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.data import NewItem
 from reef.storage.job_data import read_job_data
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.record_items import ItemRecordStore
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
@@ -36,7 +37,8 @@ from reef.train.types import JobData
 class FakeComponent(TrainingComponent):
     """Records each job; a test sets what ``status`` reports."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, runs_concurrent_jobs: bool = False) -> None:
+        self.runs_concurrent_jobs = runs_concurrent_jobs
         self.jobs: list[TrainingJob] = []
         self.statuses: dict[str, JobStatus] = {}
         self.cancelled: list[str] = []
@@ -49,6 +51,10 @@ class FakeComponent(TrainingComponent):
     @property
     def artifact_format(self) -> ArtifactFormat:
         return ArtifactFormat("full")
+
+    @property
+    def concurrent_jobs(self) -> bool:
+        return self.runs_concurrent_jobs
 
     def default_start(self) -> DefaultStart:
         return DefaultStart()
@@ -84,7 +90,7 @@ def component():
 
 
 #: The parameters that the tests submit with each job, as a recipe's stage gives them.
-PARAMETERS = {"method": "sft"}
+PARAMETERS = {"objective": "sft"}
 
 
 def loop_with(component, *, scenario="math"):
@@ -93,7 +99,7 @@ def loop_with(component, *, scenario="math"):
 
 @pytest.mark.unit
 def test_last_job_is_set_exactly_when_a_job_has_ended():
-    assert JobLoopState("/s", None, 1, FINISHED).last_job == FINISHED
+    assert JobLoopState("/s", (), 1, FINISHED).last_job == FINISHED
     for finished_jobs, last_job in ((1, None), (0, FINISHED)):
         with pytest.raises(ValueError, match="exactly when no job has ended"):
             JobLoopState("fake:base", finished_jobs=finished_jobs, last_job=last_job)
@@ -124,11 +130,10 @@ def test_a_ready_batch_is_one_submitted_job_whose_commit_consumes_it(component):
     submitted = loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS)
     result = submitted.result
     [job] = component.jobs
-    assert (job.backend, job.start, job.parameters) == ("fake", "fake:base", {"method": "sft"})
-    assert submitted.ended is None
+    assert (job.backend, job.start, job.parameters) == ("fake", "fake:base", {"objective": "sft"})
     assert result.artifact is None and result.training_job_id == job.job_id
     assert result.metrics["training_job"] == {"job_id": job.job_id, "backend": "fake", "event": "submitted"}
-    assert JobLoopState.from_dict(result.state).job == RunningJob(job.job_id)
+    assert JobLoopState.from_dict(result.state).jobs == (RunningJob(job.job_id, "fake:base"),)
     # The same rows are the same job, whatever the batch's number; another scenario's are another job.
     assert (
         loop.submit(
@@ -156,30 +161,119 @@ def test_every_job_names_its_scenario_component_and_the_job_that_the_trainer_com
 
 
 @pytest.mark.unit
-def test_one_job_runs_at_a_time_and_only_a_running_job_is_polled_or_ended(component):
+def test_a_component_without_concurrent_jobs_runs_one_job_at_a_time(component):
     loop = loop_with(component)
-    running = JobLoopState("fake:base", job=RunningJob("job-1"))
-    with pytest.raises(ValueError, match="one job at a time"):
-        loop.submit(running, batch(), PARAMETERS)
+    running = JobLoopState("fake:base", (RunningJob("job-1", "fake:other", train_from="a1"),))
+    for named in ({}, {"start": "fake:other", "train_from": "a2"}):
+        with pytest.raises(ValueError, match="one such job at a time"):
+            loop.submit(running, batch(), PARAMETERS, **named)
     assert component.jobs == []
-    with pytest.raises(ValueError, match="only a running job"):
-        loop.poll(JobLoopState("fake:base"))
+    # Without a running job there is no news.
+    assert loop.poll(JobLoopState("fake:base")) is None
     with pytest.raises(ValueError, match="has not ended"):
-        loop.end(running, JobStatus("job-1", "running"))
-    with pytest.raises(ValueError, match="only a running job ends"):
-        loop.end(JobLoopState("fake:base"), JobStatus("job-1", "finished"))
+        loop.end(running, running.jobs[0], JobStatus("job-1", "running"))
+
+
+@pytest.mark.unit
+def test_jobs_with_their_own_start_run_beside_the_one_job_that_continues_the_training_start():
+    component = FakeComponent(runs_concurrent_jobs=True)
+    loop = loop_with(component)
+    state = JobLoopState("fake:base")
+    submissions = (
+        (batch("one"), {"start": "fake:a1", "train_from": "a1"}),
+        (batch("two"), {"start": "fake:a2", "train_from": "a2"}),
+        (batch("three"), {}),
+    )
+    for data, named in submissions:
+        state = JobLoopState.from_dict(loop.submit(state, data, PARAMETERS, **named).result.state)
+    first, second, continuing = component.jobs
+    # Each job has its own start, and no submission moved the training start.
+    assert state == JobLoopState(
+        "fake:base",
+        (
+            RunningJob(first.job_id, "fake:a1", train_from="a1"),
+            RunningJob(second.job_id, "fake:a2", train_from="a2"),
+            RunningJob(continuing.job_id, "fake:base"),
+        ),
+    )
+    assert [(job.start, job.train_from_artifact_id) for job in component.jobs] == [
+        ("fake:a1", "a1"),
+        ("fake:a2", "a2"),
+        ("fake:base", None),
+    ]
+    assert state.continuing_job == state.jobs[2]
+    # A job that continues the training start begins where the one before ended, so a second one waits.
+    assert not loop.accepts_job(state, continues=True) and loop.accepts_job(state, continues=False)
+    with pytest.raises(ValueError, match="one such job at a time"):
+        loop.submit(state, batch("next"), PARAMETERS)
+    assert len(component.jobs) == 3
+    # A job names its start and the artifact of that start together.
+    for named in ({"start": "fake:a3"}, {"train_from": "a3"}):
+        with pytest.raises(ValueError, match="together, or neither"):
+            loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS, **named)
+
+
+@pytest.mark.unit
+def test_a_checkpoint_moves_the_training_start_only_for_the_job_that_continues_it(tmp_path):
+    component = FakeComponent(runs_concurrent_jobs=True)
+    loop = loop_with(component)
+    named, continuing = RunningJob("named", "fake:a1", train_from="a1"), RunningJob("continuing", "fake:base")
+    state = JobLoopState("fake:base", (named, continuing))
+    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"))
+
+    published = loop.publish(state, named, saved).result
+    # The commit names the start of the job, so its artifact does not become the training start.
+    assert published.train_from == "a1"
+    assert JobLoopState.from_dict(published.state) == JobLoopState(
+        "fake:base", (RunningJob("named", "fake:a1", 1, "a1"), continuing)
+    )
+    published = loop.publish(state, continuing, saved).result
+    assert published.train_from is None
+    assert JobLoopState.from_dict(published.state) == JobLoopState(
+        saved.path, (named, RunningJob("continuing", "fake:base", 1))
+    )
+
+
+@pytest.mark.unit
+def test_poll_reports_the_first_job_with_news_and_an_end_removes_only_that_job(component, tmp_path):
+    loop = loop_with(component)
+    jobs = tuple(RunningJob(f"job-{number}", "fake:other", train_from=f"a{number}") for number in (1, 2, 3))
+    state = JobLoopState("fake:base", jobs)
+    for job in jobs:
+        component.statuses[job.job_id] = JobStatus(job.job_id, "running")
+    assert loop.poll(state) is None
+    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"))
+    component.statuses["job-2"] = JobStatus("job-2", "finished")
+    component.statuses["job-3"] = JobStatus("job-3", "running", (saved,))
+    ended = loop.poll(state).result
+    assert ended.training_job_id == "job-2" and ended.metrics["training_job"]["event"] == "finished"
+    state = JobLoopState.from_dict(ended.state)
+    assert (state.jobs, state.finished_jobs, state.last_job.job_id) == ((jobs[0], jobs[2]), 1, "job-2")
+    # The next poll reaches the news of the job after it.
+    published = loop.poll(state).result
+    assert published.training_job_id == "job-3" and published.metrics["training_job"]["event"] == "checkpoint"
+
+
+@pytest.mark.unit
+def test_a_new_start_cancels_only_the_job_that_continues_the_start_and_cancel_cancels_every_job(component):
+    loop = loop_with(component)
+    named, continuing = RunningJob("named", "fake:a1", train_from="a1"), RunningJob("continuing", "fake:base")
+    state = JobLoopState("fake:base", (named, continuing), 1, FINISHED)
+    assert loop.started_from(state, "fake:new") == JobLoopState("fake:new", (named,), 1, FINISHED)
+    assert component.cancelled == ["continuing"]
+    loop.cancel(state)
+    assert component.cancelled == ["continuing", "named", "continuing"]
 
 
 @pytest.mark.unit
 def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(component, tmp_path):
     loop = loop_with(component)
     state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
-    job_id = state.job.job_id
+    job_id = state.jobs[0].job_id
     assert loop.poll(state) is None
     first = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"), {"loss": 0.5})
     component.statuses[job_id] = JobStatus(job_id, "running", (first,))
     publication = loop.poll(state)
-    assert publication.ended is None
     published = publication.result
     assert published.artifact is not None and published.artifact.local_path == tmp_path / "1-release"
     # The commit carries the training metrics and the checkpoint's place in its job, and no selection.
@@ -188,15 +282,15 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
         "training_job": {"job_id": job_id, "backend": "fake", "event": "checkpoint", "step": 1},
     }
     state = JobLoopState.from_dict(published.state)
-    assert state.start == first.path and state.job.checkpoints_handled == 1
+    assert state.start == first.path and state.jobs == (RunningJob(job_id, "fake:base", 1),)
     # Nothing new: the job runs on.
     assert loop.poll(state) is None
     component.statuses[job_id] = JobStatus(job_id, "finished", (first,), metrics={"optimizer_steps": 2})
     end = loop.poll(state)
     ended = end.result
     state = JobLoopState.from_dict(ended.state)
-    assert state.job is None and state.finished_jobs == 1 and state.start == first.path
-    assert end.ended == state.last_job == JobOutcome(job_id, "fake", "finished", {"optimizer_steps": 2})
+    assert state.jobs == () and state.finished_jobs == 1 and state.start == first.path
+    assert state.last_job == JobOutcome(job_id, "fake", "finished", {"optimizer_steps": 2})
     assert ended.metrics["training_job"]["event"] == "finished" and ended.metrics["optimizer_steps"] == 2
     loop.submit(state, batch("next"), PARAMETERS)
     assert component.jobs[-1].start == first.path
@@ -205,34 +299,53 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
 @pytest.mark.unit
 def test_a_failed_or_unknown_job_ends_and_keeps_the_start(component):
     loop = loop_with(component)
-    state = JobLoopState("/start", RunningJob("lost"))
+    state = JobLoopState("/start", (RunningJob("lost", "/start"),))
     ended = JobLoopState.from_dict(loop.poll(state).result.state)
-    assert ended.job is None and ended.start == "/start"
+    assert ended.jobs == () and ended.start == "/start"
     assert ended.last_job.event == "failed" and "no such job" in ended.last_job.error
 
 
 @pytest.mark.unit
 def test_the_committed_state_round_trips_and_checks_its_values():
-    state = JobLoopState("/s", RunningJob("j", 2), 3, FINISHED)
-    assert state.to_dict()["job"] == {"job_id": "j", "checkpoints_handled": 2}
+    state = JobLoopState("/s", (RunningJob("j", "/other", 2, "a1"), RunningJob("k", "/s")), 3, FINISHED)
+    assert state.to_dict()["jobs"] == [
+        {"job_id": "j", "start": "/other", "checkpoints_handled": 2, "train_from": "a1"},
+        {"job_id": "k", "start": "/s", "checkpoints_handled": 0, "train_from": None},
+    ]
     assert JobLoopState.from_dict(state.to_dict()) == state
     # A state that cannot be read is refused, not taken for an untrained scenario.
-    for unreadable in ({}, {"start": "/s"}):
+    for unreadable in ({}, {"start": "/s"}, {**state.to_dict(), "evaluations": []}, {**state.to_dict(), "job": None}):
         with pytest.raises(ValueError, match="keys"):
             JobLoopState.from_dict(unreadable)
-    with pytest.raises(ValueError, match="job_id and checkpoints_handled"):
-        JobLoopState.from_dict({**state.to_dict(), "job": {"job_id": "j"}})
+    with pytest.raises(ValueError, match="jobs each have the keys"):
+        JobLoopState.from_dict({**state.to_dict(), "jobs": [{"job_id": "j"}]})
     for start in ("", None):
         with pytest.raises(ValueError, match="start"):
             JobLoopState(start=start)  # type: ignore[arg-type]
     with pytest.raises(TypeError, match="RunningJob"):
-        JobLoopState("/s", job={"job_id": "j"})  # type: ignore[arg-type]
+        JobLoopState("/s", jobs=[RunningJob("j", "/s")])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="distinct job IDs"):
+        JobLoopState("/s", (RunningJob("j", "/s"), RunningJob("j", "/other", train_from="a1")))
+    with pytest.raises(ValueError, match="at most one job"):
+        JobLoopState("/s", (RunningJob("j", "/s"), RunningJob("k", "/s")))
     with pytest.raises(ValueError, match="checkpoints_handled"):
-        RunningJob("j", -1)
+        RunningJob("j", "/s", -1)
     with pytest.raises(ValueError, match="job_id"):
-        RunningJob("")
-    with pytest.raises(ValueError, match="keys"):
-        JobLoopState.from_dict({**state.to_dict(), "evaluations": []})
+        RunningJob("", "/s")
+    with pytest.raises(ValueError, match="start"):
+        RunningJob("j", "")
+    with pytest.raises(ValueError, match="train_from"):
+        RunningJob("j", "/s", train_from="")
+
+
+@pytest.mark.unit
+def test_a_state_from_before_concurrent_jobs_reads_as_one_job_that_continues_the_start():
+    older = {"start": "/s", "job": {"job_id": "j", "checkpoints_handled": 2}, "finished_jobs": 1}
+    older["last_job"] = FINISHED.to_dict()
+    assert JobLoopState.from_dict(older) == JobLoopState("/s", (RunningJob("j", "/s", 2),), 1, FINISHED)
+    assert JobLoopState.from_dict({**older, "job": None}) == JobLoopState("/s", (), 1, FINISHED)
+    with pytest.raises(ValueError, match="job_id and checkpoints_handled"):
+        JobLoopState.from_dict({**older, "job": {"job_id": "j"}})
 
 
 @pytest.mark.unit
@@ -241,14 +354,12 @@ def test_a_checkpoint_publication_refuses_a_training_metric_that_it_would_overwr
     state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
     reserved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"), {"training_job": 1})
     with pytest.raises(ValueError, match="training metrics name 'training_job'"):
-        loop.publish(state, reserved)
-    with pytest.raises(ValueError, match="only a running job's checkpoint"):
-        loop.publish(JobLoopState("fake:base"), reserved)
+        loop.publish(state, state.jobs[0], reserved)
 
 
-def scored_records() -> SQLiteRecordStore:
+def scored_records() -> ItemRecordStore:
     """A record store with one inference and its report: one ready batch for the threshold pipeline."""
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     records.append(
         AgentRecord.create(
             scenario="math",
@@ -280,43 +391,47 @@ def job_trainer(state: JobLoopState, component: TrainingComponent) -> Trainer:
 
 
 @pytest.mark.unit
-def test_start_from_imports_the_release_cancels_the_running_job_and_restarts_from_it(component):
-    trainer = job_trainer(JobLoopState("/start", RunningJob("job-1"), 1, FINISHED), component)
-    trainer.start_from(Artifact.local(Path("/releases/old")))
+def test_start_from_an_imported_artifact_cancels_the_continuing_job_and_keeps_a_job_with_its_own_start(component):
+    named = RunningJob("job-2", "fake:a1", train_from="a1")
+    trainer = job_trainer(JobLoopState("/start", (RunningJob("job-1", "/start"), named), 1, FINISHED), component)
+    trainer.start_from(trainer.import_start(Artifact.local(Path("/releases/old"))))
     assert component.imported == [Path("/releases/old")]
     assert component.cancelled == ["job-1"]
-    # The jobs that ended stay counted.
-    assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old", None, 1, FINISHED)
+    # The job with its own start runs on, and the jobs that ended stay counted.
+    assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old", (named,), 1, FINISHED)
+    assert trainer.job_running
 
 
 @pytest.mark.unit
-def test_start_from_is_refused_without_a_change_when_the_trainer_cannot_start(component, monkeypatch):
-    trainer = job_trainer(JobLoopState("/start", RunningJob("job-1")), component)
+def test_an_import_is_refused_without_a_change_when_the_trainer_cannot_start(component, monkeypatch):
+    running = JobLoopState("/start", (RunningJob("job-1", "/start"),))
+    trainer = job_trainer(running, component)
 
     def refuse(release):
         raise ValueError("these weights cannot train")
 
     monkeypatch.setattr(component, "import_start", refuse)
     with pytest.raises(TrainingStartRefused, match="these weights cannot train"):
-        trainer.start_from(Artifact.local(Path("/releases/old")))
+        trainer.start_from(trainer.import_start(Artifact.local(Path("/releases/old"))))
     assert component.cancelled == []
-    assert JobLoopState.from_dict(trainer.state) == JobLoopState("/start", RunningJob("job-1"))
+    assert JobLoopState.from_dict(trainer.state) == running
     # A trainer that trains nothing has no start to set.
-    observer = Trainer.build("math", SQLiteRecordStore(), pipeline_factory=threshold_pipeline)
+    observer = Trainer.build("math", memory_records("math"), pipeline_factory=threshold_pipeline)
     with pytest.raises(TrainingStartRefused, match="trains nothing"):
-        observer.start_from(Artifact.local(Path("/releases/old")))
+        observer.import_start(Artifact.local(Path("/releases/old")))
 
 
 @pytest.mark.unit
 def test_start_from_is_refused_while_a_commit_is_pending(component):
-    pending = job_trainer(JobLoopState("fake:base", job=RunningJob("job-2")), component)
+    running = JobLoopState("fake:base", (RunningJob("job-2", "fake:base"),))
+    pending = job_trainer(running, component)
     component.statuses["job-2"] = JobStatus("job-2", "finished")
     assert not pending.has_pending_commit
-    assert pending.run_once() is not None
+    assert pending.advance_job() is not None
     assert pending.has_pending_commit
     with pytest.raises(CommitPending, match="waits for its commit"):
-        pending.start_from(Artifact.local(Path("/releases/old")))
-    assert component.imported == []
+        pending.start_from("fake:old")
+    assert component.cancelled == [] and JobLoopState.from_dict(pending.state) == running
 
 
 @pytest.mark.unit
@@ -328,44 +443,44 @@ def test_a_poll_result_is_dropped_when_a_new_start_was_set_while_the_poll_ran(tm
 
         def status(self, job_id: str) -> JobStatus:
             # A new training start lands while the trainer waits on the component.
-            self.trainer.start_from(Artifact.local(Path("/releases/old")))
+            self.trainer.start_from("fake:old")
             return JobStatus(job_id, "running", (saved,))
 
     component = StartDuringStatus()
-    trainer = job_trainer(JobLoopState("/start", RunningJob("job-1")), component)
+    trainer = job_trainer(JobLoopState("/start", (RunningJob("job-1", "/start"),)), component)
     component.trainer = trainer
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert not trainer.has_pending_commit and component.cancelled == ["job-1"]
     assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old")
 
 
 @pytest.mark.unit
 def test_a_restarted_trainer_polls_its_running_job_before_it_reserves_a_batch(component, tmp_path):
-    trainer = job_trainer(JobLoopState("fake:base", job=RunningJob("job-1")), component)
+    trainer = job_trainer(JobLoopState("fake:base", (RunningJob("job-1", "fake:base"),)), component)
     component.statuses["job-1"] = JobStatus("job-1", "running")
     assert trainer.job_running
-    assert trainer.run_once() is None
+    assert trainer.advance_job() is None
     assert trainer.pending_job_data is None and component.jobs == []
     saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
     component.statuses["job-1"] = JobStatus("job-1", "running", (saved,))
-    published = trainer.run_once()
+    published = trainer.advance_job()
     assert published is not None and published.metrics["training_job"]["event"] == "checkpoint"
     assert trainer.pending_job_data is None
-    trainer.commit(trainer.prepare_commit(published))
-    assert JobLoopState.from_dict(trainer.state).job == RunningJob("job-1", 1)
+    trainer.settle_commit(trainer.prepare_commit(published))
+    assert JobLoopState.from_dict(trainer.state) == JobLoopState(saved.path, (RunningJob("job-1", "fake:base", 1),))
 
 
 @pytest.mark.unit
 def test_a_running_job_the_component_does_not_know_ends_failed_and_keeps_the_start(component):
-    trainer = job_trainer(JobLoopState("/start", RunningJob("lost")), component)
-    ended = trainer.run_once()
+    trainer = job_trainer(JobLoopState("/start", (RunningJob("lost", "/start"),)), component)
+    ended = trainer.advance_job()
     assert ended is not None and ended.metrics["training_job"]["event"] == "failed"
-    trainer.commit(trainer.prepare_commit(ended))
+    trainer.settle_commit(trainer.prepare_commit(ended))
     state = JobLoopState.from_dict(trainer.state)
-    assert (state.job, state.start, state.finished_jobs) == (None, "/start", 1)
+    assert (state.jobs, state.start, state.finished_jobs) == ((), "/start", 1)
     # With the job ended, the ready batch becomes the next job, from the kept start.
     make_samples(trainer)
-    assert trainer.run_once() is not None
+    assert trainer.advance_job() is not None
     [job] = component.jobs
     assert job.start == "/start"
 
@@ -398,33 +513,38 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     )
     [ended] = stages
     make_samples(trainer)
-    submitted = trainer.run_once()
-    trainer.commit(trainer.prepare_commit(submitted))
+    submitted = trainer.advance_job()
+    trainer.settle_commit(trainer.prepare_commit(submitted))
     [job] = component.jobs
     saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
     component.statuses[job.job_id] = JobStatus(job.job_id, "running", (saved,))
-    published = trainer.run_once()
-    trainer.commit(trainer.prepare_commit(published))
+    published = trainer.advance_job()
+    trainer.settle_commit(trainer.prepare_commit(published))
     assert ended.outcomes == [], "neither the submission nor a checkpoint publication ends the job"
 
     metrics = {"rollout_rewards": {"task-a": [1.0, 0.0]}}
     component.statuses[job.job_id] = JobStatus(job.job_id, "finished", (saved,), metrics)
-    finished = trainer.run_once()
+    finished = trainer.advance_job()
     prepared = trainer.prepare_commit(finished)
     assert ended.outcomes == [], "the end is not durable before its commit settles"
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
+    assert ended.outcomes == [], "the samples service reads the end, not the commit"
+    make_samples(trainer)
     assert ended.outcomes == [JobOutcome(job.job_id, "fake", "finished", metrics)]
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
+    make_samples(trainer)
     assert len(ended.outcomes) == 1, "a settled commit is not applied again"
 
     # A restart can fall between the end's commit and the stage taking it: the next trainer gives it again.
-    Trainer.build(
+    restarted = Trainer.build(
         "math",
         scored_records(),
         pipeline_factory=pipeline,
         job_loop=loop_with(component),
         algorithm_state=trainer.algorithm_state_dict(),
     )
+    assert stages[-1].outcomes == [], "a control process that makes no samples never feeds the stage"
+    make_samples(restarted)
     assert stages[-1].outcomes == ended.outcomes
 
 
@@ -442,7 +562,7 @@ def train_record(record_id: str, parameters: dict, sample_id: str) -> TrainingRe
     payload = {
         "text": "train",
         "session": "s-1",
-        "release_id": "r-1",
+        "artifact_id": "r-1",
         "parameters": parameters,
         "samples": [sample_id],
     }
@@ -471,21 +591,21 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
         training_mode="manual",
         samples=samples.for_trainer(""),
         # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
-        job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
+        job_parameters={"trajectory": {"objective": "sft", "learning_rate": 1e-5}},
         root=STUB_ROOT,
     )
     pipeline = trainer.pipeline
 
     def train(record: TrainingRequest) -> dict:
         pipeline.queue_requests([record])
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
         job = component.jobs[-1]
         component.statuses[job.job_id] = JobStatus(job.job_id, "finished")
-        trainer.commit(trainer.prepare_commit(trainer.run_once()))
+        trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
         return dict(job.parameters)
 
-    assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"method": "sft", "learning_rate": 2e-5}
-    rl = {"method": "task_group", "rollout": {"rollouts_per_task": 4}}
+    assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"objective": "sft", "learning_rate": 2e-5}
+    rl = {"objective": "provided:Objective", "rollout": {"rollouts_per_task": 4}}
     assert train(train_record("rl", rl, "task-a")) == rl
     assert [type(sample).__name__ for job in component.jobs for sample in read_job_data(job.data_dir).samples] == [
         "TrajectorySample",

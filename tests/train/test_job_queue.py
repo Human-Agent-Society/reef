@@ -30,10 +30,12 @@ from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import NewWork
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.job_queue import (
+    JOB_CANCELLED_ERROR,
     JOBS_QUEUE,
     JobExperimentRecorder,
     JobQueueComponent,
     TrainingJobWorker,
+    cancel_request_jobs,
     checkpoint_json,
     job_from_item,
     job_json,
@@ -42,6 +44,7 @@ from reef.train.job_queue import (
     scenario_jobs,
 )
 from reef.train.local_jobs import LocalJobComponent
+from reef.train.training_requests import REQUEST_CANCELLED_ERROR, ScenarioTrainingRequests
 
 WAIT_SECONDS = 10.0
 
@@ -156,7 +159,8 @@ def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the
     view.submit(job("j1"))
     view.submit(job("j1"))  # a second submit of one ID does nothing
     item = queue.get(JOBS_QUEUE, "j1")
-    assert (item.scenario, item.kind, item.serial_key) == ("s", job_kind("steps"), "s")
+    # The item has no serial key: a free worker takes it beside another job of its scenario.
+    assert (item.scenario, item.kind, item.serial_key) == ("s", job_kind("steps"), None)
 
     status = wait_for(lambda: view.status("j1"), "finished")
     assert [checkpoint.step for checkpoint in status.checkpoints] == [1, 2]
@@ -235,23 +239,15 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     worker.stop()
 
 
-class ReleaseRefusingComponent(StepComponent):
-    """A component that continues only from its own checkpoints, as Slime does."""
-
-    @property
-    def starts_from_artifacts(self) -> bool:
-        return False
-
-    def import_start(self, release: Path) -> str:
-        raise ValueError("this component starts only from its own checkpoints")
-
-
 @pytest.mark.unit
-def test_a_queue_component_reports_whether_its_component_starts_from_releases(tmp_path):
+def test_a_queue_component_serves_the_parameters_schema_of_its_component(tmp_path):
+    class Declaring(StepComponent):
+        def parameters_schema(self, kind):
+            return {"title": kind}
+
     queue = memory_coordination().work_queue
-    assert JobQueueComponent(StepComponent(tmp_path / "a"), queue).starts_from_artifacts is True
-    refusing = JobQueueComponent(ReleaseRefusingComponent(tmp_path / "b"), queue)
-    assert refusing.starts_from_artifacts is False
+    assert JobQueueComponent(Declaring(tmp_path / "a"), queue).parameters_schema("task") == {"title": "task"}
+    assert JobQueueComponent(StepComponent(tmp_path / "b"), queue).parameters_schema("task") is None
 
 
 @pytest.mark.unit
@@ -260,7 +256,7 @@ def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
     request = TrainingRequest("prefer tests", "session-1", "release-1", id="r1", parameters={"learning_rate": 1e-5})
     sample = policy_trajectory("s-j1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
     data = JobData("s:request:r1", (sample, sample), request=request)
-    parameters = {"method": {"objective": "sft"}, "learning_rate": 1e-5}
+    parameters = {"objective": "sft", "learning_rate": 1e-5}
     instructed = TrainingJob("j1", "steps", "steps:base", job_data_ref(data), parameters, scenario="s")
     summary = {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
     queue.add(
@@ -357,3 +353,32 @@ def test_a_job_has_no_experiment_when_the_tracker_has_no_run():
     JobExperimentRecorder(RunTracker(open_run=False), queue).record(job_event("j1"))
     JobExperimentRecorder(ExperimentTracker(), queue).record(job_event("j1"))
     assert scenario_jobs(queue, "s")[0]["experiment"] is None
+
+
+@pytest.mark.unit
+def test_the_job_of_a_request_that_was_cancelled_meanwhile_is_cancelled_when_it_is_queued(tmp_path):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    requests = ScenarioTrainingRequests(queue, "s")
+    view = JobQueueComponent(StepComponent(tmp_path / "jobs"), queue)
+    sample = policy_trajectory("s-j", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
+
+    def request_job(job_id: str, request_id: str) -> TrainingJob:
+        request = TrainingRequest("prefer tests", "session-1", "release-1", id=request_id)
+        requests.file(request_id, request.to_dict())
+        data = JobData(f"s:request:{request_id}", (sample,), request=request)
+        return TrainingJob(job_id, "steps", "steps:base", job_data_ref(data), {}, scenario="s", request_id=request_id)
+
+    # The client cancelled the request while control built the data of its job.
+    late = request_job("late", "r1")
+    assert requests.cancel("r1") is not None and requests.failures() == {"r1": REQUEST_CANCELLED_ERROR}
+    view.submit(late)
+    assert (view.status("late").state, view.status("late").error) == ("failed", JOB_CANCELLED_ERROR)
+
+    # A cancel of the jobs of a request leaves the jobs of other requests and the jobs without a request.
+    view.submit(request_job("kept", "r2"))
+    view.submit(job("automatic"))
+    assert cancel_request_jobs(queue, "s", "missing") is None
+    assert cancel_request_jobs(queue, "s", "r1")["id"] == "late"
+    assert [view.status(job_id).state for job_id in ("kept", "automatic")] == ["running", "running"]
+    assert cancel_request_jobs(queue, "s", "r2")["error"] == JOB_CANCELLED_ERROR
+    assert requests.cancel("missing") is None

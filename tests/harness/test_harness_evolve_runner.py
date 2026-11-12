@@ -17,6 +17,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from reef_client import ReefClientError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TUTORIAL = REPO_ROOT / "tutorials" / "evolve-your-harness"
@@ -33,9 +34,14 @@ REJECTED = {"selected": False, "wins": 0, "losses": 0, "ties": 3, "candidate_sco
 SKIPPED = {"skipped": "the method left the head tree unchanged"}
 NO_PUBLISH = (REJECTED, SKIPPED, SKIPPED)
 PUBLISHED = {"selected": True, "wins": 1, "losses": 0, "ties": 2, "candidate_score": 3.0, "current_score": 2.0}
-#: The release a fresh scenario serves before any step publishes, and the one a publishing step leaves behind.
+#: The snapshot a fresh scenario serves before any step publishes, and the one a publishing step leaves behind.
 SEED_ARTIFACT = "artifact:seed"
 PUBLISHED_ARTIFACT = "artifact:published"
+#: The scenario the runner creates, and the route that reports whether inference serves its model yet.
+SCENARIO = "harness-evolve-demo"
+STARTUP_STATUS = f"/reef/scenarios/{SCENARIO}/inference/status"
+#: The error the status route answers for a failed startup, word for word as the service sends it.
+STARTUP_FAILED = "The inference engine did not start. Check the service logs."
 
 
 class StubReefClient:
@@ -55,12 +61,25 @@ class StubReefClient:
 
     ``posts`` is every low-level ``post`` the run makes, in order, as ``(path, scenario, payload)``; the run uses it
     to create its scenario.
+
+    ``startup`` holds the startup states the status route answers, one per read; the last one repeats. Until the
+    run has created its scenario, the status route answers HTTP 404, as the service does for a scenario with no
+    startup request. Until a read has answered ``ready``, a model call is HTTP 503, as it is while the service
+    starts the model. Status reads are in ``reads`` as ``("startup", state)``.
     """
 
     def __init__(
-        self, *args: object, results: tuple[dict, ...] = (), head: str = PUBLISHED_ARTIFACT, **kwargs: object
+        self,
+        *args: object,
+        results: tuple[dict, ...] = (),
+        head: str = PUBLISHED_ARTIFACT,
+        startup: tuple[str, ...] = ("ready",),
+        **kwargs: object,
     ) -> None:
         self.results = list(results)
+        self.startup = list(startup)
+        self.created = False
+        self.is_inference_ready = False
         self.head = head
         self.reports: list[dict] = []
         self.references: list[list[str]] = []
@@ -79,9 +98,14 @@ class StubReefClient:
 
     def post(self, path: str, scenario: str, payload: dict, **kwargs: object) -> tuple[dict, dict[str, str]]:
         self.posts.append((path, scenario, payload))
+        if path == "/reef/scenarios":
+            self.created = True
         return {"scenario": payload["name"]}, {}
 
     def inference_with_record(self, scenario: str, path: str, payload: dict, **kwargs: object) -> tuple[dict, str]:
+        if not self.is_inference_ready:
+            body = {"error": {"type": "inference_starting", "message": "The inference engine is starting."}}
+            raise ReefClientError(503, json.dumps(body), "application/json")
         return {"choices": [{"message": {"content": "9592"}}]}, "receipt-1"
 
     def report(self, scenario: str, payload: dict, references: list[str], **kwargs: object) -> dict:
@@ -91,12 +115,26 @@ class StubReefClient:
 
     def get(self, path: str, **kwargs: object) -> dict:
         self.requested.append(path)
+        if path == STARTUP_STATUS:
+            if not self.created:
+                raise ReefClientError(404, f"scenario {SCENARIO!r} has no inference startup request", "text/plain")
+            state = self.startup.pop(0) if len(self.startup) > 1 else self.startup[0]
+            self.reads.append(("startup", state))
+            self.is_inference_ready = state == "ready"
+            return {
+                "artifact_id": SEED_ARTIFACT,
+                "state": state,
+                "error": STARTUP_FAILED if state == "failed" else None,
+                "engine": "warm" if state == "ready" else None,
+                "engine_detail": None,
+                "startup": None,
+            }
         if path == "/reef/harness/artifacts":
             rows = self._step_rows()
             published = any(row["metrics"].get("selected") for row in rows)
             self.published_seen = self.published_seen or published
             self.reads.append(("catalog", {"rows": len(rows), "published": published}))
-            return {"releases": rows}
+            return {"scenario": SCENARIO, "artifacts": rows}
         if path == "/reef/harness":
             release = self.head if self.published_seen else SEED_ARTIFACT
             self.reads.append(("manifest", release))
@@ -132,12 +170,13 @@ def _stage(
     scores: tuple[float, ...],
     results: tuple[dict, ...],
     head: str = PUBLISHED_ARTIFACT,
+    startup: tuple[str, ...] = ("ready",),
 ) -> StubReefClient:
     """Point the runner at ``scores``, one per task, and at ``results`` for the steps those reports trigger."""
     tasks_file = tmp_path / "tasks.json"
     tasks_file.write_text(json.dumps(list(TASKS[: len(scores)])), encoding="utf-8")
     monkeypatch.setattr(runner, "TASKS_FILE", tasks_file)
-    client = StubReefClient(results=results, head=head)
+    client = StubReefClient(results=results, head=head, startup=startup)
     monkeypatch.setattr(runner, "ReefClient", lambda *args, **kwargs: client)
     graded = iter(scores)
 
@@ -267,6 +306,77 @@ def test_a_publishing_step_still_reaches_the_manifest(
     assert "published: artifact artifact:published" in printed
 
 
+def test_the_run_sends_no_task_before_inference_serves_the_model(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Creating the scenario does not wait for its model to start: the run waits for ``ready`` before its first task.
+
+    The stub answers a model call with HTTP 503 until a status read says ``ready``, so a run that sends a task
+    straight after creating the scenario fails here as it fails against the service.
+    """
+    client = _stage(
+        runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH, startup=("pending", "starting", "ready")
+    )
+    _record_waits(runner, monkeypatch)
+
+    runner.main()
+
+    assert client.posts[0][0] == "/reef/scenarios", "the run creates its scenario before it reads the status"
+    startup_reads = [read[1] for read in client.reads if read[0] == "startup"]
+    assert startup_reads == ["pending", "starting", "ready"], f"the run stops polling at ready: {startup_reads}"
+    assert len(client.reports) == 3
+
+
+def test_a_failed_inference_startup_stops_the_run_before_any_task(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A model that fails to start ends the run with the log to read, not a 503 on the first task."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH, startup=("starting", "failed"))
+    # Shortened so a run that misses the failed state fails here instead of waiting out the real deadline.
+    monkeypatch.setattr(runner, "INFERENCE_TIMEOUT_S", 2.0)
+
+    with pytest.raises(SystemExit, match=r"^inference did not start: check work/reef\.log$"):
+        runner.main()
+
+    assert client.reports == [], "no task is sent to a model that did not start"
+
+
+def test_an_inference_startup_past_the_deadline_stops_the_run_before_any_task(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A model that is still starting at ``INFERENCE_TIMEOUT_S`` ends the run with the deadline and the log to read."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH, startup=("starting",))
+    monkeypatch.setattr(runner, "INFERENCE_TIMEOUT_S", 1.0)
+
+    with pytest.raises(SystemExit, match=r"^inference did not start within 1s; check work/reef\.log$"):
+        runner.main()
+
+    assert client.reports == [], "no task is sent to a model that did not start"
+
+
+def test_the_pull_waits_for_inference_before_the_serve_process_starts(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``run.py pull`` creates the scenario the serve process then calls, so it also waits until the model serves."""
+    client = StubReefClient(startup=("starting", "ready"))
+    monkeypatch.setattr(runner, "ReefClient", lambda *args, **kwargs: client)
+    monkeypatch.setattr(runner, "TREE_DIR", tmp_path / "tree")
+    monkeypatch.setattr(runner, "SCRATCH_DIR", tmp_path / "scratch")
+
+    runner.pull()
+
+    kinds = [read[0] for read in client.reads]
+    assert kinds == ["startup", "startup", "manifest"], f"the pull reads the head once the model serves: {kinds}"
+
+
 def test_the_native_run_stops_on_the_results_of_steps_that_publish_nothing(
     runner: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
@@ -298,7 +408,7 @@ def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
 ) -> None:
     """A native run that does publish: the step results come first, then the head, the mount and the second pass.
 
-    The manifest the service serves is a genuinely new release, not the seed, so the run has to reach the
+    The manifest the service serves is a genuinely new snapshot, not the seed, so the run has to reach the
     artifact:published path on the strength of this run's step results rather than on a head that never moved.
 
     The contract is an ordering one, so it is asserted on the recorded route reads, not on a clock: the catalog
@@ -333,10 +443,10 @@ def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
 
     assert len(client.reports) == 3, "three turns, three scores reported against their receipts"
     assert "step 1: published" in printed, "the catalog returned this run's steps, one of them published"
-    assert f"published: artifact {PUBLISHED_ARTIFACT}" in printed, "the head is a release other than the seed"
+    assert f"published: artifact {PUBLISHED_ARTIFACT}" in printed, "the head is a snapshot other than the seed"
     assert set(client.mounts) == {
         PUBLISHED_ARTIFACT
-    }, f"the process mounted the published release, saw {client.mounts}"
+    }, f"the process mounted the published snapshot, saw {client.mounts}"
     assert len(client.turns) == 4, f"the second pass runs after the run's three turns, saw {len(client.turns)}"
     assert "second pass" in printed
     assert (

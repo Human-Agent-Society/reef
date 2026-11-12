@@ -16,10 +16,10 @@ class NoArtifactPublication:
 class SavedArtifactPublication:
     """The publication of a commit that publishes durable bytes.
 
-    Values: ``artifact`` is the release to publish, and ``component`` is None
-    or the non-empty name of the release component that ``artifact`` replaces;
+    Values: ``artifact`` is the snapshot to publish, and ``component`` is None
+    or the non-empty name of the snapshot component that ``artifact`` replaces;
     the committer carries the other components forward. Purpose:
-    ``TrainStepResult.publication`` makes the value, and the scenario committer
+    ``TrainingCommit.publication`` makes the value, and the scenario committer
     publishes it. The published version, not a runtime load ID, names it.
     """
 
@@ -34,7 +34,7 @@ ArtifactPublication = NoArtifactPublication | SavedArtifactPublication
 
 
 @dataclass(frozen=True)
-class TrainStepResult:
+class TrainingCommit:
     """One commit's worth of training: the trainer state to commit, its metrics and what it publishes.
 
     ``state`` is the trainer state the commit records, a mapping, or ``None``
@@ -42,16 +42,18 @@ class TrainStepResult:
     training step's result needs a mapping (``Trainer.prepare_commit``
     refuses ``None``). ``metrics`` is a mapping. ``artifact`` holds the bytes to publish, or ``None`` for a
     commit that publishes nothing, such as a job submission or a job's end.
-    ``training_job_id`` names the training job the commit is about, if any.
+    ``training_job_id`` names the training job the commit is about, if any. ``train_from`` is the ID of the artifact
+    that the job's request named as its start, or ``None``: with it, ``artifact`` does not become the trainer's
+    training start (``JobLoop.publish``). Only a commit that publishes an artifact has it.
 
     The commit does not decide whether ``artifact`` serves; the scenario's
     activation rule does. ``changed_kinds`` holds the harness node kinds that
     ``artifact`` changes from the tree it was trained from, and the rule reads
     it. It is empty for weights and for a commit that publishes nothing.
 
-    ``component`` names the release component ``artifact`` replaces. A scenario
+    ``component`` names the snapshot component ``artifact`` replaces. A scenario
     serving several components requires it; the committer carries the other
-    components from the active release. A flat scenario may leave
+    components from the active selection. A flat scenario may leave
     it unset.
     """
 
@@ -59,6 +61,7 @@ class TrainStepResult:
     metrics: Mapping[str, Any] = field(default_factory=dict)
     artifact: Artifact | None = None
     training_job_id: str | None = None
+    train_from: str | None = None
     changed_kinds: frozenset[str] = frozenset()
     component: str | None = None
 
@@ -76,6 +79,12 @@ class TrainStepResult:
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
             raise ValueError("training_job_id must be a non-empty string or None")
+        if self.train_from is not None and (
+            not isinstance(self.train_from, str) or not self.train_from or self.artifact is None
+        ):
+            raise ValueError(
+                "train_from must be a non-empty artifact ID on a commit that publishes an artifact, or None"
+            )
         if not isinstance(self.changed_kinds, frozenset) or any(
             not isinstance(kind, str) or not kind for kind in self.changed_kinds
         ):

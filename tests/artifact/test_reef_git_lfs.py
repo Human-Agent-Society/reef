@@ -21,20 +21,16 @@ from reef.artifact import (
     GitLFSRepositoryBackendFactory,
     InMemoryRepositoryBackend,
     ModelDirectory,
-    Repository,
     RepositoryBackend,
     RepositoryBackendContext,
 )
-from reef.artifact.composite import compose_release
 from reef.artifact.git_client import GitClient
 from reef.artifact.git_lfs import HUB_REFS, same_file, token_config
-from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
 from reef.core.plugins import PluginConfigError
-from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
 
 
 def root_tree(directory: Path, files: dict[str, str] | None = None) -> Artifact:
-    """An unpublished root release in ``directory`` that holds ``files``."""
+    """An unpublished root snapshot in ``directory`` that holds ``files``."""
     directory.mkdir(parents=True)
     for relative, text in (files or {}).items():
         (directory / relative).parent.mkdir(parents=True, exist_ok=True)
@@ -100,6 +96,30 @@ def test_artifact_identity_survives_publication_and_a_fresh_git_cache(tmp_path: 
     assert recovered.resolve_artifact(identity).artifact_id == identity
     assert recovered.resolve_artifact(root.artifact_id).artifact_id == root.artifact_id
     assert recovered.materialize(recovered.resolve_snapshot(initial.revision)).artifact_id == root.artifact_id
+
+
+def test_a_batch_lookup_gives_each_binding_as_one_lookup_does(tmp_path: Path, fake_git_lfs: None) -> None:
+    remote = tmp_path / "artifacts.git"
+    backend = GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    root = root_tree(tmp_path / "root", {"rules.md": "initial"})
+    head = backend.register(root, metadata={})
+    trained = root_tree(tmp_path / "trained", {"rules.md": "updated"})
+    backend.publish(trained, expected_parent=head)
+
+    fresh = GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "fresh", cache_dir=tmp_path / "fresh-cache")
+    found = fresh.artifact_snapshots({root.artifact_id, trained.artifact_id, "artifact:missing"})
+    assert found == {
+        root.artifact_id: backend.artifact_snapshot(root.artifact_id),
+        trained.artifact_id: backend.artifact_snapshot(trained.artifact_id),
+    }
+    assert fresh.artifact_snapshots(set()) == {}
+
+
+def test_the_default_batch_lookup_leaves_out_an_id_without_a_binding(tmp_path: Path) -> None:
+    backend = InMemoryRepositoryBackend("math", directory=tmp_path / "stored")
+    root = root_tree(tmp_path / "root", {"rules.md": "initial"})
+    stored = backend.register(root, metadata={})
+    assert backend.artifact_snapshots({root.artifact_id, "artifact:missing"}) == {root.artifact_id: stored}
 
 
 @pytest.mark.parametrize("storage", ["memory", "git"])
@@ -292,7 +312,13 @@ def test_metadata_and_release_reads_share_one_git_workspace_safely(
     first = GitLFSRepositoryBackend("scenario", remote, work_dir=work, cache_dir=tmp_path / "cache")
     root = first.register(root_tree(tmp_path / "root"), metadata={"generation": "root"})
     candidate = root_tree(tmp_path / "candidate", {"rules.md": "new rules"})
-    candidate = Artifact(candidate.ref, None, local_path=candidate.local_path, metadata={"generation": "new"})
+    candidate = Artifact(
+        candidate.ref,
+        None,
+        artifact_id=candidate.artifact_id,
+        local_path=candidate.local_path,
+        metadata={"generation": "new"},
+    )
     first.publish(candidate, expected_parent=root)
     second = GitLFSRepositoryBackend("scenario", remote, work_dir=work / ".", cache_dir=tmp_path / "cache")
     fetched, release, attempted, second_fetch = Event(), Event(), Event(), Event()
@@ -411,7 +437,7 @@ def trained_weights(directory: Path, contents: bytes) -> Artifact:
 def test_a_fresh_workspace_publishes_with_real_lfs_over_objects_it_never_fetched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A restarted service's fresh workspace fetches no LFS objects, so neither a pending release nor a publish from
+    """A restarted service's fresh workspace fetches no LFS objects, so neither a pending snapshot nor a publish from
     it may ask Git LFS to upload the trained version, which the remote already holds.
 
     A global ``core.hooksPath`` and a Git template both install user hooks that fail; Reef's clones must run their own
@@ -437,13 +463,13 @@ def test_a_fresh_workspace_publishes_with_real_lfs_over_objects_it_never_fetched
     assert trained.parent_revision == root.revision
     assert run_git("--git-dir", str(remote), "rev-parse", first.ref_name) == trained.revision
 
-    # A restarted service materializes, saves a pending release and publishes from a fresh workspace.
+    # A restarted service materializes, saves a pending snapshot and publishes from a fresh workspace.
     fresh = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "fresh-work", cache_dir=tmp_path / "c2")
     materialized = fresh.materialize(trained).local_path
     assert materialized is not None
     assert (materialized / "weights" / "adapter_model.safetensors").read_bytes() == b"adapter v1" * 100
     assert not (materialized / ".git").exists()
-    # A pending release pushes to a new ref and leaves the head alone: the LFS check still stops at history the
+    # A pending snapshot pushes to a new ref and leaves the head alone: the LFS check still stops at history the
     # remote already holds.
     pending = fresh.publish(
         trained_weights(tmp_path / "trained-2", b"adapter v2" * 100), expected_parent=trained, advance_head=False
@@ -523,7 +549,7 @@ def test_a_model_directory_exists_and_a_model_component_needs_model_files(tmp_pa
 
 @pytest.mark.integration
 def test_a_published_file_is_linked_into_the_release_cache_not_copied(tmp_path: Path, fake_git_lfs: None) -> None:
-    """Released files are immutable, so a publish links them into the release's cache entry instead of cloning it."""
+    """Stored files are immutable, so a publish links them into the snapshot's cache entry instead of cloning it."""
     remote = tmp_path / "artifacts.git"
     backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
     head = backend.register(root_tree(tmp_path / "root"), metadata={})
@@ -553,7 +579,7 @@ def test_same_file_names_one_inode_and_a_missing_path_names_none(tmp_path: Path)
 def test_a_carried_component_is_neither_hashed_nor_copied_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A release that carries the parent's files forward as links reuses their blobs; only the changed files are read."""
+    """A snapshot that carries the parent's files forward as links reuses their blobs; only the changed files are read."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     remote = tmp_path / "artifacts.git"
@@ -591,7 +617,7 @@ def test_a_carried_component_is_neither_hashed_nor_copied_again(
     cached = backend.materialize(published).local_path
     assert cached is not None
     assert (cached / "weights" / "model.safetensors").samefile(parent_tree / "weights" / "model.safetensors")
-    # The linked cache entry holds what a clone of the release holds.
+    # The linked cache entry holds what a clone of the snapshot holds.
     cloned = GitLFSRepositoryBackend(
         "agent", remote, work_dir=tmp_path / "fresh-work", cache_dir=tmp_path / "fresh-cache"
     ).materialize(published)
@@ -690,11 +716,11 @@ def test_the_hub_layout_keeps_releases_on_tags_and_moving_refs_on_branches(tmp_p
         f"refs/tags/reef/releases/{pending.revision}",
     }
     assert refs[f"refs/heads/reef/scenarios/{encoded}"] == published.revision
-    # A release's ID is its commit, so a release on the Hub is the revision of that commit.
+    # A snapshot's ID is its commit, so a snapshot on the Hub is the revision of that commit.
     assert backend.resolve_snapshot(pending.revision) == pending
     assert factory.has_registration("math") and factory.list_registrations() == ("math",)
 
-    # A repository keeps one layout: the other is refused instead of hiding the releases.
+    # A repository keeps one layout: the other is refused instead of hiding the snapshots.
     with pytest.raises(ArtifactSourceError, match="keeps its refs under refs/heads/reef/ and refs/tags/reef/"):
         GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "reef-work", cache_dir=tmp_path / "reef-cache")
 
@@ -742,57 +768,3 @@ def test_configured_factory_reads_the_ref_layout_and_the_token(
     assert factory._git_config == token_config(config["repository"], "hf_secret_token")
     with pytest.raises(PluginConfigError, match="refs must be one of"):
         GitLFSRepositoryBackendFactory.from_config({"repository": "a", "refs": "custom"}, context=context)
-
-
-@pytest.mark.parametrize("storage", ["memory", "git"])
-def test_legacy_selection_rebuilds_missing_artifact_index(tmp_path: Path, fake_git_lfs: None, storage: str) -> None:
-    root = compose_release(
-        {
-            "weights": root_tree(tmp_path / "weights", {"model.bin": "weights"}),
-            "harness": root_tree(tmp_path / "harness", {"rules.md": "rules"}),
-        },
-        directory=tmp_path / "composed",
-    )
-    backend: RepositoryBackend
-    if storage == "memory":
-        backend = InMemoryRepositoryBackend("math", directory=tmp_path / "memory")
-    else:
-        backend = GitLFSRepositoryBackend(
-            "math", tmp_path / "artifacts.git", work_dir=tmp_path / "work", cache_dir=tmp_path / "cache"
-        )
-    initial = backend.register(root, metadata={})
-    ids = {name: root.component(name).artifact_id for name in ("weights", "harness")}
-    stored = {
-        name: {"artifact_id": artifact_id, "ref": {**encode_snapshot_ref(initial), "content_id": "obsolete"}}
-        for name, artifact_id in ids.items()
-    }
-    legacy = ArtifactSelection.from_dict(stored)
-    assert legacy == ArtifactSelection(ids), "an older stored selection decodes to a plain selection"
-    # Older repositories have snapshots but no independent ID index.
-    if isinstance(backend, InMemoryRepositoryBackend):
-        backend._storage.artifacts.clear()
-    else:
-        refs = run_git(
-            "for-each-ref", "--format=%(refname)", backend.artifact_ref_prefix, cwd=tmp_path / "artifacts.git"
-        )
-        for ref in refs.splitlines():
-            run_git("update-ref", "-d", ref, cwd=tmp_path / "artifacts.git")
-    with pytest.raises(ArtifactNotFound):
-        backend.resolve_artifact(ids["weights"])
-    # Recovery indexes the snapshots that the older selection named, as the scenario factory does.
-    for locator in set(legacy_selection_locators(stored).values()):
-        backend.index_snapshot(locator)
-        backend.index_snapshot(locator)
-    repository = Repository(backend, initial)
-    old_view = SnapshotRef("selection:legacy-cache-key", None)
-    repository.remember_selection(old_view, legacy)
-    repository.remember_selection(old_view, legacy)
-    restored = repository.resolve(old_view)
-    assert {name: restored.component(name).artifact_id for name in ids} == ids
-    assert (restored.component("harness").local_path / "rules.md").read_text() == "rules"
-    assert legacy.to_dict() == ids
-    assert repository.selection(restored.ref, tuple(ids)).to_dict() == ids
-    # Subsequent recovery uses only IDs, even when the persisted view key is old.
-    recovered = Repository(backend, initial)
-    recovered.remember_selection(old_view, ArtifactSelection.from_dict(legacy.to_dict()))
-    assert recovered.resolve(old_view).component("weights").artifact_id == ids["weights"]

@@ -31,7 +31,7 @@ _ASYNC_WAIT_POLL_S = 0.01
 
 
 class MaterializingInference(StubInferenceRuntime):
-    """Serve each release under the version its ``model.txt`` names, so the initial release serves as ``w0``."""
+    """Serve each snapshot under the version its ``model.txt`` names, so the initial snapshot serves as ``w0``."""
 
     def serve(self, artifact: Artifact) -> str:
         return super().serve(artifact.materialize())
@@ -191,7 +191,7 @@ def _wait_for_jobs(dispatcher: Dispatcher, finished_jobs: int) -> None:
     deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
     while time.monotonic() < deadline:
         status = dispatcher.build_training_status()["scenarios"]["math"]
-        if status["finished_jobs"] == finished_jobs and status["training_job"] is None:
+        if status["finished_jobs"] == finished_jobs and not status["training_jobs"]:
             return
         time.sleep(_ASYNC_WAIT_POLL_S)
     pytest.fail(f"scenario did not finish {finished_jobs} jobs: {dispatcher.build_training_status()}")
@@ -361,7 +361,7 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
 
-    # The checkpoint's commit publishes the release and carries the job's training metrics.
+    # The checkpoint's commit publishes the snapshot and carries the job's training metrics.
     committed = next(record.metrics for record in scenario.store.history() if record.checkpoint)
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
@@ -412,7 +412,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.context.recipe == "test_policy"
     assert event.context.backend == "stub"
     assert event.context.backend_config == {
-        "job_parameters": {kind: {"method": {"objective": "sft"}} for kind in ("trajectory", "task")},
+        "job_parameters": {kind: {"objective": "sft"} for kind in ("trajectory", "task")},
     }
     assert event.context.source_artifacts.components == {
         "weights": scenario.repository.resolve(
@@ -441,7 +441,7 @@ def test_operational_sample_wait_ignores_a_matching_backlog_before_training() ->
 def test_periodic_metrics_report_backlog_during_training_without_status_reads(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
-    # The root release answers the second pair while the first job trains, so that pair trains one artifact behind.
+    # The root snapshot answers the second pair while the first job trains, so that pair trains one artifact behind.
     _, dispatcher = start_dispatcher(experiment_tracker=tracker, max_staleness=1)
     # The trainer's cycle executes while it submits the first job: hold the submission.
     started, release = _hold_job_submission(monkeypatch)
@@ -451,10 +451,10 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     samples_release = Event()
     produce_samples = Trainer.produce_samples
 
-    def held_samples(self: Trainer) -> bool:
+    def held_samples(self: Trainer, progress=None) -> bool:
         if not samples_release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release the held samples service")
-        return produce_samples(self)
+        return produce_samples(self, progress)
 
     monkeypatch.setattr(Trainer, "produce_samples", held_samples)
     _submit_pair(dispatcher, "2")

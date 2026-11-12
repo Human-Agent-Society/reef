@@ -16,7 +16,6 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
-from reef.storage.data import NewItem
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -83,9 +82,111 @@ def test_a_query_pages_by_sequence_and_a_task_item_reads_without_content(tmp_pat
         assert [item["id"] for item in tasks["items"]] == ["task-a"]
         task = await (await client.get(f"{base}/task-a", headers=AUTH)).json()
         assert (task["content"], task["metadata"]["kind"]) == (None, "task")
-        for query in ("?kind=dataset", "?after=x", "?limit=0", "?content=2", "?content=yes"):
+        # The uploads give no set_id, so the trajectories are in the group without a value.
+        ungrouped = await (await client.get(f"{base}?kind=trajectory&group_key=set_id", headers=AUTH)).json()
+        assert [item["id"] for item in ungrouped["items"]] == ["t1", "t2", "t3"]
+        named = await (await client.get(f"{base}?group_key=set_id&group_value=a", headers=AUTH)).json()
+        assert named["items"] == []
+        for query in (
+            "?kind=dataset",
+            "?after=x",
+            "?limit=0",
+            "?content=2",
+            "?content=yes",
+            "?group_value=a",
+            "?group_key=set.id",
+        ):
             assert (await client.get(base + query, headers=AUTH)).status == 400, query
         assert (await client.delete(f"{base}/missing", headers=AUTH)).status == 404
+
+    served(dispatcher, check)
+
+
+def test_a_collection_names_benchmarks_and_adds_their_tasks_to_a_scenario(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+
+    def archive(*names: str) -> bytes:
+        buffer = io.BytesIO()
+        with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+            for port, name in enumerate(names, start=9000):
+                tar.add(write_harbor_task(task_for(name, "record-1", port), tmp_path / name), arcname=name)
+        return buffer.getvalue()
+
+    async def check(client: TestClient) -> None:
+        base, stored = "/reef/namespaces/acme/data", "/reef/namespaces/acme/collections"
+        await client.post("/reef/scenarios", headers=AUTH, json={"name": "math", "owner": "acme"})
+        for names, benchmarks in ((("add", "sort"), ["full"]), (("sum",), ["extra"])):
+            response = await client.post(
+                f"{base}/tasks",
+                params={"metadata": json.dumps({"benchmarks": benchmarks})},
+                headers={**AUTH, "Content-Type": "application/gzip"},
+                data=archive(*names),
+            )
+            assert response.status == 201, await response.text()
+        # A task can be in two benchmarks.
+        patch = {"ids": ["add"], "patch": {"benchmarks": ["full", "lite"]}}
+        assert (await client.post(f"{base}/metadata", headers=AUTH, json=patch)).status == 200
+        listed = await (await client.get(f"{base}?benchmark=lite", headers=AUTH)).json()
+        assert [item["id"] for item in listed["items"]] == ["add"]
+
+        coding = {"benchmarks": ["lite", "full"]}
+        saved = await client.put(f"{stored}/coding", headers=AUTH, json=coding)
+        assert saved.status == 200, await saved.text()
+        assert await saved.json() == {
+            "owner": "acme",
+            "name": "coding",
+            "collections": [],
+            "average": "task",
+            **coding,
+        }
+        everything = {"benchmarks": ["extra"], "collections": ["coding"], "average": "benchmark"}
+        assert (await client.put(f"{stored}/all", headers=AUTH, json=everything)).status == 200
+        names = [entry["name"] for entry in (await (await client.get(stored, headers=AUTH)).json())["collections"]]
+        assert names == ["all", "coding"]
+        read = await (await client.get(f"{stored}/all", headers=AUTH)).json()
+        assert read["benchmark_task_counts"] == [
+            {"benchmark": "extra", "task_count": 1},
+            {"benchmark": "lite", "task_count": 1},
+            {"benchmark": "full", "task_count": 2},
+        ]
+        assert (read["task_count"], read["average"]) == (3, "benchmark")
+        for name, body in (
+            ("coding", {"collections": ["all"]}),
+            ("open", {"collections": ["missing"]}),
+            ("named", {"name": "other", "benchmarks": ["lite"]}),
+        ):
+            assert (await client.put(f"{stored}/{name}", headers=AUTH, json=body)).status == 400, name
+        # A collection can be empty: it has no task, so it adds none to a scenario.
+        assert (await client.put(f"{stored}/empty", headers=AUTH, json={})).status == 200
+        empty = await (await client.get(f"{stored}/empty", headers=AUTH)).json()
+        assert (empty["benchmarks"], empty["collections"], empty["task_count"]) == ([], [], 0)
+        to_eval = {"scenario": "math", "split": "eval"}
+        assert (await client.post(f"{stored}/empty/scenarios", headers=AUTH, json=to_eval)).status == 400
+        assert (await client.delete(f"{stored}/empty", headers=AUTH)).status == 200
+
+        added = await client.post(
+            f"{stored}/coding/scenarios", headers=AUTH, json={"scenario": "math", "split": "eval"}
+        )
+        assert added.status == 200, await added.text()
+        assert (await added.json())["task_count"] == 2
+        used = await (await client.get(f"{base}?kind=task&scenario=math", headers=AUTH)).json()
+        assert {item["id"]: item["metadata"]["scenarios"] for item in used["items"]} == {
+            "add": {"math": "eval"},
+            "sort": {"math": "eval"},
+        }
+        bad_split = {"scenario": "math", "split": "dev"}
+        assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json=bad_split)).status == 400
+        assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json={"scenario": "math"})).status == 400
+
+        # A collection that another one names stays; a deleted collection changes no task.
+        assert (await client.delete(f"{stored}/coding", headers=AUTH)).status == 400
+        assert (await client.delete(f"{stored}/all", headers=AUTH)).status == 200
+        assert (await client.delete(f"{stored}/coding", headers=AUTH)).status == 200
+        for method in ("GET", "DELETE"):
+            assert (await client.request(method, f"{stored}/coding", headers=AUTH)).status == 404
+        missing = {"scenario": "math", "split": "eval"}
+        assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json=missing)).status == 404
+        assert len((await (await client.get(f"{base}?benchmark=full", headers=AUTH)).json())["items"]) == 2
 
     served(dispatcher, check)
 
@@ -160,39 +261,13 @@ def test_a_recipe_that_refuses_images_refuses_each_item_that_holds_one(tmp_path:
         refused = await upload_trajectories(client, AUTH, lines=lines, base=data)
         assert refused.status == 400
         assert "item 't' holds an image" in await refused.text()
+        # An item that names no scenario, or a scenario that does not exist yet, is refused too.
+        for record_id, scenarios in [("r2", {}), ("r4", {"later": "train"})]:
+            refused = await client.post(data, headers=AUTH, json=record_item_body(record_id, [IMAGE_PART], scenarios))
+            assert refused.status == 400
+            assert f"item 'old/{record_id}' holds an image" in await refused.text()
         assert dispatcher.data_store.query("s") == ()
-        # A scenario that does not exist yet refuses it too.
-        later = await client.post(data, headers=AUTH, json=record_item_body("r4", [IMAGE_PART], {"later": "train"}))
-        assert later.status == 400
-        # An item that names no scenario is stored. A metadata update cannot add it to a scenario.
-        stored = await client.post(data, headers=AUTH, json=record_item_body("r2", [IMAGE_PART], {}))
-        assert stored.status == 201, await stored.text()
-        patch = {"ids": ["old/r2"], "patch": {"scenarios": {"s": "train"}}}
-        refused = await client.post(f"{data}/metadata", headers=AUTH, json=patch)
-        assert refused.status == 400
-        assert "item 'old/r2' holds an image" in await refused.text()
         assert (await client.post(data, headers=AUTH, json=record_item_body("r3", "q", {"s": "train"}))).status == 201
-
-    served(dispatcher, check)
-
-
-def test_each_sync_skips_a_stored_record_item_with_an_image(tmp_path: Path, caplog) -> None:
-    dispatcher = dispatcher_for(tmp_path, TextOnlyRecipe())
-    data = "/reef/namespaces/s/data"
-    entry = record_item_body("image", [IMAGE_PART], {"s": "train"})["items"][0]
-    # Reef stored this item before the recipe refused images.
-    dispatcher.data_store.create("s", [NewItem(entry["id"], entry["content"], entry["metadata"])])
-
-    async def check(client: TestClient) -> None:
-        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status in (200, 201)
-        assert "skips record item 'old/image'" in caplog.text
-        caplog.clear()
-        created = await client.post(data, headers=AUTH, json=record_item_body("text", "q", {"s": "train"}))
-        assert created.status == 201, await created.text()
-        records = dispatcher.get_or_create_scenario("s").records
-        assert records.get("s", "old/text") is not None
-        assert records.get("s", "old/image") is None
-        assert "skips record item 'old/image'" in caplog.text
 
     served(dispatcher, check)
 
@@ -205,9 +280,9 @@ def test_a_client_record_item_needs_the_content_and_id_of_a_record(tmp_path: Pat
         "payload": {"score": 1.0},
         "created_at": 1.0,
         "references": [],
-        "artifact_ref": None,
+        "artifact_id": None,
     }
-    metadata = {"kind": "record", "origin": {"scenario": "old", "release_id": None, "artifact_id": None}}
+    metadata = {"kind": "record", "origin": {"scenario": "old", "artifact_id": None}}
 
     async def check(client: TestClient) -> None:
         good = {"items": [{"id": "old/r1", "content": content, "metadata": metadata}]}

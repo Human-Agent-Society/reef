@@ -118,6 +118,7 @@ FAKE_SDK = textwrap.dedent(
         def __init__(self, **kwargs): _log({"event": "session", "keys": sorted(kwargs)})
         def create_sampling_client(self, base_model=None, model_path=None): return _Sampler()
         def create_rest_client(self): return _Rest()
+        def get_server_capabilities(self): return SimpleNamespace(supported_models=[])
         def create_lora_training_client(self, base_model, rank, seed):
             _log({"event": "initialize", "base_model": base_model, "rank": rank}); return _Trainer("seed")
         def create_training_client_from_state_with_optimizer(self, path):
@@ -222,7 +223,7 @@ def inference_component(tmp_path):
 def control_plane(tmp_path, monkeypatch, url, repository):
     """Build Tinker's component, its serving runtime and a Dispatcher over them, as the HTTP service does, and close both after.
 
-    ``repository`` is the artifact backend factory; a restart passes the same one, which holds the releases.
+    ``repository`` is the artifact backend factory; a restart passes the same one, which holds the snapshots.
     """
     from recipes.tttd.recipe import TTTDRecipe
     from reef.dispatcher import Dispatcher
@@ -263,7 +264,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [service["name"] for service in config["services"]] == ["reef"]
     component, inference = connect_training_component(
-        service_config_from_mapping(config), model_path=MODEL, loss_family="tttd"
+        service_config_from_mapping(config), model_path=MODEL, default_parameters={}
     )
     dispatcher = None
     try:
@@ -358,7 +359,7 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
     from reef.artifact import InMemoryRepositoryBackend
 
     pytest.importorskip("ray")  # the component process starts its own Ray session
-    # The default start is the component's untrained adapter release, which the component writes when it starts.
+    # The default start is the component's untrained adapter artifact, which the component writes when it starts.
     repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     for key in list(os.environ):
         if key.startswith(("REEF_", "RAY_")) and key != "REEF_TEST_TINKER_REAL":

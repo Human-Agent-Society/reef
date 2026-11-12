@@ -22,7 +22,7 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.job_queue import TrainingJobWorker
-from reef.train.types import TrainStepResult
+from reef.train.types import TrainingCommit
 
 
 class CountingComponent(StubTrainingComponent):
@@ -165,7 +165,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
     scenario = dispatcher.get_or_create_scenario("math")
     assert component.train_calls == total
     assert len({job.job_id for job in component.submitted}) == total
-    assert scenario.trainer.state["job"] is None
+    assert scenario.trainer.state["jobs"] == []
     assert scenario.scenario_step == COMMITS_PER_JOB * total
     # Each job published one saved checkpoint; the head is the last one.
     head = Path(dispatcher.current_artifact("math").materialize().local_path)
@@ -230,7 +230,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
             candidate = tmp_path / f"candidate-{index}"
             candidate.mkdir()
             (candidate / "model.txt").write_text(f"v{index}")
-            dispatcher.registry.get("chat").commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
+            dispatcher.registry.get("chat").commit(TrainingCommit(state=None, artifact=Artifact.local(candidate)))
 
     errors = run_workers(thread_count, worker)
 
@@ -241,8 +241,8 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
 
     backend = scenario.repository.backend
     assert backend.current() == scenario.repository.current_artifact
-    # Walk the durable release chain: every publish linked exactly one parent, so
-    # the chain from the tip reaches the root release in total + 1 hops, with no
+    # Walk the durable snapshot chain: every publish linked exactly one parent, so
+    # the chain from the tip reaches the root snapshot in total + 1 hops, with no
     # forks or skipped links.
     node = backend.current()
     nodes = 0

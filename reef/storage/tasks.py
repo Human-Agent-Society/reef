@@ -19,7 +19,10 @@ and a plugin reference selects another subclass of :class:`TaskFileStore`.
 
 A store also keeps documents that the stage writing the store saves under
 keys of its own. The store keeps each
-document as text and does not read it.
+document as text and does not read it. A document is written once. A state
+document is a second kind of document: its key can be written again and
+removed. The stage keeps there the state that changes in place, such as the
+state of its task generator.
 
 A task store belongs to a scenario session. Archiving the scenario retires its
 task stores and task files with its records and commits. Record retention
@@ -145,12 +148,15 @@ class StoredTask:
 
 
 class TaskStore(ABC):
-    """The generations and published tasks of one named store of a scenario.
+    """The generations, published tasks and documents of one named store of a scenario.
 
-    Values: the state of a store is a pair ``(G, D)``. ``G`` is a finite
+    Values: the state of a store is a triple ``(G, D, S)``. ``G`` is a finite
     sequence of generations in increasing ``generation``, each with its
     candidates and their outcomes. ``D : K ⇀ Str`` maps non-empty keys to
     documents, each key written once. Nothing is removed from ``G`` or ``D``.
+    ``S : K ⇀ Str`` maps non-empty keys to state documents. A key of ``S``
+    can be written again and removed. ``D`` and ``S`` have separate keys: a
+    write to one does not change the other.
     The published tasks are the candidates with a split, in generation and
     candidate order, each name once: the first candidate that published it.
     Candidates that publish one name have the same files and split.
@@ -158,8 +164,13 @@ class TaskStore(ABC):
     Purpose: a record-to-sample stage writes its generations and publishes their
     candidates. Readers take the published tasks of a split (``tasks``) and their
     directories (``path``). The stage that writes the store keeps its own
-    durable state about its tasks in ``D``; the store does not interpret a
-    document.
+    durable state about its tasks in ``D``. It keeps the state that changes in
+    place in ``S``, such as the state of its task generator. The store does
+    not interpret a document of ``D`` or ``S``.
+
+    The task files of the scenario are not part of the triple. They hold the
+    directory of each candidate, and each directory that ``save_files`` saved,
+    by the digest of its files.
 
     A store is part of a scenario session and closes with it. Each write is
     durable when it returns. An identical retry of a write changes nothing.
@@ -232,8 +243,42 @@ class TaskStore(ABC):
         """Return ``D``: every saved document by its key."""
 
     @abstractmethod
+    def write_state_document(self, *, key: str, document: str) -> None:
+        """Save ``document`` under ``key`` in ``S``: after the call, ``S(key) = document``.
+
+        The call replaces an earlier document of ``key``. Raises
+        ``TaskStoreError`` if ``key`` is empty.
+        """
+
+    @abstractmethod
+    def remove_state_document(self, *, key: str) -> None:
+        """Remove ``key`` from ``S``: after the call, ``S`` has no document of ``key``.
+
+        A key that ``S`` does not hold changes nothing.
+        """
+
+    @abstractmethod
+    def state_document(self, key: str) -> str | None:
+        """Return ``S(key)``, or ``None`` if ``S`` has no document of ``key``."""
+
+    @abstractmethod
+    def state_document_keys(self, *, prefix: str = "") -> tuple[str, ...]:
+        """Return the keys of ``S`` that start with ``prefix``, in increasing string order."""
+
+    @abstractmethod
+    def save_files(self, directory: Path) -> str:
+        """Save a copy of ``directory`` in the task files of the scenario and return the digest of its files.
+
+        ``path`` returns the copy by this digest. The call does not change
+        ``(G, D, S)``: the caller keeps the digest, for example in a state
+        document. The copy is durable when the method returns, and a repeated
+        save changes nothing. Raises ``TaskStoreError`` if ``directory`` holds
+        an entry that is not a file or a directory.
+        """
+
+    @abstractmethod
     def path(self, files_digest: str) -> Path:
-        """Return the local task directory of a candidate or a published task, by its ``files_digest``.
+        """Return the local directory of a candidate, a published task or a ``save_files`` call, by its ``files_digest``.
 
         The caller must not change the directory. Raises ``TaskStoreError`` if
         the scenario holds no files of ``files_digest``.
@@ -251,9 +296,10 @@ class TaskStorage(ABC):
 class TaskFileStore(Plugin, ABC):
     """Keeps the directory of each saved candidate, published task and imported task, addressed by the digest of its files.
 
-    The store keeps the files of each scenario apart, so that ``archive``
-    retires them with the scenario. The scenario storage owns the store and
-    closes it.
+    The store also keeps each directory that ``TaskStore.save_files`` saved.
+    It keeps the files of each scenario apart, so that ``archive`` retires
+    them with the scenario. The scenario storage owns the store and closes
+    it.
     """
 
     @classmethod

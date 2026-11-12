@@ -1,7 +1,7 @@
 """Task stores in the record database of a scenario, for each SQL backend.
 
-The task tables are in the same database as the records. Each database
-operation uses one transaction of the record store. The task directories are
+The task tables are in the same database as the commits. Each database
+operation uses one transaction of the scenario database. The task directories are
 in a ``TaskFileStore``. The adapters build the tables with :func:`task_tables`
 and supply their namespace. This module implements the task store behavior once.
 """
@@ -17,7 +17,7 @@ from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
-from reef.storage.sql_records import SQLRecordStore
+from reef.storage.sql_records import SQLScenarioDatabase
 from reef.storage.tasks import (
     SPLIT_NAMES,
     GenerationState,
@@ -38,12 +38,14 @@ class TaskTables:
 
     ``generations`` holds one row for each generation. ``candidates`` holds one row for each saved
     candidate, with the digest of its task files and its outcome: a published candidate has its split.
-    ``documents`` holds one row for each document key with its text.
+    ``documents`` holds one row for each document key with its text. ``state_documents`` holds one row for
+    each state document key with its current text.
     """
 
     generations: Table
     candidates: Table
     documents: Table
+    state_documents: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -89,14 +91,21 @@ def task_tables(metadata: MetaData, *, foreign_key: str | None = None) -> TaskTa
             Column("document_key", Text, primary_key=True),
             Column("document", Text, nullable=False),
         ),
+        state_documents=Table(
+            "task_state_document",
+            metadata,
+            *key_columns(),
+            Column("document_key", Text, primary_key=True),
+            Column("document", Text, nullable=False),
+        ),
     )
 
 
 class SQLTaskStorage(TaskStorage):
-    """Opens the task stores of one scenario in the database of its record store."""
+    """Opens the task stores of one scenario in its scenario database."""
 
-    def __init__(self, records: SQLRecordStore, tables: TaskTables, files: TaskFileStore, scenario: str) -> None:
-        self.records = records
+    def __init__(self, database: SQLScenarioDatabase, tables: TaskTables, files: TaskFileStore, scenario: str) -> None:
+        self.database = database
         self.tables = tables
         self.files = files
         self.scenario = scenario
@@ -111,7 +120,7 @@ class SQLTaskStore(TaskStore):
     def __init__(self, storage: SQLTaskStorage, name: str) -> None:
         if not isinstance(name, str) or not name:
             raise ValueError("a task store name must be a non-empty string")
-        self.records = storage.records
+        self.database = storage.database
         self.tables = storage.tables
         self.files = storage.files
         self.scenario = storage.scenario
@@ -120,8 +129,8 @@ class SQLTaskStore(TaskStore):
 
     def begin_generation(self, *, generation: int, source_record_ids: tuple[str, ...]) -> GenerationState:
         requested = GenerationState(generation=generation, source_record_ids=source_record_ids)
-        with self.records._transaction(write=True) as connection:
-            self.records._insert_if_absent(
+        with self.database._transaction(write=True) as connection:
+            self.database._insert_if_absent(
                 connection,
                 self.tables.generations,
                 {
@@ -143,7 +152,7 @@ class SQLTaskStore(TaskStore):
         candidates = tuple(
             TaskCandidate(directory.name, self.files.put(self.scenario, directory)) for directory in directories
         )
-        with self.records._transaction(write=True) as connection:
+        with self.database._transaction(write=True) as connection:
             state = self.require_generation(connection, generation)
             if state.candidates is not None:
                 # A saved candidate can have an outcome already, so a retry compares the files only.
@@ -178,7 +187,7 @@ class SQLTaskStore(TaskStore):
     def publish_task(self, *, generation: int, index: int, split: SplitName) -> StoredTask:
         if split not in SPLIT_NAMES:
             raise ValueError("split must be 'train' or 'eval'")
-        with self.records._transaction(write=True) as connection:
+        with self.database._transaction(write=True) as connection:
             candidate = self.require_candidate(connection, generation, index)
             if candidate["error"]:
                 raise TaskStoreError(f"candidate {index} of generation {generation} is rejected")
@@ -196,7 +205,7 @@ class SQLTaskStore(TaskStore):
     def reject_task(self, *, generation: int, index: int, reason: str) -> None:
         if not isinstance(reason, str) or not reason:
             raise ValueError("a rejection needs a reason")
-        with self.records._transaction(write=True) as connection:
+        with self.database._transaction(write=True) as connection:
             candidate = self.require_candidate(connection, generation, index)
             if candidate["split"] is not None:
                 raise TaskStoreError(f"candidate {index} of generation {generation} is published")
@@ -207,7 +216,7 @@ class SQLTaskStore(TaskStore):
             self.set_outcome(connection, generation, index, error=reason)
 
     def complete_generation(self, *, generation: int) -> GenerationState:
-        with self.records._transaction(write=True) as connection:
+        with self.database._transaction(write=True) as connection:
             state = self.require_generation(connection, generation)
             if state.candidates is None or state.pending_indices:
                 raise TaskStoreError(
@@ -221,19 +230,19 @@ class SQLTaskStore(TaskStore):
         return replace(state, is_complete=True)
 
     def generation(self, generation: int) -> GenerationState | None:
-        with self.records._transaction(write=False) as connection:
+        with self.database._transaction(write=False) as connection:
             return self.read_generation(connection, generation)
 
     def generations(self) -> tuple[GenerationState, ...]:
         generations = self.tables.generations
-        with self.records._transaction(write=False) as connection:
+        with self.database._transaction(write=False) as connection:
             numbers = connection.execute(
                 select(generations.c.generation).where(self.matching(generations)).order_by(generations.c.generation)
             ).scalars()
             return tuple(self.require_generation(connection, number) for number in numbers.all())
 
     def tasks(self, *, split: SplitName | None = None) -> tuple[StoredTask, ...]:
-        with self.records._transaction(write=False) as connection:
+        with self.database._transaction(write=False) as connection:
             return self.published_tasks(connection) if split is None else self.published_tasks(connection, split=split)
 
     def path(self, files_digest: str) -> Path:
@@ -243,7 +252,7 @@ class SQLTaskStore(TaskStore):
         if not key:
             raise TaskStoreError("a document needs a non-empty key")
         documents = self.tables.documents
-        with self.records._transaction(write=True) as connection:
+        with self.database._transaction(write=True) as connection:
             existing = connection.execute(
                 select(documents.c.document).where(self.matching(documents, document_key=key))
             ).scalar()
@@ -254,11 +263,44 @@ class SQLTaskStore(TaskStore):
 
     def documents(self) -> Mapping[str, str]:
         documents = self.tables.documents
-        with self.records._transaction(write=False) as connection:
+        with self.database._transaction(write=False) as connection:
             rows = connection.execute(
                 select(documents.c.document_key, documents.c.document).where(self.matching(documents))
             )
             return {row.document_key: row.document for row in rows}
+
+    def write_state_document(self, *, key: str, document: str) -> None:
+        if not key:
+            raise TaskStoreError("a state document needs a non-empty key")
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=True) as connection:
+            connection.execute(state_documents.delete().where(self.matching(state_documents, document_key=key)))
+            connection.execute(state_documents.insert().values(**self.key, document_key=key, document=document))
+
+    def remove_state_document(self, *, key: str) -> None:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=True) as connection:
+            connection.execute(state_documents.delete().where(self.matching(state_documents, document_key=key)))
+
+    def state_document(self, key: str) -> str | None:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=False) as connection:
+            document: str | None = connection.execute(
+                select(state_documents.c.document).where(self.matching(state_documents, document_key=key))
+            ).scalar()
+        return document
+
+    def state_document_keys(self, *, prefix: str = "") -> tuple[str, ...]:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=False) as connection:
+            keys = connection.execute(
+                select(state_documents.c.document_key).where(self.matching(state_documents))
+            ).scalars()
+            # The prefix test and the order are Python's, so every database gives the same keys.
+            return tuple(sorted(key for key in keys if key.startswith(prefix)))
+
+    def save_files(self, directory: Path) -> str:
+        return self.files.put(self.scenario, directory)
 
     def published_tasks(self, connection: Connection, **columns: object) -> tuple[StoredTask, ...]:
         """Read the published tasks of this store whose candidates have the given column values, in generation and

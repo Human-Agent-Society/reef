@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import asyncio
+import json
+import threading
+import urllib.request
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import cast
 
 import pytest
+from reef_client.serve import CapturedTurn
 
-from reef.core.evaluation import PolicyModel
+from reef.core.errors import ReefError
+from reef.core.evaluation import FAILED, EvaluationCall, EvaluationTrajectory, PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
@@ -15,10 +26,18 @@ from reef.evaluation.rollout_worker import (
     CandidateEndpoints,
     EvaluationRollout,
     EvaluationRolloutWorker,
+    RolloutCalls,
+    evaluation_call,
+    reply_summary,
     rollout_item_id,
+    run_while_held,
+    verifier_output,
 )
+from reef.evaluation.trials import EvaluationTrial, TrialObserver
+from reef.execution.workers import WorkerStopped
+from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
-from reef.storage.work_queue import NewWork
+from reef.storage.work_queue import NewWork, WorkLeaseLost
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:
@@ -29,19 +48,207 @@ def rollout(repeat: int = 0) -> EvaluationRollout:
         "weights",
         2,
         "add",
-        "/tasks/add",
         repeat,
         PolicyModel("m", "a"),
         {"name": "x"},
         "docker",
+        {"weights": "artifact-1"},
     )
 
 
+class ServedWorker(EvaluationRolloutWorker):
+    """A worker whose candidate needs no start."""
+
+    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
+        return None
+
+
 class UnreachableEndpoints(CandidateEndpoints):
+    """Endpoints that cannot serve the candidate; they keep each call, and refuse the call at ``refused_index``."""
+
+    def __init__(self, refused_index: int | None = None) -> None:
+        self.calls: list[EvaluationCall] = []
+        self.trajectories: list[EvaluationTrajectory] = []
+        self.refused_index = refused_index
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        return Path("/tasks") / rollout.task_name
+
     @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         raise ConnectionError("the candidate cannot be served")
         yield CandidateEndpoint("http://unused", None)
+
+    def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
+        if call.summary.index == self.refused_index:
+            raise OSError("the database is gone")
+        self.calls.append(call)
+
+    def add_trajectory(self, rollout: EvaluationRollout, trajectory: EvaluationTrajectory) -> None:
+        self.trajectories.append(trajectory)
+
+
+class OpenEndpoints(UnreachableEndpoints):
+    """Task-root endpoints for worker tests, with an address supplied by ``open``.
+
+    Values have a ``Path`` root and the inherited call and trajectory lists, initially empty, with no refused call index.
+    ``task_directory`` creates ``root / rollout.task_name``, writes an empty ``task.toml``, and returns that directory.
+    File errors propagate. Call and trajectory recording follow ``UnreachableEndpoints``.
+    The default ``open`` ignores its inputs and yields ``http://127.0.0.1:9`` with no token or server.
+    Subclasses can supply a live address for tests whose agents make calls.
+    """
+
+    def __init__(self, root: Path) -> None:
+        super().__init__()
+        self.root = root
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = self.root / rollout.task_name
+        task.mkdir(parents=True, exist_ok=True)
+        (task / "task.toml").write_text("")
+        return task
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        yield CandidateEndpoint("http://127.0.0.1:9", None)
+
+
+class NoSandboxLab(TaskLab):
+    """A lab whose trial writes its exception to its trial directory under ``root`` and ends with no call."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        trial = self.root / key
+        trial.mkdir(parents=True)
+        (trial / "exception.txt").write_text("SandboxError: the image did not build")
+        return RolloutRow(rewards={}, error="the sandbox did not start", trial_uri=trial.as_uri())
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+class ReadingObserver(TrialObserver):
+    """Keeps each trial and the exception text in its directory; raises after it keeps them when ``failing``."""
+
+    def __init__(self, failing: bool = False) -> None:
+        self.trials: list[tuple[EvaluationTrial, str]] = []
+        self.failing = failing
+
+    def observe(self, trial: EvaluationTrial) -> None:
+        assert trial.directory is not None
+        self.trials.append((trial, (trial.directory / "exception.txt").read_text()))
+        if self.failing:
+            raise OSError("the log store is gone")
+
+
+@pytest.mark.parametrize("failing", [False, True])
+def test_the_trial_observer_reads_a_failed_trial_and_its_failure_changes_nothing(tmp_path, caplog, failing):
+    observer = ReadingObserver(failing)
+    worker = ServedWorker(
+        memory_coordination().work_queue,
+        OpenEndpoints(tmp_path / "tasks"),
+        worker_id="w",
+        lab=NoSandboxLab(tmp_path / "trials"),
+        trial_observer=observer,
+    )
+    with pytest.raises(ReefError, match="the rollout reached no model: the sandbox did not start"):
+        worker.score(rollout(), threading.Event(), 2)
+    [(trial, exception)] = observer.trials
+    assert trial == EvaluationTrial("s", "e1", 2, "add", 0, 2, trial.directory, "the sandbox did not start")
+    assert exception == "SandboxError: the image did not build"
+    failed = "the trial observer failed on rollout evaluation_rollout:e1:00002:00000"
+    assert (failed in caplog.text) == failing
+
+
+class AnsweringEndpoints(OpenEndpoints):
+    """Endpoints for the failed-score test's model call, with the state and task operations of ``OpenEndpoints``.
+
+    Values add no instance state. ``open`` ignores its inputs and starts an HTTP server on an unused loopback port.
+    It yields that server's URL with no token; ``Handler`` defines its responses.
+    Context exit stops and closes the server, including when the caller raises. Server setup errors propagate.
+    """
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
+        class Handler(BaseHTTPRequestHandler):
+            """One request handler, constructed by this endpoint's server with only ``BaseHTTPRequestHandler`` state.
+
+            ``do_POST`` accepts a body with a nonnegative integer ``Content-Length``, or an empty body without that header.
+            It reads that many bytes and returns HTTP 200 with JSON body ``{"choices": []}``.
+            The response has ``Content-Type: application/json`` and the body's byte length as ``Content-Length``.
+            Invalid length conversion and I/O errors propagate. ``log_message`` ignores its arguments and writes nothing.
+            Other request handling follows ``BaseHTTPRequestHandler``.
+            """
+
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body = b'{"choices": []}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            yield CandidateEndpoint(f"http://127.0.0.1:{server.server_port}", None)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class CalledThenFailedLab(TaskLab):
+    """A stateless ``TaskLab`` for the worker test of a failure after a model call.
+
+    ``run`` requires ``agent["kwargs"]`` to be a mapping with an ``api_base`` string naming a reachable HTTP base URL.
+    It ignores ``task_path``, ``key``, ``tags``, ``overrides``, and all other agent entries.
+    It POSTs ``{"model": "m", "messages": []}`` as JSON to ``{api_base}/chat/completions``, with a 10-second timeout.
+    After reading the response, it returns a ``RolloutRow`` with empty rewards and no trial URI.
+    Its error is ``VerifierTimeoutError: the verifier ran past 600 s``.
+    Input and request errors propagate; the lab keeps no state or trial files.
+    ``build_environment`` ignores both inputs and returns ``""`` to simulate a successful build without starting an environment.
+    """
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        api_base = cast(Mapping[str, str], agent["kwargs"])["api_base"]
+        request = urllib.request.Request(
+            f"{api_base}/chat/completions",
+            data=b'{"model": "m", "messages": []}',
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            response.read()
+        return RolloutRow(rewards={}, error="VerifierTimeoutError: the verifier ran past 600 s", trial_uri=None)
+
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
+
+@pytest.mark.unit
+def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp_path):
+    queue = memory_coordination().work_queue
+    value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
+    queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=CalledThenFailedLab())
+    assert worker.run_once() is True
+    item = queue.get(EVALUATIONS_QUEUE, value.item_id())
+    assert (item.state, item.error) == ("finished", None)
+    assert item.result == {
+        "score": FAILED,
+        "rewards": None,
+        "error": "VerifierTimeoutError: the verifier ran past 600 s",
+    }
+
+
+def turn(path: str, status: int, response: dict[str, object] | None) -> CapturedTurn:
+    return CapturedTurn("", path, status, {"messages": []}, response, None, False, 2.0, at=100.0)
 
 
 @pytest.mark.unit
@@ -58,7 +265,7 @@ def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 2})
     value = rollout()
     queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
-    worker = EvaluationRolloutWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
+    worker = ServedWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
 
     assert worker.run_once() is True
     assert queue.get(EVALUATIONS_QUEUE, value.item_id()).state == "queued"
@@ -66,3 +273,176 @@ def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     failed = queue.get(EVALUATIONS_QUEUE, value.item_id())
     assert failed.state == "failed" and "cannot be served" in failed.error
     assert worker.run_once() is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("path", "reply", "expected"),
+    [
+        (
+            "/v1/chat/completions",
+            {
+                "choices": [{"message": {"tool_calls": [{"id": "a"}, {"id": "b"}]}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 2100, "completion_tokens": 340},
+            },
+            (2100, 340, "tool_calls", 2),
+        ),
+        (
+            "/v1/responses",
+            {
+                "status": "completed",
+                "output": [{"type": "reasoning"}, {"type": "function_call"}, {"type": "message"}],
+                "usage": {"input_tokens": 50, "output_tokens": 7},
+            },
+            (50, 7, "completed", 1),
+        ),
+        (
+            "/v1/responses",
+            {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}, "output": []},
+            (None, None, "max_output_tokens", 0),
+        ),
+        (
+            "/v1/messages?beta=true",
+            {
+                "content": [{"type": "text"}, {"type": "tool_use"}],
+                "stop_reason": "tool_use",
+                "usage": {"input_tokens": 3, "cache_read_input_tokens": 40, "output_tokens": 9},
+            },
+            (43, 9, "tool_use", 1),
+        ),
+        ("/v1/chat/completions", {"choices": "none"}, (None, None, None, 0)),
+        ("/v1/embeddings", {"usage": {"prompt_tokens": 4}}, (None, None, None, 0)),
+    ],
+)
+def test_a_reply_summary_reads_each_model_api_dialect(path, reply, expected):
+    assert reply_summary(path, reply) == expected
+
+
+@pytest.mark.unit
+def test_a_captured_call_becomes_an_evaluation_call_and_a_failed_one_keeps_its_error_body():
+    answered = evaluation_call(
+        turn("/v1/chat/completions", 200, {"choices": [{"finish_reason": "stop"}]}), rollout(repeat=1), 2, 5
+    )
+    assert answered.summary.to_json() == {
+        "caller": "agent",
+        "label": None,
+        "attempt": 2,
+        "index": 5,
+        "path": "/v1/chat/completions",
+        "status": 200,
+        "started_at": 98.0,
+        "duration_s": 2.0,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "finish_reason": "stop",
+        "tool_calls": 0,
+    }
+    assert (answered.summary.task_index, answered.summary.repeat) == (2, 1)
+    error = {"error": {"message": "the engine stopped"}}
+    failed = evaluation_call(turn("/v1/chat/completions", 502, error), rollout(), 1, 0)
+    assert failed.summary.finish_reason is None and failed.summary.tool_calls == 0
+    assert failed.request == {"messages": []} and failed.response == error
+    trained = evaluation_call(
+        turn("/v1/chat/completions", 200, {"choices": [], "training": {"ids": [1]}}), rollout(), 1, 0
+    )
+    assert trained.response == {"choices": []}
+
+
+@pytest.mark.unit
+def test_rollout_calls_number_the_calls_in_order_and_a_refused_call_does_not_stop_the_rollout(caplog):
+    endpoints = UnreachableEndpoints(refused_index=1)
+    calls = RolloutCalls(endpoints, rollout(), 3)
+    for status in (200, 500, 200):
+        calls.call_captured(turn("/v1/chat/completions", status, None))
+    calls.close()
+    assert [(call.summary.attempt, call.summary.index, call.summary.status) for call in endpoints.calls] == [
+        (3, 0, 200),
+        (3, 2, 200),
+    ]
+    assert "could not keep call 1 of rollout evaluation_rollout:e1:00002:00000" in caplog.text
+
+
+ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "judge"}, "steps": [{"source": "user"}]}
+
+
+def judge_call(**fields: object) -> str:
+    reply = {"choices": [{"message": {"content": "4"}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 7}}
+    return json.dumps({"request": {"messages": []}, "response": reply, "started_at": 1, "duration_s": 0.5, **fields})
+
+
+@pytest.mark.unit
+def test_the_verifier_output_keeps_valid_calls_and_trajectories_and_skips_the_rest(tmp_path, monkeypatch):
+    judge = tmp_path / "verifier" / "judge"
+    judge.mkdir(parents=True)
+    lines = [
+        judge_call(label="judge:fidelity"),
+        "",
+        judge_call(status=503, response={"error": "busy"}),
+        "[1, 2]",
+        judge_call(started_at="noon"),
+        judge_call(path=7),
+        judge_call(label=""),
+        judge_call(),
+    ]
+    (judge / "calls.jsonl").write_text("\n".join(lines))
+    (judge / "trajectory-b.json").write_text(json.dumps(ATIF))
+    (judge / "trajectory-a.json").write_text('{"schema_version": "ATIF-v1.4"}')
+    (judge / "trajectory-c.json").symlink_to(tmp_path / "secret.json")
+    monkeypatch.setattr("reef.evaluation.rollout_worker.MAX_VERIFIER_CALLS", 2)
+
+    calls, trajectories, skipped = verifier_output(tmp_path, rollout(), 2)
+
+    assert [
+        (call.summary.index, call.summary.status, call.summary.label, call.summary.prompt_tokens) for call in calls
+    ] == [(0, 200, "judge:fidelity", 7), (1, 503, None, None)]
+    assert {call.summary.caller for call in calls} == {"verifier"}
+    assert [(trajectory.index, trajectory.name) for trajectory in trajectories] == [(0, "trajectory-b.json")]
+    # Four bad lines, one call over the limit, a file that is no ATIF document and a symbolic link.
+    assert skipped == 7
+    assert verifier_output(None, rollout(), 1) == ([], [], 0)
+    assert verifier_output(tmp_path / "missing", rollout(), 1) == ([], [], 0)
+
+
+@pytest.mark.unit
+def test_the_verifier_output_skips_a_file_over_the_byte_limit(tmp_path, monkeypatch):
+    judge = tmp_path / "verifier" / "judge"
+    judge.mkdir(parents=True)
+    (judge / "calls.jsonl").write_text(judge_call())
+    (judge / "trajectory.json").write_text(json.dumps(ATIF))
+    monkeypatch.setattr("reef.evaluation.rollout_worker.MAX_VERIFIER_BYTES", len(judge_call()) + 10)
+    calls, trajectories, skipped = verifier_output(tmp_path, rollout(), 1)
+    assert (len(calls), trajectories, skipped) == (1, [], 1)
+
+
+@pytest.mark.unit
+def test_a_verifier_output_that_cannot_be_kept_is_logged_and_changes_nothing(tmp_path, caplog):
+    judge = tmp_path / "verifier" / "judge"
+    judge.mkdir(parents=True)
+    (judge / "calls.jsonl").write_text("\n".join([judge_call(), "{}", judge_call()]))
+    endpoints = UnreachableEndpoints(refused_index=0)
+    worker = ServedWorker(memory_coordination().work_queue, endpoints, worker_id="w")
+    worker.keep_verifier_output(rollout(), 1, tmp_path)
+    assert [call.summary.index for call in endpoints.calls] == [1]
+    assert "skipped 1 verifier lines or files of rollout evaluation_rollout:e1:00002:00000" in caplog.text
+    assert "could not keep verifier call 0 of rollout evaluation_rollout:e1:00002:00000" in caplog.text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLost), ("stopped", WorkerStopped)])
+def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops(monkeypatch, event, error):
+    monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
+    cancelled = threading.Event()
+
+    class EndlessRunner:
+        async def run_rollouts_async(self, requests, slots):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    events = {"lease_lost": threading.Event(), "stopped": threading.Event()}
+    threading.Timer(0.1, events[event].set).start()
+    with pytest.raises(error):
+        asyncio.run(run_while_held(EndlessRunner(), "request", events["lease_lost"], events["stopped"]))
+    assert cancelled.is_set()

@@ -11,7 +11,6 @@ from reef.core.job_data import TaskSample
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioStore
-from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 #: The directories of ``made_task``; they last as long as the test process.
@@ -19,14 +18,10 @@ TASKS = tempfile.TemporaryDirectory(prefix="reef-test-tasks-")
 
 
 def data_storage(directory: Path | None = None) -> DataScenarioStorage:
-    """SQLite scenario storage in ``directory`` (in memory without one) with a SQLite data store beside it, with the
-    same task files."""
+    """SQLite scenario storage in ``directory`` (in memory without one) with its SQLite data store, which keeps its
+    records and its samples."""
     storage = SQLiteScenarioStorage(directory)
-    return DataScenarioStorage(
-        storage,
-        SQLiteDataStore(None if directory is None else directory / "data", storage.task_files),
-        refuses_images=False,
-    )
+    return DataScenarioStorage(storage, storage.data)
 
 
 def sample_store(storage: DataScenarioStorage, scenario: str, session: ScenarioStore) -> SampleStore:

@@ -16,8 +16,8 @@ packages under ``recipes/`` (``sao``, ``tttd``, ``openclawrl``, ``gepa``,
 ``meta_harness``, ``ace``, ``reasoning_bank``). Beta methods
 live under ``recipes/beta/`` (``coral``, ``spade``, ``autoenvscaling``,
 ``reefine``) until they publish reproducible results. A weight method holds
-its recipe, processor and training objective, with the ``slime/`` subpackage
-only the training plane imports. A harness method holds its ``Method``, its
+its recipe and processor, with the ``slime/`` subpackage, which holds its
+objective and loss family, that only the training plane imports. A harness method holds its ``Method``, its
 prompts, and a scorer when it needs its own; it adds a recipe subclass only
 when it changes more than the tree, such as the files a client pulls. Nothing
 under ``reef/`` imports a method package.
@@ -114,7 +114,7 @@ import a concrete integration.
 |                         | heads, and the components a recipe declares              |                                            |
 |                         | (``components.py``)                                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/harness/``       | adapters (the parts of each agent's tree and its         | recipe policy, the release chain           |
+| ``reef/harness/``       | adapters (the parts of each agent's tree and its         | recipe policy, the snapshot chain          |
 |                         | descriptor), the source tree (patches, validation,       |                                            |
 |                         | rendering), task runs, runners, trajectories, and the    |                                            |
 |                         | loopback gateway an agent process reaches its model      |                                            |
@@ -206,16 +206,16 @@ Training and inference meet only through contracts that neither side owns.
   ``InferenceService`` component and selects its implementation.
   ``registry.py`` owns the runtime factories and ``RuntimeRegistry``.
   ``serving.py`` loads saved weights into serving engines that the control
-  plane controls directly. ``recovery.py`` owns ``InferenceControl`` and
-  ``EngineHealthMonitor``, and ``residency.py`` holds the
-  ``AdapterResidencyManager``. These modules import no concrete integration.
+  plane controls directly. ``recovery.py`` owns ``InferenceControl``, and
+  ``residency.py`` holds the ``AdapterResidencyManager``. These modules import no concrete integration.
 - ``train/component.py`` defines bounded training jobs, the
-  ``TrainingComponent`` interface, and its factories. ``train/method.py``
-  holds ``TrainingMethod`` and its learning-rate schedule.
+  ``TrainingComponent`` interface, and its factories. Each backend package owns
+  its job parameters and objectives. ``train/learning_rate.py`` holds the
+  learning-rate schedule arithmetic that the backends share.
 
 The values that both sides read are in ``core/weight_layout.py``:
 ``ArtifactFormat``, ``WeightFiles`` and ``ArtifactWeights``. In ``tinker/``,
-the serving side reads a release's manifest only as a ``TinkerArtifact``; the
+the serving side reads a snapshot's manifest only as a ``TinkerArtifact``; the
 whole manifest, with the training state, is in
 ``train/tinker_backend/checkpoint.py``. ``execution/executor/`` owns worker launch and control RPC
 for both sides. ``storage/durable_files.py`` writes JSON files and directories
@@ -227,7 +227,7 @@ In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
 definitions; and ``backend.py`` holds ``PreparedStep`` and the committed
-releases that a harness step reads its head from. ``train/slime_backend/component.py`` and
+snapshots that a harness step reads its head from. ``train/slime_backend/component.py`` and
 ``train/tinker_backend/component.py`` supply the Slime and Tinker training
 components, and each ``launch.py`` supplies its deployment definition and
 runtime factory. Both components render each sample that has no tokens with
@@ -235,7 +235,7 @@ runtime factory. Both components render each sample that has no tokens with
 requests into token IDs with the model's chat template. It is in
 ``reef/core/`` because ``train/`` must not import ``inference/``. No training backend builds serving:
 ``service/deploy/serving.py`` selects and configures it from the
-``inference`` section and the component's release format.
+``inference`` section and the component's snapshot format.
 
 HTTP provider handling lives in ``inference/http.py``.
 ``inference/provider_protocol.py`` holds the provider wire format that the proxy,
@@ -246,7 +246,11 @@ over a token-native generate route: it renders the prompt, builds the provider
 response from a ``CapturedGeneration`` and streams protocol frames. The
 response carries no training tensors. Each engine
 supplies a ``NativeGenerateClient`` that shapes its request, parses its response
-and builds its tool-call parser. ``inference/engine_control.py`` holds the
+and builds its tool-call parser. The facade and Tinker's sampler in
+``tinker/sampling.py`` split a reply into its reasoning and its answer with
+``core/reasoning.py``, whole or while it streams. The split is in ``reef/core/``
+because ``tinker/`` also serves training, and training never imports
+``inference/``. ``inference/engine_control.py`` holds the
 control classes that SGLang and vLLM share: the inference backend, the
 inference service, the control actor and its default serving executor.
 ``inference/sglang/`` owns SGLang engine launch, response parsing and control
@@ -288,8 +292,8 @@ The extension points those packages expose are in `Python API
   writes each scenario's settings (such as the training mode and the
   activation rule) through the injected ``ScenarioStorage``, like records and
   commits; it imports no storage implementation.
-  ``Dispatcher`` calls the storage service directly for retention and closes
-  it after closing the loaded scenarios. It never imports or chooses a
+  ``Dispatcher`` prunes its data store for retention and closes the storage
+  service after closing the loaded scenarios. It never imports or chooses a
   concrete record backend.
 - Does it define shared record operations or retention limits? Put the contract
   or value in ``reef/storage/records.py``. It defines the ``RecordStore`` abstract base
@@ -298,35 +302,37 @@ The extension points those packages expose are in `Python API
   and opens the scenario's task stores (``reef/storage/tasks.py``) and its
   training state; its training samples are data items
   (``reef/storage/samples.py``);
-  ``ScenarioStorage`` owns scenario settings, archival, and retention.
+  ``ScenarioStorage`` owns scenario settings and archival; a scenario's records
+  are record items in the data store (``ItemRecordStore``).
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or run them with an agent? Put it in ``reef/record2sample/generator/``, the
   generator service ``reef serve`` starts beside the HTTP service from a
   ``generator`` section. ``reef/service/deploy/generator.py`` assembles that
   child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which generates tasks
   through that service and trains on them, is in
-  ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract
-  (``generator.py``). The request, ``TaskGenerationRequest``, is in
+  ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract and
+  the generator's durable state, ``GeneratorState`` (``generator.py``). The request, ``TaskGenerationRequest``, is in
   ``reef/record2sample/generator/inputs.py``, because the generator service
   reads it too. ``reef/core/tasks/`` keeps the Harbor task values and the
   split manifests. What a method asks the designer for, and what it does
   with the results, stays in the method's task generator under ``recipes/``.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
-  shares SQL record and retention operations, and ``ScopedTable``, one table
-  with the namespace of one store. ``sql_tasks.py``,
+  shares the trajectory nodes of record items, ``SQLScenarioDatabase``, the
+  database of one scenario's state, and ``ScopedTable``, one table with the
+  namespace of one store. ``sql_setup.py`` holds the connection setup that the
+  SQL stores share. ``sql_tasks.py``,
   ``sql_samples.py``, ``sql_evaluations.py`` and ``sql_commits.py``
   share the task, training sample, artifact evaluation and commit tables and
   their operations in the same database.
   ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts.
   ``sqlite.py`` supplies SQLite schema, connections, transactions, and file
-  maintenance. ``postgres.py`` supplies PostgreSQL tables, pooled transactions,
-  and retention. ``commit_history.py`` owns the ``CommitHistory`` base and
+  maintenance. ``postgres.py`` supplies PostgreSQL tables and pooled
+  transactions. ``commit_history.py`` owns the ``CommitHistory`` base and
   ``CommitHistoryScenarioStore``, which accepts any ``RecordStore``,
-  ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time
-  upgrades of older schemas and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
+  ``TaskStorage`` and ``CommitHistory``. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.
-- Does it persist or materialize versioned bytes, or declare a release
+- Does it persist or materialize versioned bytes, or declare a snapshot
   component? Put it in ``reef/artifact/``. If it loads those bytes into an
   engine, put that behavior in ``reef/inference/`` instead.
 - Does it define a model-service contract? Put an inference contract in a
@@ -363,13 +369,13 @@ The extension points those packages expose are in `Python API
     running tasks, with the history as the score cache, and ``policy.py``
     decides.
   - Release: the harness backend turns a selected tree into the step's
-    release, and the harness component names the parts that it changes from
+    snapshot, and the harness component names the parts that it changes from
     the job's start (``TrainingComponent.changed_parts``, which the job loop
     puts in ``changed_kinds``). The scenario
     committer publishes it, and the scenario's activation rule
     (``reef/evaluation/activation.py``) decides whether it serves.
   - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's
-    machine, in both directions: the release as a layer over the person's
+    machine, in both directions: the snapshot as a layer over the person's
     own configuration (``run.layer`` of the adapter's ``adapter.yaml``),
     and the person's changes merged back (the ``merge`` of each part in its
     ``parts``). The client half is ``reef_client.harness``.
@@ -386,8 +392,7 @@ The extension points those packages expose are in `Python API
   ``reef/storage/served_models.py`` the ``served_models`` table, which control
   writes and the inference service reads;
   ``reef/storage/control_lease.py`` the lease that makes one control instance
-  active; and ``reef/storage/marks.py`` the named positions that a service
-  keeps, such as how far the data service copied each scenario's records.
+  active.
   ``reef/storage/sql_coordination.py`` keeps these tables in SQLite or
   PostgreSQL. ``reef/execution/workers.py`` holds ``QueueWorker``, the loop
   that takes, leases and finishes queue items. The workers that take queue

@@ -21,7 +21,6 @@ from reef.core.job_data import JobData, TaskSample
 from reef.storage.durable_files import read_json, write_json
 from reef.train.component import TrainingJob
 from reef.train.local_jobs import JOB_FILE
-from reef.train.method import TrainingMethod
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import driver
 from reef.train.slime_backend.component import (
@@ -93,7 +92,7 @@ def sft_job(component: SlimeTrainingComponent, job_id: str = "job-0", start: str
         "slime",
         start or component.base_start,
         job_data_ref(batch_for(0)),
-        parameters(TrainingMethod("sft")),
+        parameters("sft"),
         scenario="s",
     )
 
@@ -234,8 +233,8 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
     start.mkdir(parents=True)
     SlimeStart(None, None, {}, None).write(start)
     job_parameters = {
-        **parameters(TrainingMethod("sft")),
-        **({"rollout": {"rollouts_per_task": 2}} if rollout else {}),
+        **parameters("sft"),
+        **({"harbor": {}} if rollout else {}),
     }
     # The job file that LocalJobComponent.submit writes: the job data reference with its local path.
     ref = job_data_ref(data)

@@ -22,7 +22,7 @@ from reef.record2sample import (
     SingleRecordSet,
     SingleSetUnit,
 )
-from reef.record2sample.staleness import is_stale, producing_artifact_ids
+from reef.record2sample.staleness import ServedArtifacts, is_stale, producing_artifact_ids
 from reef.train import PipelineContext
 
 
@@ -154,13 +154,12 @@ def test_the_stage_finds_samples_behind_the_served_artifact_stale() -> None:
     new = policy_trajectory("new", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a2")
     unnamed = policy_trajectory("unnamed", (1, 2), (1,), (-0.1,), 1.0)
     # Before the served artifact is known, no sample is stale.
-    assert not stage.is_stale((old, unnamed))
-    stage.observe_serving_artifact_id("a1")
-    stage.observe_serving_artifact_id("a2")
-    assert stage.is_stale((old,)) and not stage.is_stale((new,))
-    assert stage.is_stale((new, old)), "one stale sample makes the samples stale"
-    assert stage.is_stale((unnamed,)), "a sample without a producing artifact is stale"
-    assert not stage.is_stale((TaskSample(Path("task")),)), "a task rolls out with the weights it trains"
+    assert not stage.is_stale((old, unnamed), ())
+    served = ("a1", "a2")
+    assert stage.is_stale((old,), served) and not stage.is_stale((new,), served)
+    assert stage.is_stale((new, old), served), "one stale sample makes the samples stale"
+    assert stage.is_stale((unnamed,), served), "a sample without a producing artifact is stale"
+    assert not stage.is_stale((TaskSample(Path("task")),), served), "a task rolls out with the weights it trains"
 
 
 def test_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> None:
@@ -174,10 +173,10 @@ def test_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> None:
 
 def test_a_stage_finds_only_the_samples_more_than_its_configured_limit_behind_stale() -> None:
     stage = EachInference.from_config({"max-staleness": 1}, context=PipelineContext("s"), environ={})
-    for artifact_id in ("a1", "a2", "a3"):
-        stage.observe_serving_artifact_id(artifact_id)
     stale = {
-        name: stage.is_stale((policy_trajectory(name, (1, 2), (1,), (-0.1,), 1.0, artifact_id=artifact_id),))
+        name: stage.is_stale(
+            (policy_trajectory(name, (1, 2), (1,), (-0.1,), 1.0, artifact_id=artifact_id),), ("a1", "a2", "a3")
+        )
         for name, artifact_id in (("two-behind", "a1"), ("one-behind", "a2"), ("current", "a3"))
     }
     assert stale == {"two-behind": True, "one-behind": False, "current": False}
@@ -185,11 +184,14 @@ def test_a_stage_finds_only_the_samples_more_than_its_configured_limit_behind_st
 
 def test_an_artifact_that_serves_again_is_the_newest_and_its_data_is_fresh() -> None:
     stage = EachInference()
+    served = ServedArtifacts()
     for artifact_id in ("a1", "a2", "a2", "a1"):
-        stage.observe_serving_artifact_id(artifact_id)
-    assert stage.served_artifacts.artifact_ids == ["a1", "a2", "a1"]
-    assert not stage.is_stale((policy_trajectory("again", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a1"),))
-    assert stage.is_stale((policy_trajectory("before", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a2"),))
+        served.observe(artifact_id)
+    assert served.artifact_ids == ["a1", "a2", "a1"]
+    again = policy_trajectory("again", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a1")
+    assert not stage.is_stale((again,), served.artifact_ids)
+    before = policy_trajectory("before", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a2")
+    assert stage.is_stale((before,), served.artifact_ids)
 
 
 @pytest.mark.unit

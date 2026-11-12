@@ -8,6 +8,7 @@ from reef.core.errors import UnknownScenario
 from reef.core.records_types import RequestType
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
+from reef.service.inference_service import TrafficWeights
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.storage.data import check_owner
@@ -100,15 +101,19 @@ def register_scenario_writes(
     imports: ArtifactImports,
 ) -> None:
     """The changes of scenarios, which only control makes: create (from the default start, or from an artifact item
-    through ``imports``), update, delete, activate, serve, train from an artifact, and cancel a job."""
+    through ``imports``), update, delete, activate, serve, train from an artifact, and cancel a job.
+
+    The create route takes ``serves``, a boolean that is true by default. With false, the new scenario serves
+    nothing: no artifact answers its inference requests until an update sets ``served`` to one or more artifacts
+    (``Dispatcher.set_served``). An update with an empty ``served`` makes a scenario serve nothing again."""
 
     async def create_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        unknown = sorted(set(payload) - {"name", "owner", "artifact_id", "component"})
+        unknown = sorted(set(payload) - {"name", "owner", "artifact_id", "component", "serves"})
         if unknown:
             raise web.HTTPBadRequest(
-                text=f"unknown keys {unknown}: a scenario is created from name, owner, artifact_id and component; "
-                "artifact_id names the artifact item of the owner that a new scenario starts from"
+                text=f"unknown keys {unknown}: a scenario is created from name, owner, artifact_id, component and "
+                "serves; artifact_id names the artifact item of the owner that a new scenario starts from"
             )
         name = payload.get("name")
         if not isinstance(name, str) or not name.strip():
@@ -121,6 +126,9 @@ def register_scenario_writes(
         for key, value in (("artifact_id", artifact_id), ("component", component)):
             if value is not None and (not isinstance(value, str) or not value.strip()):
                 raise web.HTTPBadRequest(text=f"{key} must be a non-empty string")
+        serves = payload.get("serves", True)
+        if not isinstance(serves, bool):
+            raise web.HTTPBadRequest(text="serves must be a boolean: false creates a scenario that serves nothing")
         if component is not None and artifact_id is None:
             raise web.HTTPBadRequest(text="component names where artifact_id lands: give artifact_id too")
         dispatcher = request_service.dispatcher
@@ -128,17 +136,17 @@ def register_scenario_writes(
         # An existing scenario keeps its root: creation is idempotent.
         item_id = artifact_id.strip() if isinstance(artifact_id, str) and not dispatcher.has_scenario(name) else None
         if item_id is not None:
-            # The root release holds the item, read from the owner whose data items the scenario uses (RFC #1028).
+            # The root snapshot holds the item, read from the owner whose data items the scenario uses (RFC #1028).
             scenario, created = await asyncio.to_thread(
-                imports.create_from_item, dispatcher, name, owner or name, target, item_id
+                imports.create_from_item, dispatcher, name, owner or name, target, item_id, serves=serves
             )
         else:
-            scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name)
+            scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name, serves=serves)
         if owner is not None:
             # The default owner is the scenario's own name. A new owner loads the scenario again.
             await asyncio.to_thread(dispatcher.set_scenario_owner, name, owner)
             scenario = await asyncio.to_thread(dispatcher.registry.require, name)
-        components = {row["component"]: row["artifact_id"] for row in scenario.artifacts() if row["active"]}
+        components = dict(scenario.artifact_selection().artifact_ids)
         answer: dict[str, object] = {
             "scenario": scenario.name,
             "owner": dispatcher.scenario_owner(name),
@@ -150,8 +158,23 @@ def register_scenario_writes(
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if not payload or set(payload) - {"training_mode", "artifact_evaluation", "activation", "serving_config"}:
-            raise ValueError("expected training_mode, artifact_evaluation, activation or serving_config settings")
+        settings = {
+            "training_mode",
+            "artifact_evaluation",
+            "activation",
+            "serving_config",
+            "served",
+            "component",
+            "record2sample_config",
+        }
+        if not payload or set(payload) - settings:
+            raise ValueError(
+                "expected training_mode, artifact_evaluation, activation, serving_config, served or "
+                "record2sample_config settings"
+            )
+        component = payload.get("component")
+        if "component" in payload and ("served" not in payload or not isinstance(component, str) or not component):
+            raise ValueError("component is the non-empty name of the component whose served artifacts change")
         if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual"):
             raise ValueError("expected training_mode 'auto' or 'manual'")
         name = request.match_info["scenario"]
@@ -169,6 +192,17 @@ def register_scenario_writes(
             result.update(
                 await asyncio.to_thread(request_service.dispatcher.set_serving_config, name, payload["serving_config"])
             )
+        if "record2sample_config" in payload:
+            result.update(
+                await asyncio.to_thread(
+                    request_service.dispatcher.set_record2sample_config, name, payload["record2sample_config"]
+                )
+            )
+        if "served" in payload:
+            if not isinstance(payload["served"], dict):
+                raise ValueError("served must map artifact IDs to weights that sum to 100, or be empty")
+            served = TrafficWeights.from_json(payload["served"]).by_artifact
+            result.update(await asyncio.to_thread(request_service.dispatcher.set_served, name, served, component))
         return web.json_response(result)
 
     async def delete_scenario(request: web.Request) -> web.Response:
@@ -176,7 +210,7 @@ def register_scenario_writes(
         return web.json_response(result)
 
     async def read_artifact_selection(request: web.Request) -> tuple[str, str | None]:
-        """The ``artifact_id`` and the optional ``component`` that an activation, a train-from or a serve names."""
+        """The ``artifact_id`` and the optional ``component`` that a train-from names."""
         payload = await read_object(request)
         artifact_id = payload.get("artifact_id")
         component = payload.get("component")
@@ -185,30 +219,6 @@ def register_scenario_writes(
         if component is not None and (not isinstance(component, str) or not component.strip()):
             raise ValueError("component must be a non-empty string")
         return artifact_id.strip(), None if component is None else component.strip()
-
-    async def activate_artifact(request: web.Request) -> web.Response:
-        scenario = request.match_info["scenario"]
-        artifact_id, component = await read_artifact_selection(request)
-        activated = await asyncio.to_thread(request_service.dispatcher.activate, scenario, artifact_id, component)
-        return web.json_response(
-            {
-                "scenario": scenario,
-                "component": activated.component,
-                "artifact_id": activated.artifact_id,
-            }
-        )
-
-    async def serve_artifact(request: web.Request) -> web.Response:
-        scenario = request.match_info["scenario"]
-        artifact_id, component = await read_artifact_selection(request)
-        served = await asyncio.to_thread(request_service.dispatcher.serve, scenario, artifact_id, component)
-        return web.json_response(
-            {
-                "scenario": scenario,
-                "component": served.component,
-                "artifact_id": served.artifact_id,
-            }
-        )
 
     async def restore_selection(request: web.Request) -> web.Response:
         payload = await read_object(request)
@@ -221,19 +231,10 @@ def register_scenario_writes(
         components = await asyncio.to_thread(request_service.dispatcher.restore, scenario, step)
         return web.json_response({"scenario": scenario, "components": dict(components)})
 
-    async def stop_serving_artifact(request: web.Request) -> web.Response:
+    async def redeploy_scenario(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        artifact_id, component = await read_artifact_selection(request)
-        if component is not None:
-            raise ValueError("stop-serving takes the artifact_id alone: it names one artifact of one component")
-        stopped = await asyncio.to_thread(request_service.dispatcher.stop_serving, scenario, artifact_id)
-        return web.json_response(
-            {
-                "scenario": scenario,
-                "component": stopped.component,
-                "artifact_id": stopped.artifact_id,
-            }
-        )
+        await asyncio.to_thread(request_service.dispatcher.redeploy, scenario)
+        return web.json_response({"scenario": scenario})
 
     async def cancel_job(request: web.Request) -> web.Response:
         scenario, job_id = request.match_info["scenario"], request.match_info["job_id"]
@@ -244,6 +245,15 @@ def register_scenario_writes(
         if job is None:
             raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training job {job_id!r}")
         return web.json_response({"scenario": scenario, "job": job})
+
+    async def cancel_request(request: web.Request) -> web.Response:
+        scenario, request_id = request.match_info["scenario"], request.match_info["request_id"]
+        cancelled = await asyncio.to_thread(request_service.dispatcher.cancel_request, scenario, request_id)
+        if cancelled is None:
+            raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training request {request_id!r}")
+        return web.json_response(
+            {"scenario": scenario, "request_id": request_id, "queued": cancelled.queued, "job": cancelled.job}
+        )
 
     async def train_from_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
@@ -256,12 +266,11 @@ def register_scenario_writes(
     app.router.add_post("/reef/scenarios", create_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
     app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
-    app.router.add_post("/reef/scenarios/{scenario}/activate", activate_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/restore", restore_selection)
     app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
-    app.router.add_post("/reef/scenarios/{scenario}/serve", serve_artifact)
-    app.router.add_post("/reef/scenarios/{scenario}/stop-serving", stop_serving_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/redeploy", redeploy_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/jobs/{job_id}/cancel", cancel_job)
+    app.router.add_post("/reef/scenarios/{scenario}/requests/{request_id}/cancel", cancel_request)
 
 
 __all__ = ["register_scenario_reads", "register_scenario_writes"]

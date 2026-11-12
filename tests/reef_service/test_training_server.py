@@ -287,7 +287,7 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     assert component.received_model_path == "/models/demo"
     assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
     assert component.config["batch_size"] == 4
-    # The backend serves its own releases by default (``inference.serving: trainer``).
+    # The backend serves its own snapshots by default (``inference.serving: trainer``).
     assert isinstance(dispatcher.recipe.runtime, StubInferenceRuntime)
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
@@ -435,7 +435,7 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
     )
     backend = training_deployment_for("slime")
 
-    config = backend.component_config(dataclasses.asdict(settings), loss_family="policy")
+    config = backend.component_config(dataclasses.asdict(settings), default_parameters={})
     assert (config["ray_address"], config["namespace"]) == ("ray-head:6379", "reef")
     assert config["settings"]["model_path"] == "/models/demo"
     serving = serving_runtime_config(settings, backend, ArtifactFormat("full"))
@@ -454,8 +454,6 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
     # The training backend built the component (the inference branch builds none).
     component = dispatcher.recipe.training_component.component
     assert component.received_model_path == "/models/demo"
-    # A weight recipe that does not support images: each scenario's data sync skips an item with an image.
-    assert dispatcher.refuses_images and dispatcher.storage.refuses_images
 
 
 @pytest.mark.unit
@@ -489,7 +487,7 @@ class HeldJobComponent(StubTrainingComponent):
 
 
 class AdapterInference(StubInferenceRuntime):
-    """Serve each release under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
+    """Serve each snapshot under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
 
     def __init__(self, *, per_scenario_adapters: bool) -> None:
         super().__init__()
@@ -537,7 +535,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             block = await math_status(client)
             if (
                 block["finished_jobs"] == finished_jobs
-                and (block["training_job"] is not None) == running
+                and bool(block["training_jobs"]) == running
                 and block["served_artifact_id"]
                 == dispatcher.get_or_create_scenario("math").artifact_status()["weights"]["active"]
             ):
@@ -549,7 +547,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         async with TestClient(TestServer(create_app(dispatcher))) as client:
             dispatcher.get_or_create_scenario("math")
             idle = await wait_for(client, finished_jobs=0, running=False)
-            assert (idle["training_job"], idle["finished_jobs"]) == (None, 0)
+            assert (idle["training_jobs"], idle["finished_jobs"]) == ([], 0)
             assert "last_drain_at" not in idle and "checkpoint_storage" not in idle
             assert ("adapter_runtime_load_id" in idle) is per_scenario_adapters
 
@@ -561,7 +559,15 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             while not component.submitted and time.monotonic() < deadline:
                 await asyncio.sleep(0.01)
             (job,) = component.submitted
-            assert running["training_job"] == {"job_id": job.job_id, "backend": "stub", "checkpoints_handled": 0}
+            assert running["training_jobs"] == [
+                {
+                    "job_id": job.job_id,
+                    "start": job.start,
+                    "checkpoints_handled": 0,
+                    "train_from": None,
+                    "backend": "stub",
+                }
+            ]
 
             component.finish_jobs()
             finished = await wait_for(client, finished_jobs=1, running=False)

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import UnknownScenario
@@ -74,6 +76,18 @@ def test_scenario_contract_returns_processor_and_request_types(tmp_path) -> None
     assert "recipe" not in contract
     assert contract["processor"] == "NoJobData"
     assert contract["required_request_types"] == ["inference", "report"]
+    assert contract["parameters_schema"] == {}, "a recipe without a training component declares no schema"
+
+
+def test_scenario_contract_serves_the_training_components_schema_by_sample_kind(tmp_path) -> None:
+    class Declaring(StubTrainingComponent):
+        def parameters_schema(self, kind):
+            return {"title": kind} if kind == "task" else None
+
+    dispatcher = _dispatcher(tmp_path)
+    scenario = dispatcher.get_or_create_scenario("math")
+    scenario._binding = replace(scenario._binding, training_component=Declaring())
+    assert dispatcher.scenario_contract("math")["parameters_schema"] == {"task": {"title": "task"}}
 
 
 def test_scenario_contract_raises_for_unknown_scenario(tmp_path) -> None:
@@ -86,7 +100,7 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
     value = _dispatcher(tmp_path)
     created = value.get_or_create_scenario("delivery")
     assert created is not None
-    first_release = created.repository.require_current_artifact().revision
+    first_snapshot = created.repository.require_current_artifact().revision
 
     result = value.delete_scenario("delivery")
 
@@ -99,7 +113,7 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
     # The name is free: a new scenario under it starts from the base, not the dropped chain.
     again = value.get_or_create_scenario("delivery")
     assert again is not None and again is not created
-    assert again.repository.require_current_artifact().revision == first_release or again.scenario_step == 0
+    assert again.repository.require_current_artifact().revision == first_snapshot or again.scenario_step == 0
 
 
 def test_delete_scenario_refuses_names_that_are_paths() -> None:

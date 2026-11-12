@@ -20,12 +20,11 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
-import math
 import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -36,18 +35,17 @@ from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import read_job_data
+from reef.storage.job_data import JobDataKind, read_job_data
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
-from reef.train.algos.registry import job_training
-from reef.train.algos.schedule import StepScheduling
 from reef.train.component import SavedCheckpoint, TrainingJob
+from reef.train.learning_rate import learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.local_jobs import LocalJobComponent
-from reef.train.method import TrainingMethod, learning_rate_metrics, resolve_learning_rate_schedule_state
-from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.task_rollouts import RolloutSettings, RolloutTokens, TaskJobRollouts, run_train_tasks, task_name
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
+from reef.train.tinker_backend.parameters import TinkerJobParameters, rollout_settings, tinker_parameters_schema
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
 
@@ -55,52 +53,15 @@ from reef.train.tinker_backend.rollout import SamplerChat
 SAMPLER_WARM_TIMEOUT_S = 3600.0
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
-#: The parameters of a Tinker job besides ``method`` and ``scheduling``.
-JOB_PARAMETER_NAMES = frozenset({"batch_size", "kl_coef", "learning_rate", "save_interval", "rollout"})
-
-
-@dataclass(frozen=True)
-class TinkerJobParameters:
-    """The parameters of one Tinker job, with the component's defaults for those the job leaves out.
-
-    Values: ``method`` and ``scheduling`` as ``job_training`` reads them; ``batch_size`` a positive int, the
-    rollouts of one optimizer step; ``learning_rate`` finite and positive; ``kl_coef`` finite and non-negative;
-    ``save_interval`` a positive int, the optimizer steps between two saved checkpoints, or None for one
-    checkpoint when the job ends; ``rollout`` the rollouts of a task job, or None for a job of trajectories.
-    Purpose: ``TinkerTrainingComponent.job_parameters`` makes it when it checks and when it runs a job; the run
-    reads it.
-    """
-
-    method: TrainingMethod
-    scheduling: StepScheduling
-    batch_size: int
-    learning_rate: float
-    kl_coef: float
-    save_interval: int | None
-    rollout: RolloutSettings | None
-
-    def __post_init__(self) -> None:
-        counts = {
-            "batch_size": self.batch_size,
-            "save_interval": 1 if self.save_interval is None else self.save_interval,
-        }
-        for name, count in counts.items():
-            if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
-                raise ValueError(f"{name} must be a positive int")
-        for name, rate in (("learning_rate", self.learning_rate), ("kl_coef", self.kl_coef)):
-            if isinstance(rate, bool) or not isinstance(rate, int | float) or not math.isfinite(rate):
-                raise ValueError(f"{name} must be a finite number")
-        if self.learning_rate <= 0 or self.kl_coef < 0:
-            raise ValueError("learning_rate must be positive and kl_coef non-negative")
 
 
 class TinkerJobComponent(LocalJobComponent, ABC):
     """Train each job as remote sessions on a Tinker-compatible service from the job's start, in a background thread.
 
-    A job's parameters are ``TinkerJobParameters``: ``method``, optionally
-    ``scheduling``, and ``batch_size``, ``kl_coef``, ``learning_rate``,
-    ``save_interval`` and ``rollout``, where ``batch_size``, ``kl_coef`` and
-    ``learning_rate`` default to the component's ``TinkerServiceConfig``.
+    A job's parameters are ``TinkerJobParameters``: ``objective``, optionally
+    ``learning_rate_schedule`` and ``scheduling``, and ``batch_size``, ``kl_coef``,
+    ``learning_rate``, ``save_interval`` and ``rollout``, where ``batch_size``,
+    ``kl_coef`` and ``learning_rate`` default to the component's ``TinkerServiceConfig``.
     ``submit`` refuses any other parameter or a malformed value. Jobs of
     several scenarios can share the component, since each job trains from its
     own start.
@@ -113,8 +74,12 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     groups. The tasks of a job have distinct names (``task_name``), each of
     which names its group. The component keeps the rollouts in
     ``rollouts.json`` in the job's directory, so a resumed job trains the same
-    samples, and reports in the job's metrics each task's rewards of the
-    rollouts that ran (``rollout_rewards``, by task name).
+    samples, and reports the rollouts' metrics (``TaskJobRollouts.metrics``)
+    in the job's metrics.
+
+    A sample that cannot render, or whose tokens after the first are more than
+    the model's context window (``TinkerClient.context_window``), does not
+    train; the job metric ``unrenderable_samples`` counts these samples.
 
     With a ``score_centering``, a policy-gradient job trains as score-centered
     ``cispo`` (``prepare_tinker_job``), and a task job's rollouts record the
@@ -130,14 +95,14 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     ``config.state_dir`` holds ``base/`` (the base start), ``imported/<digest>/`` (starts taken from
     releases) and ``jobs/`` (see ``LocalJobComponent``). The constructor makes no base start. ``prepared_base``
     makes ``base/`` on its first call in a process: before the process runs jobs (``start_jobs``), when it reads
-    ``base_start`` or checks a job from it, or when a new scenario's root release holds the default start
+    ``base_start`` or checks a job from it, or when a new scenario's root snapshot holds the default start
     (``TinkerBaseFiles``). A process that does none of these, such as a service that only opens scenarios, makes
     nothing. A saved checkpoint is
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
-    directory is both the start of a later job and the release Reef publishes.
+    directory is both the start of a later job and the snapshot Reef publishes.
     The weights stay on the service. A subclass decides the parameterization:
     which checkpoints it trains (``validated``), what its base is
-    (``prepare_base``, ``start_at``), and which releases it imports.
+    (``prepare_base``, ``start_at``), and which snapshots it imports.
     """
 
     def __init__(
@@ -213,8 +178,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"the start {directory} holds no Tinker checkpoint manifest")
         return self.validated(TinkerCheckpoint.read(directory))
 
-    def complete_release(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
-        """Add to ``directory``, which holds ``checkpoint``'s manifest, what else its release holds; by default nothing.
+    def complete_artifact(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
+        """Add to ``directory``, which holds ``checkpoint``'s manifest, what else its snapshot holds; by default nothing.
 
         The job loop calls it for each saved checkpoint before the checkpoint is recorded, so a job that a restart
         interrupts here saves the checkpoint again.
@@ -224,7 +189,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def check_manifest(self, files: ArtifactFiles) -> None:
         """Raise ``ValueError`` unless ``files`` hold a manifest that ``validated`` takes and whose state resolves."""
         if MANIFEST not in files.paths():
-            raise ValueError(f"a Tinker release holds {MANIFEST}")
+            raise ValueError(f"a Tinker artifact holds {MANIFEST}")
         try:
             checkpoint = TinkerCheckpoint.from_dict(json.loads(files.read_bytes(MANIFEST)))
         except (TypeError, ValueError) as exc:
@@ -232,11 +197,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
         self._client.check_remote(self.validated(checkpoint))
 
-    def import_manifest(self, release: Path) -> str:
+    def import_manifest(self, artifact_dir: Path) -> str:
         """Take the manifest in ``release`` as a start: copy it into ``imported/<digest>/``; return that directory."""
-        if not (release / MANIFEST).exists():
+        if not (artifact_dir / MANIFEST).exists():
             raise ValueError(f"artifact is missing {MANIFEST}")
-        checkpoint = self.validated(TinkerCheckpoint.read(release))
+        checkpoint = self.validated(TinkerCheckpoint.read(artifact_dir))
         digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
         imported = self._root / "imported" / digest
         if not imported.exists():
@@ -246,7 +211,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     @property
     def artifact_format(self) -> ArtifactFormat | None:
-        """``None`` by default: a release holds only its manifest, and the weights stay on the service."""
+        """``None`` by default: a snapshot holds only its manifest, and the weights stay on the service."""
         return None
 
     @property
@@ -258,25 +223,20 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return True
 
     @property
+    def concurrent_jobs(self) -> bool:
+        return True
+
+    @property
     def base_start(self) -> str:
         """``base/``, which this property prepares on its first use in a process (``prepared_base``)."""
         return str(self.prepared_base())
 
     def job_parameters(self, parameters: Mapping[str, Any]) -> TinkerJobParameters:
         """``parameters`` over the component's defaults; ``ValueError`` for an unknown or a malformed parameter."""
-        unknown = set(parameters) - {"method", "scheduling", *JOB_PARAMETER_NAMES}
-        if unknown:
-            raise ValueError(f"Tinker jobs accept no parameters {sorted(unknown)}")
-        method, scheduling = job_training(parameters)
-        return TinkerJobParameters(
-            method,
-            scheduling,
-            parameters.get("batch_size", self._config.batch_size),
-            parameters.get("learning_rate", self._config.learning_rate),
-            parameters.get("kl_coef", self._config.kl_coef),
-            parameters.get("save_interval"),
-            None if parameters.get("rollout") is None else RolloutSettings.from_parameters(parameters),
-        )
+        return TinkerJobParameters.from_parameters(parameters, self._config)
+
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
+        return tinker_parameters_schema(kind)
 
     def check_job(self, job: TrainingJob) -> None:
         parameters = self.job_parameters(job.parameters)
@@ -297,9 +257,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         """A task job rolls its tasks out on this component's sampler, as the ``rollout`` parameter says."""
         if self._sampler is None:
             raise ValueError("this Tinker component has no sampler, so it cannot roll tasks out")
-        if parameters.get("rollout") is None:
-            raise ValueError("a task job needs the rollout parameter as an object")
-        RolloutSettings.from_parameters(parameters)
+        self.job_parameters(parameters)
+        rollout_settings(parameters)
 
     def close_resources(self) -> None:
         try:
@@ -319,7 +278,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data_id, samples)), RolloutScores.from_json(kept["scores"])
+                trajectories(JobData(job.data_id, samples)),
+                RolloutScores.from_json(kept["scores"]),
+                tuple(RolloutTokens(**item) for item in kept["tokens"]),
+                kept["left_out"],
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
@@ -343,12 +305,15 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             work_dir=directory / "rollouts",
             start=job.start,
             model_adapter=start.sampler_path,
+            max_tokens=self._client.context_window(),
         )
         write_json(
             record,
             {
                 "samples": JobData(job.data_id, rollouts.samples).to_dict(),
                 "scores": rollouts.scores.to_json(),
+                "tokens": [asdict(item) for item in rollouts.tokens],
+                "left_out": rollouts.left_out,
             },
         )
         return rollouts
@@ -375,33 +340,38 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
         start = self.start_at(Path(job.start))
-        method = parameters.method
         data = read_job_data(job.data_dir, job.data_id)
         rollout_metrics: dict[str, Any] = {}
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)
-            rollout_metrics = {
-                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
-                "rollout_samples": len(rollouts.samples),
-            }
+            rollout_metrics = rollouts.metrics()
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.
                 return rollout_metrics
             data = JobData(data.data_id, rollouts.samples)
         # A trajectory that serving recorded carries no tokens: the component renders it with the base model's chat
         # template, and the client computes its log probabilities with the weights of the job's start.
+        left_out = 0
         if needs_rendering(data):
-            data, left_out = rendered_job_data(
+            data, unrenderable = rendered_job_data(
                 data, self._client.chat_template(self._config.chat_template_kwargs or {})
             )
-            if left_out:
-                rollout_metrics["unrenderable_samples"] = len(left_out)
-                if not data.samples:
-                    return rollout_metrics
+            left_out += len(unrenderable)
+        # Tinker refuses a whole optimizer step for one row whose targets, every token but the first, are longer than
+        # the model's context window, so such a sample is left out as one that cannot render.
+        window = self._client.context_window()
+        if window is not None:
+            fitting = tuple(sample for sample in trajectories(data) if len(sample.training["tokens"]) - 1 <= window)
+            left_out += len(data.samples) - len(fitting)
+            data = JobData(data.data_id, fitting, request=data.request)
+        if left_out:
+            rollout_metrics["unrenderable_samples"] = left_out
+            if not data.samples:
+                return rollout_metrics
         prepared = prepare_tinker_job(
             data,
-            method,
-            start.state_for(method.objective),
+            parameters.objective,
+            start.state_for(parameters.objective),
             parameters.scheduling,
             batch_size=parameters.batch_size,
             kl_coef=parameters.kl_coef,
@@ -412,7 +382,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             return {**prepared.metrics, **rollout_metrics}
         steps = prepared.steps
         schedule = resolve_learning_rate_schedule_state(
-            start.learning_rate_schedule_state, method.learning_rate_schedule
+            start.learning_rate_schedule_state, parameters.learning_rate_schedule
         )
         learning_rates = (
             (parameters.learning_rate,) * len(steps) if schedule is None else schedule.learning_rates(len(steps))
@@ -440,11 +410,13 @@ class TinkerJobComponent(LocalJobComponent, ABC):
                 self.validated(checkpoint),
                 learning_rate_schedule_state=schedule_state,
                 algorithm_state=dict(prepared.next_algorithm_state) if final else dict(start.algorithm_state),
-                objective=(method.objective if prepared.next_algorithm_state else None) if final else start.objective,
+                objective=(
+                    (parameters.objective if prepared.next_algorithm_state else None) if final else start.objective
+                ),
             )
             target = directory / str(last)
             current.write(target)
-            self.complete_release(current, target)
+            self.complete_artifact(current, target)
             self.save_checkpoint(
                 directory,
                 SavedCheckpoint(
@@ -467,7 +439,7 @@ class TinkerBaseFiles(BaseModelFiles):
     """The base start of a Tinker component as the model files of its default start.
 
     Values: ``component`` is the ``TinkerJobComponent`` whose ``base/`` the files are. ``directory`` returns
-    ``component.prepared_base()``, so a new scenario's root release makes the base start on its first call in a
+    ``component.prepared_base()``, so a new scenario's root snapshot makes the base start on its first call in a
     process. Purpose: ``TinkerJobComponent`` subclasses give it in their ``default_start``, which itself makes
     nothing.
     """
@@ -483,7 +455,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
 
     The base start, ``base/``, is the untrained adapter's checkpoint, which the
     client saves on first use (``TinkerClient.initialize``): before the training
-    process runs jobs, or when a new scenario's root release holds the
+    process runs jobs, or when a new scenario's root snapshot holds the
     default start (``prepared_base``). Serving reads
     each saved checkpoint from its artifact: Tinker's sampler
     (``reef.inference.tinker``) reads the manifest, and a serving runtime that
@@ -504,7 +476,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
 
     def prepare_base(self) -> None:
         if not (self._base / MANIFEST).exists():
-            # The untrained adapter is the base checkpoint: the default start holds it as a release.
+            # The untrained adapter is the base checkpoint: the default start holds it as a snapshot.
             self._client.initialize().write(self._base)
 
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
@@ -527,5 +499,5 @@ class TinkerTrainingComponent(TinkerJobComponent):
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
         self.check_manifest(files)
 
-    def import_start(self, release: Path) -> str:
-        return self.import_manifest(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        return self.import_manifest(artifact_dir)

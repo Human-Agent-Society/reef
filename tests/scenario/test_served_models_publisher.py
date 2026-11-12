@@ -11,13 +11,7 @@ from reef.core.served_models import CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, retry_delay_seconds, wait_for_control_lease
 from reef.storage.coordination import Coordination
 from reef.storage.served_models import AUTOMATIC_RETRIES, SERVING_KIND, SERVING_QUEUE
-from reef.storage.sql_coordination import (
-    SQLControlLease,
-    SQLiteCoordinationDatabase,
-    SQLMarks,
-    SQLServedModels,
-    SQLWorkQueue,
-)
+from reef.storage.sql_coordination import SQLControlLease, SQLiteCoordinationDatabase, SQLServedModels, SQLWorkQueue
 
 
 class Runtime:
@@ -42,6 +36,7 @@ class Registry:
         self.scenario = SimpleNamespace(
             name="math",
             runtime=runtime,
+            serves=True,
             artifact_status=lambda: {"weights": {"active": runtime.release, "training_start": None}},
             served_component=lambda: "weights",
             serving_artifact_id=lambda: runtime.release,
@@ -78,7 +73,7 @@ class Instance(ControlInstance):
 def coordination() -> Coordination:
     database = SQLiteCoordinationDatabase(None)
     lease = SQLControlLease(database)
-    return Coordination(database, SQLWorkQueue(database), SQLServedModels(database, lease), lease, SQLMarks(database))
+    return Coordination(database, SQLWorkQueue(database), SQLServedModels(database, lease), lease)
 
 
 def fail_current_request(store: Coordination, *, now: float) -> str:

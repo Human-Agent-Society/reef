@@ -67,13 +67,14 @@ The training component renders each sample with the model's chat template
 a sample that cannot render or that is longer than ``max_tokens``, and counts
 it in the job metric ``unrenderable_samples``.
 
-Training renders text only, so Reef refuses a recorded call or an imported record
-with an image (see `Recipe <../../reference/python-api.rst#recipe>`__). An older
-record can still hold an image. A sample with an image part cannot render. A
-sample can lose an image with no error when ATIF does not keep the image as an
-image part, such as the screenshot of a Responses ``computer_call_output``.
+Training renders text only, so Reef refuses a recorded call, an imported
+record or a new data item with an image (see `Recipe
+<../../reference/python-api.rst#recipe>`__). An older record or upload can
+still hold an image. A sample with an image part cannot render. A sample can
+lose an image with no error when ATIF does not keep the image as an image
+part, such as the screenshot of a Responses ``computer_call_output``.
 
-The ``sft`` objective (``SftObjective``) sends no advantages. On Slime, the
+The ``sft`` objective, built in on Slime and on Tinker, sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
 ``sft_loss``. On Tinker, the built-in ``sft`` family trains Tinker's
 ``cross_entropy`` on the target tokens (``training.backend: tinker``). Both
@@ -151,19 +152,21 @@ For example, to keep an earlier answer as context and train only the last one:
      {"step_id": 4, "source": "agent", "message": "37 + 45 = 82."}
    ]}
 
-Reef checks each trajectory when an upload names an existing scenario, and when
-a metadata update adds the item to one. It refuses the request with 400, naming
-the trajectory, when one cannot train:
+Reef checks the structure of each trajectory when it accepts the upload. It
+refuses the whole upload with 400, naming the trajectory, when one cannot
+train:
 
 - it has no agent step that trains (all its agent steps are copied context),
   or its first trained agent step has no step before it;
 - ``is_copied_context`` is not a boolean;
 - a step's ``observation`` is not empty and is not an object; a content part
-  of a message or an observation result is not an object, or a text part has
-  a ``text`` that is not a string;
-- a message or an observation result holds an image or another part that is
-  not text. Training renders text only, and Reef does not train on the text
-  without the image.
+  of a message or an observation result is not an object, a text part has a
+  ``text`` that is not a string, or an image part has no ``source.path``;
+- it holds an image. Training renders text only, and Reef does not train on
+  the text without the image.
+
+A trajectory that Reef stored before this check, or that holds another part
+that is not text, is skipped with a warning when the trainer reads it.
 
 The training component leaves a trajectory out of its job when:
 
@@ -296,19 +299,22 @@ SFT, then RL on uploaded tasks
 
 The recipe gives parameters to trajectory jobs only. An uploaded train task
 (a task item in the ``train`` split, ``POST /reef/namespaces/{owner}/data/tasks``) trains in ``manual``
-mode, for a request whose ``parameters`` give its job's method and
-rollout. Thus one scenario runs SFT first and then RL:
+mode, for a request whose ``parameters`` give its job's objective and
+rollouts. The recipe gives task jobs no objective, so a request without one is
+refused. Thus one scenario runs SFT first and then RL:
 
 1. Set the scenario to ``manual``, and create the trajectories and the tasks as items that it uses.
 2. Send a request that names the trajectories in ``samples``. The job
    trains them with SFT.
 3. Send a request that names the tasks in ``samples``, with
-   ``{"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}``
-   in ``parameters``. The job rolls the tasks out and trains on the rollouts.
+   ``{"objective": "my_methods.objectives:MyObjective", "rollout": {"rollouts_per_task": 4}}``
+   in ``parameters``, with a method that the deployment provides. The job rolls the
+   tasks out and trains on the rollouts.
 
-The training component must run task jobs: Tinker does, and Slime does with
-its own rollout engines (`Task jobs on Slime
-<../../reference/configuration.rst#task-jobs-on-slime>`__). See
+The training component must run both kinds of job, as Tinker does. On Slime, a
+task job needs a deployment of the ``slime`` loss family, which refuses jobs of
+trajectories, so this sequence does not run on one Slime deployment (`Task jobs on
+Slime <../../reference/configuration.rst#task-jobs-on-slime>`__). See
 `Manual training <../../reference/http-api.rst#manual-training>`__ for the
 request and `Choose the samples that train
 <../../reference/http-api.rst#choose-the-samples-that-train>`__ for ``samples``.
@@ -317,8 +323,8 @@ Train SFT for some jobs of another recipe
 -----------------------------------------
 
 A recipe can train some jobs with SFT, for example its trajectory jobs, and its
-task jobs with a policy objective. Its ``parameters_by_kind()``
-puts ``TrainingMethod("reef.recipe.sft:SftObjective")`` in the ``method``
+task jobs with a policy objective. Its ``default_parameters()``
+puts ``"sft"`` in the ``objective``
 parameter of the jobs of that kind (`Train each kind of sample with its own
 method
 <../../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).

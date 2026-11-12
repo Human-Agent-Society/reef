@@ -22,7 +22,8 @@ import yaml
 from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
 from tests.support.harness_service import backend_step, seed_root
-from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
+from tests.support.harness_steps import COMPONENT, TreeArtifacts, harness_backend
+from tests.support.records import memory_records
 
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.activation import AlwaysActivate
@@ -41,7 +42,7 @@ from reef.recipe.registry import build_named_recipe
 from reef.service.assembly import _serving_recipe, _upstream_runtime
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.commits import CommitRecord
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.storage.sqlite import SQLiteScenarioDatabase
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
@@ -118,8 +119,8 @@ def pi_message(text: str) -> dict:
     return {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
 
 
-def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
-    return ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
+def artifacts_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
+    return ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
 
 
 # -- the grader: exact last-line answers ---------------------------------------------------------
@@ -286,7 +287,7 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
         "openai",
     )
     assert list(built.model_bindings()) == ["served"]
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
+    trainer = built.build("demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built))
     assert isinstance(trainer, Trainer)
     # serve.yaml sets no job_samples, so each report is one step.
     assert trainer.job_samples == 1
@@ -315,7 +316,7 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
         "native/graphs/main.json",
         "skills/answer-style/SKILL.md",
     } == set(NATIVE_SEED.files)
-    # A fresh scenario's root release is the seed's source tree, which names no endpoint.
+    # A fresh scenario's root snapshot is the seed's source tree, which names no endpoint.
     assert built.default_start().files == dict(NATIVE_SEED.files)
     assert not any("upstream" in text for text in NATIVE_SEED.files.values())
     empty = tmp_path / "empty-seed"
@@ -359,10 +360,10 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.training_mode == "auto" and type(built.method).__name__ == "RulesMethod"
-    records = SQLiteRecordStore()
+    records = memory_records("demo")
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
     trainer = replace(built, evolution=local).build(
-        "demo", records, releases=releases_for(built), root=seed_root(built)
+        "demo", records, artifacts=artifacts_for(built), root=seed_root(built)
     )
     assert trainer.pipeline.training_mode == "auto"
     # Each report is one job's data: the deployment sets no job_samples, and the default is 1.
@@ -581,8 +582,7 @@ def session_events(session: str, release: str, stages, tool: str | None = None) 
 def write_commits(directory: Path, *commits: dict) -> None:
     """Replace the commits of one scenario database with stored records at steps 1, 2, ...
 
-    Each of ``commits`` gives the fields that differ from a complete record. A commit with a legacy
-    ``artifact_ref`` is stored in the ``reef-commit/6`` format.
+    Each of ``commits`` gives the fields that differ from a complete record.
     """
     stored = []
     for commit in commits:
@@ -596,15 +596,11 @@ def write_commits(directory: Path, *commits: dict) -> None:
             high_water_sequence=0,
             high_water_offset=0,
         ).to_dict()
-        if "artifact_ref" in commit:
-            base.pop("snapshot")
-            base["record"] = "reef-commit/6"
-            commit = {**commit, "artifact_ref": {"kind": "artifact", "content_id": "c", **commit["artifact_ref"]}}
         if "snapshot" in commit:
             commit = {**commit, "snapshot": {"kind": "snapshot", **commit["snapshot"]}}
         stored.append({**base, **commit})
     database = directory / "x.sqlite3"
-    SQLiteRecordStore(database).close()
+    SQLiteScenarioDatabase(database).close()
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("DELETE FROM scenario_commit")
         connection.executemany(
@@ -624,7 +620,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         "step": 1,
         "recorded_at": 1050.0,
         "operation": "training",
-        "artifact_ref": {"release_id": "r2", "parent_release_id": "r1"},
+        "snapshot": {"revision": "r2", "parent_revision": "r1"},
         "metrics": {
             "selected": True,
             "wins": 2,
@@ -653,9 +649,9 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         (0, "seed", "seed"),
         (1, "published", "r2"),
     ]
-    seed_release, published = data["releases"]
-    # The native run's seed is the native seed directory; a published release is it with the step's patch applied.
-    assert seed_release["files"] == dict(NATIVE_SEED.files) == data["seed_files"]
+    seed_snapshot, published = data["releases"]
+    # The native run's seed is the native seed directory; a published snapshot is it with the step's patch applied.
+    assert seed_snapshot["files"] == dict(NATIVE_SEED.files) == data["seed_files"]
     assert published["files"] == {**NATIVE_SEED.files, "rules.md": "one line\n"}
     assert published["diff"] == {"added": ["rules.md"], "updated": [], "removed": []}
     assert published["summary"] == "rewrote rules.md from 1 failing trace(s)"
@@ -692,13 +688,13 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         "removed": [],
     }
 
-    # An activation row is not a step: it is shown as its own kind, with no result, over the files of the release it
+    # An activation row is not a step: it is shown as its own kind, with no result, over the files of the snapshot it
     # activated, here the seed.
     activation = {
         "recorded_at": 1060.0,
         "operation": "activate",
         "step": 2,
-        "artifact_ref": {"release_id": "r1", "parent_release_id": None},
+        "snapshot": {"revision": "r1", "parent_revision": None},
         "metrics": None,
         "algorithm_state": None,
     }

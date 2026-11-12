@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
-from reef.core.components import COMPONENTS_METADATA_KEY, ReleaseComponents, legacy_artifact_id, release_components
+from reef.core.components import COMPONENTS_METADATA_KEY, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
 
 # Re-export the pure identity types while keeping ``reef.core`` independent of
@@ -19,6 +19,7 @@ __all__ = [
     "ARTIFACT_ID_METADATA_KEY",
     "LOCAL_SNAPSHOT_PREFIX",
     "SNAPSHOT_METADATA_KEYS",
+    "TRAINING_STARTS_METADATA_KEY",
     "Artifact",
     "ArtifactConflict",
     "ArtifactError",
@@ -33,14 +34,18 @@ __all__ = [
     "content_metadata",
     "decode_snapshot_ref",
     "encode_snapshot_ref",
+    "training_starts_of",
+    "with_training_starts",
 ]
 
-#: Files a repository adds to a materialized release; a release with nothing else holds no weights.
+#: Files a repository adds to a materialized snapshot; a snapshot with nothing else holds no weights.
 REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
 #: The stored metadata key of a flat artifact's ID; ``Artifact`` reads it into ``artifact_id`` and writes it back.
 ARTIFACT_ID_METADATA_KEY = "artifact_id"
 #: Metadata keys that describe a snapshot, not the content of the artifact it holds.
 SNAPSHOT_METADATA_KEYS = frozenset({COMPONENTS_METADATA_KEY, "scenario_commit_record"})
+#: The key of an artifact's own metadata that names its training starts (RFC #1263).
+TRAINING_STARTS_METADATA_KEY = "training_starts"
 
 
 class ArtifactError(ReefError):
@@ -135,11 +140,11 @@ class Artifact:
 
     @property
     def artifact_id(self) -> str:
-        """The artifact that this value holds: the artifact of a component view, or the only component of a release.
+        """The artifact that this value holds: the artifact of a component view, or the only component of a snapshot.
 
         New artifacts record an independent ID before publication. A component
-        view keeps that ID when another snapshot carries it. Legacy snapshots
-        without an explicit ID use their original revision-based identity.
+        view keeps that ID when another snapshot carries it, and a use through an artifact item keeps it in another
+        scenario (RFC #1218).
         A snapshot containing several components has no single artifact ID;
         callers must select a component.
         """
@@ -151,7 +156,7 @@ class Artifact:
             return materialized._artifact_id
         manifest = materialized.components
         if manifest is None:
-            return legacy_artifact_id(self.ref.revision, None)
+            raise ArtifactNotFound(f"snapshot {self.ref.revision!r} names no artifact ID")
         if not manifest.single:
             raise ArtifactNotFound(
                 f"snapshot {self.ref.revision!r} holds components {list(manifest.names)}; name one of them"
@@ -159,14 +164,14 @@ class Artifact:
         return next(iter(manifest.artifact_ids(self.ref.revision).values()))
 
     @property
-    def components(self) -> ReleaseComponents | None:
-        """The release's component manifest; ``None`` for a release published without one."""
-        return release_components(self._metadata)
+    def components(self) -> SnapshotComponents | None:
+        """The snapshot's component manifest; ``None`` for a snapshot published without one."""
+        return snapshot_components(self._metadata)
 
     def component(self, name: str) -> Artifact:
-        """The named component of this release, materialized.
+        """The named component of this snapshot, materialized.
 
-        A release without a manifest, or with one component, is that component
+        A snapshot without a manifest, or with one component, is that component
         itself. A multi-component release keeps each component in a directory
         named after it; the view carries the component's own artifact ID and metadata.
         """
@@ -184,10 +189,10 @@ class Artifact:
         directory = materialized.local_path / manifest.relative_path(name)
         # A component the base seeded nothing for has no directory in the
         # release (git keeps none for an empty tree); it is empty, not missing.
-        # Only the leaf is created, and only inside a release tree that is
-        # there: a release directory that is gone must not come back empty.
+        # Only the leaf is created, and only inside a snapshot tree that is
+        # there: a snapshot directory that is gone must not come back empty.
         if materialized.local_path.is_dir() and not directory.exists():
-            # Two readers of one release race here; the second finds the leaf made.
+            # Two readers of one snapshot race here; the second finds the leaf made.
             directory.mkdir(exist_ok=True)
         return Artifact(
             SnapshotRef(self.ref.revision, self.ref.parent_revision),
@@ -204,16 +209,18 @@ class Artifact:
         *,
         metadata: Mapping[str, object] | None = None,
         repository: ArtifactRepository | None = None,
+        artifact_id: str | None = None,
     ) -> Artifact:
-        """Create an unpublished artifact with a fresh ID that staging and publication preserve."""
+        """Create an unpublished artifact with the ID ``artifact_id``, or a fresh one, that staging and publication
+        preserve. ``artifact_id`` names an artifact that already exists elsewhere, with the same content."""
         token = uuid.uuid4().hex
         stored_metadata = dict(metadata or {})
         stored_metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
-        manifest = release_components(stored_metadata)
+        manifest = snapshot_components(stored_metadata)
         if manifest is None:
-            stored_metadata[ARTIFACT_ID_METADATA_KEY] = f"artifact:{token}"
+            stored_metadata[ARTIFACT_ID_METADATA_KEY] = artifact_id or f"artifact:{token}"
         else:
-            manifest = ReleaseComponents(
+            manifest = SnapshotComponents(
                 {
                     name: replace(entry, artifact_id=entry.artifact_id or f"artifact:{uuid.uuid4().hex}")
                     for name, entry in manifest.entries.items()
@@ -269,3 +276,28 @@ def content_metadata(snapshot: Artifact, component: str | None) -> dict[str, obj
     if component is None or manifest is None:
         return {key: value for key, value in snapshot.metadata.items() if key not in SNAPSHOT_METADATA_KEYS}
     return dict(manifest.entries[component].metadata)
+
+
+def training_starts_of(artifact: Artifact) -> tuple[str, ...]:
+    """The artifact IDs of the training starts of ``artifact`` (RFC #1263), nearest first: the training start of
+    the trainer that made it, then that start's own training starts. Empty for an artifact that no training made.
+
+    ``artifact`` is one artifact: a flat snapshot or a component view. Raise ``ValueError`` when its metadata holds
+    another value than a list of non-empty strings.
+    """
+    starts = artifact.metadata.get(TRAINING_STARTS_METADATA_KEY, [])
+    if not isinstance(starts, list) or not all(isinstance(start, str) and start for start in starts):
+        raise ValueError(f"an artifact's training starts are a list of artifact IDs, not {starts!r}")
+    return tuple(starts)
+
+
+def with_training_starts(artifact: Artifact, starts: tuple[str, ...]) -> Artifact:
+    """``artifact``, unpublished, with ``starts`` as the training starts in its own metadata."""
+    if not starts or not all(isinstance(start, str) and start for start in starts):
+        raise ValueError("training starts are a non-empty tuple of artifact IDs")
+    return Artifact(
+        artifact.ref,
+        artifact.repository,
+        local_path=artifact.local_path,
+        metadata={**artifact.storage_metadata, TRAINING_STARTS_METADATA_KEY: list(starts)},
+    )

@@ -4,7 +4,7 @@ Train with Tinker
 The optional ``tinker`` backend runs LoRA training and sampling through
 `Tinker's SDK <https://tinker-docs.thinkingmachines.ai/>`__. Reef runs on a CPU
 host and retains ownership of requests, feedback, candidate selection, and the
-versioned release chain. By default it launches no Ray cluster, no Slime and
+versioned snapshot chain. By default it launches no Ray cluster, no Slime and
 no inference engine; `Serve on inference engines`_ describes the option to
 serve the trained adapters on SGLang engines. The tested SDK interface is
 pinned to ``tinker==0.28.1``.
@@ -62,18 +62,27 @@ per request, ``max_tokens`` or ``max_completion_tokens``, ``temperature``,
 ``chat_template_kwargs.enable_thinking``. Unknown options, tool calls,
 multimodal messages, and Anthropic routes fail explicitly.
 
+A request without ``max_tokens`` or ``max_completion_tokens`` may reply up to
+the rest of the model's context window, or 1024 tokens when the service states
+no window for the model. A prompt that fills the window gets a ``400`` whose
+message starts with ``context_length_exceeded``. A thinking model's reasoning
+comes in the message's ``reasoning_content``, and its answer in ``content``.
+
 Streaming is buffered: the complete sampled response is emitted as valid
-OpenAI SSE events. It does not provide token-by-token latency. Prompt IDs come
-from the tokenizer's chat template.
+OpenAI SSE events. It does not provide token-by-token latency. A streamed
+answer carries only ``content``, so a streaming client gets no reasoning.
+Prompt IDs come from the tokenizer's chat template.
 
 Serving returns and records no training tensors. The training component
 renders each recorded call with the base model's tokenizer and
 ``training.options.chat_template_kwargs``, which must equal the chat template
 arguments of serving, for example ``{enable_thinking: false}``. It computes
 the rollout log probabilities with a forward pass at the job's start, before
-the first optimizer step. A sample that cannot render does not train, and the
-job metric ``unrenderable_samples`` counts it. A task job's own rollouts keep
-the sampled IDs and log probabilities that Tinker returns.
+the first optimizer step. A sample that cannot render, or whose tokens after
+the first are more than the model's context window, does not train, and the
+job metric ``unrenderable_samples`` counts it: Tinker refuses a whole
+optimizer step for one such sample. A task job's own rollouts keep the sampled
+IDs and log probabilities that Tinker returns.
 
 Reef's normal ``WeightTrainingRecipe`` drives the integration. The backend is
 one training component (``reef.train.tinker_backend``) and one inference
@@ -81,7 +90,7 @@ runtime (``reef.inference.tinker``). Reef submits each job's ready data to the
 component as one training job. They share nothing in process: each saved
 checkpoint carries a ``tinker-checkpoint.json`` manifest that names its
 remote training state and sampler. The inference side serves the sampler that
-a release names. Each job starts from the scenario's last saved checkpoint,
+a snapshot names. Each job starts from the scenario's last saved checkpoint,
 which ``state-dir`` keeps across restarts.
 
 ``training.options.batch-size`` (default 1) is the batch size: the samples in
@@ -127,7 +136,7 @@ group of samples, keeps the rollouts in its job directory so a resumed job
 trains the same samples, and reports each task's rewards in the job's metrics.
 The ``rollout`` job parameter sets the rollouts, the agent and the sandbox.
 Reef's serving takes no part, so another runtime, such as an inference
-component, can serve the releases.
+component, can serve the snapshots.
 
 Each job trains the Tinker loss of the objective that its recipe selected
 (`Train each kind of sample with its own method
@@ -175,11 +184,12 @@ in the originating account/project. Local disk retention does not remove remote
 files. Use Tinker's checkpoint management for remote retention, preserving all
 checkpoints referenced by Reef.
 
-Requests that are already admitted keep the sampler of the release they
+Requests that are already admitted keep the sampler of the snapshot they
 started with. Restart creates a fresh runtime-load incarnation and serves the
-active release. Train-from works: Reef imports the older artifact's manifest
-into the component, cancels the running job, and the next job starts from that
-artifact's weights and optimizer state.
+active selection. Train-from works: Reef imports the older artifact's manifest
+into the component, cancels the running job that continues the start before,
+and the next job that names no start begins from that artifact's weights and
+optimizer state.
 
 Serve on inference engines
 --------------------------
@@ -228,12 +238,12 @@ training scenarios; a scenario's new adapter replaces its own served adapter
 when no slot is free.
 
 Each scenario trains its own adapter. A job runs the optimizer steps of its data
-on Tinker from the scenario's last saved checkpoint. A release still holds only
-its manifest. When the control plane loads a release, it downloads the adapter
+on Tinker from the scenario's last saved checkpoint. A snapshot still holds only
+its manifest. When the control plane loads a snapshot, it downloads the adapter
 that the manifest's ``sampler_path`` names, as ``tinker-cookbook``'s
 ``weights.download`` does, and converts it into a PEFT adapter with
 ``weights.build_lora_adapter``. It keeps the result under
-``<state-dir>/sampler-weights/``, one directory per sampler path, so a release
+``<state-dir>/sampler-weights/``, one directory per sampler path, so a snapshot
 downloads once. A service that serves no checkpoint archives, such as Spindle,
 fails the load. The control plane loads the PEFT adapter into every engine under a
 new adapter name for the scenario. Requests reach that adapter through the
@@ -365,15 +375,15 @@ Prerequisites:
        learning-rate: 1.0e-6
 
 The default start is a reference to the base revision (`Import an artifact
-<operate.rst#import-an-artifact>`__), which a new scenario's root release
+<operate.rst#import-an-artifact>`__), which a new scenario's root snapshot
 holds; a job from it starts a new model with the base's own weights.
 
-Every release refers to its weights on Hugging Face. When Spindle saves a
+Every snapshot refers to its weights on Hugging Face. When Spindle saves a
 checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint
 Volume (``checkpoint-volume``, default ``spindle-checkpoints``). A Modal
 function then commits those weights, with the base's tokenizer, chat template
 and processor files, to ``release-repo``. Each saved checkpoint is one commit,
-which holds exactly that checkpoint's files. The release holds two files:
+which holds exactly that checkpoint's files. The snapshot holds two files:
 
 - ``hf-reference.json``, the commit with the weights. Any serving runtime can
   load it: Reef's engines (``inference.serving: engines``) download it, and a

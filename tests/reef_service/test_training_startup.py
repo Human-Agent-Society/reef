@@ -45,7 +45,7 @@ def training_config():
 
 
 def slime_runtime_config(config):
-    return SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), loss_family="")
+    return SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), default_parameters={})
 
 
 def slime_argv(config):
@@ -144,7 +144,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
             {"inference.backend": "vllm", "inference.num-gpus": "2", "inference.tensor-parallel-size": "1"},
             "vllm serves one engine",
         ),
-        ({"inference.serving": "trainer"}, "needs a training backend that serves its own releases"),
+        ({"inference.serving": "trainer"}, "needs a training backend that serves its own snapshots"),
         ({"inference.serving": "elsewhere"}, "engines, trainer, none or module:Factory"),
         ({"inference.backend": "tinker-engine"}, "unknown inference backend 'tinker-engine'"),
     ],

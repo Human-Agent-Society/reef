@@ -1,7 +1,7 @@
 """The evaluation store in the record database of a scenario, for each SQL backend.
 
-The artifact evaluation table is in the same database as the records. Each
-database operation uses one transaction of the record store. The adapters build
+The artifact evaluation table is in the same database as the commits. Each
+database operation uses one transaction of the scenario database. The adapters build
 the table with :func:`evaluation_table` and supply their namespace.
 """
 
@@ -30,7 +30,7 @@ from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
 from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation
-from reef.storage.sql_records import ScopedTable, SQLRecordStore
+from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 
 
 def evaluation_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -73,8 +73,8 @@ def evaluation_table(metadata: MetaData, *, foreign_key: str | None = None) -> T
 class SQLEvaluationStore(EvaluationStore):
     """The artifact evaluations of one scenario in its record database."""
 
-    def __init__(self, records: SQLRecordStore, table: ScopedTable) -> None:
-        self.records = records
+    def __init__(self, database: SQLScenarioDatabase, table: ScopedTable) -> None:
+        self.database = database
         self.table = table
 
     def create(
@@ -90,7 +90,7 @@ class SQLEvaluationStore(EvaluationStore):
             raise ValueError(f"an evaluation is created queued or running, not {state!r}")
         stored = StoredEvaluation(evaluation_id, owner, request, state, created_at)
         table = self.table.table
-        with self.records._transaction(write=True) as connection:
+        with self.database._transaction(write=True) as connection:
             held = connection.execute(
                 select(table.c.sequence).where(self.table.condition(), table.c.evaluation_id == evaluation_id)
             ).scalar_one_or_none()
@@ -135,6 +135,11 @@ class SQLEvaluationStore(EvaluationStore):
             error=error,
         )
 
+    def reopen(self, evaluation_id: str) -> StoredEvaluation:
+        return self.move(
+            evaluation_id, ("finished", "failed"), state="running", finished_at=None, result_json=None, error=None
+        )
+
     def move(
         self,
         evaluation_id: str,
@@ -147,7 +152,7 @@ class SQLEvaluationStore(EvaluationStore):
     ) -> StoredEvaluation:
         """Move an evaluation in one of ``sources`` to ``state`` in one transaction, and return it as stored."""
         table = self.table.table
-        with self.records._transaction(write=True) as connection:
+        with self.database._transaction(write=True) as connection:
             row = (
                 connection.execute(select(table).where(self.table.condition(), table.c.evaluation_id == evaluation_id))
                 .mappings()
@@ -165,7 +170,7 @@ class SQLEvaluationStore(EvaluationStore):
 
     def get(self, evaluation_id: str) -> StoredEvaluation | None:
         table = self.table.table
-        with self.records._transaction(write=False) as connection:
+        with self.database._transaction(write=False) as connection:
             row = (
                 connection.execute(select(table).where(self.table.condition(), table.c.evaluation_id == evaluation_id))
                 .mappings()
@@ -177,7 +182,7 @@ class SQLEvaluationStore(EvaluationStore):
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
             raise ValueError("limit must be a positive integer")
         table = self.table.table
-        with self.records._transaction(write=False) as connection:
+        with self.database._transaction(write=False) as connection:
             rows = (
                 connection.execute(
                     select(table)

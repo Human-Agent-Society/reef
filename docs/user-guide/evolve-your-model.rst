@@ -10,7 +10,7 @@ engines load its weights from files.
 +--------------------------+-----------------------------------------------+
 | Process                  | Owns                                          |
 +==========================+===============================================+
-| Reef HTTP service        | requests, records, the release chain, and the |
+| Reef HTTP service        | requests, records, the snapshot chain, and the|
 |                          | Slime training component, which queues the    |
 |                          | jobs and starts their drivers                 |
 +--------------------------+-----------------------------------------------+
@@ -19,9 +19,9 @@ engines load its weights from files.
 |                          | and saves the job's own. Without a serving    |
 |                          | session, it also reserves the job's GPUs      |
 +--------------------------+-----------------------------------------------+
-| Slime serving session    | the rollout engines of task jobs, their       |
-| (from the first task job | router and the training GPUs, across jobs     |
-| until the component      |                                               |
+| Slime serving session    | the rollout engines of task jobs and dataset  |
+| (from the first such job | jobs, their router and the training GPUs,     |
+| until the component      | across jobs                                   |
 | closes)                  |                                               |
 +--------------------------+-----------------------------------------------+
 | Inference component      | SGLang or vLLM engines on their own GPUs,     |
@@ -195,7 +195,7 @@ Megatron requires ``save-interval`` whenever ``save`` is set, so the examples
 keep it.
 
 Training is linear: each job continues from the workers' latest checkpoint,
-whether or not Reef selected it. The workers cannot load a published release,
+whether or not Reef selected it. The workers cannot load a published snapshot,
 so Reef refuses a ``train-from`` on a Slime scenario. Activating an older
 artifact still works: it changes what serves, not where training continues.
 Under the default rule, Reef activates the next checkpoint again; `Go back to
@@ -227,7 +227,7 @@ weights. Add these native flags to ``training.options`` (without leading
    --megatron-lora-rank=32 --megatron-lora-alpha=32
    --megatron-lora-target-modules linear_qkv linear_proj linear_fc1 linear_fc2
 
-Each release then holds the PEFT adapter alone, and the engines load it under
+Each snapshot then holds the PEFT adapter alone, and the engines load it under
 a new adapter name. The engines start with the adapter's rank and target
 modules. ``inference.max-loaded-adapters`` (default 1) sizes their adapter
 table: the adapters they keep resident. With 1, the engines unload the
@@ -238,7 +238,7 @@ serves full weights only. To train one adapter per scenario on one base
 model, use `Tinker with inference engines <tinker.rst#serve-on-inference-engines>`__.
 
 An adapter the scenario did not train, such as one from an offline SFT run,
-is admitted the same way. It enters the release chain only if
+is admitted the same way. It enters the snapshot chain only if
 ``adapter_config.json`` declares a
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.
@@ -246,10 +246,10 @@ engine holds.
 What a published adapter contains
 ---------------------------------
 
-Every published LoRA release holds the adapter alone in its ``adapter/``
+Every published LoRA artifact holds the adapter alone in its ``adapter/``
 directory, never a merged or full-model checkpoint. This is what makes saving every update
 affordable: a rank-32 adapter is a few megabytes where the base model is
-gigabytes. Thus the release chain can keep every revision.
+gigabytes. Thus the snapshot chain can keep every revision.
 
 .. code:: text
 
@@ -301,7 +301,7 @@ Run Harbor tasks and report
 
 .. code-block:: bash
 
-   python -m reef.harness.tasks.rollouts \
+   python -m reef.harness.harbor.rollouts \
      --reef-url http://127.0.0.1:8900 --scenario my-agent --model qwen3.8:27b \
      --manifest tasks/manifest.json --tasks-root tasks --side train
 

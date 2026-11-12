@@ -28,8 +28,8 @@ It reports these values for every scenario:
 - the step counter and the latest committed step outcome
 - the artifact that answers the scenario's requests (``served_artifact_id``)
 - whether a job's data is waiting, and the processor's state
-- whether inference is admitted or paused while a release loads
-- for a weight-training scenario, its running training job (``training_job``) and the number of jobs that ended, finished or failed (``finished_jobs``)
+- whether inference is admitted or paused while a snapshot loads
+- for a weight-training scenario, its running training jobs (``training_jobs``) and the number of jobs that ended, finished or failed (``finished_jobs``)
 
 The committed outcome includes the recipe-owned metrics. You can therefore tell a skipped or rejected update from one that is still running. Look here first when requests keep being served by an old version.
 
@@ -45,9 +45,9 @@ Read the artifacts
 
 An artifact is one immutable output, such as a checkpoint's weights or a harness tree. Its ``artifact_id`` is the only identifier callers need. Keep the ID as an opaque string: do not parse a Git revision or component name from it.
 
-Training, imports and harness syncs make artifacts. The list is newest first, with one row per artifact. ``active`` marks the selected artifact of each component. ``activated`` marks artifacts that have served as active. ``served`` marks artifacts served beside the active selection (`Serve an artifact beside the active selection`_). The ``creation`` rows hold the starting artifacts (`Starting artifacts`_). Their ``source`` says where they came from. See `Artifacts <../reference/http-api.rst#artifacts>`__ for the fields.
+Training, imports and harness syncs make artifacts. The list is newest first, with one row per artifact. ``active`` marks the selected artifact of each component. ``activated`` marks artifacts that have served as active. ``served`` marks artifacts that the scenario serves beside the active artifact (`Set what a scenario serves`_). The ``creation`` rows hold the starting artifacts (`Starting artifacts`_). Their ``source`` says where they came from. See `Artifacts <../reference/http-api.rst#artifacts>`__ for the fields.
 
-A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations, train-from operations and serves. ``GET /reef/scenarios/{scenario}/operations`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
+A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations, train-from operations and changes to the served artifacts. ``GET /reef/scenarios/{scenario}/operations`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
 
 For harness scenarios, ``GET /reef/harness/artifacts`` lists the harness artifacts. Pull a listed tree with ``GET /reef/harness?artifact_id=<id>``. An artifact waiting for activation has ``active: false`` and ``activated: false``. The older ``/reef/harness/artifacts`` route remains for clients that need its step pages.
 
@@ -71,12 +71,12 @@ The creation row's ``source`` is ``{"kind": "default", "inputs": {...}}``, with 
 
 A new trainer starts its first job from its starting artifact. A train-from or the trainer's own training step changes the start later (`Train from an artifact`_). Activate that artifact to serve it again, or train from it to start training again from it; the ``slime`` backend refuses train-from, as it refuses every artifact.
 
-A change of the configuration does not change an existing scenario. It keeps its stored starting artifacts, and a new scenario gets the new default start. A start that no longer fits the configuration fails only its own scenario: the runtime refuses to activate it, or the training component refuses to start from it, with that component's message. The ``slime`` backend trains only the weights that its workers load from ``inference.model-path``. It refuses to create a scenario from an artifact item. A scenario whose starting artifact came from other inputs does not load, and the error names both inputs. Reef refuses a scenario that an earlier Reef stored with a shared base release (``reef-scenario/4`` metadata). Create such a scenario again.
+A change of the configuration does not change an existing scenario. It keeps its stored starting artifacts, and a new scenario gets the new default start. A start that no longer fits the configuration fails only its own scenario: the runtime refuses to activate it, or the training component refuses to start from it, with that component's message. The ``slime`` backend trains only the weights that its workers load from ``inference.model-path``. It refuses to create a scenario from an artifact item. A scenario whose starting artifact came from other inputs does not load, and the error names both inputs. Reef refuses a scenario that an earlier Reef stored with a shared base snapshot (``reef-scenario/4`` metadata). Create such a scenario again.
 
 Choose a scenario's start
 -------------------------
 
-The default inference routes answer from the scenario's active selection. No request header keeps a client on an older release. To keep an older artifact answering, serve it beside the active selection (`Serve an artifact beside the active selection`_).
+The default inference routes answer from the scenario's active selection. No request header keeps a client on an older snapshot. To keep an older artifact answering, serve it beside the active artifact (`Set what a scenario serves`_).
 
 A new scenario uses the default starting artifacts. To start it from another artifact, name an artifact item of the scenario's owner in ``artifact_id`` when you create the scenario:
 
@@ -87,7 +87,7 @@ A new scenario uses the default starting artifacts. To start it from another art
      -d '{"name": "code-repair-2", "owner": "acme", "artifact_id": "code-repair/<artifact_id>"}' \
      "$REEF_URL/reef/scenarios"
 
-The owner's artifact library holds the item ``<scenario>/<artifact_id>`` for each artifact that a scenario of the owner lists. It also holds the artifact items that you stored, such as an upload to S3 or a Hugging Face snapshot (`Data items <../reference/http-api.rst#data-items>`__). Reef reads the item's files and checks them as `Import an artifact`_ describes. Then it stores them, by reference or as a copy, as the component's starting artifact. The item is thus the active artifact and the training start of its component. Add ``component`` when the scenario has several components; each other component holds its default start. The answer's ``components`` maps each component to its starting ``artifact_id``. A scenario with one component also returns that ID as ``artifact_id``.
+The owner's artifact library holds the item ``<scenario>/<artifact_id>`` for each artifact that a scenario of the owner made. An artifact from an item keeps its artifact ID in each scenario, and it gets no second item. The library also holds the artifact items that you stored, such as an upload to S3 or a Hugging Face snapshot (`Data items <../reference/http-api.rst#data-items>`__). Reef reads the item's files and checks them as `Import an artifact`_ describes. Then it stores them, by reference or as a copy, as the component's starting artifact. The item is thus the active artifact and the training start of its component. Add ``component`` when the scenario has several components; each other component holds its default start. The answer's ``components`` maps each component to its starting ``artifact_id``. A scenario with one component also returns that ID as ``artifact_id``.
 
 Before registration, Reef checks that every training component accepts its starting artifact as a training start. A composite with Slime refuses an item start even when the item fills another component. Use the default start for that composite.
 
@@ -95,7 +95,7 @@ When Reef cannot read the item, or a layout or training-start check refuses it, 
 
 A report or a record import creates a missing scenario from the default start. A request header does not select the starting artifact. An inference response identifies the answering artifact with ``x-reef-artifact-id``. An inference request never creates a scenario.
 
-To pull a specific harness artifact, add ``?artifact_id=<id>`` to the harness manifest route. To serve an earlier artifact again, activate it as `Activate an artifact`_ describes.
+To pull a specific harness artifact, add ``?artifact_id=<id>`` to the harness manifest route. To serve an earlier artifact again, make it the active artifact as `Set what a scenario serves`_ describes.
 
 Import an artifact
 ------------------
@@ -119,30 +119,72 @@ To import model weights from Hugging Face without a copy, name a full commit SHA
 
 A harness sync is different. ``POST /reef/harness/import`` merges the files that a person's session changed onto the active selection. It commits the result as a ``sync`` row. In that operation the new artifact becomes the active selection and training start of its component (`Evolve your harness <evolve-your-harness.rst>`__).
 
-Activate an artifact
---------------------
+Set what a scenario serves
+--------------------------
 
-The scenario keeps a mapping from each component to its selected ``artifact_id``. Harness routes read the selected tree. Inference serves the last selection that completed startup. To select another artifact, activate it:
+A scenario serves one or more artifacts of each component. One of them is the active artifact: harness routes read the active tree, and the default inference routes answer from the active artifact that completed startup. To change what the scenario serves, send the ``served`` setting, which maps artifact IDs of one component to weights:
 
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"artifact_id": "<id>"}' \
-     "$REEF_URL/reef/scenarios/code-repair/activate"
+     -d '{"served": {"<id>": 100}}' \
+     "$REEF_URL/reef/scenarios/code-repair/update"
 
-The target is any row of the artifact list. Reef updates the component selection atomically and appends an ``activate`` operation. It creates no artifact or repository revision. Inference then loads the selection in the background.
+The weights are integers from 0 to 100 that sum to 100. Afterwards the scenario serves exactly the artifacts of the mapping. The artifact with the largest weight is the active artifact. These examples use the artifacts ``a`` and ``b`` of one component, where ``a`` is active before the request:
 
-For example, changing ``harness`` from artifact B to C changes ``{weights: A, harness: B}`` to ``{weights: A, harness: C}``. The weights keep artifact A and its identity. The operation stores the complete selection, so recovery restores the same combination.
+.. list-table::
+   :header-rows: 1
 
-The response accepts the selection. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using the new artifact. Repeating activation retries a failed startup at once. The answer contains ``scenario``, ``component`` and the selected ``artifact_id``. Leave out ``component`` when the scenario has one component. A scenario of several components requires it. An unknown component is HTTP 400. History is not rewritten, and the step counter keeps increasing. Activation never changes a trainer's training start.
+   * - Goal
+     - ``served``
+     - Result
+   * - Activate an artifact
+     - ``{"b": 100}``
+     - ``b`` becomes the active artifact, and Reef stops every other served artifact.
+   * - Split the traffic
+     - ``{"a": 95, "b": 5}``
+     - ``b`` answers 5% of the model requests. One conversation stays on one artifact.
+   * - Serve an artifact beside the active one
+     - ``{"a": 100, "b": 0}``
+     - Reef loads ``b``, which answers only the requests that name it.
+   * - Stop an artifact
+     - ``{"a": 100}``
+     - Reef stops serving ``b``.
+   * - Serve nothing
+     - ``{}``
+     - Reef stops every engine route of the scenario. Its inference requests answer HTTP 404.
 
-A full-weight serving runtime that activates its starting artifact after a checkpoint loads the starting artifact's files from the artifact repository. `HTTP API <../reference/http-api.rst#activate-an-artifact>`__ lists the answers and status codes.
+Each ID is any row of the artifact list. Leave out ``component`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` beside ``served``, and an unknown component is HTTP 400. The answer contains ``scenario`` and the ``served`` mapping. ``GET /reef/scenarios/{scenario}/settings`` returns ``served`` for each component.
+
+An empty mapping, ``{"served": {}}`` without ``component``, makes the whole scenario serve nothing. Reef then starts no engine for it, and training still runs. ``POST /reef/scenarios`` with ``"serves": false`` creates a scenario in this state. The scenario serves again when ``served`` names an artifact (`Serve nothing <../reference/http-api.rst#serve-nothing>`__).
+
+The response accepts the mapping. Inference then loads the artifacts in the background. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using a new active artifact. Repeating the request retries a failed startup at once.
+
+Reef appends an ``activate``, ``serve`` or ``stop_serving`` operation for each artifact that changes. It creates no artifact or repository revision. For example, changing the active ``harness`` from artifact B to C changes ``{weights: A, harness: B}`` to ``{weights: A, harness: C}``. The weights keep artifact A and its identity. Each operation stores the complete selection, so recovery restores the same combination. History is not rewritten, and the step counter keeps increasing. The request never changes a trainer's training start.
+
+**Traffic split.** With more than one weight above 0, Reef divides the model requests that name no artifact by the weights. Reef starts each artifact of the mapping that does not serve yet, and the active artifact answers its requests until it has started. `Traffic split <../reference/http-api.rst#traffic-split>`__ describes how Reef keeps a conversation on one artifact and which requests do not use the weights.
+
+**One artifact's own URL.** Each served artifact also answers at its own URL. Use weight 0 to keep an older artifact answering while a newer one is active, or to try a new artifact before it is active:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "reef", "messages": [{"role": "user", "content": "hi"}]}' \
+     "$REEF_URL/reef/scenarios/code-repair/artifacts/<id>/v1/chat/completions"
+
+A call to the artifact's URL is recorded with the ``artifact_id`` that answered. Choose which clients call each URL, for example with a gateway. The served artifacts survive a restart.
+
+**Runtime limits.** To serve several artifacts, the runtime must answer each call from the artifact that the call names. A Tinker scenario can serve any of its artifacts together. A runtime that loads weights into engines serves one artifact, so Reef refuses a mapping of several artifacts there. A full-weight serving runtime that makes its starting artifact active after a checkpoint loads the starting artifact's files from the artifact repository. `Set what a scenario serves <../reference/http-api.rst#set-what-a-scenario-serves>`__ in the HTTP API lists the answers and status codes.
+
+Activation rule
+---------------
 
 The deployment's `activation section <../reference/configuration.rst#the-activation-section>`__ names the rule that decides whether Reef activates each new artifact:
 
 - ``always``, the default, activates each new artifact when the training step makes it. Its ``review_kinds`` holds back a harness tree that changes one of the listed tree kinds.
-- ``never`` makes each new artifact but does not activate it. A person activates it.
+- ``never`` makes each new artifact but does not activate it. A person activates it with ``served``.
 - ``evaluated`` activates an artifact once an evaluation of it reaches ``min_mean_score``.
 
 A scenario can select one of these rules for itself with ``POST /reef/scenarios/{scenario}/update`` and ``{"activation": {"module": "never"}}``. Send ``"activation": null`` to follow the deployment's rule again. ``GET /reef/scenarios/{scenario}/settings`` reads back the scenario's rule and the rule that applies (`Scenario updates <../reference/http-api.rst#scenario-updates>`__).
@@ -152,7 +194,7 @@ An artifact that the rule does not activate still becomes the start of the next 
 Train from an artifact
 ----------------------
 
-Each trainer continues from its own newest output: a weight trainer from its newest saved checkpoint, a harness trainer from the tree it kept. That artifact is the trainer's training start. To make a trainer continue from another artifact, set its training start:
+Each trainer continues from its own newest output: a weight trainer from its newest saved checkpoint, a harness trainer from the tree it kept. That artifact is the trainer's training start. A job whose request names its own start with ``train_from`` is the exception: it does not move the training start. To make a trainer continue from another artifact, set its training start:
 
 .. code:: bash
 
@@ -161,7 +203,7 @@ Each trainer continues from its own newest output: a weight trainer from its new
      -d '{"artifact_id": "<id>"}' \
      "$REEF_URL/reef/scenarios/code-repair/train-from"
 
-Reef cancels the running job. The next training job, or the next evolve step, starts from the artifact. Train-from never changes the active selection. Leave out ``"component"`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` in the body, and an unknown component is HTTP 400. A weight artifact without optimizer state, such as a starting artifact made from the default configuration, starts training with a new optimizer state. Each train-from also starts a new run in experiment tracking.
+Reef cancels the running job that continues the training start; a job with its own start keeps running. The next training job that names no start, or the next evolve step, starts from the artifact. One training request can also name its own start with ``train_from`` (see `Manual training <../reference/http-api.rst#manual-training>`__). Train-from never changes the active selection. Leave out ``"component"`` when the scenario has one component. A scenario of several components requires ``"component": "<name>"`` in the body, and an unknown component is HTTP 400. A weight artifact without optimizer state, such as a starting artifact made from the default configuration, starts training with a new optimizer state. Each train-from also starts a new run in experiment tracking.
 
 Whether a trainer can start from an artifact depends on the backend:
 
@@ -175,31 +217,6 @@ Reef cannot move the training of a Slime scenario back to an earlier checkpoint,
 - Point Slime at the old checkpoint with its own options in ``training.options``: ``load`` names the old ``save`` directory, and ``ckpt-step`` names the saved rollout.
 
 The new scenario's first job continues from the weights that the workers loaded. An existing scenario cannot move to the new deployment: its committed start names a checkpoint of the old one, so the Slime component refuses its jobs.
-
-Serve an artifact beside the active selection
----------------------------------------------
-
-A scenario can serve other artifacts beside its active selection, each at its own URL. Use it to:
-
-- keep the current artifact answering while you move traffic to a new one;
-- try a new artifact before it is active.
-
-
-.. code:: bash
-
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"artifact_id": "<id>"}' \
-     "$REEF_URL/reef/scenarios/code-repair/serve"
-
-   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/json" \
-     -d '{"model": "reef", "messages": [{"role": "user", "content": "hi"}]}' \
-     "$REEF_URL/reef/scenarios/code-repair/artifacts/<id>/v1/chat/completions"
-
-The default routes keep answering from the active selection. A call to the artifact's URL is recorded with the ``artifact_id`` that answered. Serving creates no artifact or repository revision. An activation does not change what is served, so serve the active artifact before you activate another one to keep it answering. ``POST /reef/scenarios/{scenario}/stop-serving`` with the same body ends the serve. Both survive a restart.
-
-Serving another artifact leaves each trainer's start unchanged. Choose which clients call each URL, for example with a gateway. The runtime must answer each call from the artifact that the call names. A Tinker scenario can serve any of its artifacts. A runtime that loads weights into engines refuses a serve. `Serve an artifact beside the active selection <../reference/http-api.rst#serve-an-artifact-beside-the-active-selection>`__ in the HTTP API lists the answers and status codes.
 
 Go back to an older artifact
 ----------------------------
@@ -357,7 +374,7 @@ work, and inference starts the artifact.
      - data items, record items, artifact items, data sync requests
    * - ``harness``
      - Serves the routes that a harness client calls: the active tree, the
-       harness releases, the import of a person's files, and the adapters
+       harness artifacts, the import of a person's files, and the adapters
      - harness import requests
 
 Start each service with the same config and ``--component``:
@@ -395,7 +412,7 @@ fetches.
 coding agent and the evaluation runs. Install the adapter's binary and the
 sandbox where the training service runs. The training service writes the step
 records and the running step's progress under ``evolution.state_dir``. Control
-reads them for the release and request pages, so both must reach that
+reads them for the snapshot and request pages, so both must reach that
 directory, as they reach the artifact backend.
 
 .. _Harness clients:
@@ -403,13 +420,13 @@ directory, as they reach the artifact backend.
 **Harness clients.** Send ``GET /reef/harness``, ``GET /reef/harness/artifacts``,
 ``POST /reef/harness/import`` and ``GET /reef/harness/adapters`` to the harness
 service. It reads the commit history and the artifact backend, and loads a
-scenario without activating it. It writes no release: an import goes to control
+scenario without activating it. It writes no snapshot: an import goes to control
 as a ``harness_sync`` request, control merges the files onto the newest active
 tree and commits the sync, and the harness service answers with control's
 answer. It waits up to 30 seconds for control, and answers ``503`` when control
 did not commit the import in that time; the import stays queued, and the same
 files sent again wait for the same request. The harness service needs no control
-lease, so you can run several replicas of it behind one address. The release and
+lease, so you can run several replicas of it behind one address. The snapshot and
 request pages, the step records and ``/reef/status`` stay with control. Set
 ``harness.inference_url`` to the address at which clients reach the inference
 service: a client's layer then sends its model calls there, not to the harness
@@ -447,7 +464,7 @@ its production engine.
 scenario in ``x-reef-scenario``. The inference service answers
 ``/v1/chat/completions``, ``/v1/responses``, ``/v1/messages``,
 ``/v1/messages/count_tokens``, the evaluation routes and the routes of an
-artifact served beside the active selection. A one-process ``reef serve`` answers
+artifact that the scenario serves. A one-process ``reef serve`` answers
 the same routes in the same way, in control's process.
 
 Send ``GET /reef/scenarios/{scenario}/inference/status`` to inference to read
@@ -456,9 +473,9 @@ the selected artifact's startup result. It reports ``pending``, ``starting``,
 <../reference/http-api.rst#startup-status>`__ for the response and retry rules.
 
 For each request, the inference service reads the scenario's rows in
-``served_models``. The request's ``model`` selects the row of an artifact
-served beside the active selection when it names one; any other ``model`` selects
-the active row. The service sends the request to the engine at the row's URL,
+``served_models``. The request's ``model`` selects the row of a served
+artifact when it names one; any other ``model`` selects the active row, or the
+row that a traffic split gives the request. The service sends the request to the engine at the row's URL,
 under the row's model name. The only credential that it sends is the
 deployment's provider key (``inference.upstream-api-key``), when one is set.
 No artifact changes the request on its way to the engine. The service
@@ -473,8 +490,11 @@ inference service never creates a scenario: create it first with
   is pending or starting and no route can serve it. A failed startup returns
   ``503`` with ``inference_start_failed`` until a retry of the startup
   succeeds.
-* ``502`` when the engine fails or cannot be reached, and ``504`` when it does
-  not answer within ``inference.timeout-s``.
+* the engine's own ``4xx`` and message when the engine refuses the request, for
+  example a prompt longer than the model's context. An agent reads it to end or
+  compact its run.
+* ``502`` when the engine fails otherwise or cannot be reached, and ``504`` when
+  it does not answer within ``inference.timeout-s``.
 * ``409`` when the engine answers with another model name or aborts the
   request twice. The service reads the row again and retries once, for
   example during a change of the served model.
@@ -498,8 +518,8 @@ queue after its work lease expires.
 A failed startup does not stay failed, because the selection still states what
 the scenario serves. Control queues the startup again 60 seconds after it
 failed. After each automatic retry that fails, control doubles the wait, up to
-one hour. To retry at once, activate the active artifact again
-(``POST /reef/scenarios/{scenario}/activate``). This also sets the wait back to
+one hour. To retry at once, send the ``served`` mapping of the scenario again
+(``POST /reef/scenarios/{scenario}/update``). This also sets the wait back to
 60 seconds. The service that fails a work item writes one warning to its log,
 with the queue, the item ID, the scenario and the error.
 
@@ -587,13 +607,6 @@ scenario gets a new identifier. The same retention settings apply across all
 active and archived stores in the configured schema, while preserving active
 records and retry hashes.
 
-When you upgrade, Reef imports the model configuration files that earlier
-versions kept in ``agent_record_dir`` into the storage backend. Reef then moves
-the imported files to ``agent_record_dir/archived/imported-*``. Reef does not
-read the ``*.commits.jsonl`` files of earlier versions. A deployment upgraded
-from such a version recovers each scenario from its last checkpointed release,
-as after a lost commit history.
-
 A change from one backend to another does not move records or commit history.
 Use a new deployment directory or schema for a new backend.
 
@@ -624,7 +637,7 @@ With all backends, each scenario needs one Reef writer.
 Choose the artifact backend
 ---------------------------
 
-The artifact backend stores the releases of each scenario. The default,
+The artifact backend stores the snapshots of each scenario. The default,
 ``git_lfs``, keeps them in the Git LFS repository that
 ``storage.artifact-repository`` names. Git and Git LFS must be installed.
 
@@ -648,12 +661,12 @@ and does not need its tools. Do not set ``storage.artifact-repository``: Reef
 refuses that configuration, because the plugin reads its own config.
 
 A change from one backend to another does not move releases. Keep the old
-store readable while scenarios refer to its releases, or use a new deployment.
+store readable while scenarios refer to its snapshots, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
 
 To keep the Git LFS repository on Hugging Face, give the built-in factory with
-its options. Reef still reads every release from its local clone, and pushes
-each release to the Hub as it publishes it:
+its options. Reef still reads every snapshot from its local clone, and pushes
+each snapshot to the Hub as it publishes it:
 
 .. code-block:: yaml
 
@@ -665,7 +678,7 @@ each release to the Hub as it publishes it:
          refs: branches-and-tags
          token_env: HF_TOKEN
 
-- ``refs: branches-and-tags`` keeps each release on a tag
+- ``refs: branches-and-tags`` keeps each snapshot on a tag
   ``reef/releases/<revision>``, and the refs that move on branches under
   ``reef/``, because the Hub accepts no other refs. The default, ``reef``,
   keeps every ref under ``refs/reef/``. A repository keeps the layout it
@@ -754,12 +767,16 @@ segment files instead. A segment is one JSON Lines file per owner. The
 database keeps the place of each line, and a read fetches only the lines that
 it needs.
 
-- The content of each new trajectory item goes to a segment when the item is
-  created. One ``create`` call writes one segment.
+- A write of new trajectory items with at least 1 MiB of content, such as an
+  upload, goes to one segment when the items are created.
 - Every 5 minutes, the data service moves the content that the database still
-  holds into segments: the messages of record items, and trajectory items from
-  before you set the backend. It moves an owner's content when at least 64 MiB
-  of it waits, oldest first, in segments of at least 64 MiB.
+  holds into segments: the messages of record items, the trajectory items of
+  smaller writes, and trajectory items from before you set the backend. It
+  moves an owner's content when at least 64 MiB of it waits, oldest first, in
+  segments of at least 64 MiB.
+- In the same run, the data service merges segments of less than 1 MiB into
+  segments of at least 64 MiB, when an owner has at least 64 MiB in them. A
+  read of many items then sends fewer requests to the segment store.
 - A segment that no item uses for 24 hours is deleted.
 
 ``local`` keeps the segments in ``<agent-record-dir>/segments``. Only the
@@ -875,7 +892,7 @@ by default.
      max-scenarios: 1000
 
 An unload keeps all durable state: the records, the commit history, the settings
-and the releases. The next request to the scenario loads it again, as after a
+and the snapshots. The next request to the scenario loads it again, as after a
 restart. Counters in memory, such as the operation metrics, start again from
 zero.
 
@@ -916,24 +933,21 @@ Reef makes these calls one at a time, so the methods must return quickly.
 ``ScenarioLimits``. If you set ``scenario-admission``, do not set them: Reef
 refuses that configuration.
 
-Upgrade to commit records without storage locations
----------------------------------------------------
+Upgrade from a Reef that wrote older formats
+--------------------------------------------
 
-This Reef writes ``reef-commit/8`` records. These records hold artifact IDs, and
-no storage location. Older records stay as they are, and Reef still reads them.
-Reef also stops sending ``release_id`` and ``parent_release_id`` in harness
-answers.
+This Reef reads only the formats that it writes: ``reef-commit/8`` commit
+records, ``reef-scenario/7`` scenario metadata, and the current tables of the
+record database, the data store and the coordination store. It does not
+upgrade a store that an older Reef wrote.
 
-#. Stop every Reef process that writes to the deployment.
-#. Back up the deployment (see `Back up a deployment`_).
-#. Upgrade Reef, and upgrade ``reef-client`` on each machine with an install.
-   An older ``reef-client`` fails on the new harness answers. A new one reads
-   an existing install, and updates the install at its next sync.
-#. Start Reef. It binds the artifact IDs of older records when it opens each
-   scenario. This step can run again after a stop.
+A scenario with an older commit record or older scenario metadata does not
+load, and its error names the format. A PostgreSQL record schema of another
+version stops the start with ``unsupported PostgreSQL record schema version``.
+Reef does not change or delete older data.
 
-The first new record is the point of no return. An older Reef cannot read it,
-so a rollback needs the backup from step 2.
+To move to this Reef from one that wrote older formats, use a new deployment
+directory and, for PostgreSQL, a new schema. Then create the scenarios again.
 
 Back up a deployment
 --------------------

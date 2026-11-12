@@ -18,15 +18,18 @@ from typing import Any
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
+from reef.evaluation.trials import TrialObserver
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
+from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
 from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
-from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.segments import SegmentStore
+from reef.storage.sql_setup import postgres_url, validate_postgres_schema
 from reef.storage.tasks import TaskFileStore
+from reef.train.manager import TrainingManager
 
 
 @dataclass(frozen=True)
@@ -37,11 +40,18 @@ class ServiceConfig:
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
     ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
+
+    ``routing_manifest`` is None, which turns routing off, or a non-empty manifest path; the public reader
+    takes a blank value as not supplied, and nothing checks the file when the value is made.
+    ``routing_deployment`` holds the router's settings; loading a configuration parses and checks
+    them even when routing is off, but only a routed deployment acts on them. Starting managed routing also
+    needs a deployment ID, a record-only recipe and a loopback host; the controller and app assembly check
+    those when they start, not here.
     """
 
     recipe: str = config_option(
         public_path=("recipe", "implementation"),
-        help="Recipe implementation or named deployment preset (the launcher reserves --recipe).",
+        help="Recipe implementation or named deployment preset.",
     )
     host: str = config_option("0.0.0.0", public_path=("reef", "host"), help="HTTP bind address.")
     port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")
@@ -69,6 +79,12 @@ class ServiceConfig:
     console_origins: tuple[str, ...] = config_option(
         (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
     )
+    routing_manifest: str | None = config_option(
+        None,
+        public_path=("reef", "routing_manifest"),
+        help="External-target routing manifest for a record-only recipe; see reef.routing_deployment.lifecycle.",
+    )
+    routing_deployment: RoutingDeploymentSettings = field(default_factory=RoutingDeploymentSettings)
     ray_address: str | None = config_option(None, public_path=("training", "ray_address"), help="Ray cluster address.")
     ray_namespace: str = config_option(
         "reef", public_path=("training", "ray_namespace"), help="Ray namespace of the training component."
@@ -109,7 +125,7 @@ class ServiceConfig:
         None,
         public_path=("inference", "serving"),
         help=(
-            "How a weight-training deployment serves its releases: engines (Reef's engines on an inference "
+            "How a weight-training deployment serves its snapshots: engines (Reef's engines on an inference "
             "component), trainer (the training backend's own serving, such as Tinker's sampler), none, or a "
             "module:Factory runtime factory. Default: engines when engine settings are given, else the "
             "training backend's default."
@@ -124,13 +140,13 @@ class ServiceConfig:
     inference_max_loaded_adapters: int = config_option(
         1,
         public_path=("inference", "max_loaded_adapters"),
-        help="Adapters the serving engines keep resident when the releases are PEFT adapters.",
+        help="Adapters the serving engines keep resident when the snapshots are PEFT adapters.",
     )
     inference_prefix_sharing: bool = config_option(
         False,
         public_path=("inference", "prefix_sharing"),
         help=(
-            "Share prefix-cache entries between requests. Each release load then retracts the requests in "
+            "Share prefix-cache entries between requests. Each snapshot load then retracts the requests in "
             "flight, which prefill again on the new weights."
         ),
     )
@@ -187,6 +203,18 @@ class ServiceConfig:
     train_timeout_s: float | None = config_option(
         None, public_path=("training", "timeout_s"), help="Training request timeout in seconds."
     )
+    #: The jobs of one training component that one process of the training service runs at the same time.
+    training_max_jobs: int = config_option(
+        1,
+        public_path=("training", "max_jobs"),
+        help="The training jobs that one process of the training service runs at once for each training component.",
+    )
+    #: Unset, or a ``TrainingManager`` plugin: ``package.module:ClassName`` or module and config.
+    training_manager: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("training", "manager"),
+        help="A TrainingManager plugin reference: it decides what the scenarios in auto mode train.",
+    )
     inference_handler_factory: str | None = config_option(
         None, public_path=("inference", "handler_factory"), help="Dotted InferenceHandler subclass with from_config()."
     )
@@ -195,6 +223,19 @@ class ServiceConfig:
         metadata=config_metadata(
             "Inference request handler options as a JSON/YAML object.", public_path=("inference", "handler_config")
         ),
+    )
+    inference_retry_initial_s: float = config_option(
+        0.05,
+        public_path=("inference", "retry_initial_s"),
+        help="Initial retry delay for a routed request, in seconds.",
+    )
+    inference_retry_max_s: float = config_option(
+        1.0, public_path=("inference", "retry_max_s"), help="Maximum retry delay for a routed request, in seconds."
+    )
+    inference_retry_timeout_s: float = config_option(
+        300.0,
+        public_path=("inference", "retry_timeout_s"),
+        help="Retry deadline for a routed request, in seconds. Defaults to the inference timeout.",
     )
     #: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin: ``package.module:ClassName`` or module
     #: and config.
@@ -219,6 +260,25 @@ class ServiceConfig:
         (),
         public_path=("storage", "artifact_sources"),
         help="Artifact source reader plugin references, as a JSON/YAML list, beside the hf, file and s3 readers.",
+    )
+    #: The address at which a task's container reaches this host, for an evaluation with a harness tree.
+    evaluation_agent_host: str = config_option(
+        "host.docker.internal",
+        public_path=("evaluation", "agent_host"),
+        help="The address at which a task's container reaches this host, for an evaluation with a harness tree.",
+    )
+    #: The rollouts that one process of the evaluation service runs at once, across evaluations. Each one holds a
+    #: sandbox of its task.
+    evaluation_max_sandboxes: int = config_option(
+        4,
+        public_path=("evaluation", "max_sandboxes"),
+        help="The task sandboxes that one process of the evaluation service holds at once: one for each rollout.",
+    )
+    #: Unset, or a ``TrialObserver`` plugin: ``package.module:ClassName`` or module and config.
+    evaluation_trial_observer: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("evaluation", "trial_observer"),
+        help="A TrialObserver plugin reference that reads each evaluation trial before its directory is removed.",
     )
     agent_record_dir: str = config_option(
         ".reef/agent-record", public_path=("storage", "agent_record_dir"), help="Agent record directory."
@@ -245,11 +305,15 @@ class ServiceConfig:
         public_path=("storage", "coordination_backend"),
         help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
     )
-    #: How many times a worker takes one work item before the item fails, for every queue.
+    #: How many times a worker takes one work item before the item fails, for every queue. An attempt that ends
+    #: because its worker stops, such as at a restart of the service, does not count.
     work_max_attempts: int = config_option(
         3,
         public_path=("storage", "work_max_attempts"),
-        help="Attempts of one work item (a job, a selection, a rollout, a data task) before it fails.",
+        help=(
+            "Attempts of one work item (a job, a selection, a rollout, a data task) before it fails. "
+            "An attempt that ends because its service stops does not count."
+        ),
     )
     #: How long control keeps an ended work item, so that its producer reads its result; then control deletes it.
     work_retention_s: float = config_option(
@@ -377,6 +441,10 @@ class ServiceConfig:
     execution_config: Mapping[str, Any] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
+        if self.routing_manifest is not None and (
+            not isinstance(self.routing_manifest, str) or not self.routing_manifest
+        ):
+            raise ValueError("reef.routing_manifest must be a non-empty path")
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
         if not isinstance(self.execution_config, Mapping):
             raise TypeError("ServiceConfig.execution_config must be a mapping")
@@ -421,6 +489,16 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if self.training_manager is not None:
+            TrainingManager.reference(self.training_manager, setting="training.manager")
+        max_jobs = self.training_max_jobs
+        if isinstance(max_jobs, bool) or not isinstance(max_jobs, int) or max_jobs < 1:
+            raise ValueError("training.max_jobs must be a positive integer")
+        sandboxes = self.evaluation_max_sandboxes
+        if isinstance(sandboxes, bool) or not isinstance(sandboxes, int) or sandboxes < 1:
+            raise ValueError("evaluation.max_sandboxes must be a positive integer")
+        if self.evaluation_trial_observer is not None:
+            TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
             raise ValueError("storage.work_max_attempts must be an integer")
         if self.work_max_attempts < 1:
@@ -508,6 +586,15 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
     return (
         *config_arguments(ServiceConfig),
         ConfigArgument(
+            "routing_deployment",
+            ("reef", "routing_deployment"),
+            "object",
+            False,
+            {},
+            "Semantic Router settings; reef serve owns the router unless the lifecycle is external.",
+            public_path=("reef", "routing_deployment"),
+        ),
+        ConfigArgument(
             "token",
             ("reef", "token"),
             "str",
@@ -520,7 +607,7 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
 
 
 def service_override(key: str, value: str) -> tuple[ConfigArgument, str] | None:
-    """Identify a declared option, retaining legacy names and dotted paths."""
+    """Identify a declared option by its flag."""
     flag = f"--{key}"
     for argument in service_config_arguments():
         if flag in argument.flags:
@@ -555,9 +642,12 @@ def parse_service_arguments(config: Mapping[str, Any]) -> dict[str, Any]:
         value = _argument_value(config, argument)
         if value is not None:
             supplied[argument.name] = value
-    return parse_config_values(
+    values = parse_config_values(
         tuple(dataclasses.replace(argument, required=False) for argument in arguments), supplied, environ=os.environ
     )
+    if "inference_retry_timeout_s" not in supplied:
+        values["inference_retry_timeout_s"] = values["inference_timeout_s"]
+    return values
 
 
 def normalize_service_config(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -568,6 +658,8 @@ def normalize_service_config(config: Mapping[str, Any]) -> dict[str, Any]:
     no Reef HTTP child at all.
     """
     values = parse_service_arguments(config)
+    # Reject removed or invalid routing settings while loading, before any process starts.
+    routing_deployment_settings(values["routing_deployment"])
     normalized = copy.deepcopy(dict(config))
     for argument in service_config_arguments():
         if _argument_value(config, argument) is None:
@@ -590,6 +682,7 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     tokens = (token.strip() for token in (values.pop("token") or "", *values["tokens"]))
     values["tokens"] = tuple(dict.fromkeys(token for token in tokens if token))
     values["console_origins"] = console_origins(values["console_origins"])
+    values["routing_deployment"] = routing_deployment_settings(values["routing_deployment"])
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
     execution = {key: config[key] for key in ("execution", "executors") if key in config}

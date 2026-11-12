@@ -11,7 +11,7 @@ import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents
@@ -35,11 +35,9 @@ from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
-from reef.train.algos.registry import resolve_objective
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingArtifactLayout, TrainingComponent
 from reef.train.jobs import JobLoop
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 
@@ -68,7 +66,7 @@ class ServedEndpoint:
     """Where this Reef answers inference itself: what a recipe's own evaluation calls target.
 
     ``url`` is the service's base URL and ``token`` a bearer token it accepts.
-    ``component`` names the release component the recipe evolves when it is
+    ``component`` names the snapshot component the recipe evolves when it is
     one of several: its evaluation calls then leave that component's served
     hooks out, since the rollout runs a candidate of it.
     """
@@ -143,6 +141,33 @@ class Recipe:
             return PipelineConfig.from_setting(None, spec=type(self).pipeline_spec(), environ={})
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
+
+    def with_record2sample_config(self, config: Mapping[str, Any]) -> Self:
+        """This recipe with each key of ``config`` in place of that key of its record-to-sample stage's config
+        (``PipelineConfig.with_record2sample_config``). An empty ``config`` returns this recipe."""
+        if not config:
+            return self
+        return replace(self, pipeline_stages=Recipe.stages(self).with_record2sample_config(config))
+
+    def for_record2sample_configs(
+        self, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
+    ) -> Recipe:
+        """The recipe whose :meth:`build_trainers` builds the trainer of each component that ``configs`` names with
+        those keys over its record-to-sample config (``ScenarioSettings.record2sample_config``).
+
+        ``components`` is what the scenario serves. The default applies the config of the one component that
+        :meth:`build_trainers` binds. Empty ``configs`` return this recipe. A recipe that binds several trainers
+        overrides this method; the default raises ``RecipeConfigError`` for such a recipe.
+        """
+        if not configs:
+            return self
+        if len(components.names) > 1:
+            raise RecipeConfigError(
+                f"{type(self).__name__} serves components {list(components.names)}: override "
+                "for_record2sample_configs to give each trainer its own record2sample config"
+            )
+        component = components.names[0] if components.names else RECORDS_COMPONENT
+        return self.with_record2sample_config(configs.get(component, {}))
 
     def build_pipeline(self, context: PipelineContext) -> TrainingPipeline:
         """Build the training pipeline of one scenario from :meth:`stages`, in pipeline order."""
@@ -293,7 +318,7 @@ class Recipe:
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
@@ -318,7 +343,7 @@ class Recipe:
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: CommittedArtifacts | None = None,
+        artifacts: CommittedArtifacts | None = None,
         samples: SampleStore | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
@@ -334,9 +359,9 @@ class Recipe:
         the scenario session, and ``samples`` is the data items that it trains
         on. Each trainer gives them to its pipeline as its own
         (``SampleStore.for_trainer``, ``""`` for the only trainer).
-        ``releases`` reads the scenario's committed releases; each trainer
+        ``releases`` reads the scenario's committed snapshots; each trainer
         reads those of its own component. ``root`` is the scenario's root
-        release, where a new trainer starts; a recipe of several components
+        snapshot, where a new trainer starts; a recipe of several components
         gives each trainer its own component of it
         (``ScenarioComponents.component_artifact``).
         """
@@ -355,7 +380,7 @@ class Recipe:
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
-                    releases=None if releases is None else ComponentArtifacts(releases, component),
+                    artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
                     samples=None if samples is None else samples.for_trainer(""),
                     root=root,
                 ),
@@ -363,7 +388,7 @@ class Recipe:
         )
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        """The components that every release of the named scenario binds.
+        """The components that every snapshot of the named scenario binds.
 
         Each ``ComponentSpec`` gives the component's kind, the admission check
         run before it is published or restored, its import layout and the
@@ -371,37 +396,6 @@ class Recipe:
         traffic only. Most recipes ignore ``scenario``.
         """
         return ScenarioComponents()
-
-    def build_artifact_validator(self) -> ArtifactValidator:
-        """An admission check run beside the component's own before the recipe's release is published or restored.
-
-        Kept for recipes written before admission moved onto the component
-        (``ComponentSpec.validator``, where a new recipe binds it):
-        it joins the check of the one component the recipe serves, and on a
-        recipe that serves none it admits the release as a whole; inside a
-        composite that recipe's release is its component, so the check joins
-        that component's. A recipe that overrides it while serving several
-        components is refused at build, since the check could not say which
-        component it admits.
-        """
-        return AcceptAnyArtifact()
-
-    def scenario_components(self, scenario: str) -> ScenarioComponents:
-        """``build_components`` with ``build_artifact_validator`` joined to the served component's check."""
-        components = self.build_components(scenario)
-        if type(self).build_artifact_validator is Recipe.build_artifact_validator:
-            return components
-        if not components.components:
-            # A release with no component is admitted as a whole, as it was before components existed.
-            return replace(components, validator=every_check(components.validator, self.build_artifact_validator()))
-        if len(components.components) != 1:
-            raise RecipeConfigError(
-                f"{type(self).__name__} overrides build_artifact_validator but serves components "
-                f"{list(components.names)}: bind the check on each component's ComponentSpec.validator instead"
-            )
-        ((name, component),) = components.components.items()
-        checks = every_check(component.validator, self.build_artifact_validator())
-        return replace(components, components={name: replace(component, validator=checks)})
 
     def check_root_start(self, root: ScenarioRoot) -> None:
         """Check that training can start from ``root`` before an item start is registered.
@@ -413,7 +407,7 @@ class Recipe:
             self.training_component.root_start(root)
 
     def default_start(self) -> DefaultStart:
-        """The content of a new scenario's root release when no artifact item starts the scenario; empty by
+        """The content of a new scenario's root snapshot when no artifact item starts the scenario; empty by
         default."""
         return DefaultStart()
 
@@ -430,7 +424,7 @@ class Recipe:
 
     @property
     def harness_adapter(self) -> str | None:
-        """The adapter this recipe's harness releases render for, as ``GET /reef/harness`` serves them.
+        """The adapter this recipe's harness artifacts render for, as ``GET /reef/harness`` serves them.
 
         ``None`` for a recipe that serves no harness tree. Every scenario of
         the process shares it, so the scenario list names it before a
@@ -445,28 +439,6 @@ class Recipe:
         state to report.
         """
         return None
-
-
-@dataclass(frozen=True)
-class WeightTrainingSpec:
-    """Static machinery a weight-training recipe binds to its configuration.
-
-    Keeping the binding behind one explicit hook leaves the recipe dataclass
-    to describe instance configuration only. The service can still inspect a
-    recipe class without constructing it.
-
-    ``objective`` is the recipe's objective: a registered name or a dotted
-    ``package.module:Objective`` reference. Every job trains with it unless
-    the recipe overrides :meth:`WeightTrainingRecipe.parameters_by_kind`. How a job's
-    data is cut into optimizer steps belongs to the training component.
-    """
-
-    objective: str
-
-    @property
-    def loss_family(self) -> str:
-        """The selected objective owns backend loss selection."""
-        return resolve_objective(self.objective).loss_family
 
 
 #: The component of a weight-training recipe's weights.
@@ -484,12 +456,13 @@ class WeightTrainingRecipe(Recipe):
     ``training_component`` (the first positional argument of every training
     recipe), which runs the recipe's training jobs.
 
-    :meth:`training_spec` binds the training objective, which declares its
-    backend loss family. Keeping that static machinery in one structured
-    return value means the dataclass fields remain the recipe's instance
-    configuration. The service reads the selected class from the same
-    deployment config and obtains its loss family from this hook; deployments
-    do not repeat that binding in an environment variable.
+    A job's ``parameters`` belong to its training component, and Reef reads
+    none of them. :meth:`default_parameters` gives the recipe's own default
+    parameters by sample kind, normally the method as ``objective``. The class
+    method keeps the dataclass fields as the recipe's instance configuration.
+    :meth:`configured_parameters` adds the ``job_parameters`` config; the service
+    passes it to the backend when it connects the training component, so a backend
+    that starts with one method reads it there.
 
     ``pipeline_stages`` is framework-owned configuration derived from an
     optional top-level ``pipeline`` section: each stage's class, the recipe's
@@ -507,8 +480,8 @@ class WeightTrainingRecipe(Recipe):
     job_parameters: Mapping[str, Any] | None = config_field(
         None,
         help=(
-            "Job parameters that the recipe sends with every job, beside method; the training component "
-            "refuses a parameter it does not take."
+            "Job parameters that the recipe sends with every job, over its default parameters; the training "
+            "component refuses a parameter it does not take."
         ),
     )
 
@@ -517,34 +490,37 @@ class WeightTrainingRecipe(Recipe):
         return not self.supports_images
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        """Return the objective binding for this recipe.
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """The recipe's own parameters of a training job, by the kind of the job's samples; empty by default.
 
-        Concrete weight recipes override this hook to name their objective.
+        Each value belongs to the training component, and Reef passes it unread. A recipe normally names its method
+        here, as the ``objective`` that the backends register. A kind can have its own method, and the training
+        component switches the objective from one job to the next.
         """
-        return WeightTrainingSpec(objective="")
+        return {}
+
+    @classmethod
+    def configured_parameters(cls, job_parameters: Mapping[str, Any] | None) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """The parameters of each training job, by the kind of the job's samples, for the ``job_parameters`` config.
+
+        The default is :meth:`default_parameters` with ``job_parameters`` over it, key by key, for every kind. A kind
+        that a result leaves out trains only for a request that gives its parameters. The service reads this hook
+        before it constructs the recipe, and passes the result to the backend when it connects the training component.
+        """
+        defaults = cls.default_parameters()
+        return {kind: {**defaults.get(kind, {}), **(job_parameters or {})} for kind in SAMPLE_KINDS}
 
     def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
-        """The parameters of each training job, by the kind of the job's samples.
+        """This recipe's ``configured_parameters``.
 
-        The pipeline's sample-to-job stage gives a job the parameters of its
-        samples' kind (``Sample2Job.job_parameters``). The default gives every
-        job ``training_spec()``'s objective (the parameter ``method``) and the
-        ``job_parameters`` config, such as a ``scheduling`` or a
-        ``save_interval``. The component's own defaults fill the rest, such as
-        its learning rate. A recipe that trains each kind with its own method,
-        such as SFT on trajectories and a policy objective on tasks, overrides
-        it; the training component switches the objective from one job to the
-        next. The result must be the same at every call: it is part of each
-        job's identity.
+        The pipeline's sample-to-job stage gives a job the parameters of its samples' kind, with its request's
+        parameters merged in (``Sample2Job.job_parameters``). The component's own defaults fill the rest, such as its
+        learning rate. The result must be the same at every call: it is part of each job's identity.
         """
-        method = TrainingMethod(type(self).training_spec().objective).to_dict()
-        return {kind: {**(self.job_parameters or {}), "method": method} for kind in SAMPLE_KINDS}
+        return type(self).configured_parameters(self.job_parameters)
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        if self.job_parameters is not None and "method" in self.job_parameters:
-            raise RecipeConfigError("job_parameters cannot set method: the recipe's objective is the job's method")
         self.resolve_training_component(self.training_component)
         if not isinstance(self.runtime, InferenceRuntime):
             raise RecipeConfigError("weight recipes require an independent inference runtime")
@@ -635,11 +611,11 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
-        """Build a trainer from this recipe's pipeline, objective, and report contract.
+        """Build a trainer from this recipe's pipeline, job parameters, and report contract.
 
         Override with ``Trainer.build`` for bespoke wiring such as a local
         training backend, and pass :attr:`report_type` and ``task_storage``
@@ -651,7 +627,7 @@ class WeightTrainingRecipe(Recipe):
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             task_storage=task_storage,
-            releases=releases,
+            artifacts=artifacts,
             samples=samples,
             root=root,
         )
@@ -664,25 +640,16 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentArtifacts | None = None,
+        artifacts: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
-        spec = type(self).training_spec()
         if type(self).pipeline_spec().sample2job is NoJobData:
             raise TypeError(
                 f"{type(self).__name__} declares no sample2job: return a PipelineSpec with a Sample2Job subclass "
                 f"from pipeline_spec() or override build() for bespoke trainer wiring"
             )
-        if not spec.objective:
-            raise TypeError(
-                f"{type(self).__name__} declares no objective: return a registered objective name "
-                f"(see reef.train.algos) or a dotted 'module:Objective' path from training_spec(), "
-                f"or override build()"
-            )
-        # Resolve the objective before starting workers, so an unknown reference fails the build.
-        resolve_objective(spec.objective)
         # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
         try:
             return Trainer.build(
@@ -692,7 +659,7 @@ class WeightTrainingRecipe(Recipe):
                 job_loop=JobLoop(
                     self.training_component,
                     scenario=scenario,
-                    scenario_component=None if releases is None else releases.component,
+                    scenario_component=None if artifacts is None else artifacts.component,
                     data_store=self.data_store,
                 ),
                 root=root,

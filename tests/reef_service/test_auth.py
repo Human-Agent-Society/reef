@@ -39,7 +39,7 @@ def _make_client(tokens, evaluation_tokens=None) -> TestClient:
     app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:.+}", _ok)
     app.router.add_get("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", _ok)
     app.router.add_post("/v1/chat/completions", _ok)
-    app.router.add_post("/reef/scenarios/{scenario}/activate", _ok)
+    app.router.add_post("/reef/scenarios/{scenario}/update", _ok)
     return TestClient(TestServer(app))
 
 
@@ -72,7 +72,7 @@ def test_the_anthropic_dialect_presents_the_token_in_its_own_header() -> None:
 
 
 def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
-    """The token a recipe's evaluation calls carry runs candidate code: it samples the served release through the
+    """The token a recipe's evaluation calls carry runs candidate code: it samples the served artifact through the
     evaluation routes, in either header, and every other route refuses it."""
 
     async def run() -> None:
@@ -95,7 +95,7 @@ def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
                 ("GET", "/protected"),
                 ("GET", "/reef/scenarios/agent/evaluation/v1/chat/completions"),
                 ("POST", "/v1/chat/completions"),
-                ("POST", "/reef/scenarios/agent/activate"),
+                ("POST", "/reef/scenarios/agent/update"),
                 # The recorded URL of a served artifact stays closed to the evaluation token.
                 ("POST", "/reef/scenarios/agent/artifacts/r1/v1/chat/completions"),
             ):

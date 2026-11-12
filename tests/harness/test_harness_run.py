@@ -84,7 +84,7 @@ import json, os, sqlite3, sys
 from pathlib import Path
 
 args = sys.argv[1:]
-assert args[:3] == ["run", "--format", "json"] and "--auto" in args, args
+assert args[:3] == ["run", "--format", "json"] and "--auto" in args and args[-2] == "--", args
 config_dir = Path(os.environ["OPENCODE_CONFIG_DIR"])
 config = json.loads((config_dir / "opencode.json").read_text())
 assert config["autoupdate"] is False and config["share"] == "disabled", config
@@ -138,11 +138,11 @@ import json, os, sys
 from pathlib import Path
 
 args = sys.argv[1:]
-assert args[:10] == [
+assert args[:11] == [
     "exec", "--json", "--strict-config", "--config", 'approval_policy="never"', "--config", 'web_search="disabled"',
-    "--sandbox", "workspace-write", "--skip-git-repo-check",
+    "--sandbox", "workspace-write", "--skip-git-repo-check", "--",
 ], args
-prompt = args[10]
+prompt = args[11]
 codex_home = Path(os.environ["CODEX_HOME"])
 assert Path(os.environ["HOME"]) == codex_home.parent
 config = (codex_home / "config.toml").read_text()
@@ -385,6 +385,171 @@ def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path
     second.write_text('{"type": "event_msg"}\n{"type": "turn_context"\n')
     assert [event["type"] for event in CodexSessionReader()(tmp_path)] == ["session_meta", "event_msg"]
     assert reader_for("codex-session-jsonl").format == "codex-session-jsonl"
+
+
+def write_jsonl(path: Path, events: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(event) + "\n" for event in events))
+
+
+def test_claude_codex_and_pi_sessions_convert_to_atif_with_harbors_converters(tmp_path: Path) -> None:
+    session = "11111111-1111-1111-1111-111111111111"
+    write_jsonl(
+        tmp_path / "claude" / "-app" / f"{session}.jsonl",
+        [
+            {"type": "user", "sessionId": session, "uuid": "u1", "message": {"role": "user", "content": "Say hi"}},
+            {
+                "type": "assistant",
+                "sessionId": session,
+                "uuid": "a1",
+                "parentUuid": "u1",
+                "message": {"id": "m1", "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+            },
+        ],
+    )
+    write_jsonl(
+        tmp_path / "codex" / "2026" / "11" / "09" / "rollout-s1.jsonl",
+        [
+            {"type": "session_meta", "payload": {"id": "s1", "cwd": "/app"}},
+            {
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Say hi"}]},
+            },
+            {
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "hi"}],
+                },
+            },
+        ],
+    )
+    pi_session = Path(__file__).parent / "data" / "pi_session_real"
+    for format_, path, final in [
+        ("claude-session-jsonl", tmp_path / "claude", "hi"),
+        ("codex-session-jsonl", tmp_path / "codex", "hi"),
+        ("pi-session-jsonl", pi_session, "READY"),
+    ]:
+        (document,) = reader_for(format_).to_atif(path)
+        assert document["schema_version"].startswith("ATIF-")
+        assert document["steps"][-1]["source"] == "agent"
+        assert document["steps"][-1]["message"] == final
+        assert reader_for(format_).to_atif(tmp_path / "missing") == ()
+
+
+def test_a_format_without_a_converter_gives_no_atif(tmp_path: Path) -> None:
+    write_jsonl(tmp_path / "session.jsonl", [{"type": "message"}])
+    assert reader_for("json:loads").to_atif(tmp_path) == ()
+
+
+def atif_steps(document: dict[str, object]) -> list[tuple[object, ...]]:
+    """Each step's source, message, tool names and observation contents."""
+    return [
+        (
+            step["source"],
+            step["message"],
+            [call["function_name"] for call in step.get("tool_calls") or []],
+            [result["content"] for result in (step.get("observation") or {}).get("results", [])],
+        )
+        for step in document["steps"]
+    ]
+
+
+def test_real_dsh_and_opencode_sessions_convert_to_atif_with_their_tool_call() -> None:
+    data = Path(__file__).parent / "data"
+    task = "Run `echo reef-tool-ok` in the shell, then reply with exactly READY."
+    (dsh,) = reader_for("deepseek-session-jsonl").to_atif(data / "dsh_session_real")
+    steps = atif_steps(dsh)
+    assert steps[0][0] == "system" and steps[1] == ("user", task, [], [])
+    assert steps[-2][2:] == (["bash"], ["reef-tool-ok\n"]) and steps[-1] == ("agent", "READY", [], [])
+    (opencode,) = reader_for("opencode-session-sqlite").to_atif(data / "opencode_session_real")
+    steps = atif_steps(opencode)
+    assert steps[0][0] == "user" and task in steps[0][1]
+    assert steps[1][2:] == (["bash"], ["reef-tool-ok\n"]) and steps[2] == ("agent", "READY", [], [])
+
+
+def native_event(type_: str, **data: object) -> dict[str, object]:
+    return {"type": type_, "seq": 0, "time": 0, "data": data}
+
+
+def test_a_native_session_converts_to_one_document_for_each_segment_and_one_for_each_agent(tmp_path: Path) -> None:
+    (real,) = reader_for("native-jsonl").to_atif(Path(__file__).parent / "data" / "native_session_real")
+    assert [step[0] for step in atif_steps(real)] == ["system", "user", "agent"]
+    assert real["steps"][-1]["message"] == "READY" and real["agent"]["model_name"] == "smoke-model"
+    call = {"id": "c1", "type": "function", "function": {"name": "shell", "arguments": '{"command": "ls"}'}}
+    write_jsonl(
+        tmp_path / "session.jsonl",
+        [
+            native_event("session", task="List the files."),
+            native_event("request/header", model="m", system="Be brief.", tools=[]),
+            native_event("assistant/message", step=1, content="", tool_calls=[call]),
+            native_event("tool/result", step=1, call_id="c1", name="shell", content="a.txt"),
+            native_event("context/compacted", fired=True, summary="Listed a.txt."),
+            native_event("assistant/message", step=2, content="a.txt", tool_calls=[]),
+        ],
+    )
+    write_jsonl(tmp_path / "agents" / "001-helper.jsonl", [native_event("session", task="Help.")])
+    write_jsonl(tmp_path / "agents" / "002-checker.jsonl", [native_event("context/compacted", fired=False)])
+    helper, before, after = reader_for("native-jsonl").to_atif(tmp_path)
+    assert atif_steps(helper) == [("user", "Help.", [], [])]
+    assert atif_steps(before) == [
+        ("system", "Be brief.", [], []),
+        ("user", "List the files.", [], []),
+        ("agent", "", ["shell"], ["a.txt"]),
+    ]
+    assert atif_steps(after) == [
+        ("system", "Be brief.", [], []),
+        ("user", "Summary of the earlier steps:\nListed a.txt.", [], []),
+        ("agent", "a.txt", [], []),
+    ]
+
+
+def test_a_hermes_snapshot_converts_to_atif_with_harbors_converter(tmp_path: Path) -> None:
+    call = {"id": "c1", "type": "function", "function": {"name": "terminal", "arguments": '{"command": "echo ok"}'}}
+    snapshot = {
+        "session_id": "s1",
+        "messages": [
+            {"role": "user", "content": "Run echo"},
+            {"role": "assistant", "content": "", "tool_calls": [call], "finish_reason": "tool_calls"},
+            {"role": "tool", "tool_name": "terminal", "tool_call_id": "c1", "content": "ok"},
+            {"role": "assistant", "content": "READY", "finish_reason": "stop"},
+        ],
+    }
+    (tmp_path / "session_s1.json").write_text(json.dumps(snapshot, indent=2))
+    (document,) = reader_for("hermes-session-json").to_atif(tmp_path)
+    steps = atif_steps(document)
+    assert steps[0] == ("user", "Run echo", [], []) and steps[-1] == ("agent", "READY", [], [])
+    assert steps[1][2:] == (["terminal"], ["ok"])
+
+
+def test_a_python_programs_logged_calls_convert_to_one_document_for_each_conversation(tmp_path: Path) -> None:
+    def call(messages: list[dict[str, str]], answer: str) -> dict[str, object]:
+        return {
+            "model": "m",
+            "messages": messages,
+            "response": {"choices": [{"message": {"role": "assistant", "content": answer}}]},
+        }
+
+    first = call([{"role": "user", "content": "hi"}], "hello")
+    judge = call([{"role": "system", "content": "Judge."}, {"role": "user", "content": "Score it."}], "5")
+    second = call(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "bye"},
+        ],
+        "READY",
+    )
+    write_jsonl(tmp_path / "calls.jsonl", [first, {"event": "note"}, judge, second])
+    talk, judged = reader_for("python-jsonl").to_atif(tmp_path)
+    assert [step[:2] for step in atif_steps(talk)] == [
+        ("user", "hi"),
+        ("agent", "hello"),
+        ("user", "bye"),
+        ("agent", "READY"),
+    ]
+    assert [step[:2] for step in atif_steps(judged)] == [("system", "Judge."), ("user", "Score it."), ("agent", "5")]
 
 
 @pytest.mark.parametrize("answer", ["reef-ok", "wrong", None])

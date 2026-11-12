@@ -1,7 +1,7 @@
 """A loopback endpoint that answers model calls from one artifact, for the rollouts that evaluate it.
 
 An artifact evaluation runs its rollouts against an artifact that the scenario may not serve. A runtime that
-answers each call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``) can
+answers each call from the artifact that the call names (``InferenceRuntime.serves_any_artifact``) can
 answer them without loading the artifact: ``ArtifactEndpoint`` hands each call to the runtime's handler with that
 artifact, under the runtime's inference admission. Reef's serving takes no part, and no call is a record.
 """
@@ -14,10 +14,13 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, UpstreamStatusError
+from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
+from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
 
 #: The model call routes that the endpoint answers, as Reef's own inference routes do.
@@ -28,7 +31,8 @@ class ArtifactEndpoint:
     """An OpenAI endpoint on loopback that answers every call from ``artifact`` with ``runtime``'s handler.
 
     Values: ``runtime`` is an ``InferenceRuntime`` that serves artifacts on request, and ``artifact``
-    the materialized artifact that every call samples. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
+    the materialized artifact that every call samples. ``served`` is the value that reaches an engine that answers
+    for the artifact, or None for the runtime's own handler. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
     body that is not a JSON object 400, a runtime that admits no call 503, a handler refusal its own status, and
     any other handler failure 502 with the reason. Purpose: the artifact evaluation service points its rollouts
     at ``url``. Use it as a context manager: it binds its loopback port and sets ``url`` when it is entered, and
@@ -36,11 +40,12 @@ class ArtifactEndpoint:
     ``artifact`` on request.
     """
 
-    def __init__(self, runtime: InferenceRuntime, artifact: Artifact) -> None:
-        if not runtime.serves_artifacts_on_request:
+    def __init__(self, runtime: InferenceRuntime, artifact: Artifact, served: ServedArtifact | None = None) -> None:
+        if not runtime.serves_any_artifact:
             raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.revision!r}")
         self.runtime = runtime
         self.artifact = artifact
+        self.served = served
         self.server: ThreadingHTTPServer | None = None
         self.url = ""
 
@@ -51,9 +56,17 @@ class ArtifactEndpoint:
         except InferenceUnavailable as exc:
             return 503, {"error": {"message": str(exc)}}
         try:
-            return 200, await self.runtime.inference_handler.inference(
-                InferenceArtifact.from_artifact(self.artifact), path, payload
-            )
+            if self.served is None:
+                handler = self.runtime.inference_handler
+            else:
+                # A runtime that started the engine in another process has no handler of its own here.
+                reached = self.runtime.handler_for(self.served.url)
+                if reached is None:
+                    raise ValueError(f"the runtime has no handler for {self.served.url}")
+                # The candidate samples with the deployment's values, as a client's call to a served artifact does.
+                body = reached.request_payload(payload, serving_config={})
+                handler, payload = reached, reached.address_model(body, self.served.model_name)
+            return 200, await handler.inference(InferenceArtifact.from_artifact(self.artifact), path, payload)
         except UpstreamStatusError as exc:
             return exc.status, {"error": {"message": str(exc)}}
         except (ValueError, TimeoutError, OSError) as exc:
@@ -104,19 +117,39 @@ class ArtifactEndpoint:
 
 
 class CandidateArtifacts(ABC):
-    """Finds the candidate of an evaluation rollout.
+    """Finds the candidate of an evaluation rollout, and keeps the rollout's calls.
 
     ``candidate(scenario, artifact_id, component)`` returns the runtime of ``scenario`` and the materialized
     artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
     runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
+    ``candidate_task(scenario, task_name)`` returns the directory of one of its tasks here.
+    ``add_evaluation_call(scenario, evaluation_id, artifact_id, call)`` keeps one call of a rollout to the candidate
+    ``artifact_id`` as a record item of the scenario's owner (``reef.storage.record_items.evaluation_call_item``).
+    ``add_evaluation_trajectory(scenario, evaluation_id, trajectory)`` keeps one trajectory that a rollout's verifier
+    wrote as a trajectory item of that owner (``reef.storage.record_items.evaluation_trajectory_item``).
 
     Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
     """
 
     @abstractmethod
+    def candidate_task(self, scenario: str, task_name: str) -> Path:
+        """The directory of the Harbor task ``task_name`` of ``scenario`` on this process's file system, which the task
+        file store fetches when another process stored it. ``ReefError`` for a task that the scenario does not use."""
+
+    @abstractmethod
     def candidate(
         self, scenario: str, artifact_id: str, component: str | None
     ) -> tuple[InferenceRuntime, Artifact]: ...
+
+    @abstractmethod
+    def add_evaluation_call(
+        self, scenario: str, evaluation_id: str, artifact_id: str, call: EvaluationCall
+    ) -> None: ...
+
+    @abstractmethod
+    def add_evaluation_trajectory(
+        self, scenario: str, evaluation_id: str, trajectory: EvaluationTrajectory
+    ) -> None: ...
 
 
 __all__ = ["ArtifactEndpoint", "CandidateArtifacts"]

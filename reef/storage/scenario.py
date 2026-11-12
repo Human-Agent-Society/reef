@@ -7,6 +7,7 @@ implementations may use a database transaction or a recoverable journal.
 
 from __future__ import annotations
 
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
 from reef.core.serving_config import ServingConfig
 from reef.storage.commits import CommitRecord, CommitSnapshots
-from reef.storage.data import check_owner
+from reef.storage.data import DataStore, check_owner
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainingState
@@ -43,7 +44,12 @@ class ScenarioSettings:
     ``check_owner``. It is ``None`` only for a scenario that the data sync has
     not opened yet; the first open sets it. ``serving_config`` is the serving fields that the scenario sets over
     the deployment's values (RFC #1097); the scenario registry checks it with the runtime before it stores it.
-    Construction checks these types.
+    ``serves`` is a boolean. When it is true, control asks inference to serve the scenario's active selection and
+    the artifacts beside it. When it is false, the scenario serves nothing: control withdraws its routes, and no
+    artifact answers its inference requests. ``record2sample_config`` maps the name of a component of the scenario
+    to a JSON object. Each key of that object replaces the same key of the deployment's
+    ``pipeline.record2sample.config`` for the trainer of that component. An empty mapping changes no trainer.
+    Construction checks these types, and keeps its own copies of ``record2sample_config``.
 
     Purpose: the scenario registry and the dispatcher write the settings
     through ``ScenarioStorage.write_settings`` and read them back when a
@@ -55,6 +61,8 @@ class ScenarioSettings:
     activation: Mapping[str, object] | None = None
     owner: str | None = None
     serving_config: ServingConfig = field(default_factory=ServingConfig)
+    serves: bool = True
+    record2sample_config: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.training_mode is not None and not isinstance(self.training_mode, str):
@@ -67,6 +75,19 @@ class ScenarioSettings:
             check_owner(self.owner)
         if not isinstance(self.serving_config, ServingConfig):
             raise ValueError("scenario settings serving_config must be a ServingConfig")
+        if not isinstance(self.serves, bool):
+            raise ValueError("scenario settings serves must be a boolean")
+        configs = self.record2sample_config
+        if not isinstance(configs, Mapping) or not all(
+            isinstance(component, str) and component and isinstance(config, Mapping)
+            for component, config in configs.items()
+        ):
+            raise ValueError("scenario settings record2sample_config maps component names to objects")
+        try:
+            copied = json.loads(json.dumps(configs, allow_nan=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"scenario settings record2sample_config must encode as JSON: {exc}") from exc
+        object.__setattr__(self, "record2sample_config", copied)
 
 
 class ScenarioStore(ABC):
@@ -166,14 +187,18 @@ class ScenarioStorage(Plugin, ABC):
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
         """Build the storage a deployment names.
 
         ``config`` is the plugin's own configuration. ``directory`` is the
         deployment's ``storage.agent_record_dir``, which the storage may use
         for local files. ``task_files`` keeps the files of published tasks.
         The storage owns it: ``archive`` retires the files of a scenario, and
-        ``close`` closes it.
+        ``close`` closes it. ``data`` is the deployment's data store, which keeps
+        each scenario's records as record items (RFC #1219); the storage shares
+        it and does not close it.
         """
 
     @property
@@ -201,10 +226,6 @@ class ScenarioStorage(Plugin, ABC):
     @abstractmethod
     def archive(self, scenario: str) -> tuple[str, ...]:
         """Archive a closed scenario's records, commits, tasks and settings; return archive locations."""
-
-    @abstractmethod
-    def prune(self, *, max_bytes: int) -> int:
-        """Evict oldest bodies over max_bytes."""
 
     @abstractmethod
     def close(self) -> None:

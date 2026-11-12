@@ -54,7 +54,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.rollouts_per_task` rollouts of each training task in a task job; the recipe runs no eval tasks.
 5. When every training task of the generation has a result, `record_results` computes the pass rate of each task that ran and its place against the band, and writes the generation's report. A task that could not run is an outage, not a band measurement. It sends no Designer reports, because the Designer here is not trained.
 
-Until `record_results` closes a generation, the generator keeps its sessions and check results in `open-<generation>.json` under its state directory, named by the recipe's generation number, so a restart can still close it.
+Until `record_results` closes a generation, the generator keeps its sessions and check results in the state document `open/<generation>`, named by the recipe's generation number, so a restart can still close it ([the generator's state](#the-generators-state)).
 
 An accepted task names two source records: the author's last recorded call, the one that wrote the task, and the session's record. A task that Claude Code wrote names one source record, the session's, and its transcript ([Claude Code as the author](#claude-code-as-the-author)). A task rebuilt from a repository gets 4 CPUs, 4 GB of memory, 10 GB of storage, 20 minutes to build, an hour for the solver and 7.5 minutes for the verifier.
 
@@ -64,7 +64,7 @@ The last step of every task's Dockerfile keeps the solver from reading the chang
 
 The generator chooses its own sessions. It does not use the request's description, and it refuses a request that carries source records. Leave the record-to-sample stage's `source_records_per_round` at 0, its default.
 
-`cursor.json` in the state directory keeps the next generation number and the next position in the sources file. The generations walk the whole file and then start again. A session counts as taken when its author finishes, whatever the result, so a restart continues with the next session. A run that a reload cancels takes no session. Task names hold the generation number and the session's index, not the scenario, so give each scenario its own generator service and tasks root: two scenarios on one service write tasks with the same names, and the service refuses the second one.
+The state document `cursor` keeps the next generation number and the next position in the sources file. The generations walk the whole file and then start again. A session counts as taken when its author finishes, whatever the result, so a restart continues with the next session. A run that a reload cancels takes no session. Task names hold the generation number and the session's index, not the scenario, so give each scenario its own generator service and tasks root: two scenarios on one service write tasks with the same names, and the service refuses the second one.
 
 ### Sessions without a task
 
@@ -92,14 +92,39 @@ Three kinds of failure end differently:
 
 ### The report and the task store
 
-`state_dir/<scenario>/generation-<n>.json` keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each task that ran (its path under the tasks root, rollout rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before its rollouts run. Related source sessions keep the same split. The training band does not filter the store; the calibration in `refuse` mode does.
+The report of a generation, the state document `report/<n>`, keeps each session (its position, source record, Designer record, task name, stage, refusal and check results) and each task that ran (its path under the tasks root, rollout rewards, pass rate, band position and check results). The recipe saves each valid task and its train/eval split in the scenario's task store before its rollouts run. Related source sessions keep the same split. The training band does not filter the store; the calibration in `refuse` mode does.
+
+### The generator's state
+
+The generator keeps its state in the scenario's task store, as state documents and saved files, and keeps no file of its own. So the state is in the deployment's database and its task file store, and a restart on another machine reads it. Each number in a key has five digits:
+
+| Document | Content |
+| --- | --- |
+| `cursor` | the number of the next generation, and the walk's position of its first session |
+| `adaptive` | with `adaptive`, the parents: each with its pass rate and the digest of its saved files |
+| `open/<generation>` | the sessions and check results of a generation that `record_results` has not closed, named by the recipe's generation number |
+| `report/<n>` | the report of a closed generation, named by the generator's own number of the generation |
+
+The saved files are the task directory of each parent and each Claude Code transcript. The state keeps them in the task file store (`storage.task-file-dir`), by the digest of their files.
+
+The documents are rows of the table `task_state_document` in the scenario's database, under the store name `generated-tasks`. With SQLite storage, the database of a scenario is `<storage.agent-record-dir>/<SHA-256 of the scenario name>.sqlite3`. To read the report of generation 0:
+
+```bash
+sqlite3 "$REEF_AUTOENVSCALING_STATE_DIR/agent-record/$(printf autoenvscaling | shasum -a 256 | cut -d' ' -f1).sqlite3" \
+  "select document from task_state_document where store_name = 'generated-tasks' and document_key = 'report/00000'"
+```
+
+The directory of an agent run and the repository snapshots are in a temporary directory. A run's directory is removed when the run ends, and a restart clones a repository again.
+
+The generator takes no `state_dir`: a config that still has the key is refused. The generator does not read the files of an earlier `state_dir`, so a scenario that upgrades starts again at its first session, with no parents, and an open generation of the earlier version gets no feedback. The task store keeps every generation and task.
+
+### Configuration
 
 The generator's `config` keys:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `generator_url` | required | the generator service, `${endpoints.generator}` |
-| `state_dir` | required | where each scenario keeps its cursor, reports, agent runs and repository snapshots |
 | `sources_path` | required | the sources file |
 | `author` | `agent` | `agent`, or `prompt` for the baseline |
 | `author_harness` | `pi` | the agent: `pi`, or `claude-code` ([Claude Code as the author](#claude-code-as-the-author)); `claude-code` needs `author: agent` |
@@ -123,11 +148,11 @@ Set `eval_fraction` and `split_seed` in `pipeline.record2sample.config`, outside
 
 ## The author
 
-The author is pi, Reefine's pinned coding agent, in an E2B sandbox. It reads the recorded session, the repository at the base commit (a fresh one-commit copy with no history, cached under `state_dir/<scenario>/repositories`) and the checkout path. It writes the task under `./task/`: `instruction.md`, `environment/` (a Dockerfile that clones the repository at the base commit into the checkout path), `tests/test.sh`, `solution/solve.sh`, and an optional `hint.txt`.
+The author is pi, Reefine's pinned coding agent, in an E2B sandbox. It reads the recorded session, the repository at the base commit (a fresh one-commit copy with no history, cached in a temporary directory while the process runs) and the checkout path. It writes the task under `./task/`: `instruction.md`, `environment/` (a Dockerfile that clones the repository at the base commit into the checkout path), `tests/test.sh`, `solution/solve.sh`, and an optional `hint.txt`.
 
 Its one tool, `task_check`, runs the workspace's task through admission and Harbor's oracle and nop agents on the generator service, and answers with both rewards and, for a failing task, the reason. A check that could not run uses up none of `max_checks`.
 
-The agent holds no credential. Its model calls go through a loopback gateway that sends each one to `agent_reef_url` under the generator's scenario, with the token from `agent_token_env` and the tags `role: designer`, `generation` and `index`, so each call is an inference record. A run lasts at most `agent_timeout_seconds` and makes at most `max_model_calls` model calls. Each run keeps the task and pi's session log in `state_dir/<scenario>/runs/<generation>-<index>/`.
+The agent holds no credential. Its model calls go through a loopback gateway that sends each one to `agent_reef_url` under the generator's scenario, with the token from `agent_token_env` and the tags `role: designer`, `generation` and `index`, so each call is an inference record. A run lasts at most `agent_timeout_seconds` and makes at most `max_model_calls` model calls. Each run has a temporary directory of its own, which holds the task and pi's session log and is removed when the run ends.
 
 ### Claude Code as the author
 
@@ -154,7 +179,7 @@ export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # the variable claude_token_en
 - The author redacts its log and error messages and replaces the token in retained run files and file names. It refuses a check of a task that holds the token, including through a symbolic link. Such a task is not admitted, and generation ends with stage `credential`: the token may have left the sandbox. Make a new token before the next run.
 - The agent checks its task with the command `python3 "$REEF_AUTHOR_CHECK"`, the same check as pi's tool. The command waits up to 9 minutes; for a longer check it prints `state: running` and the `--wait <check_id>` command that waits again.
 - A run ends at `agent_timeout_seconds` or after `max_model_calls` turns, Claude Code's own limit; either way its task stands. Any other error of Claude Code's (a spent plan, a refused token) is an outage.
-- The task names one source record, the session's, so a variant keeps its parent's split. Its metadata names the transcript, `designer_transcript`, relative to `state_dir/<scenario>/`, and `designer_harness: claude-code`. Each run keeps Claude Code's transcript under `claude/projects/` in its run directory. Reef deletes Claude Code's other state there, which can hold the account's email.
+- The task names one source record, the session's, so a variant keeps its parent's split. Its metadata names the transcript and `designer_harness: claude-code`. The generator saves a copy of the transcript in its state: `designer_transcript` is the file's name, and `designer_transcript_files` is the digest of the saved directory that holds it ([the generator's state](#the-generators-state)). Reef deletes Claude Code's other state in the run directory, which can hold the account's email, and then the run directory itself.
 
 Reef refuses at startup a token that is missing or is no Claude Code OAuth token (`sk-ant-oat...`). It also refuses an `agent_sandbox_options.env_from` variable that would win over the run's own setup: an `ANTHROPIC_*` or `CLAUDE_*` variable, a `*BASE_URL*` or `*PROXY*` variable, a variable the run sets (such as `HOME`, `DISABLE_ERROR_REPORTING` or `BASH_MAX_TIMEOUT_MS`), or a variable whose value holds the token.
 
@@ -162,7 +187,7 @@ Reef refuses at startup a token that is missing or is no Claude Code OAuth token
 
 The pass rate of a task that ran is the mean reward of its training rollouts. The task is inside the band when the pass rate lies in `[band_low, band_high]`, 0.25 to 0.75 by default. A task outside the band stays under the tasks root, so a later analysis can run it again. It stays in the task store and is recorded with stage `band` (`outside the solver band: pass rate 1.00`) and its path in the generation's report. A null bound is no bound; with both null, every task that ran is inside the band.
 
-The band does not decide what trains. The recipe trains on the training rollouts of every valid task, before the band is known. Its `task_group` objective gives an advantage of 0 to every rollout of a group whose rewards are all equal. With 0 or 1 rewards and four rollouts per task, a task outside the default band is such a group, so it trains nothing, but it still takes a place in a batch.
+The band does not decide what trains. The recipe trains on the training rollouts of every valid task, before the band is known. The objective that the deployment provides (`recipe.config.job_parameters.objective`; the example `serve.yaml` holds a placeholder that you must replace) decides what such a group trains. With 0 or 1 rewards and four rollouts per task, a task outside the default band has equal rewards in its group, and it still takes a place in a batch.
 
 ## Solver calibration
 
@@ -205,9 +230,9 @@ No results with the calibration are published yet.
 
 ## Adaptive generation
 
-With `adaptive: true`, the solver's results steer later generations, as in RFC #811. When a generation closes, each training task whose pass rate fell outside the band becomes a parent: the generator keeps its files under `state_dir/<scenario>/parents/` and its pass rate in `adaptive.json`. A later generation gives up to `variant_share` of its slots to the newest parents. The slot count is rounded down after adding a tolerance of 1e-9 slots, so floating-point error does not turn 29 slots into 28. The agent gets the parent and its pass rate in its inputs and writes a harder task for a parent above the band, or a simpler one for a parent below it, from the same session. So a variant keeps its parent's source and its split. The other slots rebuild the next sessions of the walk, and a variant takes no session from it.
+With `adaptive: true`, the solver's results steer later generations, as in RFC #811. When a generation closes, each training task whose pass rate fell outside the band becomes a parent: the generator saves its files in its state, and keeps its pass rate and the digest of the files in the state document `adaptive`. A later generation gives up to `variant_share` of its slots to the newest parents. The slot count is rounded down after adding a tolerance of 1e-9 slots, so floating-point error does not turn 29 slots into 28. The agent gets the parent and its pass rate in its inputs and writes a harder task for a parent above the band, or a simpler one for a parent below it, from the same session. So a variant keeps its parent's source and its split. The other slots rebuild the next sessions of the walk, and a variant takes no session from it.
 
-Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, a parent gets one variant slot whatever becomes of the variant, and the generator keeps at most 256 parents, dropping the oldest. Parents with missing files or sessions are skipped but still count toward the limit until they are dropped. A replayed result adds nothing: a closed generation is not closed again, and one closed again after a crash adds each parent once. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. With `calibration: refuse`, a task outside the band is refused before it trains, so it never becomes a parent: the parents are then the admitted tasks that the solver outgrows, or falls behind on, during training. With `calibration: measure`, every task is admitted and trained, so a task the calibration placed outside the band can still become a parent. Proposer training and retiring tasks from the pool are not part of this mode.
+Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, a parent gets one variant slot whatever becomes of the variant, and the generator keeps at most 256 parents, dropping the oldest. A parent whose session left the sources file is skipped but still counts toward the limit until it is dropped. The saved files of a dropped parent stay in the task file store. A replayed result adds nothing: a closed generation is not closed again, and one closed again after a crash adds each parent once. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. With `calibration: refuse`, a task outside the band is refused before it trains, so it never becomes a parent: the parents are then the admitted tasks that the solver outgrows, or falls behind on, during training. With `calibration: measure`, every task is admitted and trained, so a task the calibration placed outside the band can still become a parent. Proposer training and retiring tasks from the pool are not part of this mode.
 
 ## The task checks
 
@@ -275,7 +300,7 @@ pipeline:
           band_high: null
 ```
 
-Run each author as a deployment of its own, with its own state directory: both name their tasks `harbor-<generation>-<index>-autoenvscaling`.
+Run each author as a deployment of its own, with its own storage: both name their tasks `harbor-<generation>-<index>-autoenvscaling`.
 
 ## Run it
 
@@ -301,7 +326,7 @@ curl -s -X POST -H "Authorization: Bearer $REEF_AUTOENVSCALING_DESIGNER_TOKEN" -
   -d '{"name": "autoenvscaling"}' "$REEF_AUTOENVSCALING_DESIGNER_URL/reef/scenarios"
 ```
 
-`reef serve` creates no scenario on its own. The first `POST /reef/scenarios` above creates the training scenario, and round 0 starts when the recipe's pipeline first looks for job data after that. The second one creates the same scenario on the Designer's Reef, which records the Designer's model calls under it and answers only a scenario that exists. Each generation writes `generations/autoenvscaling/generation-<n>.json` under the state directory. The recipe keeps each task, its split and its rollout result in the scenario's task store.
+`reef serve` creates no scenario on its own. The first `POST /reef/scenarios` above creates the training scenario, and round 0 starts when the recipe's pipeline first looks for job data after that. The second one creates the same scenario on the Designer's Reef, which records the Designer's model calls under it and answers only a scenario that exists. Each generation writes its report to the state document `report/<n>` ([the generator's state](#the-generators-state)). The recipe keeps each task, its split and its rollout result in the scenario's task store.
 
 Optional, for an upstream that serves only the Responses API (a ChatGPT plan): set `agent_api: responses` for the agent, and `model_name: "openai/responses/{model}"` in `generator.agent` for the Reasoning Agent's Harbor agent.
 
@@ -319,8 +344,8 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
 
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
    from reef.pipeline_context import PipelineContext
-   from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
-   from reef.recipe.generated_tasks.processor import GenerationJob, next_generation
+   from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings, StoredGeneratorState
+   from reef.recipe.generated_tasks.processor import TASK_STORE_NAME, GenerationJob, next_generation
    from reef.storage.samples import SampleStore
    from reef.storage.sql_data import SQLiteDataStore
    from reef.storage.sqlite import SQLiteScenarioStorage
@@ -335,7 +360,12 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
        session = storage.open("autoenvscaling")
        samples = SampleStore(data, "autoenvscaling", "autoenvscaling", session.training_state).for_trainer("")
        context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=samples)
-       generator = AutoEnvScalingGenerator.from_config(generator_config, scenario=context.scenario, environ=os.environ)
+       generator = AutoEnvScalingGenerator.from_config(
+           generator_config,
+           scenario=context.scenario,
+           environ=os.environ,
+           state=StoredGeneratorState(session.tasks.open(TASK_STORE_NAME)),
+       )
        settings = GeneratedTaskSettings(
            rounds=rounds,
            description="coding tasks rebuilt from recorded coding-agent sessions",
@@ -352,7 +382,7 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
            storage.close()
    ```
 
-   `generator_config` is the generator's `config` from the example, with its environment references filled in. `state_dir` is the deployment's state directory, so the generations save each valid task in the task store that the example's `storage` uses. The band is only recorded in the generation report. A restart continues with the next generation.
+   `generator_config` is the generator's `config` from the example, with its environment references filled in. `state_dir` is the deployment's state directory, so the generations save each valid task, and the generator's state, in the task store that the example's `storage` uses. The band is only recorded in the generation report. A restart continues with the next generation.
 
 2. **Train from the saved tasks.** Start the example in the environment of [Run it](#run-it) with `rounds` at the number of generations that step 1 built, and create the scenario as there. Those generations are complete, so the recipe generates no more: it saves their train tasks as task items that the scenario uses and trains them, up to `buffer_size` tasks in one job.
 

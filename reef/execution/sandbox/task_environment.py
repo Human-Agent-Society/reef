@@ -28,8 +28,8 @@ from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 #: Every Harbor task environment type Reef passes to Harbor: local Docker, and each cloud type in
 #: ``REMOTE_TASK_ENVIRONMENTS``.
 HARBOR_TASK_ENVIRONMENTS: tuple[str, ...] = ("docker", *REMOTE_TASK_ENVIRONMENTS)
-#: The top level names that Harbor's e2b environment imports from the e2b package (harbor 0.20.0,
-#: ``harbor/environments/e2b.py`` lines 30 to 60); without one of them Harbor marks the environment missing.
+#: The top level names that Harbor's e2b environment imports from the e2b package (harbor 0.25.0,
+#: ``harbor/environments/e2b.py`` lines 32 to 39); without one of them Harbor marks the environment missing.
 HARBOR_E2B_NAMES = ("ALL_TRAFFIC", "AsyncSandbox", "AsyncTemplate", "FileType", "SandboxNetworkOpts", "Template")
 DOCKER_PROBE_TIMEOUT_S = 5.0
 
@@ -221,12 +221,28 @@ class E2BTaskEnvironment(ProbedTaskEnvironment):
         )
 
 
-#: Each task environment whose host needs can be checked, by name. modal has credentials in
-#: ``REMOTE_TASK_ENVIRONMENTS`` but no tested probes yet, so a caller that needs readiness refuses it.
+class ModalTaskEnvironment(ProbedTaskEnvironment):
+    """``modal``: its credential variables (``REMOTE_TASK_ENVIRONMENTS``) and the modal package, which Harbor's
+    modal environment imports."""
+
+    name = "modal"
+
+    def probes(self, credential_hint: str) -> tuple[ReadinessProbe, ...]:
+        return (
+            *(
+                EnvironmentVariableProbe(variable, hint=credential_hint)
+                for variable in REMOTE_TASK_ENVIRONMENTS["modal"]
+            ),
+            ModuleProbe("modal", hint="Harbor's modal environment needs it; install reef-infra[modal]"),
+        )
+
+
+#: Each task environment whose host needs can be checked, by name: every member of ``HARBOR_TASK_ENVIRONMENTS``.
 TASK_ENVIRONMENT_PROBES: Mapping[str, ProbedTaskEnvironment] = {
-    environment.name: environment for environment in (DockerTaskEnvironment(), E2BTaskEnvironment())
+    environment.name: environment
+    for environment in (DockerTaskEnvironment(), E2BTaskEnvironment(), ModalTaskEnvironment())
 }
-#: The task environments ``task_environment_probes`` can check; a subset of ``HARBOR_TASK_ENVIRONMENTS``.
+#: The task environments ``task_environment_probes`` can check: ``HARBOR_TASK_ENVIRONMENTS``, in the same order.
 PROBED_TASK_ENVIRONMENTS: tuple[str, ...] = tuple(TASK_ENVIRONMENT_PROBES)
 
 
@@ -262,6 +278,7 @@ __all__ = [
     "DockerTaskEnvironment",
     "E2BTaskEnvironment",
     "EnvironmentVariableProbe",
+    "ModalTaskEnvironment",
     "ModuleNamesProbe",
     "ModuleProbe",
     "ProbedTaskEnvironment",

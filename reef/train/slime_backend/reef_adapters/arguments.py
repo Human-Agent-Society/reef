@@ -61,6 +61,26 @@ class SlimeArguments(Namespace):
     reef_executor_backend: str
     reef_train_executor_options: dict[str, object]
     advantage_estimator: str
+    # Slime's native options that a task job reads (reef.train.slime_backend.harbor_rollouts).
+    rewards_normalization: bool
+    n_samples_per_prompt: int
+    rollout_batch_size: int
+    over_sampling_batch_size: int | None
+    group_rm: bool
+    reward_key: str | None
+    custom_generate_function_path: str | None
+    data_source_path: str | None
+    rollout_function_path: str
+    partial_rollout: bool
+    dynamic_sampling_filter_path: str | None
+    use_rollout_routing_replay: bool
+    use_score_centering: bool
+    rollout_temperature: float
+    rollout_top_p: float
+    rollout_top_k: int
+    rollout_max_response_len: int | None
+    sglang_router_ip: str
+    sglang_router_port: int
     reef_rollout_tensor_dtypes: dict[str, str]
     reef_external_batch_keys: tuple[str, ...]
     reef_rollout_log_skip_keys: tuple[str, ...]

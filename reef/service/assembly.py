@@ -25,6 +25,7 @@ from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.served import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
+from reef.evaluation.trials import TrialObserver
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
@@ -46,10 +47,15 @@ from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
 from reef.service.harness_imports import HarnessSyncWorker
+from reef.service.lifecycle import LifecycleSettings
 from reef.service.request_service import RequestService
+from reef.service.routed_inference import InferenceRetryPolicy
+from reef.service.routing import RoutingAdapter
+from reef.service.routing_preview import PreviewSettings
 from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
+from reef.storage.job_data import JobDataKind
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
@@ -60,6 +66,7 @@ from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 from reef.train.component import TrainingComponent, build_training_component
+from reef.train.manager import TrainingManager
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
@@ -85,8 +92,6 @@ def _recipe_owned_settings(settings: ServiceConfig) -> dict[str, Any]:
     return {key: value for key, value in settings.recipe_settings.items() if key not in service_owned}
 
 
-#: The evaluation rollout workers of a process that runs the evaluation service.
-ROLLOUT_WORKERS = 4
 #: The factory that ``storage.artifact_backend: git_lfs`` selects, over ``storage.artifact_repository``.
 GIT_LFS_ARTIFACT_BACKEND = "reef.artifact.git_lfs:GitLFSRepositoryBackendFactory"
 
@@ -98,9 +103,9 @@ def _require_non_empty(value: str | None, setting: str) -> str:
 
 
 def connect_training_component(
-    settings: ServiceConfig, *, model_path: str, loss_family: str
+    settings: ServiceConfig, *, model_path: str, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
 ) -> tuple[TrainingComponent, InferenceRuntime]:
-    """Build the selected training component for the recipe's ``loss_family``, then the serving of its releases.
+    """Build the selected training component for the recipe's ``default_parameters``, then its snapshots' serving.
 
     The training backend builds only the component. The serving runtime comes
     from the deployment's ``inference`` settings and the component's
@@ -110,7 +115,7 @@ def connect_training_component(
     """
     backend = training_deployment_for(settings.training_backend)
     component = build_training_component(
-        backend.component_config(asdict(settings), loss_family=loss_family), model_path=model_path
+        backend.component_config(asdict(settings), default_parameters=default_parameters), model_path=model_path
     )
     try:
         serving = RuntimeRegistry().build(
@@ -153,7 +158,9 @@ def _training_recipe(
         recipe_config["pipeline"] = dict(settings.pipeline_settings)
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
     training_component, runtime = connect_training_component(
-        settings, model_path=model_path, loss_family=recipe_type.training_spec().loss_family
+        settings,
+        model_path=model_path,
+        default_parameters=recipe_type.configured_parameters(resolved_recipe_data.get("job_parameters")),
     )
     try:
         return recipe_type.from_resolved_config(
@@ -173,6 +180,7 @@ def composed_training_recipe(
     recipe_type: type[Recipe],
     config: dict[str, Any],
     weight_type: type[WeightTrainingRecipe],
+    weight_config: Mapping[str, Any],
     settings: ServiceConfig,
     env: Mapping[str, str],
 ) -> Recipe:
@@ -194,7 +202,9 @@ def composed_training_recipe(
             "components.<name>.config"
         )
     training_component, runtime = connect_training_component(
-        settings, model_path=model_path, loss_family=weight_type.training_spec().loss_family
+        settings,
+        model_path=model_path,
+        default_parameters=weight_type.configured_parameters(weight_config.get("job_parameters")),
     )
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
     if settings.pipeline_settings is not None:
@@ -250,7 +260,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         recipe_type = recipe_class_for(selected)
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
         if weight_training is not None and recipe_type is not None:
-            return composed_training_recipe(selected, recipe_type, config, weight_training[0], settings, env)
+            return composed_training_recipe(selected, recipe_type, config, *weight_training, settings, env)
         if settings.pipeline_settings is not None:
             config["pipeline"] = dict(settings.pipeline_settings)
         if settings.activation_settings is not None:
@@ -373,29 +383,38 @@ def build_task_files(settings: ServiceConfig) -> TaskFileStore:
     return TaskFileStore.referenced_class(reference).from_config(reference.config, directory=task_file_directory)
 
 
-def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, TaskFileStore]:
-    """The deployment's scenario storage (``storage.record_backend``) and its task file store, which it owns."""
+def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, DataStore]:
+    """The deployment's scenario storage (``storage.record_backend``), which owns the task file store, and the data
+    store (``build_data_store``), which keeps the scenarios' records. The caller closes the data store before the
+    storage, because the data store shares the task file store."""
     record_directory = Path(settings.agent_record_dir)
     task_files = build_task_files(settings)
+    data: DataStore | None = None
     try:
+        data = build_data_store(settings, task_files)
         if settings.record_backend == "postgres":
             storage: ScenarioStorage = PostgresScenarioStorage(
                 _require_non_empty(settings.record_database_url, "reef.record_database_url"),
                 record_directory,
                 schema=settings.record_database_schema,
                 task_files=task_files,
+                data=data,
             )
         elif settings.record_backend == "sqlite":
-            storage = SQLiteScenarioStorage(record_directory, task_files=task_files)
+            storage = SQLiteScenarioStorage(record_directory, task_files=task_files, data=data)
         else:
             reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
             storage_class = ScenarioStorage.referenced_class(reference)
-            storage = storage_class.from_config(reference.config, directory=record_directory, task_files=task_files)
+            storage = storage_class.from_config(
+                reference.config, directory=record_directory, task_files=task_files, data=data
+            )
     except BaseException:
         # The storage owns the task file store after it exists. Until then, this code closes it.
+        if data is not None:
+            data.close()
         task_files.close()
         raise
-    return storage, task_files
+    return storage, data
 
 
 def build_artifact_backend(settings: ServiceConfig) -> ConfigurableRepositoryBackendFactory:
@@ -433,7 +452,7 @@ def build_dispatcher(
     evaluates each new artifact with its scenario's settings.
 
     A composite recipe's evaluation calls come back to this service, so a
-    candidate of one component is evaluated against the release the others
+    candidate of one component is evaluated against the snapshot the others
     serve; ``evaluation_token`` is the token they present, one the app accepts
     on the evaluation routes alone, since those calls run candidate code, and
     ``hold_local_cycles`` holds its local cycles until the service answers. A
@@ -453,7 +472,7 @@ def build_dispatcher(
         raise
     calls_service = isinstance(recipe, CompositeRecipe)
     if calls_service:
-        # A composite's evaluation calls come back to this Reef, so they sample the release it serves.
+        # A composite's evaluation calls come back to this Reef, so they sample the snapshot it serves.
         served_url = settings.served_url or default_served_url(settings.host, settings.port)
         recipe = recipe.with_served_endpoint(ServedEndpoint(url=served_url, token=evaluation_token))
     experiment_tracker = None
@@ -461,8 +480,7 @@ def build_dispatcher(
     data_store: DataStore | None = None
     dispatcher: Dispatcher | None = None
     try:
-        scenario_storage, task_files = open_scenario_storage(settings)
-        data_store = build_data_store(settings, task_files)
+        scenario_storage, data_store = open_scenario_storage(settings)
         task_import = (
             TaskImport(Path(settings.task_import_manifest), Path(settings.task_import_tasks_root))
             if settings.task_import_manifest is not None and settings.task_import_tasks_root is not None
@@ -477,9 +495,7 @@ def build_dispatcher(
         # The inference path and the data service append and read records without opening a scenario.
         record_storage = scenario_storage
         # Each scenario's session reads its training samples from the data store.
-        scenario_storage = DataScenarioStorage(
-            scenario_storage, data_store, task_import, refuses_images=recipe.refuses_images
-        )
+        scenario_storage = DataScenarioStorage(scenario_storage, data_store, task_import)
         backend_factory = build_artifact_backend(settings)
         if not isinstance(settings.training_settings, Mapping):
             raise ValueError("training must be an object")
@@ -515,15 +531,31 @@ def build_dispatcher(
             ),
             components=components,
             work_retention_seconds=settings.work_retention_s,
+            training_max_jobs=settings.training_max_jobs,
+            training_manager=(
+                None
+                if settings.training_manager is None
+                else TrainingManager.from_setting(settings.training_manager, setting="training.manager")
+            ),
         )
         if dispatcher.services.runs_evaluation:
-            # Each worker serves its rollout's candidate itself, from the scenario's repository.
-            for _ in range(ROLLOUT_WORKERS):
-                dispatcher.workers.add(
-                    EvaluationRolloutWorker(
-                        dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id=instance_id("evaluation")
-                    )
+            # The worker serves each rollout's candidate itself, from the scenario's repository.
+            dispatcher.workers.add(
+                EvaluationRolloutWorker(
+                    dispatcher.queue,
+                    LocalCandidateEndpoints(dispatcher),
+                    worker_id=instance_id("evaluation"),
+                    trial_observer=(
+                        None
+                        if settings.evaluation_trial_observer is None
+                        else TrialObserver.from_setting(
+                            settings.evaluation_trial_observer, setting="evaluation.trial_observer"
+                        )
+                    ),
+                    agent_host=settings.evaluation_agent_host,
+                    slots=settings.evaluation_max_sandboxes,
                 )
+            )
         if dispatcher.services.runs_control and not dispatcher.services.runs_harness and recipe.harness_adapter:
             # The harness service runs in another process: it sends each import here to commit.
             dispatcher.workers.add(
@@ -564,6 +596,7 @@ def build_app(
     *,
     environ: Mapping[str, str] | None = None,
     inference_handler: InferenceHandler | None = None,
+    lifecycle: LifecycleSettings | None = None,
     components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
 ) -> web.Application:
     """Build the complete HTTP service from settings: dispatcher, retention, retries, tokens and cleanup.
@@ -574,10 +607,41 @@ def build_app(
     An embedding application adds its middleware and routes to the returned
     app before startup and reaches the dispatcher with ``get_dispatcher(app)``.
 
+    With ``reef.routing_manifest``, ``lifecycle`` is required: ``reef serve`` starts this service as the
+    closed child of a managed routing deployment and hands it the router's selection credential.
+
     ``components`` names the services that this process runs besides ``control``. With ``evaluation``, this
-    process's evaluation workers serve each candidate themselves; without it, the evaluation service runs in another
+    process's evaluation worker serves each candidate itself; without it, the evaluation service runs in another
     process.
     """
+    routing = None
+    preview = None
+    retry_policy = None
+    if settings.routing_manifest is not None:
+        if lifecycle is None or not lifecycle.selection_token or not lifecycle.control_socket:
+            raise ValueError(
+                "reef.routing_manifest runs only as a managed routing deployment started by reef serve, which "
+                "supplies the Semantic Router selection credential and control socket"
+            )
+        policy = settings.routing_deployment
+        if settings.port == policy.sr_management_port:
+            raise ValueError("reef.port must differ from routing sr_management_port")
+        routing = RoutingAdapter.from_manifest(
+            settings.routing_manifest,
+            router_config_hash=lifecycle.router_config_hash or None,
+            environ=environ,
+            timeout_s=settings.inference_timeout_s,
+        )
+        preview = PreviewSettings(
+            f"http://127.0.0.1:{policy.sr_management_port}",
+            lifecycle.selection_token,
+            policy.selection_timeout_seconds,
+        )
+        retry_policy = InferenceRetryPolicy(
+            initial_s=settings.inference_retry_initial_s,
+            max_s=settings.inference_retry_max_s,
+            timeout_s=settings.inference_retry_timeout_s,
+        )
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     # A composite's model calls come back to this service, which answers only once the app listens: its local
     # cycles wait for that, so a harness job started by the preload never fails its calls into a skip.
@@ -593,7 +657,9 @@ def build_app(
         new_artifacts=new_artifacts,
         components=components,
     )
-    evaluations = ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts)
+    evaluations = ArtifactEvaluations(
+        dispatcher, new_artifacts=new_artifacts, sources=ArtifactSources.from_setting(settings.artifact_sources)
+    )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:
@@ -606,6 +672,10 @@ def build_app(
             close_dispatcher=True,
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),
+            routing=routing,
+            lifecycle=lifecycle,
+            preview=preview,
+            inference_retry_policy=retry_policy,
             evaluations=evaluations,
             artifact_imports=ArtifactImports(
                 ArtifactSources.from_setting(settings.artifact_sources),

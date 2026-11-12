@@ -129,7 +129,7 @@ def test_trace_processor_batches_a_failed_trace() -> None:
     assert sample.metadata.get("reward") == 0.0
     assert recorded_payload(sample)["messages"][0]["content"] == "skill"
     processor.acknowledge(batch.data_id)
-    retention = processor.releasable_record_ids()
+    retention = processor.record2sample.releasable_record_ids()
     assert "rep-1" in retention
 
 
@@ -204,7 +204,7 @@ def test_trace_processor_has_no_judge_hook() -> None:
 
 def test_trace_processor_has_no_training_preparation_hook() -> None:
     for stage in (TrainingPipeline, TraceSamples, TraceJobData):
-        assert not hasattr(stage, "prepare_training_step")
+        assert not hasattr(stage, "next_commit")
         assert not hasattr(stage, "prepare")
 
 
@@ -239,7 +239,7 @@ def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
     assert {s.metadata.get("reward") for s in batch.samples} == {None}
 
     # The stored samples consume their records; the job data consumes the samples.
-    retention = processor.releasable_record_ids()
+    retention = processor.record2sample.releasable_record_ids()
     assert retention == frozenset({"inf-1", "inf-2"})
 
     consumed = processor.acknowledge(batch.data_id)
@@ -251,7 +251,7 @@ def test_record_driven_processor_releases_reports_untouched() -> None:
     processor = _record_processor()
     processor.push(_report("rep-1", 0.0, ["inf-0"], feedback="ignored"))
     assert not processor.ready(1)
-    retention = processor.releasable_record_ids()
+    retention = processor.record2sample.releasable_record_ids()
     assert retention == frozenset({"rep-1"})
 
     processor.push(_inference("inf-1", {"messages": []}))

@@ -53,7 +53,7 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
     requested = frozenset(record_ids)
     commits = scenario.store.history() if scenario.store.durable else ()
     components = tuple(scenario.artifact_status())
-    queries = scenario.release_queries
+    queries = scenario.snapshot_queries
     matches = tuple(
         islice(
             (

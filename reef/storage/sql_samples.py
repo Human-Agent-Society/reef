@@ -1,19 +1,21 @@
 """The training state of a scenario in its record database, for each SQL backend (RFC #1140).
 
-The train count table and the consumed record table are in the same database as the records and the commits. The
-commit history counts the samples that a commit consumed in the transaction of the commit (``SQLCommitHistory``).
-The adapters build the tables with :func:`sample_train_count_table` and :func:`stage_record_table` and supply their
-namespace.
+The consumed record table is in the same database as the commits. The train counts have no table: each training
+commit lists the samples that it consumed, and ``SQLTrainingState`` counts them from the commit table. The adapters
+build the stage record table with :func:`stage_record_table` and supply their namespace.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from threading import Lock
 
-from sqlalchemy import Column, ForeignKey, Integer, MetaData, String, Table, Text, select
+from sqlalchemy import Column, ForeignKey, MetaData, String, Table, Text, select
 
-from reef.storage.samples import TrainingState
-from reef.storage.sql_records import ScopedTable, SQLRecordStore
+from reef.storage.commits import CommitRecord
+from reef.storage.samples import CONSUMED_SAMPLE_PREFIX, TrainingState
+from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 
 
 def scoped_table(name: str, metadata: MetaData, columns: tuple[Column, ...], foreign_key: str | None) -> Table:
@@ -22,21 +24,6 @@ def scoped_table(name: str, metadata: MetaData, columns: tuple[Column, ...], for
     if foreign_key is None:
         return Table(name, metadata, *columns)
     return Table(name, metadata, Column("storage_id", String(32), ForeignKey(foreign_key), primary_key=True), *columns)
-
-
-def sample_train_count_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
-    """Define the ``sample_train_count`` table in ``metadata``: how many committed jobs of each trainer held a sample.
-
-    A row ``(sample_id, component, train_count)`` says that ``train_count`` committed jobs of the trainer
-    ``component`` listed ``consumed_sample_id(sample_id)``. ``component`` is the component that the commits name, or
-    ``""`` for the only trainer of a scenario, whose commits name none. A missing row is a count of 0.
-    """
-    columns = (
-        Column("sample_id", Text, primary_key=True),
-        Column("component", Text, primary_key=True),
-        Column("train_count", Integer, nullable=False),
-    )
-    return scoped_table("sample_train_count", metadata, columns, foreign_key)
 
 
 def stage_record_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
@@ -50,31 +37,48 @@ def stage_record_table(metadata: MetaData, *, foreign_key: str | None = None) ->
 
 
 class SQLTrainingState(TrainingState):
-    """The training state of one scenario in its record database: ``train_counts`` is its train count table and
-    ``consumed`` its stage record table, both in the namespace of the scenario."""
+    """The training state of one scenario in its record database.
 
-    def __init__(self, records: SQLRecordStore, train_counts: ScopedTable, consumed: ScopedTable) -> None:
-        self.records = records
-        self.counts = train_counts
+    Values: ``commits`` is the commit table and ``consumed`` the stage record table, both in the namespace of the
+    scenario. ``counts`` holds, for each sample ID, the number of commits of each trainer that list the sample
+    (``consumed_sample_id``), over the commits up to step ``read_step``; the trainer of a commit is its ``component``,
+    or ``""`` when it names none.
+    Purpose: a SQL scenario database makes it in ``training_state()``; ``SampleStore`` reads it. ``train_counts``
+    reads the commits after ``read_step`` first, so the counts follow the commit history with no table of their own.
+    """
+
+    def __init__(self, database: SQLScenarioDatabase, commits: ScopedTable, consumed: ScopedTable) -> None:
+        self.database = database
+        self.commits = commits
         self.consumed = consumed
+        self.counts: dict[str, dict[str, int]] = {}
+        self.read_step = 0
+        self.lock = Lock()
 
     def train_counts(self, sample_ids: Sequence[str]) -> dict[str, dict[str, int]]:
         if not sample_ids:
             return {}
-        table = self.counts.table
-        counts: dict[str, dict[str, int]] = {}
-        with self.records._transaction(write=False) as connection:
-            for row in connection.execute(
-                select(table.c.sample_id, table.c.component, table.c.train_count).where(
-                    self.counts.condition(), table.c.sample_id.in_(list(sample_ids)), table.c.train_count > 0
-                )
-            ):
-                counts.setdefault(row.sample_id, {})[row.component] = row.train_count
-        return counts
+        table = self.commits.table
+        with self.lock:
+            with self.database._transaction(write=False) as connection:
+                rows = connection.execute(
+                    select(table.c.step, table.c.commit_json)
+                    .where(self.commits.condition(), table.c.step > self.read_step)
+                    .order_by(table.c.step)
+                ).all()
+            for step, commit_json in rows:
+                record = CommitRecord.from_dict(json.loads(commit_json))
+                trainer = record.component or ""
+                for consumed in record.consumed_ids:
+                    if consumed.startswith(CONSUMED_SAMPLE_PREFIX):
+                        by_trainer = self.counts.setdefault(consumed.removeprefix(CONSUMED_SAMPLE_PREFIX), {})
+                        by_trainer[trainer] = by_trainer.get(trainer, 0) + 1
+                self.read_step = step
+            return {sample_id: dict(self.counts[sample_id]) for sample_id in sample_ids if sample_id in self.counts}
 
     def consumed_record_ids(self, trainer: str) -> frozenset[str]:
         table = self.consumed.table
-        with self.records._transaction(write=False) as connection:
+        with self.database._transaction(write=False) as connection:
             return frozenset(
                 connection.execute(
                     select(table.c.agent_record_id).where(self.consumed.condition(), table.c.trainer == trainer)
@@ -87,8 +91,8 @@ class SQLTrainingState(TrainingState):
             for record_id in dict.fromkeys(record_ids)
         ]
         if rows:
-            with self.records._transaction(write=True) as connection:
-                self.records._insert_if_absent(connection, self.consumed.table, rows)
+            with self.database._transaction(write=True) as connection:
+                self.database._insert_if_absent(connection, self.consumed.table, rows)
 
 
-__all__ = ["SQLTrainingState", "sample_train_count_table", "stage_record_table"]
+__all__ = ["SQLTrainingState", "stage_record_table"]

@@ -18,7 +18,7 @@ from tests.support.harness_steps import IdleMethod, harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.sources import ArtifactSources
+from reef.artifact.sources import ArtifactSources, DirectorySource
 from reef.core.job_data import JobData
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
@@ -29,7 +29,13 @@ from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.recipe import CompositeRecipe, Recipe
-from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
+from reef.record2sample.service import (
+    RECORD_SELECTION_KIND,
+    SAMPLES_QUEUE,
+    SamplesWorker,
+    Selection,
+    request_selection,
+)
 from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app
@@ -38,6 +44,8 @@ from reef.service.data_service import DataJob, DataWorker
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
+from reef.service.scenario_files import artifact_directory
+from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
@@ -266,11 +274,22 @@ def test_failed_assembly_stops_workers_before_closing_their_stores(
                 dispatcher.close()
 
 
+class Quiet(Selection):
+    """A selection that drops its progress."""
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        return
+
+
 @pytest.mark.unit
 def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_the_jobs_to_control() -> None:
     made: list[str] = []
-    trainer = SimpleNamespace(trains=True, produce_samples=lambda: made.append("weights") or False)
-    current = SimpleNamespace(trainers=(SimpleNamespace(component="weights", trainer=trainer),))
+    trainer = SimpleNamespace(trains=True)
+    current = SimpleNamespace(
+        trainers=(SimpleNamespace(component="weights", trainer=trainer),),
+        produce_samples=lambda component, selection: made.append(component) or False,
+        record2sample_config={},
+    )
     loads: list[tuple[str, object]] = []
 
     class Registry:
@@ -278,7 +297,10 @@ def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_th
             loads.append((scenario, allow_implicit_creation))
             return current
 
-    assert LocalSampleProducers(Registry(), None).produce("math", "weights") is False
+        def stored_settings(self, scenario: str) -> ScenarioSettings:
+            return ScenarioSettings()
+
+    assert LocalSampleProducers(Registry(), None).produce("math", "weights", Quiet("t")) is False
     assert made == ["weights"] and loads == [("math", False)]
 
 
@@ -316,7 +338,7 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(ini
     first_records = [] if initial_sequence == 0 else ["math"]
     assert changes.records == first_records and changes.samples == []
     sequence["math"] = 5
-    request_selection(queue, "math", "weights")
+    request_selection(queue, "math", "weights", trigger="records")
     item = queue.take(SAMPLES_QUEUE, "samples-1", [RECORD_SELECTION_KIND])
     queue.finish(SAMPLES_QUEUE, item.id, "samples-1", {"changed": True, "background": False})
     watcher.run_once()
@@ -440,6 +462,54 @@ def test_control_and_data_load_a_scenario_without_activating_its_engine(tmp_path
     finally:
         data.close()
     assert component.inference.activated == []
+
+
+@pytest.mark.unit
+def test_the_data_service_reads_the_artifact_that_control_commits_after_the_data_service_loaded(
+    tmp_path: Path,
+) -> None:
+    component = ImportingComponent(tmp_path / "checkpoints")
+    repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+
+    def dispatcher(components: frozenset[str]) -> Dispatcher:
+        return Dispatcher(
+            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            repository,
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
+            components=components,
+        )
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "config.json").write_text("{}")
+    (weights / "model.safetensors").write_bytes(b"w9")
+    directory = tmp_path / "store"
+    directory.mkdir()
+    control = dispatcher(frozenset({"control"}))
+    data = dispatcher(frozenset({"data"}))
+    try:
+        control.get_or_create_scenario("math")
+        before = {row["artifact_id"] for row in _listed(data)}
+        imported = control.import_artifact(
+            "math",
+            DirectorySource(weights, source_version="", link=False),
+            None,
+            source={"uri": weights.as_uri(), "version": ""},
+            directory=directory,
+        )
+        assert imported.artifact_id not in before
+        assert imported.artifact_id in {row["artifact_id"] for row in _listed(data)}
+        assert artifact_directory(data, "math", imported.artifact_id, None).is_dir()
+    finally:
+        data.close()
+        control.close()
+
+
+def _listed(dispatcher: Dispatcher) -> tuple[dict[str, object], ...]:
+    """The data service's artifact list. It loads the scenario on its first read."""
+    dispatcher.get_or_create_scenario("math")
+    return dispatcher.list_artifacts("math")
 
 
 @pytest.mark.unit

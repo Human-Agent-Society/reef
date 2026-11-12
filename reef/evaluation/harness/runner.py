@@ -34,7 +34,7 @@ from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.sandbox.process import RUN_OWNER_LEASE, ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.harbor_task import run_harbor_task
+from reef.harness.harbor.agent import run_harbor_task
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.run import TaskResult, TaskRunError, run_task
 from reef.harness.tasks.trajectory import (
@@ -336,11 +336,10 @@ def evaluation_selection(
         raise ValueError(
             "declare GPU needs through execution.evolution.resources.gpus_per_worker, not executor.options.num_gpus"
         )
-    configured_cpus = settings.options.get("num_cpus", requirements.cpus_per_worker)
-    if settings.resources.cpus_per_worker is not None and configured_cpus != requirements.cpus_per_worker:
-        raise ValueError("executor.options.num_cpus conflicts with execution.evolution.resources.cpus_per_worker")
-    # Keep the older Ray profiles, which request CPUs through options.num_cpus.
-    requirements = replace(requirements, cpus_per_worker=configured_cpus)
+    if settings.options.get("num_cpus", requirements.cpus_per_worker) != requirements.cpus_per_worker:
+        raise ValueError(
+            "declare CPU needs through execution.evolution.resources.cpus_per_worker, not executor.options.num_cpus"
+        )
     runtime_env = settings.options.get("runtime_env", {})
     if not isinstance(runtime_env, dict):
         raise ValueError("evolution executor runtime_env must be an object")

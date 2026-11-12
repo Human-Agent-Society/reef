@@ -9,8 +9,9 @@ from typing import Any
 from recipes.sdpo.processor import SDPOJobData, SDPOSamples
 from recipes.sdpo.report import SDPOReport
 from reef.core.reports import ReportBase
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -23,7 +24,7 @@ class SDPORecipe(WeightTrainingRecipe):
     next-token distributions over the student's on-policy response become the
     target of a per-token divergence. A step is a complete sampling grid,
     ``groups_per_step`` questions by ``rollouts_per_group`` attempts from one
-    policy release; each report carries one rollout's receipt, its score and
+    policy artifact; each report carries one rollout's receipt, its score and
     its coordinates, and the grid trains as one optimizer step once complete.
 
     The recipe binds the objective, the step schedule, and the report
@@ -45,8 +46,8 @@ class SDPORecipe(WeightTrainingRecipe):
         return SDPOReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective="sdpo")
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "sdpo"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

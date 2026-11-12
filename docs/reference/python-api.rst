@@ -30,7 +30,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | turn job data into a signal                 | `Training objective <#training-objective>`__     | weight-training methods      |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| declare a new release component             | `Scenario components <#scenario-components>`__   | only a new evolution medium  |
+| declare a new snapshot component            | `Scenario components <#scenario-components>`__   | only a new evolution medium  |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | evolve a harness tree and score a task run  | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
@@ -70,15 +70,14 @@ there is no aggregate runtime:
 
 A ``TrainingComponent`` runs bounded training jobs (see `Training jobs and
 components`_). An ``InferenceRuntime`` executes requests, owns admission, and
-loads published releases into its engines (see `Runtime responsibilities`_).
+loads published snapshots into its engines (see `Runtime responsibilities`_).
 ``InferenceBackend`` controls the serving engines of one deployment: it loads
 ``WeightFiles`` into every engine (``load_weight_files``), pauses and resumes
 generation, unloads adapters, and reports the runtime load IDs that the engines
 serve. ``InferenceEngine`` names the operations one engine actor offers, which
 ``ReefSGLangEngine`` and ``ReefVLLMEngine`` implement. The engine supervision
-hooks an inference integration also implements (``InferenceEngineGroup``,
-``InferenceMonitor``, ``EngineHealthChecks``, ``EngineHealthTarget``) live in
-``reef/inference/recovery.py``, next to the objects that drive them.
+hook an inference integration also implements (``InferenceEngineGroup``) lives
+in ``reef/inference/recovery.py``, next to ``InferenceControl``, which drives it.
 Implementations inherit the corresponding interface and provide every abstract
 operation. SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``
 through ``EngineInferenceBackend``. ``InferenceService`` in
@@ -97,7 +96,7 @@ Two other extension points have separate names and purposes:
   The trainer's job size is its sample-to-job stage's ``job_samples``.
 - ``reef.inference.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
-  ``artifact_id``, an optional ``local_path``, and ``require_token_runtime_load_ids``.
+  ``artifact_id`` and an optional ``local_path``.
   Handlers receive no repository or snapshot locator. Runtime and recipe objects
   expose the handler as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -122,8 +121,33 @@ methods. Each has a default for a handler or runtime without serving fields:
   scenario's override with each request. It applies its own fields and leaves
   the rest.
 - ``InferenceRuntime.apply_serving_config(scenario, override)`` applies the
-  engine fields. The inference worker calls it before each activation and when
-  only the override changed.
+  engine fields. The inference worker calls it before each activation, before
+  each ``serve_artifact(artifact, scenario=...)``, and when only the override
+  changed. After it, the worker reads the scenario's route again with
+  ``served_artifact``, so the runtime may move the scenario to another engine.
+
+An ``InferenceHandler`` whose engines scale to zero can report the state of
+the engine behind a route with ``engine_state(served)``: ``"warm"``,
+``"starting"``, ``"idle"`` or None (RFC #1269). The startup status of a ready
+artifact returns it as ``engine``. It must not start an engine. While an
+engine is ``"starting"``, ``engine_detail(served)`` can give one short line
+for a person, which the status returns as ``engine_detail``, and
+``engine_steps(served)`` its ``start`` and ``load`` phases as
+``reef.inference.interfaces.StartupSteps`` (RFC #1283).
+
+While an ``InferenceRuntime`` serves an artifact, it can report the phase of
+its startup with ``reef.inference.startup.report_startup(phase, detail,
+estimate_seconds=...)``: ``prepare`` (deploy, convert or quantize), ``start``
+(a machine and the weights) or ``load`` (GPU memory, kernels, warm-up). The
+serving worker adds each report to the serving work's progress for that
+artifact, and the startup status gives them as ``startup``. Report when the
+phase or its detail changes. Outside a serving work, the call does nothing.
+
+A runtime that serves several models declares a serving field that chooses the
+model of each artifact (`Serving settings <http-api.rst#serving-settings>`__).
+It reads an artifact's training starts with
+``reef.artifact.artifact.training_starts_of``, nearest first, so that a training
+artifact can use the setting of its start.
 
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.
@@ -216,9 +240,9 @@ Common members
 | ``task_storage=..., releases=...)``               |                             | and give ``task_storage`` to   |
 |                                                   |                             | ``Trainer.build``;             |
 |                                                   |                             | ``releases`` reads the         |
-|                                                   |                             | component's committed releases |
+|                                                   |                             | component's committed snapshots|
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per release        |
+| ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per snapshot       |
 | ``components=..., algorithm_states=...,``         | ...]``                      | component; defaults to the     |
 | ``task_storage=..., releases=...)``               |                             |                                |
 |                                                   |                             | single trainer ``build``       |
@@ -226,20 +250,10 @@ Common members
 |                                                   |                             | scenario's one component       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_components(scenario)``                    | ``ScenarioComponents``      | the components of one named    |
-|                                                   |                             | scenario's releases, each with |
+|                                                   |                             | scenario's snapshots, each with|
 |                                                   |                             | its kind and admission check   |
 |                                                   |                             | (default                       |
 |                                                   |                             | ``AcceptAnyArtifact()``)       |
-+---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_artifact_validator()``                    | ``ArtifactValidator``       | kept from before component     |
-|                                                   |                             | checks: joins the check of the |
-|                                                   |                             | one component served, admits   |
-|                                                   |                             | the whole release of a recipe  |
-|                                                   |                             | serving none (inside a         |
-|                                                   |                             | composite, that recipe's       |
-|                                                   |                             | component); an override on a   |
-|                                                   |                             | recipe serving several is      |
-|                                                   |                             | refused at build               |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``serving_status()``                              | ``Mapping | None``          | runtime-wide state for         |
 |                                                   |                             | ``/reef/status``               |
@@ -255,7 +269,7 @@ as trainer construction. A refusal leaves the scenario unregistered.
 
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
-adapter ``GET /reef/harness`` renders the recipe's harness releases for
+adapter ``GET /reef/harness`` renders the recipe's harness artifacts for
 (``None``, the default, for a recipe with no harness tree;
 ``HarnessEvolutionRecipe`` names ``evolution.adapter``).
 The scenario list names it for every scenario.
@@ -267,21 +281,20 @@ recipe's scenarios. The default is ``False``, so a recipe that trains no
 weights keeps image content in its records. A ``WeightTrainingRecipe`` refuses
 images unless it supports them, and a composite refuses them when any component
 does. Reef then answers 400 to a recorded call, an imported inference record, and
-a trajectory or record item that names a scenario, when it holds an image
-(``reef.core.trajectories.has_image_content``). It stores none of them. An
-unrecorded call, such as an evaluation rollout's, is not checked. An item that
-names no scenario is stored, and a metadata update cannot add it to a scenario.
-A scenario skips a record item with an image that Reef stored earlier, with a
-warning.
+a new trajectory or record item, also one that names no scenario, when it holds
+an image (``reef.core.trajectories.has_image_content``). It stores none of them.
+An unrecorded call, such as an evaluation rollout's, is not checked. A record
+or an upload with an image that Reef stored earlier does not train: training
+leaves it out with a warning (``render_trajectory``).
 
 Every recipe declares ``pipeline_spec()``, the default class of each pipeline
 stage (see `Pipeline stages <#pipeline-stages>`__). Weight-training recipes add
 these members:
 
-- ``training_spec()`` binds the registered or dotted training objective.
-  The objective declares the backend loss family.
-- ``parameters_by_kind()`` returns the parameters of each training job by the
-  kind of its samples (see `Training objective`_).
+- ``default_parameters()`` gives the recipe's own parameters of each training
+  job by the kind of its samples, normally the ``objective``.
+- ``parameters_by_kind()`` returns them with the ``job_parameters`` config over
+  them (see `Training objective`_).
 
 Every recipe's ``activation_rule()`` returns the rule that decides whether an
 artifact that its trainers make serves; the deployment's ``activation``
@@ -298,8 +311,8 @@ section names it (`Activation rule`_).
            return MyMethodReport
 
        @classmethod
-       def training_spec(cls) -> WeightTrainingSpec:
-           return WeightTrainingSpec(objective="my_method.objective:MyObjective")
+       def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+           return {kind: {"objective": "my_method"} for kind in SAMPLE_KINDS}
 
        @classmethod
        def pipeline_spec(cls) -> PipelineSpec:
@@ -425,7 +438,7 @@ Scenario stores
 ---------------
 
 ``RecordStore`` in ``reef.storage.records`` is the abstract base for appending,
-reading and auditing records, and for recording consumption receipts. ``ScenarioStore`` composes a ``RecordStore`` with committed
+reading and auditing records. ``ScenarioStore`` composes a ``RecordStore`` with committed
 scenario state, settling each step and its record progress together. Recipes
 and trainers use the record interface; ``Scenario`` coordinates training and
 artifact publication through its supplied scenario store.
@@ -441,7 +454,7 @@ callers remain compatible with existing adapters.
 Storage implementations explicitly subclass ``RecordStore``,
 ``ScenarioStore``, and ``ScenarioStorage`` and override their abstract
 methods and properties. Incomplete subclasses cannot be instantiated. The
-bundled ``SQLiteRecordStore``, ``CommitHistoryScenarioStore``, and
+bundled ``ItemRecordStore``, ``CommitHistoryScenarioStore``, and
 ``SQLiteScenarioStorage`` inherit those bases, respectively.
 
 .. code:: python
@@ -522,10 +535,9 @@ scenario package depends only on storage contracts. The storage contract is:
    * - ``write_settings(scenario, settings)``
      - Replace the settings durably. The caller serializes writers of one scenario.
    * - ``archive(scenario)``
-     - Retire the scenario's records, commits, tasks and settings, so a
-       recreated scenario starts empty; return the archive locations.
-   * - ``prune(max_bytes=...)``
-     - Evict the oldest record bodies over the byte budget.
+     - Retire the scenario's commits, tasks and settings, and remove the
+       scenario from the uses of its owner's items, so a recreated scenario
+       starts empty; return the archive locations.
    * - ``close()``
      - Release shared resources; repeated calls are safe.
 
@@ -539,10 +551,10 @@ The session contract is:
      - Contract
    * - ``records``
      - A ``RecordStore`` implementation preserving append deduplication,
-       ordered replay, scenario isolation, audit reads, and consumption receipts.
+       ordered replay, scenario isolation, and audit reads.
    * - ``durable``
      - Whether committed history survives session/process restart. A durable
-       store requires a repository backend supporting staged releases.
+       store requires a repository backend supporting staged snapshots.
    * - ``tasks``
      - The ``TaskStorage`` that opens the task stores of the
        scenario (see `Task stores`_). The stores close with the
@@ -554,7 +566,7 @@ The session contract is:
        session and survives restarts when ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
-       (including inactive releases), activations, and new training starts.
+       (including inactive artifacts), activations, and new training starts.
        This is authoritative after an ambiguous commit error.
    * - ``training_run_position()``
      - The step of the last ``train_from`` commit and the count of training
@@ -577,8 +589,6 @@ flags, metrics and training job identity. Operations include ``training``,
 selection and leaves training starts unchanged. A sync selects its new
 artifact for serving and training in one commit. Activation and serving record a complete selection without
 publishing another artifact snapshot. A selection maps component names directly to artifact IDs.
-Older records without a selection
-remain readable through their stored artifact references.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
 the current step before accepting a new successor: two different commits
 prepared from the same step cannot both succeed. An identical recorded retry
@@ -603,16 +613,16 @@ processor memory without repeating work. It does not modify stored bodies.
 
 Artifact bytes and backend head movement remain outside ``ScenarioStore``.
 ``ScenarioCommitter`` owns their order around store settlement, including
-inactive releases, activation, new training starts, and checkpoint
+inactive artifacts, activation, new training starts, and checkpoint
 reconciliation. See `Commit ordering
 <../advanced_topics/state-model.rst#commit-ordering>`__. Step validation does not
 provide distributed leases or authorize multiple active training writers.
 
 The storage service exposes ``durable``, ``open(scenario)``, ``archive(scenario)``,
-``prune(max_bytes=...)``, and ``close()``. Archive retires that scenario's
-stored state so its name can be reused; prune applies retained-body limits to
-active and archived state. Custom backends implement those operations instead
-of exposing local file paths. Each opened session belongs to its scenario and
+and ``close()``. Archive retires that scenario's stored state so its name can be
+reused. Custom backends implement those operations instead
+of exposing local file paths. ``from_config`` takes the deployment's data store,
+which keeps each scenario's records as record items. Each opened session belongs to its scenario and
 closes after its trainer, including on construction or recovery failure. The
 dispatcher closes its storage service on shutdown. Application assembly should use
 the scenario storage service; direct record store construction is described below.
@@ -692,14 +702,27 @@ its split. The published tasks are the candidates with a split. A
      - Return the published tasks in generation and candidate order, each
        name once. Give a ``split`` to return only the tasks of that split.
    * - ``path(files_digest)``
-     - Return the local task directory of a candidate or a published task,
-       for example for ``read_harbor_task`` or ``TaskRolloutRunner.run``. Do not
-       change it.
+     - Return the local directory of a candidate, a published task or a
+       ``save_files`` call, for example for ``read_harbor_task`` or
+       ``TaskRolloutRunner.run``. Do not change it.
    * - ``write_document(key=..., document=...)``, ``documents()``
      - Save a text document under a non-empty key, or return every document by
        key. Each key holds one document; another document under a used key
        raises ``TaskStoreError``. The store does not read a document: the stage
        that writes the store keeps its own state about its tasks here.
+   * - ``write_state_document(key=..., document=...)``,
+       ``remove_state_document(key=...)``, ``state_document(key)``,
+       ``state_document_keys(prefix="")``
+     - Save, remove or read a state document, or return the keys that start
+       with ``prefix`` in increasing string order. A state document is text
+       under a non-empty key. Unlike a document, its key can be written again
+       and removed. The two kinds of document have separate keys. The stage
+       keeps there the state that changes in place: the generated-task stage
+       gives it to its task generator as ``GeneratorState``.
+   * - ``save_files(directory)``
+     - Save a copy of a directory in the task files of the scenario and return
+       the digest of its files, which ``path`` takes. The call makes no
+       candidate and changes no generation.
 
 Each write is durable when it returns. An identical retry of a write changes
 nothing. A write that conflicts with the stored state raises
@@ -758,8 +781,7 @@ task, which the task file store keeps in the owner's partition. Its metadata
 is a JSON object. Reef reads ``kind`` (``trajectory``, ``task`` or
 ``record``), ``owner``, ``scenarios`` (scenario name to ``train`` or
 ``eval``) and, for a record or artifact, ``origin``
-(``{scenario, artifact_id}``). Older origin metadata can carry ``release_id``;
-the input boundary accepts it for compatibility. ``kind``, ``owner`` and ``origin`` never change. A deployment
+(``{scenario, artifact_id}``). ``kind``, ``owner`` and ``origin`` never change. A deployment
 selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
 ``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are
 built in. Every operation names one owner and reads or writes only its items.
@@ -869,7 +891,7 @@ partition per owner. A deployment selects the store in
 Artifact backends
 -----------------
 
-An artifact backend stores the releases of each scenario. By default, Reef
+An artifact backend stores the snapshots of each scenario. By default, Reef
 uses Git LFS. A deployment selects a different backend in
 ``storage.artifact_backend`` (see `Choose the artifact backend
 <../user-guide/operate.rst#choose-the-artifact-backend>`__).
@@ -896,11 +918,11 @@ updates scenario selections without calling ``publish``.
 
 Every scenario owns its root snapshot, which Reef writes when it creates the
 scenario (`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
-A backend shares no release between scenarios. It must:
+A backend shares no snapshot between scenarios. It must:
 
 - Implement ``register(root, *, metadata)``. ``root`` is an unpublished
   ``Artifact`` whose ``local_path`` is a directory. When the scenario has no
-  head, store the files of ``root`` as a release with no parent, preserve its
+  head, store the files of ``root`` as a snapshot with no parent, preserve its
   artifact IDs and ``metadata``, and make it the head in one atomic
   step. When the scenario has a head, also one that another caller registered
   first, store nothing and return that head.
@@ -915,9 +937,6 @@ A backend shares no release between scenarios. It must:
   changes. The second returns a value that is equal for two snapshots exactly when they hold the same
   files and metadata for the artifact. The inherited ``bind_artifact_ids(snapshot)`` uses both, and
   raises ``ArtifactConflict`` for an ID that names other content. Call it before a head moves.
-- Implement ``index_snapshot(ref)`` to add ID bindings for older stored snapshots.
-  Recovery calls it before resolving artifacts from legacy records. Repeated
-  calls preserve existing bindings; conflicting bindings raise ``ArtifactConflict``.
 - Implement ``resolve_snapshot(revision)``. Return a ``SnapshotRef`` for a
   stored snapshot, or raise ``ArtifactNotFound``. Its ``revision`` and
   ``parent_revision`` are backend locators, separate from component IDs.
@@ -940,24 +959,24 @@ that the backend supports:
        loads them when it starts.
    * - ``CachedRepositoryBackendFactory``
      - Both capabilities, and one cached backend for each scenario.
-   * - ``StagedReleaseRepositoryBackend``
-     - The backend side: ``publish(advance_head=False)`` stores a release
-       without moving the head, and ``commit_release`` moves the head
+   * - ``StagedSnapshotRepositoryBackend``
+     - The backend side: ``publish(advance_head=False)`` stores a snapshot
+       without moving the head, and ``commit_snapshot`` moves the head
        after the scenario commit. A durable scenario store requires it.
 
 A backend whose storage can give clients a URL for each file, such as an
 object store, overrides ``file_downloads(ref, expires_in_seconds)``. It
-returns every file of the release as a ``FileDownload``: ``path`` in the
-release, ``byte_count``, and a ``url`` that opens the file without a Reef
-credential until ``expires_at``. It must not materialize the release. The
+returns every file of the snapshot as a ``FileDownload``: ``path`` in the
+snapshot, ``byte_count``, and a ``url`` that opens the file without a Reef
+credential until ``expires_at``. It must not materialize the snapshot. The
 default returns None, and Reef then lists and serves the files of the
-materialized release itself. The artifact file list of the HTTP API gives
+materialized snapshot itself. The artifact file list of the HTTP API gives
 these URLs to clients, so that a large artifact downloads from the storage.
 
-Such a backend also overrides ``release_uri(ref)``: the URI of the release's
+Such a backend also overrides ``snapshot_uri(ref)``: the URI of the snapshot's
 directory, ending with ``/``, in a scheme that ``ArtifactSources`` reads. The
 `artifact items <http-api.rst#artifact-items>`__ of the data store carry it,
-so that a scenario, also in another deployment, imports the release from
+so that a scenario, also in another deployment, imports the snapshot from
 there. The default returns None.
 
 ``tests/artifact/test_reef_artifacts.py`` and
@@ -977,7 +996,7 @@ revision that cannot change. Two contracts decide what an import accepts.
 
 A component's layout is the ``layout`` of its ``ComponentSpec``, an
 ``reef.artifact.components.ArtifactLayout``. ``check(files)`` returns when ``files`` are
-an artifact in the layout of the component's releases, and the remote weights
+an artifact in the layout of the component's snapshots, and the remote weights
 that they name exist. Otherwise it raises ``ValueError``, and Reef answers
 HTTP 400 before it copies anything. ``None``, the default, means that the
 component takes no import. ``files`` is a ``reef.artifact.ArtifactFiles``. It
@@ -991,9 +1010,9 @@ revision, each read downloads that file. The built-in recipes bind one:
   ``adapter/adapter_config.json``.
 - A harness recipe binds ``HarnessLayout``. Every file must be UTF-8 text,
   and the files must form a ``HarnessTree`` that passes ``validate_tree`` for
-  the adapter: the source tree a harness release stores.
+  the adapter: the source tree a harness artifact stores.
 
-After the layout, the release's own admission check runs on what Reef stores,
+After the layout, the snapshot's own admission check runs on what Reef stores,
 as at a training publication.
 
 A source reader is a subclass of ``reef.artifact.ArtifactSourceReader`` with
@@ -1030,7 +1049,7 @@ component's layout says that its readers resolve one
 that hold weight files). Then Reef stores only ``hf-reference.json``,
 ``{"uri": "hf://org/model", "version": "<commit>"}``, and
 ``reef.artifact.read_reference(directory)`` reads it back. The built-in
-serving runtimes load such a release from the revision's snapshot, which
+serving runtimes load such a snapshot from the revision's snapshot, which
 Hugging Face downloads once into its cache. A runtime that loads models from
 the Hub can read the reference and download nothing.
 
@@ -1042,105 +1061,47 @@ Record storage and audit
 or concrete storage adapters. Both ``reef.RecordStore`` and
 ``reef.storage.records.RecordStore`` refer to this abstract base.
 
-``reef.storage.sql_records.SQLRecordStore`` implements the shared SQLAlchemy
-Core record operations. ``reef.storage.sqlite.SQLiteRecordStore`` inherits
-those operations and supplies SQLite connection setup, schema migration,
-transactions, and dialect behavior. When opening older SQLite schemas, the
-adapter uses Alembic's operations API to add missing columns on its connection.
-Retention query logic is shared in the SQL module; the SQLite adapter owns
-database-file discovery and maintenance connections.
+``reef.storage.record_items.ItemRecordStore`` is the ``RecordStore`` of one
+scenario over the data store (RFC #1219). It appends each record as its record
+item with the scenario's generation, and reads the record items that the
+scenario made, in item sequence order. ``SQLiteScenarioStorage`` and
+``PostgresScenarioStorage`` give one to each session. Both take a data store
+(``data=``); without one, the SQLite storage keeps its records in
+``<directory>/data``, and the PostgreSQL storage in the schema
+``<schema>_data``. Deployment assembly gives them the deployment's data store.
 
-``reef.storage.postgres.PostgresRecordStore`` inherits those same operations.
-It supplies PostgreSQL schema types, pooled transactions, and conflict insertion
-through psycopg 3. Install ``reef-infra[postgres]`` to enable the driver. The
-``RecordTables.scope`` mapping isolates named stores in shared SQL tables;
-SQLite leaves it empty because each store owns a database. Custom SQL adapters
-must also supply ``RecordTables.eviction`` with scope/scenario keys and the
-``record_count``, ``body_bytes``, ``first_sequence`` and ``last_sequence`` columns.
-These totals are updated atomically with capacity deletion and retry hashes.
-The records table also has ``message_field`` and ``payload_sha256`` columns,
-and ``RecordTables.nodes`` holds the trajectory node of each record with a
-message list (``messages``, or ``input`` for responses). Define it with
-``trajectory_node_table(metadata, name, *scope_columns)``. The node keeps the
-record's payload as ATIF (``reef.core.atif_payloads``): each request message as
-ATIF steps and observation results, ``tools`` as the agent's
-``tool_definitions``, and the reply as an agent step. Provider fields that ATIF
-cannot hold, such as ``cache_control``, stay in ``extra.reef``. A node links the
-record to the earlier record of its scenario with the same API format and
-``tools`` whose messages are the longest prefix of its own; among equal
-prefixes, it prefers the record whose reply the new messages resend. Other tools
-start another trajectory. The node keeps only the messages after its parent's,
-and the root node of a trajectory keeps its tools. The record row keeps only the
-payload's hash. Reads render the provider payload back exactly. A node stays
-while a stored record needs its messages.
-``RecordTables.settings`` holds the store's settings as ``name`` and
-``value_json`` rows under the scope keys; ``SQLRecordStore.read_settings()`` and
-``write_settings(settings)`` read and replace them.
+``reef.storage.sql_records.SQLScenarioDatabase`` is the database of one
+scenario's state: its settings, and the transactions of its task, sample,
+evaluation and commit stores. ``reef.storage.sqlite.SQLiteScenarioDatabase`` and
+``reef.storage.postgres.PostgresScenarioDatabase`` supply the connections,
+schemas and conflict insertion. Install ``reef-infra[postgres]`` to enable the
+PostgreSQL driver.
 
-.. code-block:: python
-
-   import os
-   from contextlib import closing
-   from reef.storage.postgres import PostgresRecordStore
-
-   with closing(PostgresRecordStore(
-       os.environ["REEF_RECORD_DATABASE_URL"],
-       schema="reef_records",
-       name="my-record-store",
-   )) as records:
-       rows = records.replay("my-scenario")
-
-The URL constructor owns its pool. To share a pool across sessions, construct
-``PostgresRecordDatabase(url, schema=...)`` and pass that object instead of a URL;
-close sessions before closing the database. Both close operations are idempotent.
-``PostgresScenarioStorage(url, directory, schema=...)`` keeps records, commits
-(the ``scenario_commit`` table) and settings (the ``scenario_setting`` table) in
-the schema. It uses ``directory`` only to import the model configuration
-files of earlier versions on start. Pass it through
-``Dispatcher(..., scenario_storage=...)`` for embedded use. Scenario code
-continues to depend only on the abstract store contracts. Deployment configuration
-selects this storage service with ``storage.record_backend: postgres``; see
+``PostgresScenarioStorage(url, directory, schema=...)`` keeps commits (the
+``scenario_commit`` table) and settings (the ``scenario_setting`` table) in the
+schema. Pass it through ``Dispatcher(..., scenario_storage=...)`` for embedded
+use. Scenario code continues to depend only on the abstract store contracts.
+Deployment configuration selects this storage service with
+``storage.record_backend: postgres``; see
 `Choose the storage backend <../user-guide/operate.rst#choose-the-storage-backend>`__
 for connection and storage setup.
 
-Writes lock their store generation before allocating append sequences and hold
-the lock through commit. Reads use a consistent transaction snapshot. PostgreSQL
-receipt keys hash large consumed ID sets, with complete canonical content checked
-by the shared SQL layer. PostgreSQL timestamps use double precision, and sequences
-use 64-bit identities. Retention applies the same byte-budget policy to
-all bodies across active and archived generations in the deployment schema.
-
-Existing SQLite and PostgreSQL stores link their records when they first open;
-the upgrade rewrites the records that have a message list, oldest first. Direct
-callers must replace
-``RecordStore(path)`` with ``SQLiteRecordStore(path)``; the abstract base cannot
-be instantiated. ``SQLiteRecordStore`` is also exported from ``reef``:
-
-.. code:: python
-
-   from pathlib import Path
-
-   from reef.storage.sqlite import SQLiteRecordStore
-
-   with SQLiteRecordStore(Path(".reef/records.sqlite3")) as records:
-       retained = records.audit_page("math")
-
-``RecordRetention`` in ``reef.storage.records`` holds and validates the
-``max_bytes`` capacity budget. Store factories apply capacity limits through
-``prune`` independently of record consumption.
+A database of a version before RFC #1219 keeps its records in the tables
+``agent_record``, ``record_node``, ``consumed_agent_record``,
+``record_consumption`` and ``record_eviction``. That version copied each record
+to its record item at the first open of its scenario. The storage drops these
+tables when the record item of the newest record of each active scenario is in
+the data store: the PostgreSQL storage when it starts, the SQLite storage at the
+first open of each scenario. Otherwise it keeps them and logs a warning: run
+Reef 83a6f3ab once to copy the records.
 
 Training commits persist consumption progress without changing record
-visibility or deleting bodies. Processors expose ``releasable_record_ids()``
-and ``release_records(ids)`` for memory management. Storage controls capacity
-independently of these buffers. An earlier Reef version wrote a consumption
-receipt for each stale batch drop. With several trainers in one scenario, such
-a receipt carries ``component`` in its metadata, and each trainer skips on
-recovery only the rows its own commits and receipts consumed.
+visibility or deleting bodies. Record-to-sample stages expose
+``releasable_record_ids()`` and ``release_records(ids)``, which the samples
+service calls for memory management. Storage controls capacity
+independently of these buffers.
 
 ``get``, ``replay``, ``replay_page``, and ``count`` read all retained records.
-A one-time upgrade converts older retirement markers and receipts into
-consumption records. It preserves original bodies, drops the old schema,
-and keeps consumption metadata out of record reads.
 
 .. list-table::
    :header-rows: 1
@@ -1155,22 +1116,17 @@ and keeps consumption metadata out of record reads.
        consumed bodies. Advance the cursor using the last entry's ``sequence``.
    * - ``loss(scenario)``
      - Durable ``RecordLoss`` totals: ``record_count``, ``body_bytes``,
-       ``first_sequence`` and ``last_sequence`` for capacity-evicted bodies.
-       ``body_bytes`` counts the record rows and the trajectory nodes that the
-       evictions freed. Counts include consumed and unconsumed records.
+       ``first_sequence`` and ``last_sequence`` of the record items that
+       retention deleted (``DataStore.record_loss``). Counts include consumed
+       and unconsumed records.
    * - ``trajectory(scenario, agent_record_id)``
      - The record IDs of the trajectory that the record ends, oldest first: the
        earlier calls with the same API format and tools whose messages the
        record's messages extend, one per prefix, and then the record. A retry
-       with the same messages replaces the call that it retries. An ID can name
-       a record that capacity eviction deleted. A record without a message list,
-       or a store that keeps no trajectories, gives a trajectory of one call;
-       ``()`` for a record that is not stored.
-   * - ``consumption_receipts(scenario)``
-     - Ordered receipts with ``receipt_id``, ``consumed_ids``, ``metadata``,
-       and ``recorded_at``. Reef no longer writes receipts. A store that an
-       earlier version wrote holds them for skipped batches and legacy
-       retirement markers.
+       with the same messages replaces the call that it retries. A call that
+       retention deleted is left out. A record without a message list, or a
+       store that keeps no trajectories, gives a trajectory of one call; ``()``
+       for a record that is not stored.
 
 ``StoredRecord`` contains ``sequence`` and ``item`` (the original ``AgentRecord``).
 Reading a record does not change a consumer's progress. A missing body may have been purged or never stored;
@@ -1187,53 +1143,29 @@ For example, inspect one trace without making it available to training again:
        payload = entry.item.payload
        references = entry.item.references
 
-With the default SQLite storage service, the HTTP service runs background retention at
-startup and every 60 seconds.
-It evicts oldest bodies only when their total exceeds a shared 20 GiB budget
-across scenario databases in ``agent_record_dir``,
-including ``archived/``. The budget measures UTF-8 JSON payloads, references,
-and artifact references. Limits are configurable in `Configuration <configuration.rst>`__.
+The HTTP service runs background retention at startup and every 60 seconds. It
+deletes the oldest record items, across owners, only when they hold more than a
+shared 20 GiB budget (``DataStore.prune_records``). The budget counts each record
+item's row and the trajectory nodes that only it needs. It counts and deletes
+only the record items whose ``origin.source`` is ``inference``; it keeps the
+calls of evaluation rollouts. Limits are configurable
+in `Configuration <configuration.rst>`__.
 
 For embedded Python deployments, use
 ``dispatcher.prune_record_archives(RecordRetention(max_bytes=20 * 1024**3))``
-with ``RecordRetention`` imported from ``reef.storage.records``. This runs one sweep
-through the configured storage service and serializes it with scenario archival.
-Standalone ``SQLiteRecordStore`` and ``Dispatcher`` construction do not start a
-maintenance task. ``create_app(dispatcher, ...)`` requires an existing dispatcher
-and accepts ``record_retention=RecordRetention(...)`` to enable service maintenance.
-It closes the dispatcher on cleanup only when ``close_dispatcher=True``.
-The deployment assembly selects the storage backend and passes the dispatcher
-to the HTTP app; ``create_app`` never creates a default backend.
+with ``RecordRetention`` imported from ``reef.storage.records``. This runs one
+sweep over the dispatcher's data store and serializes it with scenario archival.
+``Dispatcher`` construction does not start a maintenance task.
+``create_app(dispatcher, ...)`` requires an existing dispatcher and accepts
+``record_retention=RecordRetention(...)`` to enable service maintenance. It
+closes the dispatcher on cleanup only when ``close_dispatcher=True``. The
+deployment assembly selects the storage backend and passes the dispatcher to the
+HTTP app; ``create_app`` never creates a default backend.
 
-The former ``RecordRetention.prune(directory)`` method has been removed: the
-retention value no longer opens databases or accepts a filesystem path. Use
-``dispatcher.prune_record_archives(retention)`` for a running dispatcher. For
-standalone SQLite maintenance, pass the directory to the storage service:
-
-.. code:: python
-
-   from pathlib import Path
-
-   from reef.storage.records import RecordRetention
-   from reef.storage.sqlite import SQLiteScenarioStorage
-
-   retention = RecordRetention(max_bytes=20 * 1024**3)
-   storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
-   try:
-       purged = storage.prune(max_bytes=retention.max_bytes)
-   finally:
-       storage.close()
-
-The caller must serialize standalone maintenance with any scenario file moves.
-
-Capacity eviction includes active records and logs warnings with counts, byte
-sizes and sequence ranges. Retry hashes and commit/receipt metadata survive,
-so identical retries still deduplicate and conflicting content still fails.
-SQLite deletes commit in batches of 256; PostgreSQL serializes a sweep with
-writers in one transaction. Concurrent writes can exceed the budget between
-sweeps. SQLite reuses freed pages without shrinking its file. Indexes and other
-metadata also require disk space. HTTP audit routes remain a separate integration. See
-`Configuration <configuration.rst>`__ for migration and rollback constraints.
+Retention logs nothing per record. A trainer reports the loss of its scenario in
+its metrics and status. Concurrent writes can exceed the budget between sweeps.
+Indexes and other metadata also require disk space. HTTP audit routes remain a
+separate integration.
 
 Pipeline stages
 ---------------
@@ -1275,7 +1207,7 @@ sample2job=...)``):
   default, ``NoSamples``, makes no sample, so nothing trains.
   ``uploaded_sample(trajectory) -> TrajectorySample`` turns an uploaded ATIF
   trajectory into its training sample. It must be pure, and it raises
-  ``ValueError`` to refuse the upload (see `Uploaded trajectories
+  ``ValueError`` to skip the trajectory (see `Uploaded trajectories
   <../developer-guide/processors.rst#uploaded-trajectories>`__).
 - ``sample2job``: the sample-to-job stage (``reef.sample2job.Sample2Job``).
   Its ``make_job_data(samples, data_id)`` shapes the samples of the next job,
@@ -1468,8 +1400,8 @@ Task generation
 ``TaskGenerator`` is the plugin base class that a deployment names in
 ``pipeline.record2sample.config.generator``. Subclasses implement:
 
-- the class method ``from_config(config, *, scenario, environ)``, which returns
-  the generator of one scenario;
+- the class method ``from_config(config, *, scenario, environ, state)``, which
+  returns the generator of one scenario;
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``;
 - ``async validate(task: HarborTask) -> TaskValidationResult``.
 
@@ -1481,6 +1413,13 @@ default keeps nothing. The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls these methods.
 See `Training pipeline <../developer-guide/processors.rst#task-generation-contract>`__
 for the round and its failure behavior.
+
+``state`` is a ``GeneratorState`` (``reef.recipe.generated_tasks``): the
+durable state of the scenario's generator, kept in the scenario's task store.
+It holds text documents by key (``read``, ``write``, ``remove``, ``keys``) and
+saved directories by the digest of their files (``save_files``, ``files``). A
+generator keeps its state there and keeps no file of its own. A generator
+written for an earlier version must accept the ``state`` argument.
 
 ``TaskGenerationRequest(source_records, description, assets=(), asset_files={}, generation=0)``
 carries source records, non-empty requirements text, and the number of the generation.
@@ -1679,21 +1618,26 @@ it. ``reef.core.chat_rendering`` holds the shared rendering:
 Training objective
 ------------------
 
-Each method defines a ``TrainingObjective`` in its own ``objective.py``. It
-owns signal preparation over a job's full data and declares the backend loss family.
-Recipes bind it with ``WeightTrainingSpec(objective="my_method.objective:MyObjective")``.
+Each training backend owns its objectives: ``SlimeObjective`` in
+``reef.train.slime_backend.objectives`` and ``TinkerObjective`` in
+``reef.train.tinker_backend.objectives``. An objective
+owns signal preparation over a job's full data and declares the backend's loss family.
+A job names it in its ``objective`` parameter, usually from the recipe's
+``default_parameters()``: a registered name, or a dotted
+``my_method.slime:MyObjective`` reference.
 The dotted reference names a class with a zero-argument
 constructor or an existing instance; its module must be importable in both the
 service and training processes.
 
 .. code:: python
 
-   from reef.train.algos import TrainingObjective, TrainingSignal
    from reef.train.algos.helpers import next_steps
+   from reef.train.algos.signals import TrainingSignal
+   from reef.train.slime_backend.objectives import SlimeObjective
    from reef.train.types import JobData, trajectories
    from reef.core.trajectories import trajectory_reward
 
-   class MyObjective(TrainingObjective):
+   class MyObjective(SlimeObjective):
        name = "my_method"
        loss_family = "my_method"
 
@@ -1707,11 +1651,12 @@ service and training processes.
                metrics={"steps": steps},
            )
 
-For a shared short name, decorate the class with ``@register_objective`` from
-``reef.train.algos.registry``; importing its package registers it. The same
-function accepts an explicit instance. Core never imports method packages.
-``WeightTrainingSpec.loss_family`` is derived from the objective, so neither
-the recipe nor the signal repeats that choice.
+For a shared short name, decorate the class with ``@register_slime_objective``
+(or ``@register_tinker_objective``). The same function accepts an explicit
+instance. So that the name resolves where the module is not yet imported, a method
+package's public half calls ``register_objective_ref(name, "my_method.slime:MyObjective")``
+from ``reef.train.algos.registry``. Core never imports method packages. A built-in
+``sft`` objective exists on each backend, and ``slime_dataset`` on Slime.
 
 The training component cuts each job's data into optimizer steps. The
 backend's batch size (Slime's ``--global-batch-size``, Tinker's
@@ -1743,13 +1688,16 @@ A job's optional ``scheduling`` parameter is a ``StepScheduling``
    ``packing_length`` : ``null``
        pack the rollouts into packs of at most this many tokens (``training["tokens"]`` of each trajectory) before the steps are cut; one step then trains batch-size packs. A pack never splits a rollout, and a longer rollout is a pack of its own. ``shuffle`` and ``remainder`` apply to the packs.
 
-A component reads a job's ``method`` and ``scheduling`` parameters with
-``reef.train.algos.registry.job_training(parameters)``. It raises
-``ValueError`` when ``method`` is missing or is not an object, when
-``scheduling`` has another key or a value out of range, and when the
+Each component parses a job's parameters into its own typed value:
+``reef.train.slime_backend.parameters.SlimeJobParameters`` and
+``reef.train.tinker_backend.parameters.TinkerJobParameters``. The parser raises
+``ValueError`` for an unknown key, when ``objective`` is missing or does not
+resolve, when ``scheduling`` has another key or a value out of range, and when the
 objective's ``validate_scheduling`` refuses the schedule: ``epochs > 1``
-without ``supports_multiple_epochs``. Slime and Tinker call it when they
+without ``supports_multiple_epochs``. Slime and Tinker parse when they
 accept a job and again when they run it.
+``TrainingComponent.parameters_schema(kind)`` returns the JSON Schema of those
+parameters for a sample kind, or None; the scenario contract serves it.
 
 ``reef.train.algos.schedule.pack_rollouts(token_counts, packing_length)`` is
 the packing: best-fit decreasing, which puts each rollout, longest first, into
@@ -1767,12 +1715,11 @@ nested objects merge key by key, and every other value of the request wins. It r
 both kinds, and a kind that the recipe does not name when no request gives
 parameters. A kind that the recipe does not name never trains in ``auto``. Reef reads none of the parameters; it submits
 them to the deployment's training component, whose name is the job's
-``backend``. ``TrainingMethod`` (``reef.train.method``) is an objective
-reference and an optional ``LearningRateSchedule``.
+``backend``.
 
-By default, the parameters of both kinds are ``method``
-(``TrainingMethod(objective).to_dict()``) and the recipe's ``job_parameters``
-config, such as ``scheduling`` or ``save_interval``.
+By default, the parameters of both kinds are the recipe's
+``default_parameters()`` with its ``job_parameters`` config over them, key by key,
+such as ``scheduling`` or ``save_interval``.
 
 The parameters are part of the job's ID, so ``parameters_by_kind()`` must
 return the same value at every call. See `Write a recipe
@@ -2029,7 +1976,7 @@ Scenario components
    from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 
 ``Recipe.build_components(scenario)`` returns the components that every
-release of the scenario binds. ``WeightTrainingRecipe`` declares a
+snapshot of the scenario binds. ``WeightTrainingRecipe`` declares a
 ``weights`` component of its runtime's ``served_weight_kind``, and
 ``HarnessEvolutionRecipe`` declares a ``harness`` component that clients
 pull, so most methods never touch this. See `Scenario components
@@ -2037,7 +1984,7 @@ pull, so most methods never touch this. See `Scenario components
 
 ``ScenarioComponents`` is a frozen dataclass mapping each component name to a
 ``ComponentSpec``. Bare ``ScenarioComponents()`` is the complete record-only
-configuration. A release of one component is flat; a release of several
+configuration. A snapshot of one component is flat; a snapshot of several
 components has one directory per component. At most one component has a
 weight kind, and at most one has ``files``.
 
@@ -2064,7 +2011,7 @@ the inference routes forward each request to the engine that ``served_models``
 names.
 
 Components do not decide which records train, compute candidates, execute a
-training job, or mutate the release chain. Native streaming behavior stays
+training job, or mutate the snapshot chain. Native streaming behavior stays
 unchanged. A method should not add an HTTP proxy or copy Reef's record store.
 
 Runtime responsibilities
@@ -2079,14 +2026,14 @@ Neither inherits from the other, and no trainer holds a serving engine.
   ``batch_size``). Reef does not read that size; the deployment sets the job
   size in ``pipeline.sample2job.config.job_samples``.
 * An ``InferenceRuntime`` executes requests, manages admission, and loads
-  published releases. It loads a release when a
-  scenario starts, when a committed release is activated, and when a person
+  published snapshots. It loads a snapshot when a
+  scenario starts, when a committed snapshot is activated, and when a person
   activates one.
   Its ``model_path`` property supplies the default model name for harness
   bindings; the base implementation returns an empty string for runtimes whose
   requests select the model. ``per_scenario_adapters`` is true for a runtime
   that serves each scenario its own adapter. ``served_weight_kind`` is the
-  kind of the weights that the runtime serves from a release: ``model``, the
+  kind of the weights that the runtime serves from a snapshot: ``model``, the
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
   ``served_artifact(artifact_id, scenario)`` gives the engine's HTTP(S) URL
@@ -2099,16 +2046,14 @@ Neither inherits from the other, and no trainer holds a serving engine.
   each call from the artifact that the call names overrides it, as the Tinker
   runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
   of a model artifact needs it. Such a runtime also returns True from
-  ``serves_artifacts_on_request``, which the scenario contract's
-  ``capabilities`` read.
+  ``serves_any_artifact``.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` publishes checkpoints and records artifact selections.
   A dispatcher queues each selection for the inference worker. The worker
-  opens the runtime, loads the published release, and publishes routes when
+  opens the runtime, loads the published snapshot, and publishes routes when
   activation returns. Route publication and startup completion share one
   transaction. A superseded request cannot publish routes.
-  A standalone scenario keeps synchronous activation by default.
   ``train-from`` still imports the artifact into the trainer before it writes
   a ``train_from`` record.
 
@@ -2116,8 +2061,8 @@ Neither inherits from the other, and no trainer holds a serving engine.
 ``Scenario.served_artifact_id()`` reads the published route when a dispatcher
 owns the scenario. Training staleness checks use this served identity.
 Automatic weight training waits while the selected artifact has no matching
-served route. Standalone scenarios and deployments without inference keep
-their existing training behavior.
+served route. Manual training does not wait, since a request names its samples.
+Deployments without inference keep their existing training behavior.
 Startup status is available through the inference service's
 ``GET /reef/scenarios/{scenario}/inference/status`` route.
 
@@ -2125,18 +2070,18 @@ Startup status is available through the inference service's
 ``InferenceBackend``:
 
 * ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
-  base model. A release holds the adapter in ``adapter/``. At most
+  base model. A snapshot holds the adapter in ``adapter/``. At most
   ``adapter_capacity`` adapters stay resident.
   ``reef.inference.residency.AdapterResidencyManager`` evicts a leaked
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. The engines start with the base model. Each release loads its
-  files, a root release's included, unless the engines serve its content
+  weights. The engines start with the base model. Each snapshot loads its
+  files, a root snapshot's included, unless the engines serve its content
   already.
 
-A root release made from the default start has the layout of every other
-release of its component, so no runtime treats it as a special case. An
+A root snapshot made from the default start has the layout of every other
+snapshot of its component, so no runtime treats it as a special case. An
 adapter runtime loads its untrained adapter, and the Tinker runtime samples
 its untrained adapter.
 
@@ -2146,15 +2091,15 @@ weights. The Tinker component allows it, because each job carries its own
 start. The Slime component does not: its workers hold one set of weights, so
 a Slime deployment trains one scenario.
 
-Each runtime passes a release's directory as a ``WeightFiles`` value, with
+Each runtime passes a snapshot's directory as a ``WeightFiles`` value, with
 the ``"adapter"`` or ``"full"`` layout, to
 ``InferenceBackend.load_weight_files``, under a new runtime load ID that every
 engine then reports. The runtime kind ``remote_serving``
 (``reef.inference.remote.runtime``) builds one of them over the engines of an
-inference component, as the release format says: ``AdapterServingRuntime``
+inference component, as the artifact format says: ``AdapterServingRuntime``
 for ``adapter`` releases, ``FullWeightServingRuntime`` for ``full`` ones.
 ``serving_engine_config`` builds the engines' input from the ``inference``
-settings and the release format. With a ``service``, each runtime checks its
+settings and the artifact format. With a ``service``, each runtime checks its
 health every ``health_interval_s`` seconds (default 30). After a failed check
 it calls ``recover_engines``: it pauses generation, lets the backend replace
 lost or dead engines (``InferenceBackend.recover``, which for an inference
@@ -2182,8 +2127,7 @@ root of ``reef.inference``: ``interfaces`` (inference contracts and runtime
 load IDs), ``deployment`` (the inference service contracts), ``registry``
 (runtime factories), ``serving`` (the saved-weight serving runtimes),
 ``residency`` (adapter residency) and ``recovery`` (engine supervision).
-``reef.train.component`` holds the training component contract, and
-``reef.train.method`` holds ``TrainingMethod``. Values that both sides read
+``reef.train.component`` holds the training component contract. Values that both sides read
 are in ``reef.core.weight_layout`` (``ArtifactFormat``, ``WeightFiles``,
 ``ArtifactWeights``). ``reef.execution.executor`` contains worker transports.
 Concrete integrations live with their owners:
@@ -2233,26 +2177,26 @@ loop:
      - The backend name that the component's jobs carry.
    * - ``artifact_format``
      - A ``ArtifactFormat``: the weight files that each saved checkpoint's
-       release holds, ``layout`` ``full`` (a Hugging Face checkpoint) or
+       snapshot holds, ``layout`` ``full`` (a Hugging Face checkpoint) or
        ``adapter`` (a PEFT adapter in ``adapter/``, with ``adapter_rank`` and
-       ``adapter_target_modules``). ``None`` when the releases hold no weight
+       ``adapter_target_modules``). ``None`` when the snapshots hold no weight
        files that an engine loads, such as Tinker's manifests. The serving
        assembly configures the engines from it and refuses a serving runtime
        that cannot load it.
    * - ``default_start()``
      - The component's untrained checkpoint as a ``DefaultStart``, laid out
-       as one of its releases, with the ``inputs`` that decide its content.
+       as one of its snapshots, with the ``inputs`` that decide its content.
        A scenario created without an artifact item holds it in its root
-       release. Slime gives the ``hf_checkpoint`` directory, or with LoRA an
+       snapshot. Slime gives the ``hf_checkpoint`` directory, or with LoRA an
        adapter whose weights are zero. Tinker gives the checkpoint of its
        untrained adapter, which it makes only when a scenario's root needs it
        or the training process runs jobs.
    * - ``root_start(root)``
      - The start of the first job of a trainer without committed state, a
        non-empty string. ``root`` is a ``ScenarioRoot``: the trainer's
-       component of the scenario's root release and the root's
+       component of the scenario's root snapshot and the root's
        ``RootSource``. The default is ``import_start`` of the root's files.
-       Slime, which imports no release, returns its startup weights when the
+       Slime, which imports no snapshot, returns its startup weights when the
        root's source is its default start with equal ``inputs``, and raises
        ``ValueError`` naming both otherwise.
    * - ``submit(job)``
@@ -2267,7 +2211,7 @@ loop:
    * - ``cancel(job_id)``
      - Stop a running job, which then reports ``failed``.
    * - ``import_start(release)``
-     - Copy a published release into the component's own storage and return
+     - Copy a published snapshot into the component's own storage and return
        it as a start. Reef calls it
        for a ``train-from``. Raise ``ValueError`` when no job can start from
        those weights.
@@ -2275,13 +2219,9 @@ loop:
      - Start running jobs in this process: the training service's job worker
        calls it once. Other processes use the component without running jobs.
        The default does nothing.
-   * - ``starts_from_artifacts``
-     - False when ``import_start`` refuses every release, as Slime's does;
-       True, the default, otherwise. The scenario contract's
-       ``capabilities`` read it.
    * - ``check_artifact(directory)``
-     - Raise ``ValueError`` unless ``directory`` holds a release in the
-       layout of this component's releases. An artifact import calls it.
+     - Raise ``ValueError`` unless ``directory`` holds a snapshot in the
+       layout of this component's snapshots. An artifact import calls it.
        The default reads ``artifact_format``: ``full`` needs ``config.json``
        and weight files, ``adapter`` needs a PEFT adapter in ``adapter/``
        with a rank of at most ``adapter_rank`` and target modules within
@@ -2345,21 +2285,21 @@ algorithm state. This ``JobLoopState`` has four fields:
 A failed job ends like a finished one. Reef consumed the records of its data when
 it submitted the job, so they do not train again.
 
-Once the commit of a job's end is durable, the trainer calls
+Once the commit of a job's end is durable, the samples service calls
 ``Record2Sample.job_ended(outcome)`` with ``last_job``. The default does nothing.
 A trainer that starts with no running job calls it again for the last job
-that ended, before any other call to a new stage. The stage takes it as the
+that ended, before it reads a record. The stage takes it as the
 end of the last job that may have trained its samples.
 A stage whose job data holds ``TaskSample`` values (Harbor tasks) reads each
-task's rollout results from the outcome's ``metrics``: the Tinker component
-reports ``rollout_rewards``, the rewards of each task's rollouts, by task
-name. A component that cannot roll out tasks refuses such a job in
-``check_job``; Slime does.
+task's rollout results from the outcome's ``metrics``: the Tinker and Slime
+components report ``rollout_rewards``, the rewards of each task's rollouts, by
+task name. A component that cannot roll out tasks refuses such a job in
+``check_job``.
 
-For a ``train-from``, Reef first imports the release with ``import_start``
+For a ``train-from``, Reef first imports the snapshot with ``import_start``
 and cancels the running job. It then writes the ``train_from`` commit. The
-next job starts from the imported release. A component that cannot load a
-release raises ``ValueError``, and Reef refuses the request with HTTP 400.
+next job starts from the imported snapshot. A component that cannot load a
+snapshot raises ``ValueError``, and Reef refuses the request with HTTP 400.
 
 Tinker integration
 ------------------
@@ -2368,23 +2308,23 @@ Tinker integration
 ``tinker`` backend as an ``InProcessTrainingDeployment``. Its
 ``component_factory`` builds, from ``TinkerConfig`` and only after deployment
 selection, a ``TinkerTrainingComponent``. Each job
-trains remotely from the job's start manifest. Its parameters are ``method``,
-the optional ``scheduling``, optional ``batch_size``, ``kl_coef`` and
+trains remotely from the job's start manifest. Its parameters are ``objective``,
+the optional ``learning_rate_schedule`` and ``scheduling``, optional ``batch_size``, ``kl_coef`` and
 ``learning_rate`` overrides, and ``save_interval``, the optimizer steps between saved
 checkpoints (by default, one checkpoint when the job ends). A saved checkpoint
-is both the start of a later job and the release Reef publishes. A job of
+is both the start of a later job and the snapshot Reef publishes. A job of
 Harbor tasks also takes ``rollout``, the rollouts of each task.
 
 ``TinkerDeployment.default_serving`` is ``trainer``: its
 ``trainer_serving_config`` selects ``reef.inference.tinker.TinkerInferenceRuntime``
-(runtime kind ``tinker``), which reads each release's
+(runtime kind ``tinker``), which reads each snapshot's
 ``tinker-checkpoint.json`` manifest and samples from the immutable sampler it
-names. A release holds that manifest alone, so the component's
+names. A snapshot holds that manifest alone, so the component's
 ``artifact_format`` is ``None``. Reef's engines can still serve the adapters
 (``inference.serving: engines``): ``TinkerDeployment.engine_weights`` names
 ``reef.tinker.weights.TinkerSamplerWeights``, which downloads the adapter at
-each release's ``sampler_path`` and converts it into a PEFT adapter.
-Train-from works: the component imports the release's manifest as a start.
+each snapshot's ``sampler_path`` and converts it into a PEFT adapter.
+Train-from works: the component imports the snapshot's manifest as a start.
 
 ``TrainingDeployment`` (``reef.train.deployment``) is a training backend's
 deployment definition. ``default_serving`` (``engines`` unless the backend
@@ -2392,10 +2332,10 @@ says otherwise) is the serving of a deployment that names none and sets no
 engine setting, and ``trainer_serving_config(settings)`` the runtime config
 of the backend's own serving, or ``None`` without one.
 ``engine_weights(settings)`` is an ``EngineWeights`` for a backend whose
-releases hold no weight files: the ``ArtifactFormat`` that Reef's engines load
+snapshots hold no weight files: the ``ArtifactFormat`` that Reef's engines load
 and the ``ArtifactWeights`` plugin (``reef.core.weight_layout``) that gives each
-release's files. The default is ``None``: engines cannot serve such
-releases. ``ArtifactWeightFiles``, the default plugin, reads a release's own files. ``requires_local_model``
+snapshot's files. The default is ``None``: engines cannot serve such
+releases. ``ArtifactWeightFiles``, the default plugin, reads a snapshot's own files. ``requires_local_model``
 defaults to true; hosted integrations set it to false to preserve remote
 model identifiers during deployment resolution.
 

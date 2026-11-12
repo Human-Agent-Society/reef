@@ -13,16 +13,16 @@ You evolve a harness in four stages:
    service. The deployment chooses the agent, the method and the evaluation
    (see the table below).
 #. **Connect your agent.** ``reef-client harness connect`` installs the active
-   release as your agent's own plugin. It also sends the agent's model calls
+   selection as your agent's own plugin. It also sends the agent's model calls
    through Reef.
 #. **Use the agent and score it.** Use the agent as you always do, and score
    sessions with ``POST /reef/report``. When enough scored sessions wait, a
    training step changes the harness and evaluates the change. The offline
    way uses uploaded tasks in place of sessions.
-#. **Get the new release.** Reef stores each selected change as a new release.
+#. **Get the new snapshot.** Reef stores each selected change as a new snapshot.
    Your next agent session syncs first: it sends back the files you changed
-   and installs the active release. A deployment can make a new release wait
-   for a person (see `Activate an inactive release`_).
+   and installs the active selection. A deployment can make a new snapshot wait
+   for a person (see `Activate an inactive artifact`_).
 
 `Quickstart`_ gives the commands. The deployment chooses three things:
 
@@ -54,8 +54,8 @@ How it works
    * - Step
      - What happens
    * - 1
-     - ``reef-client harness run`` installs the active release and starts the
-       agent with your own configuration plus the release.
+     - ``reef-client harness run`` installs the active selection and starts the
+       agent with your own configuration plus the snapshot.
    * - 2
      - The agent's model calls go to ``/reef/scenarios/<scenario>/v1/*``.
        Reef forwards and records each one. When the agent exits, the client
@@ -67,7 +67,7 @@ How it works
      - When ``job_samples`` traces wait (default 1), a training step starts
        (see `Step data`_).
    * - 5
-     - The method edits a copy of the head: the newest release that a step
+     - The method edits a copy of the head: the newest snapshot that a step
        selected or that a sync committed (see `Choose or write a method`_).
    * - 6
      - Reef checks the new tree. An unchanged or invalid tree skips the step.
@@ -75,9 +75,9 @@ How it works
      - The candidate and the head play the same tasks, and the policy
        compares their scores (see `Evaluation: the publication policy`_).
    * - 8
-     - A selected candidate becomes a new release and the new head. It serves
+     - A selected candidate becomes a new snapshot and the new head. It serves
        at once, or waits until a person activates it (see `Activate an
-       inactive release`_).
+       inactive artifact`_).
 
 Two ways to evolve
 ~~~~~~~~~~~~~~~~~~
@@ -99,7 +99,7 @@ Both ways feed the same training step (4 to 8).
      - the eval split of the uploaded tasks
    * - Agents
      - ``claude``, ``pi``, ``opencode``, ``codex`` (the adapters with a plugin)
-     - every adapter with an npm ``install``
+     - every adapter with an npm, uv or git ``install``
    * - Recipes
      - ACE, ReasoningBank, GEPA (AIME example)
      - GEPA with ``TrainTaskJobData``
@@ -138,10 +138,10 @@ Online: learn from your sessions
      -H "x-reef-scenario: <scenario>" -H "Content-Type: application/json" \
      -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
 
-   # The steps and their results; a row with "selected": true is a new release.
+   # The steps and their results; a row with "selected": true is a new snapshot.
    curl -s -H "x-reef-scenario: <scenario>" http://127.0.0.1:8901/reef/harness/artifacts
 
-The next ``pi`` session starts on the new active release. `Tutorial: evolve your
+The next ``pi`` session starts on the new active selection. `Tutorial: evolve your
 agent's harness <../getting-started/harness-tutorial.rst>`__ walks through
 these steps.
 
@@ -200,7 +200,7 @@ example, needs ``--enable-auto-tool-choice --tool-call-parser hermes``. See
 The harness tree
 ----------------
 
-A harness tree is one directory of text files. Each release holds one tree,
+A harness tree is one directory of text files. Each snapshot holds one tree,
 and each step changes it with a patch: paths mapped to their new text, or to
 ``null`` for a removal. Every adapter uses the same tree path for the same
 part:
@@ -368,14 +368,14 @@ Task directories
 
 A Harbor task directory holds an instruction, an environment and tests. Reef
 runs each one in its own container: Harbor starts it, Reef installs the
-adapter's pinned agent with npm and copies in the rendered tree, the agent
+adapter's pinned agent with npm (uv for ``python``) and copies in the rendered tree, the agent
 plays the instruction, and the tests' reward is the score
 (``VerifierRewardScorer``). The image needs glibc.
 
 The agent reaches Reef at ``evolution.evaluation.agent_host`` (default
 ``host.docker.internal``) in place of a loopback address. On Linux, set it
 to an address the container reaches, such as the Docker bridge gateway.
-Startup refuses task directories when the adapter has no npm ``install``,
+Startup refuses task directories when the adapter has no npm, uv or git ``install``,
 when the executor is not ``local``, or with ``collect_failures``. An offline
 run's evaluation tasks must be directories too.
 
@@ -403,11 +403,11 @@ History
 Use a published tree
 --------------------
 
-``reef-client harness`` installs the active release as your agent's own
+``reef-client harness`` installs the active selection as your agent's own
 plugin, with the agent's own command, so every session of the agent loads it
 beside your own configuration. A session that starts through Reef also sends
-its model calls to Reef. To go back to an earlier release, activate it
-(`Activate an inactive release`_); your next sync installs it.
+its model calls to Reef. To go back to an earlier snapshot, activate it
+(`Activate an inactive artifact`_); your next sync installs it.
 The deployment's ``evolution.adapter`` decides the agent; ``GET
 /reef/scenarios`` lists each harness with its ``adapter``.
 
@@ -423,7 +423,7 @@ The deployment's ``evolution.adapter`` decides the agent; ``GET
    * - Command
      - What it does
    * - ``connect``
-     - Installs the active release under ``~/.local/share/reef-client/harness/<scenario>``
+     - Installs the active selection under ``~/.local/share/reef-client/harness/<scenario>``
        and as the agent's plugin, installs the pinned agent when the machine
        lacks it, and makes the agent's own command run through Reef. It asks
        only for a token and a harness when it must.
@@ -433,12 +433,12 @@ The deployment's ``evolution.adapter`` decides the agent; ``GET
        it exits. Arguments after ``--`` go to the agent.
    * - ``sync``
      - Sends your changed files, then installs the result. Reef merges them
-       onto the active release by each part's ``merge``: text by line, code by file.
+       onto the active selection by each part's ``merge``: text by line, code by file.
        It commits the merged tree as a sync: one commit makes it a new
-       release, the active release and the next step's training start.
+       snapshot, the active selection and the next step's training start.
        ``--discard`` drops your files.
    * - ``status``
-     - Shows the installed release, the active release and the changed
+     - Shows the installed artifact, the active selection and the changed
        files.
    * - ``disconnect``
      - Removes the plugin, the install and the agent command.
@@ -448,7 +448,7 @@ The deployment's ``evolution.adapter`` decides the agent; ``GET
    :widths: 12 88
 
    * - Agent
-     - The release, as your agent's plugin
+     - The snapshot, as your agent's plugin
    * - ``claude``
      - The plugin ``reef``: skills and commands as ``reef:<name>``, the rules
        as its output style, the extensions as its hooks.
@@ -463,15 +463,15 @@ The deployment's ``evolution.adapter`` decides the agent; ``GET
      - The plugin ``reef`` in ``~/.codex``: skills and commands as
        ``$reef:<name>``.
 
-Reef never reads your own configuration, and evaluates each release without
+Reef never reads your own configuration, and evaluates each snapshot without
 it. Your configuration still reaches the model calls that Reef records, such
 as your rules and the names of your skills.
 
-A client of your own reads a release with ``GET /reef/harness`` and commits a
+A client of your own reads a snapshot with ``GET /reef/harness`` and commits a
 sync with ``POST /reef/harness/import`` (see `HTTP API
 <../reference/http-api.rst#importing-a-harness>`__).
 
-Activate an inactive release
+Activate an inactive artifact
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Tree code runs with your privileges. To make a person approve a change, set
@@ -485,21 +485,21 @@ the deployment's top-level ``activation`` section (`Configuration
 - A kind that is always reviewed, such as native's ``native_loop``, always
   waits.
 
-An inactive release sits in ``GET /reef/harness/artifacts`` with ``active:
+An inactive artifact sits in ``GET /reef/harness/artifacts`` with ``active:
 false`` and ``activated: false``, and Reef serves it to no client. The next
-steps train from it in the meantime. To serve it, send the row's
-``artifact_id`` to the activate route. The same route serves an earlier
-release again. Clients install the active release at their next sync:
+steps train from it in the meantime. To serve it, set ``served`` to the row's
+``artifact_id`` with weight 100. The same request serves an earlier
+snapshot again. Clients install the active selection at their next sync:
 
 .. code:: bash
 
-   curl -sS -X POST -H "Content-Type: application/json" -d '{"artifact_id": "<artifact_id>"}' \
-     http://127.0.0.1:8901/reef/scenarios/<scenario>/activate
+   curl -sS -X POST -H "Content-Type: application/json" -d '{"served": {"<artifact_id>": 100}}' \
+     http://127.0.0.1:8901/reef/scenarios/<scenario>/update
 
-`Activate an artifact <operate.rst#activate-an-artifact>`__ describes
-activation, and `Train from an artifact
+`Set what a scenario serves <operate.rst#set-what-a-scenario-serves>`__ describes
+the request, and `Train from an artifact
 <operate.rst#train-from-an-artifact>`__ describes how to make the steps train
-from another release.
+from another snapshot.
 
 Choose or write a method
 ------------------------

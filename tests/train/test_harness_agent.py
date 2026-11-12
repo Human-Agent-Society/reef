@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import TreeReleases, build_harness_backend, harness_recipe
+from tests.support.harness_steps import TreeArtifacts, build_harness_backend, harness_recipe
 
 from reef.core.plugins import PluginConfigError
 from reef.execution.sandbox.e2b import E2BExecutor
@@ -133,7 +133,7 @@ def agent_backend(tmp_path: Path, upstream: Upstream, mode: str = ""):
         agent=AgentSettings("pi", LocalExecutor(), 60.0, str(binary)),
         models={"proposer": ModelBinding(base_url=upstream.base_url, model="proposer-model", api_key="k")},
     )
-    releases = TreeReleases(recipe.seed)
+    releases = TreeArtifacts(recipe.seed)
     return build_harness_backend(recipe, "demo", releases)
 
 
@@ -198,9 +198,6 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     assert claude is not None and (claude.adapter, claude.binary) == ("claude", "/opt/claude")
     unset = agent_settings({}, {"REEF_AGENT_SANDBOX": "none"}, state_dir=state_dir)
     assert unset is not None and isinstance(unset.executor, LocalExecutor)
-    # The variable's old name would be ignored, and the agent run with another isolation: it is refused.
-    with pytest.raises(ValueError, match="set REEF_AGENT_SANDBOX instead"):
-        agent_settings({}, {"REEF_PROPOSER_SANDBOX": "none"}, state_dir=state_dir)
     with pytest.raises(ValueError, match="one of 'bwrap', 'e2b', 'modal', 'none'"):
         agent_settings({"sandbox": "docker"}, {}, state_dir=state_dir)
     with pytest.raises(ValueError, match="positive number"):

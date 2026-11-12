@@ -54,9 +54,13 @@ class LocalTrainingWorkers:
     closure therefore tries the cycle lock without waiting.
     """
 
-    def __init__(self, registry: ScenarioRegistry, errors: TrainingErrors, *, held: bool) -> None:
+    def __init__(
+        self, registry: ScenarioRegistry, errors: TrainingErrors, *, held: bool, automatic_jobs: bool = True
+    ) -> None:
         self.registry = registry
         self.errors = errors
+        #: Whether a trainer in ``auto`` mode starts jobs by Reef's own rule; false when a training manager decides.
+        self.automatic_jobs = automatic_jobs
         #: The coordination lock.
         self.lock = Lock()
         self.phase: Literal["held", "running", "stopping", "closed"] = "held" if held else "running"
@@ -192,7 +196,7 @@ class LocalTrainingWorkers:
                 # Reloaded while this worker waited: look again on the rebuilt instance, whose rows are unread.
                 return True
             try:
-                result = current.prepare_training_step(component)
+                result = current.next_commit(component, automatic_jobs=self.automatic_jobs)
             except Exception as exc:
                 self.fail_request(current, exc, component)
                 self.reload_after_local_failure(current)
@@ -227,7 +231,7 @@ class LocalTrainingWorkers:
 
     def fail_request(self, current: Scenario, cause: Exception, component: str | None = None) -> None:
         """A failed request step consumes the request with a skip row on the next step; wake for it."""
-        if not current.trainer_for(component).fail_pending_request(error_text(cause)):
+        if not current.fail_pending_request(error_text(cause), component):
             return
         with self.registry.lock_instance(current) as state:
             # Wake the worker, so that the failed request settles without a new record.
@@ -295,20 +299,4 @@ class LocalTrainingWorkers:
             return
         with self.registry.lock_instance(current) as state:
             if state is InstanceState.CURRENT:
-                self.reload(current.name, current)
-
-    def reload(self, scenario: str, current: Scenario | None) -> Scenario:
-        """Rebuild durable state, retaining failed requests that still need skip rows."""
-        failures = (
-            {
-                component_trainer.component: component_trainer.trainer.request_failures()
-                for component_trainer in current.trainers
-            }
-            if current is not None
-            else {}
-        )
-        recovered = self.registry.reload(scenario)
-        for component, failed in failures.items():
-            if failed:
-                recovered.trainer_for(component).set_request_failures(failed)
-        return recovered
+                self.registry.reload(current.name)

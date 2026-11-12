@@ -46,7 +46,7 @@ def data_storage(tmp_path: Path, task_import: TaskImport | None) -> Iterator[Dat
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = DataScenarioStorage(
-        SQLiteScenarioStorage(tmp_path / "records", task_files=task_files), data, task_import, refuses_images=False
+        SQLiteScenarioStorage(tmp_path / "records", task_files=task_files, data=data), data, task_import
     )
     try:
         yield storage

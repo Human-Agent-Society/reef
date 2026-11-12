@@ -8,42 +8,23 @@ from typing import Any
 import ray
 
 from reef.inference.process import EngineStartup, retire_engines
-from reef.inference.recovery import (
-    EngineHealthMonitor,
-    HealthMonitorConfig,
-    InferenceControl,
-    InferenceEngineGroup,
-    InferenceMonitor,
-)
+from reef.inference.recovery import InferenceControl, InferenceEngineGroup
 from reef.inference.vllm.config import VLLMConfig
-from reef.inference.vllm.launch import VLLMEngineGroup, VLLMEngineHealthChecks
+from reef.inference.vllm.launch import VLLMEngineGroup
 
 
 class VLLMWorker:
-    """Own the serving engines and their health monitor."""
+    """Own the serving engines."""
 
     def __init__(self, config: VLLMConfig, pg: Any) -> None:
         self.config = config
         self.group = VLLMEngineGroup(config, pg)
-        self._health_monitor: EngineHealthMonitor | None = None
         self._closed = False
         try:
             startup = EngineStartup()
             startup.start(self.group)
             startup.wait()
-            self._control = InferenceControl(_VLLMEngineGroup(self), _VLLMInferenceMonitor(self))
-            if config.health_enabled:
-                monitor = EngineHealthMonitor(
-                    VLLMEngineHealthChecks(self.group),
-                    HealthMonitorConfig(
-                        interval=config.health_interval,
-                        timeout=config.health_timeout,
-                        first_wait=config.health_first_wait,
-                    ),
-                )
-                self._health_monitor = monitor
-                monitor.start()
-                monitor.resume()
+            self._control = InferenceControl(_VLLMEngineGroup(self))
         except BaseException:
             with suppress(Exception):
                 self.shutdown()
@@ -107,23 +88,13 @@ class VLLMWorker:
     def recover_updatable_engines(self) -> int:
         return self._control.recover()
 
-    def health_monitoring_pause(self) -> None:
-        if self._health_monitor is not None:
-            self._health_monitor.pause()
-
-    def health_monitoring_resume(self) -> None:
-        if self._health_monitor is not None and not self._control.paused:
-            self._health_monitor.resume()
-
     def check_health(self) -> None:
-        """Raise if the monitor failed or a live engine actor is unreachable.
+        """Raise if a live engine actor is unreachable.
 
         A ``None`` slot is an engine the owner already retired and will replace
         through recovery; reporting it here would turn a recoverable
         publication into a deployment failure.
         """
-        if self._health_monitor is not None:
-            self._health_monitor.check_health()
         engines = self.engines
         if engines:
             ray.get([engine.__ray_ready__.remote() for engine in engines], timeout=30)
@@ -131,10 +102,6 @@ class VLLMWorker:
     def shutdown(self) -> None:
         if self._closed:
             return
-        # A failed monitor drain must prevent engine mutation and remain retryable.
-        if self._health_monitor is not None:
-            self._health_monitor.stop()
-            self._health_monitor = None
         self._closed = True
         retire_engines(self.engines)
         self.group.all_engines = [None] * len(self.group.all_engines)
@@ -145,10 +112,6 @@ class _VLLMEngineGroup(InferenceEngineGroup):
 
     def __init__(self, worker: VLLMWorker) -> None:
         self._worker = worker
-
-    @property
-    def owned(self) -> bool:
-        return True
 
     def pause(self) -> Any:
         """Stop generation for a weight load; a ``retract`` pause also leaves no reusable cache entry."""
@@ -172,14 +135,3 @@ class _VLLMEngineGroup(InferenceEngineGroup):
         for index in slots:
             group.all_engines[index] = None
         return len(slots)
-
-
-class _VLLMInferenceMonitor(InferenceMonitor):
-    def __init__(self, worker: VLLMWorker) -> None:
-        self._worker = worker
-
-    def pause(self) -> None:
-        self._worker.health_monitoring_pause()
-
-    def resume(self) -> None:
-        self._worker.health_monitoring_resume()

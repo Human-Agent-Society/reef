@@ -92,12 +92,21 @@ class CommitHistory(ABC):
         return run_segment, run_step
 
 
+class Closeable(ABC):
+    """A resource that a session closes with itself, such as the database of a scenario's state."""
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release the resource; repeated closes are harmless."""
+
+
 class CommitHistoryScenarioStore(ScenarioStore):
     """One open session of a scenario: its records, task stores, training state, evaluations and commits.
 
     Values: ``scenario`` is a non-empty name. ``records``, ``tasks``,
     ``training_state``, ``evaluations`` and ``commit_history`` hold that
-    scenario's state; the bundled storages keep all five in one database. Every record in the
+    scenario's state; the bundled storages keep the records as record items, and the rest in one database,
+    ``database``, which the session closes with itself. Every record in the
     history names ``scenario``; a read that finds another name raises
     ``ReefError``. ``initial_step`` is a non-negative step for an existing
     scenario constructed at a saved step. The current step is the last step in
@@ -118,6 +127,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         tasks: TaskStorage,
         training_state: TrainingState,
         evaluations: EvaluationStore,
+        database: Closeable | None = None,
         initial_step: int = 0,
     ) -> None:
         if not isinstance(scenario, str) or not scenario:
@@ -126,6 +136,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
             raise ValueError("initial_step must be a non-negative integer")
         self._scenario = scenario
         self._records = records
+        self._database = database
         self._tasks = tasks
         self._training_state = training_state
         self._evaluations = evaluations
@@ -253,6 +264,8 @@ class CommitHistoryScenarioStore(ScenarioStore):
                 return
             self._closed = True
             self._records.close()
+            if self._database is not None:
+                self._database.close()
 
     def _ensure_open(self) -> None:
         if self._closed:

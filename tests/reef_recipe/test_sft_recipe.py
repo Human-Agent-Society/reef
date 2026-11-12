@@ -22,17 +22,15 @@ from reef.core.trajectories import source_record_id
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.recipe.sft import SFTJobData, SftObjective, SFTRecipe, SFTSamples, SFTSettings
+from reef.recipe.sft import SFTJobData, SFTRecipe, SFTSamples, SFTSettings
 from reef.sample2job import DistillJobData
 from reef.storage.data import NewItem
 from reef.train import PipelineContext
-from reef.train.algos import registry
-from reef.train.algos.registry import ObjectiveRegistry, resolve_objective
 from reef.train.algos.schedule import StepScheduling
-from reef.train.method import TrainingMethod
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.objectives import SftObjective, resolve_slime_objective
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.sft import SftAlgorithm
 
@@ -345,8 +343,8 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
     assert isinstance(recipe, SFTRecipe)
     assert recipe.name == "sft"
     assert recipe.report_type is TeacherContextReport
-    spec = SFTRecipe.training_spec()
-    assert (spec.objective, spec.loss_family) == ("reef.recipe.sft:SftObjective", "sft")
+    assert SFTRecipe.default_parameters() == {"trajectory": {"objective": "sft"}}
+    assert resolve_slime_objective("sft").loss_family == "sft"
     assert SftObjective.rollout_unit == "sample"
     pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SFTSamples)
@@ -381,34 +379,15 @@ def test_objective_trains_every_batch_without_advantages_and_allows_several_epoc
     assert (signal.action, signal.next_algorithm_state, signal.advantages) == ("train", {"steps": 3}, None)
     assert signal.metrics == {"steps": 3, "samples": 1}
     SftObjective().validate_scheduling(StepScheduling(epochs=3))
-    # Another recipe selects the objective for a job by its dotted reference.
-    assert isinstance(resolve_objective("reef.recipe.sft:SftObjective"), SftObjective)
-
-
-@pytest.mark.unit
-def test_the_recipe_objective_resolves_where_the_recipe_was_never_imported(
-    tokenizer: TurnTokenizer, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The Slime bridge never imports the recipe module, so no objective is registered there.
-    monkeypatch.setattr(registry, "OBJECTIVES", ObjectiveRegistry())
-
-    step = prepare_slime_job(
-        _rendered(_pipeline_with_report().build_job_data(1), tokenizer),
-        TrainingMethod(SFTRecipe.training_spec().objective),
-        {},
-        StepScheduling(),
-        step_size=1,
-    )
-
-    assert step.payload is not None
-    assert step.payload["loss"] == "sft"
+    # Another recipe selects the objective for a job by its name.
+    assert isinstance(resolve_slime_objective("sft"), SftObjective)
 
 
 @pytest.mark.unit
 def test_slime_payload_trains_the_target_tokens_without_log_probs(tokenizer: TurnTokenizer) -> None:
     payload = prepare_slime_job(
         _rendered(_pipeline_with_report().build_job_data(1), tokenizer),
-        TrainingMethod("sft"),
+        "sft",
         {},
         StepScheduling(),
         step_size=1,
@@ -580,10 +559,7 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
     assert pipeline.acknowledge(data.data_id) == {"sample:t1"}
 
 
-def test_sft_gives_parameters_to_trajectory_jobs_and_trains_imported_tasks_only_by_request() -> None:
-    recipe = SFTRecipe(**runtime_bindings())
-    assert set(recipe.parameters_by_kind()) == {"trajectory"}
-    assert (
-        recipe.parameters_by_kind()["trajectory"]["method"] == TrainingMethod("reef.recipe.sft:SftObjective").to_dict()
-    )
+def test_sft_configures_trajectory_jobs_and_trains_imported_tasks_only_by_request() -> None:
+    recipe = SFTRecipe(**runtime_bindings(), job_parameters={"save_interval": 50})
+    assert recipe.parameters_by_kind() == {"trajectory": {"objective": "sft", "save_interval": 50}}
     assert SFTJobData.accepts_trajectories and SFTJobData.accepts_imported_tasks

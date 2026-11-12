@@ -23,11 +23,10 @@ classifiers = [
 # `pip install reef-infra` must support the base `recipe` configuration on CPU.
 dependencies = [
     "aiohttp>=3.14",  # web.RequestKey
-    "alembic>=1.13,<2",
     "huggingface_hub",
     # Harbor's environment contract backs reef.execution.sandbox; task directory rollouts, the task player and the
     # generator service play Harbor tasks with reef-eval.
-    "harbor>=0.20,<0.26",
+    "harbor>=0.24,<0.26",
     "pyyaml",
     "reef-client>=0.4.0",
     "reef-eval>=0.1.1",
@@ -37,13 +36,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # Python-side inference adapters; install native SGLang in its GPU environment.
-sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
+sglang = ["requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 # Python-side vLLM adapter; install native vLLM in its GPU environment.
-vllm = ["httpx", "requests", "ray[default]", "psutil>=5.9"]
+vllm = ["requests", "ray[default]", "psutil>=5.9"]
 tinker = [
-    "tinker==0.36.0",
+    "tinker==0.38.0",
     # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
-    "tinker-cookbook==0.5.9",
+    "tinker-cookbook==0.6.0",
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
@@ -95,7 +94,7 @@ dev = [
     "pytest-cov",
     # Runs the suite in parallel, as CI does (-n 8; addopts selects --dist worksteal).
     "pytest-xdist==3.8.0",
-    "ruff==0.17.3",
+    "ruff==0.17.4",
 ]
 
 [dependency-groups]

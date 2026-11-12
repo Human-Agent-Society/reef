@@ -38,7 +38,7 @@ def component_of(tmp_path: Path, method) -> HarnessTrainingComponent:
 
 
 def seed_start(component: HarnessTrainingComponent, tmp_path: Path) -> str:
-    """The start of a job from the seed tree: the component's import of a release that holds the seed."""
+    """The start of a job from the seed tree: the component's import of a snapshot that holds the seed."""
     release = tmp_path / "seed-release"
     if not release.is_dir():
         PI_SEED.write(release)
@@ -70,18 +70,13 @@ def ended(component: HarnessTrainingComponent, job_id: str, seconds: float = 30.
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("queued_earlier", [False, True])
 def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(
-    tmp_path: Path, queued_earlier: bool
+    tmp_path: Path,
 ) -> None:
     component = component_of(tmp_path, lambda workspace, services: MARKER)
     component.start_jobs()
     try:
         first = job(component, "one", start=seed_start(component, tmp_path))
-        if queued_earlier:
-            # A job that an earlier Reef queued names its component and its artifact in its parameters.
-            parameters = {**first.parameters, "component": COMPONENT, "head_release_id": "base", "previous_job": None}
-            first = replace(first, parameters=parameters, component=None)
         component.submit(first)
         status = ended(component, "one")
         assert status.state == "finished" and status.metrics == {}
@@ -116,10 +111,13 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
     # The job loop of every component asks the component for the parts; the activation rule reads them: the step
     # rewrote the rules of the seed tree.
     loop = JobLoop(component, scenario="demo", scenario_component=COMPONENT)
-    published = loop.publish(JobLoopState(seed_start(component, tmp_path), RunningJob("one")), checkpoint)
+    # The parts are those that changed from the job's own start, wherever the training start is.
+    first = RunningJob("one", seed_start(component, tmp_path))
+    published = loop.publish(JobLoopState(checkpoint.path, (first,)), first, checkpoint)
     assert published.result.artifact is not None and published.result.changed_kinds == {"rules"}
     # From a start that holds the same tree, nothing changed.
-    again = loop.publish(JobLoopState(checkpoint.path, RunningJob("two")), checkpoint)
+    second = RunningJob("two", checkpoint.path)
+    again = loop.publish(JobLoopState(checkpoint.path, (second,)), second, checkpoint)
     assert again.result.changed_kinds == frozenset()
 
 
@@ -175,7 +173,7 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     component = component_of(tmp_path, lambda workspace, services: None)
     assert component.artifact_format is None and component.shares_scenarios
     assert component.default_start().files == dict(PI_SEED.files)
-    # An imported start is a copy of the release's tree, under its checksum, without the repository's own files.
+    # An imported start is a copy of the snapshot's tree, under its checksum, without the repository's own files.
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)
     # An import's directory holds the tree alone.

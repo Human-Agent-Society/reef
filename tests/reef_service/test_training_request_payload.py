@@ -16,7 +16,7 @@ def test_request_normalization_preserves_text_and_cleans_optional_fields() -> No
         "requires": [{"name": "TOKEN", "kind": "env", "prompt": "  Set the token  ", "extra": True}],
         "client": {
             "platform": "  darwin  ",
-            "release": "not; a release",
+            "release": "not; a snapshot",
             "commands": {"git": True, "node": False, "bad name": True, "python3": "yes"},
             "hostname": "not requested",
         },
@@ -84,7 +84,7 @@ def test_client_command_report_is_bounded() -> None:
 
 def test_a_request_carries_json_job_parameters_and_omits_empty_ones() -> None:
     base = {"text": "train", "session": "s", "artifact_id": "r"}
-    parameters = {"method": {"objective": "task_group"}, "learning_rate": 1e-5}
+    parameters = {"objective": "provided:Objective", "learning_rate": 1e-5}
     request = TrainingRequest.from_dict({**base, "parameters": parameters}, request_id="train-1")
     assert request.parameters == parameters
     assert TrainingRequest.from_dict(request.to_dict()) == replace(request, id="")
@@ -100,7 +100,7 @@ def test_a_request_carries_json_job_parameters_and_omits_empty_ones() -> None:
 
 
 def test_legacy_identity_is_normalized_to_artifact_id():
-    payload = {"text": "Train", "session": "s", "release_id": "legacy"}
+    payload = {"text": "Train", "session": "s", "artifact_id": "legacy"}
     assert TrainingRequest.from_dict(payload).to_dict() == {
         "text": "Train",
         "session": "s",

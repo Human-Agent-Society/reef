@@ -18,8 +18,9 @@ from typing import Any, Self
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord, CommitSnapshots
+from reef.storage.data import DataStore
 from reef.storage.evaluations import EvaluationStore
-from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
+from reef.storage.records import AppendResult, RecordLoss, RecordStore, StoredRecord
 from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
@@ -101,9 +102,6 @@ class ObservedRecordStore(RecordStore):
     ) -> tuple[StoredRecord, ...]:
         return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit, request_type=request_type)
 
-    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        return self._inner.consumption_receipts(scenario)
-
     def loss(self, scenario: str) -> RecordLoss:
         return self._inner.loss(scenario)
 
@@ -171,7 +169,9 @@ class ObservedScenarioStorage(ScenarioStorage):
         self._observer = observer
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
         raise PluginConfigError(f"{cls.__name__} wraps another storage; deployment assembly applies it")
 
     @property
@@ -192,9 +192,6 @@ class ObservedScenarioStorage(ScenarioStorage):
 
     def archive(self, scenario: str) -> tuple[str, ...]:
         return self._inner.archive(scenario)
-
-    def prune(self, *, max_bytes: int) -> int:
-        return self._inner.prune(max_bytes=max_bytes)
 
     def close(self) -> None:
         try:

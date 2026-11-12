@@ -13,8 +13,9 @@ from reef.train.trainer import Trainer
 
 def make_samples(owner: Scenario | Trainer) -> bool:
     """Make the samples of every new record of ``owner``'s trainers; return whether background work still runs."""
-    trainers = [owner] if isinstance(owner, Trainer) else [item.trainer for item in owner.trainers]
+    if isinstance(owner, Trainer):
+        return owner.produce_samples().background
     running = False
-    for trainer in trainers:
-        running = trainer.produce_samples().background or running
+    for component_trainer in owner.trainers:
+        running = owner.produce_samples(component_trainer.component).background or running
     return running

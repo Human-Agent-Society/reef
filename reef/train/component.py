@@ -43,11 +43,12 @@ class TrainingJob:
     """One bounded training job: its data directory, the weights it starts from, and the backend's parameters.
 
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
-    (the non-empty start that the component reads, ``TrainingComponent.root_start`` for a scenario's root release),
+    (the non-empty start that the component reads, ``TrainingComponent.root_start`` for a scenario's root snapshot),
     ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
     with ``read_job_data(job.data_dir, job.data_id)`` and cuts it into optimizer batches by its own batch size),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
-    trainer submits the job. The jobs of one scenario run one at a time, in the order of their submission.
+    trainer submits the job. The jobs of one scenario can run at the same time when the component has
+    ``concurrent_jobs``; each starts from its own ``start``.
     ``request_id`` is the ID of the training request that the job trains, or None. Reef's job listing reads it; a
     component does not need it. ``component`` is the scenario component that the job trains, or None when the
     trainer names none. ``previous_job_id`` is the last job whose end the trainer committed, or None before the
@@ -135,7 +136,7 @@ class SavedCheckpoint:
     ``step`` is a non-negative int, counted within the job. ``path`` is a
     non-empty directory path as the component wrote it, which a later job
     can start from. ``artifact_path`` is the non-empty directory that Reef
-    publishes as a release when it serves the checkpoint: the weights that
+    publishes as a snapshot when it serves the checkpoint: the weights that
     serving loads, without the training state that only the component reads
     (for example ``path`` itself, or its Hugging Face export).
     ``metrics`` is the backend's telemetry for the training that led to this
@@ -201,10 +202,10 @@ class JobStatus:
 
 @dataclass(frozen=True)
 class ScenarioRoot:
-    """A scenario's root release, as one trainer's component sees it, and where the root came from.
+    """A scenario's root snapshot, as one trainer's component sees it, and where the root came from.
 
-    Values: ``artifact`` is the trainer's component of the scenario's root release (the release itself when the
-    release is flat), which ``materialize`` makes local. ``source`` is the root's ``RootSource``.
+    Values: ``artifact`` is the trainer's component of the scenario's root snapshot (the snapshot itself when the
+    snapshot is flat), which ``materialize`` makes local. ``source`` is the root's ``RootSource``.
 
     Purpose: ``ScenarioFactory`` makes it when it builds a scenario's trainers, and ``Trainer.build`` gives it to
     ``TrainingComponent.root_start`` for the first job of a trainer that has no committed state.
@@ -236,45 +237,35 @@ class TrainingComponent(ABC):
     @property
     @abstractmethod
     def artifact_format(self) -> ArtifactFormat | None:
-        """The weight files that each saved checkpoint's release holds.
+        """The weight files that each saved checkpoint's snapshot holds.
 
-        ``None`` means the releases hold no weight files that an engine
+        ``None`` means the snapshots hold no weight files that an engine
         loads: only the backend's own serving runtime reads them (for
         example a Tinker manifest that Tinker's sampler serves).
         """
 
     @abstractmethod
     def default_start(self) -> DefaultStart:
-        """The component's untrained checkpoint, laid out as one of its releases, and the configuration it comes from.
+        """The component's untrained checkpoint, laid out as one of its snapshots, and the configuration it comes from.
 
-        A scenario that is created without an artifact item holds it in its root release, in the component that
-        this component trains. It has the layout of every other release (``artifact_format``), so serving and
-        training read it as they read any release. Its ``inputs`` name the model and the settings that decide its
+        A scenario that is created without an artifact item holds it in its root snapshot, in the component that
+        this component trains. It has the layout of every other snapshot (``artifact_format``), so serving and
+        training read it as they read any snapshot. Its ``inputs`` name the model and the settings that decide its
         content. Every service process can call this method, so a component whose model files cost a remote call
         gives them as ``BaseModelFiles`` that make them on the first ``directory`` call.
         """
 
     def root_start(self, root: ScenarioRoot) -> str:
-        """The start of the first job of a trainer whose scenario has the root release ``root``.
+        """The start of the first job of a trainer whose scenario has the root snapshot ``root``.
 
-        The default is ``import_start`` of the root's files. A component that imports no release
-        (``starts_from_artifacts`` False) overrides it, and raises ``ValueError`` for a root that it cannot start
+        The default is ``import_start`` of the root's files. A component that imports no snapshot
+        overrides it, and raises ``ValueError`` for a root that it cannot start
         from.
         """
         local_path = root.artifact.materialize().local_path
         if local_path is None:
-            raise ValueError(f"the root release {root.artifact.ref.revision} has no local files to train from")
+            raise ValueError(f"the root snapshot {root.artifact.ref.revision} has no local files to train from")
         return self.import_start(local_path)
-
-    @property
-    def starts_from_artifacts(self) -> bool:
-        """Whether ``import_start`` can take a published release as the start of later jobs.
-
-        False exactly when the component refuses every release, so no trainer of it can train from an artifact.
-        True, the default, when it takes some releases; ``import_start`` still refuses one whose weights it cannot
-        start from.
-        """
-        return True
 
     @property
     def shares_scenarios(self) -> bool:
@@ -289,6 +280,16 @@ class TrainingComponent(ABC):
         """
         return False
 
+    @property
+    def concurrent_jobs(self) -> bool:
+        """Whether several jobs of one scenario can run on this component at the same time.
+
+        True exactly when a job depends only on its own ``start``, data and parameters, and never on a job that
+        runs beside it or on ``previous_job_id``. The default is False: the trainer then submits a job only when
+        no other job of its scenario runs.
+        """
+        return False
+
     def check_job(self, job: TrainingJob) -> None:
         """Raise ``ValueError`` for a job this component cannot train. The default accepts every job.
 
@@ -297,38 +298,47 @@ class TrainingComponent(ABC):
         """
         return
 
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
+        """The JSON Schema of the complete parameters of a job of ``kind`` samples, or None when it declares none.
+
+        A job's parameters are the recipe's parameters of that kind with the request's merged in. The default
+        declares none. The scenario contract serves the schema, so a client can validate parameters against it.
+        ``check_job`` still checks each job.
+        """
+        return None
+
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
 
         A recipe whose jobs train tasks calls it when it is built, so a deployment that cannot run them fails before
-        any job. ``parameters`` are the recipe's job parameters without the method. The default refuses: the
+        any job. ``parameters`` are the recipe's parameters of a task job. The default refuses: the
         component trains trajectories only. ``check_job`` still checks each job.
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")
 
     def check_artifact(self, files: ArtifactFiles) -> None:
-        """Raise ``ValueError`` unless ``files`` are a release in the layout of this component's releases.
+        """Raise ``ValueError`` unless ``files`` are a snapshot in the layout of this component's snapshots.
 
         An artifact import calls it (RFC #980) on the directory it copied or on the revision it keeps by reference
         (RFC #995). The default reads ``artifact_format``: ``"full"`` needs ``config.json`` and weight files at the
         root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank is at most ``adapter_rank`` and whose
         target modules are within ``adapter_target_modules``. It reads only file names and
         ``adapter/adapter_config.json``, so a revision is checked without downloading its weights. ``None``
-        refuses every release. A component whose releases name weights on a service overrides it and also checks
+        refuses every snapshot. A component whose snapshots name weights on a service overrides it and also checks
         that each path resolves there.
         """
         artifact_format = self.artifact_format
         if artifact_format is None:
-            raise ValueError(f"the {self.name} training component takes no imported releases")
+            raise ValueError(f"the {self.name} training component takes no imported snapshots")
         paths = set(files.paths())
         if artifact_format.layout == "full":
             if "config.json" not in paths or not any(
                 "/" not in path and path.endswith((".safetensors", ".bin")) for path in paths
             ):
-                raise ValueError("a full-weight release holds config.json and weight files at its root")
+                raise ValueError("a full-weight artifact holds config.json and weight files at its root")
             return
         if not paths & {f"{ADAPTER_DIR}/adapter_model.safetensors", f"{ADAPTER_DIR}/adapter_model.bin"}:
-            raise ValueError(f"an adapter release holds a PEFT adapter in {ADAPTER_DIR}/")
+            raise ValueError(f"an adapter artifact holds a PEFT adapter in {ADAPTER_DIR}/")
         try:
             config = json.loads(files.read_bytes(f"{ADAPTER_DIR}/adapter_config.json"))
         except (OSError, ValueError) as exc:
@@ -345,19 +355,18 @@ class TrainingComponent(ABC):
 
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         """The parts of the scenario component that ``checkpoint`` changed from ``start``, which the scenario's
-        activation rule reads (``TrainStepResult.changed_kinds``). The default is none."""
+        activation rule reads (``TrainingCommit.changed_kinds``). The default is none."""
         return frozenset()
 
     @abstractmethod
-    def import_start(self, release: Path) -> str:
-        """Take the published release in ``release`` as the start of later jobs; return that start.
+    def import_start(self, artifact_dir: Path) -> str:
+        """Take the published snapshot in ``release`` as the start of later jobs; return that start.
 
         Reef calls this when a trainer starts training from an artifact
         (``train-from``). The component copies what it trains
         from into its own durable directory, since ``release`` can be
         discarded later. Raise ``ValueError``, and change nothing, when the
-        component cannot start from these weights. A component whose
-        ``starts_from_artifacts`` is False refuses every release.
+        component cannot start from these weights.
         """
 
     @abstractmethod
@@ -393,9 +402,9 @@ class TrainingComponent(ABC):
 
 @dataclass(frozen=True)
 class TrainingArtifactLayout(ArtifactLayout):
-    """The layout of the releases of ``component``: an import of the component it trains must meet it.
+    """The layout of the snapshots of ``component``: an import of the component it trains must meet it.
 
-    ``check`` is ``component.check_artifact``. The releases resolve a reference when they hold weight files
+    ``check`` is ``component.check_artifact``. The snapshots resolve a reference when they hold weight files
     (``artifact_format``), which the serving runtimes read through ``ArtifactWeightFiles``. A weight recipe binds it on
     its ``weights`` component.
     """

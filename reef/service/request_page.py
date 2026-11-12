@@ -127,17 +127,17 @@ class NextAction:
 
 
 def next_action(scenario: str, artifact_id: str, selection_result: str, requires: Sequence[str]) -> NextAction | None:
-    """The next action of a settled step: activate a release that is not active, or pull an active one.
+    """The next action of a settled step: activate a snapshot that is not active, or pull an active one.
 
-    ``requires`` names what the release needs where the harness runs (see
+    ``requires`` names what the snapshot needs where the harness runs (see
     ``reef.core.requirements.required_by``). ``None`` for a rejected,
     skipped or failed step: nothing waits on the person then.
     """
     if selection_result == "inactive":
         return NextAction(
-            "Read this page, then activate it",
-            (f'POST /reef/scenarios/{scenario}/activate {{"artifact_id": "{artifact_id}"}}',),
-            "The scenario's activation rule did not make this release active; activating it serves it.",
+            "Read this page, then serve it",
+            (f'POST /reef/scenarios/{scenario}/update {{"served": {{"{artifact_id}": 100}}}}',),
+            "The scenario's activation rule did not make this snapshot active; serving it alone makes it active.",
         )
     if selection_result != "selected":
         return None
@@ -145,7 +145,7 @@ def next_action(scenario: str, artifact_id: str, selection_result: str, requires
     return NextAction(
         "Pull it",
         ("GET /reef/harness",),
-        f"Reef serves this release's files now; a client gets them from there.{needs}",
+        f"Reef serves this snapshot's files now; a client gets them from there.{needs}",
     )
 
 
@@ -245,7 +245,7 @@ def request_html(record: Mapping[str, object]) -> str:
         f'<p class="text">{escape(payload.get("text"))}</p>',
         '<details class="request-meta"><summary>Session and request details</summary><dl class="metadata">',
         f'<div><dt>Session</dt><dd class="id">{escape(payload.get("session") or "Not provided")}</dd></div>',
-        f'<div><dt>Base artifact</dt><dd class="id">{escape(payload.get("artifact_id", payload.get("release_id")) or "Not provided")}</dd></div>',
+        f'<div><dt>Base artifact</dt><dd class="id">{escape(payload.get("artifact_id") or "Not provided")}</dd></div>',
         f'<div class="record-id"><dt>Request ID</dt><dd class="id">{escape(record["agent_record_id"])}</dd></div>',
     ]
     filed = record.get("created_at")
@@ -452,7 +452,7 @@ def build_request_page(
         eyebrow="Harness evolution",
         heading="Request details",
         subtitle=escape(subtitle),
-        # The active release is this scenario's home, the version this request is asked against.
+        # The active selection is this scenario's home, the version this request is asked against.
         home="" if served is None else step_href(served, link_query),
         head=head,
         body=(

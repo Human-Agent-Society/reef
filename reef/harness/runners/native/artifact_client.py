@@ -16,13 +16,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
-
 #: The poll backoff never waits longer than this between attempts.
 MAX_BACKOFF_S = 600.0
 
 
 class ArtifactClientError(Exception):
-    """Reef did not answer a release request; ``status`` carries the HTTP status when there was one."""
+    """Reef did not answer a snapshot request; ``status`` carries the HTTP status when there was one."""
 
     def __init__(self, message: str, *, status: int | None = None, timed_out: bool = False) -> None:
         super().__init__(message)
@@ -53,7 +52,7 @@ class EventWriter(ABC):
 
 
 class ArtifactClient:
-    """The release routes of one scenario: the catalog and one manifest."""
+    """The snapshot routes of one scenario: the catalog and one manifest."""
 
     def __init__(self, reef_url: str, token: str | None, scenario: str, *, timeout_s: float = 30.0) -> None:
         self.reef_url = reef_url.rstrip("/")
@@ -90,10 +89,10 @@ class ArtifactClient:
         return [dict(row) for row in rows if isinstance(row, Mapping)]
 
     def poll(self) -> str | None:
-        """The active release: the ``artifact_id`` of the catalog row marked ``active``, or None while no row is
+        """The active selection: the ``artifact_id`` of the catalog row marked ``active``, or None while no row is
         active."""
-        release = next((row.get("artifact_id") for row in self.artifacts() if row.get("active")), None)
-        return str(release) if release else None
+        artifact_id = next((row.get("artifact_id") for row in self.artifacts() if row.get("active")), None)
+        return str(artifact_id) if artifact_id else None
 
     def fetch(self, artifact_id: str | None = None) -> dict[str, Any]:
         """Read the source manifest for one artifact, or the active harness when no ID is given."""
@@ -102,19 +101,11 @@ class ArtifactClient:
             query["artifact_id"] = artifact_id
         return self.manifest(query)
 
-    def fetch_legacy(self, revision: str) -> dict[str, Any]:
-        """Resolve an installed legacy revision into a component artifact manifest."""
-        return self.manifest({"form": "source", "release_id": revision})
-
     def manifest(self, query: Mapping[str, str]) -> dict[str, Any]:
         _, manifest = self._request("GET", f"/reef/harness?{urllib.parse.urlencode(query)}")
         if not isinstance(manifest, Mapping) or "files" not in manifest or not manifest.get("artifact_id"):
             raise ArtifactClientError("the harness answered no artifact manifest")
-        return {
-            key: value
-            for key, value in manifest.items()
-            if key not in ("release_id", "parent_release_id", "content_id")
-        }
+        return dict(manifest)
 
 
 class HeadWatch:

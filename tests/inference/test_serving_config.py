@@ -196,3 +196,19 @@ def test_another_service_reads_the_stored_serving_config_that_control_changed(se
         worker.stop()
         data.close()
         control.close()
+
+
+@pytest.mark.unit
+def test_another_service_reads_the_training_mode_that_control_changed(serving, tmp_path):
+    control_of, worker = serving[0], serving[1]
+    control = control_of()
+    data = control_of(memory_coordination(), SQLiteScenarioStorage(tmp_path / "records"))
+    try:
+        control.create_scenario("math")
+        assert data.scenario_settings("math")["training_mode"] == "auto"
+        control.set_training_mode("math", "manual")
+        assert data.scenario_settings("math")["training_mode"] == "manual"
+    finally:
+        worker.stop()
+        data.close()
+        control.close()

@@ -2,7 +2,8 @@
 
 A producer adds a ``WorkItem``. A worker takes the oldest item it can take, holds a lease on it while it works,
 extends the lease, adds progress, and finishes or fails it. An item whose lease expires goes back to the queue,
-so another worker continues it. Readers find changes by ``changed_sequence``. The item ID is a function of the
+so another worker continues it. A worker that stops gives its items back (``give_back``); such an attempt does not
+count toward the attempts that the queue allows, so restarts of a service do not fail a long item. Readers find changes by ``changed_sequence``. The item ID is a function of the
 item's inputs, so work that runs again writes the same result.
 
 Two fields order the work:
@@ -10,6 +11,9 @@ Two fields order the work:
 - Items with the same ``serial_key`` run one at a time, in ``created_sequence`` order: a worker can take one only
   when every earlier item with that key is final. The training jobs of one trainer use this.
 - A worker can take an item only at or after its ``available_at`` time. A polling item uses this to wait.
+
+A worker can also keep the log lines of each attempt of an item (``append_log``, ``read_log``). They go with the item
+when ``delete_final`` deletes it.
 """
 
 from __future__ import annotations
@@ -60,6 +64,8 @@ class WorkItem:
     - ``state`` is one of ``WORK_STATES``. ``worker_id`` and ``lease_expires_at`` are set exactly when ``state`` is
       ``assigned`` or ``running``.
     - ``attempt_count`` is the number of times a worker took the item, an integer from 0.
+    - ``stopped_attempt_count`` is the number of those attempts that the worker gave back because it stopped
+      (``WorkQueue.give_back``), an integer from 0 to ``attempt_count``.
     - ``progress`` is a tuple of JSON objects in the order a worker added them.
     - ``result`` is set exactly when ``state`` is ``finished``; ``error`` is a non-empty string set exactly when
       ``state`` is ``failed``, or the last retryable error of a ``queued`` item.
@@ -86,6 +92,7 @@ class WorkItem:
     started_at: float | None = None
     ended_at: float | None = None
     attempt_count: int = 0
+    stopped_attempt_count: int = 0
     worker_id: str | None = None
     lease_expires_at: float | None = None
     progress: tuple[Mapping[str, JsonValue], ...] = ()
@@ -112,6 +119,9 @@ class WorkItem:
                 raise ValueError(f"{name} is a finite time or None")
         if isinstance(self.attempt_count, bool) or not isinstance(self.attempt_count, int) or self.attempt_count < 0:
             raise ValueError("attempt_count is an integer from 0")
+        stopped = self.stopped_attempt_count
+        if isinstance(stopped, bool) or not isinstance(stopped, int) or not 0 <= stopped <= self.attempt_count:
+            raise ValueError("stopped_attempt_count is an integer from 0 to attempt_count")
         if self.attempt_count == 0 and self.started_at is not None:
             raise ValueError("a work item that no worker took has no started_at")
         held = self.state in HELD_STATES
@@ -132,13 +142,47 @@ class WorkItem:
 
     @property
     def final(self) -> bool:
-        """Whether the item finished or failed, after which only its ``metadata`` changes."""
+        """Whether the item finished or failed. After that only its ``metadata`` changes, until its producer queues
+        it again (``WorkQueue.retry``)."""
         return self.state in FINAL_STATES
 
 
 def is_finite_time(value: object) -> bool:
     """Whether ``value`` is a finite int or float that is not a bool: a time in seconds."""
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
+#: The most log lines that one attempt of a work item keeps.
+MAX_LOG_LINES = 2000
+#: The most characters of one log line's message.
+MAX_LOG_MESSAGE = 4096
+
+
+@dataclass(frozen=True)
+class WorkLogLine:
+    """One log line of one attempt of a work item.
+
+    Values: ``number`` is the line's position in the attempt, an integer from 0, unique in the attempt. ``at`` is
+    the finite time in seconds when the line was logged. ``level`` is the name of a ``logging`` level, such as
+    ``INFO``. ``logger`` is the name of the logger. ``message`` is the text, at most ``MAX_LOG_MESSAGE`` characters.
+
+    Purpose: a worker writes the lines of the attempt that it runs (``WorkQueue.append_log``); readers read them
+    (``WorkQueue.read_log``).
+    """
+
+    number: int
+    at: float
+    level: str
+    logger: str
+    message: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 0:
+            raise ValueError("a log line's number is an integer from 0")
+        if not is_finite_time(self.at):
+            raise ValueError("a log line's time is a finite time")
+        if len(self.message) > MAX_LOG_MESSAGE:
+            raise ValueError(f"a log line's message has at most {MAX_LOG_MESSAGE} characters")
 
 
 @dataclass(frozen=True)
@@ -175,11 +219,13 @@ class WorkQueue(ABC):
     Values: the state is a finite set of ``WorkItem`` values with distinct ``(queue, id)`` pairs, and a sequence
     counter that numbers every change across the store. ``lease_seconds`` is the lease length that ``take`` and
     ``extend_lease`` give. A worker can take one item of a queue ``max_attempts[queue]`` times, or
-    ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int.
+    ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int. An attempt
+    that its worker gave back (``give_back``) is not one of these times.
 
-    Purpose: control and the services add work (``add``, ``request``); workers take, extend, progress, finish and
-    fail it; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``)
-    and record facts about it (``set_metadata``); control deletes old final items (``delete_final``).
+    Purpose: control and the services add work (``add``, ``request``); workers take, extend, progress, finish,
+    fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``)
+    and record facts about it (``set_metadata``); a producer queues a final item again (``retry``); control deletes
+    old final items (``delete_final``).
     """
 
     def __init__(
@@ -200,8 +246,13 @@ class WorkQueue(ABC):
         self.default_attempts = default_attempts
 
     def attempts_allowed(self, queue: str) -> int:
-        """How many times a worker can take one item of ``queue``."""
+        """How many times a worker can take one item of ``queue``, without the attempts that a worker gave back."""
         return self.max_attempts.get(queue, self.default_attempts)
+
+    def has_attempts_left(self, item: WorkItem) -> bool:
+        """Whether a worker can take ``item`` again: fewer of its attempts than ``attempts_allowed`` of its queue
+        ended otherwise than by ``give_back``. The attempt that holds a held item counts."""
+        return item.attempt_count - item.stopped_attempt_count < self.attempts_allowed(item.queue)
 
     @abstractmethod
     def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
@@ -296,10 +347,28 @@ class WorkQueue(ABC):
         left, else ``failed``, ended at ``now``. ``WorkLeaseLost`` when ``worker_id`` does not hold it."""
 
     @abstractmethod
+    def give_back(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+        """End the held attempt because the worker stops: the item becomes ``queued`` with the error
+        ``"the worker stopped"`` and one more ``stopped_attempt_count``, so another worker continues it at once.
+        The attempt does not count toward the attempts that the queue allows. ``WorkLeaseLost`` when ``worker_id``
+        does not hold it."""
+
+    @abstractmethod
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
         """Make an item that is not final ``failed`` with ``error``, ended now, for the producer that added it. A
         worker that held it gets ``WorkLeaseLost`` at its next call and stops. Return the item, or None when it does
         not exist; a final item does not change."""
+
+    @abstractmethod
+    def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:
+        """Make a final item ``queued`` again, for the producer that added it, so that a worker takes it once more.
+
+        The item keeps its payload, its progress, its metadata, its ``started_at`` and its attempt counts. It loses
+        its result and its ``ended_at``, keeps the error of a failed item as its last error, and is available at
+        ``now``. A worker can take it whatever its ``attempt_count`` is, so the item gets at least one more attempt;
+        a retryable failure of that attempt queues it again only while ``has_attempts_left``. Return the item, or
+        None when it does not exist; an item that is not final does not change.
+        """
 
     @abstractmethod
     def set_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
@@ -312,6 +381,18 @@ class WorkQueue(ABC):
         ``value``, nothing changes; otherwise the change gets the next change sequence. ``name`` is a non-empty
         string.
         """
+
+    @abstractmethod
+    def append_log(self, queue: str, item_id: str, attempt: int, lines: Sequence[WorkLogLine]) -> None:
+        """Keep ``lines`` as log lines of attempt ``attempt`` (from 1) of the item. Each line's number is new in the
+        attempt. No lease is needed: the worker of the attempt is the only writer."""
+
+    @abstractmethod
+    def read_log(
+        self, queue: str, item_id: str, attempt: int, *, after: int = -1, limit: int = 500
+    ) -> tuple[WorkLogLine, ...]:
+        """Up to ``limit`` log lines of attempt ``attempt`` of the item with a number above ``after``, in number
+        order. ``limit`` is 1 to 1000 and ``after`` is from -1; ``ValueError`` otherwise."""
 
     @abstractmethod
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
@@ -369,6 +450,12 @@ def check_page(state: str | None, before_sequence: int | None, limit: int) -> No
         raise ValueError("limit must be 1 to 1000 and before must be positive")
 
 
+def check_log_page(after: int, limit: int) -> None:
+    """Raise ValueError for ``after`` below -1 or ``limit`` outside 1 to 1000 (``WorkQueue.read_log``)."""
+    if after < -1 or not 1 <= limit <= 1000:
+        raise ValueError("after must be -1 or more and limit must be 1 to 1000")
+
+
 def clock(now: float | None) -> float:
     """``now``, or the current time when it is None."""
     return time.time() if now is None else float(now)
@@ -419,6 +506,8 @@ class LeaseExtender:
 __all__ = [
     "FINAL_STATES",
     "HELD_STATES",
+    "MAX_LOG_LINES",
+    "MAX_LOG_MESSAGE",
     "WORK_STATES",
     "JsonValue",
     "LeaseExtender",
@@ -426,8 +515,10 @@ __all__ = [
     "WorkConflict",
     "WorkItem",
     "WorkLeaseLost",
+    "WorkLogLine",
     "WorkQueue",
     "WorkState",
+    "check_log_page",
     "check_page",
     "clock",
     "is_finite_time",

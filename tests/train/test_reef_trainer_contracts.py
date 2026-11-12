@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-
 import pytest
 from tests.support._threshold_processor import ThresholdJobData
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent
 from tests.support.samples_service import make_samples
 
 from reef.core import AgentRecord, RequestType
 from reef.evaluation import UpdateCandidate
-from reef.storage.sqlite import SQLiteRecordStore
-from reef.train import JobData, PipelineContext, PreparedStep, Trainer, TrainingPipeline, TrainStepResult
+from reef.train import JobData, PipelineContext, PreparedStep, Trainer, TrainingCommit, TrainingPipeline
 from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
 
@@ -68,7 +67,7 @@ def test_training_pipeline_is_the_no_update_default() -> None:
     assert processor.ready(1) is False
     record = AgentRecord.create(scenario="math", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
     processor.push(record)
-    assert processor.releasable_record_ids() == frozenset()
+    assert processor.record2sample.releasable_record_ids() == frozenset()
     # The default holds no units, so it never becomes ready and
     # build_job_data refuses on that ground — the same refusal every pipeline gives.
     with pytest.raises(RuntimeError, match="no job data ready"):
@@ -99,13 +98,13 @@ def test_prepared_step_enforces_its_single_outcome() -> None:
 def test_custom_pipelines_default_to_releasing_no_records() -> None:
     processor = ExamplePipeline(PipelineContext("math"), [])
 
-    assert processor.releasable_record_ids() == frozenset()
+    assert processor.record2sample.releasable_record_ids() == frozenset()
 
 
 @pytest.mark.unit
 def test_trainer_dispatches_only_required_data_types() -> None:
     events: list[str] = []
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     trainer = Trainer.build(
         "math",
         records,
@@ -127,7 +126,7 @@ def test_trainer_dispatches_only_required_data_types() -> None:
         )
     )
     make_samples(trainer)
-    trainer.run_once()
+    trainer.advance_job()
 
     assert "push:report" in events
     assert "push:inference" not in events
@@ -137,7 +136,7 @@ def test_trainer_dispatches_only_required_data_types() -> None:
 @pytest.mark.unit
 def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     events: list[str] = []
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     trainer = Trainer.build(
         "math",
         records,
@@ -152,20 +151,20 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     )
     make_samples(trainer)
 
-    result = trainer.run_once()
+    result = trainer.advance_job()
 
     assert result is not None
     assert result.metrics["training_job"]["event"] == "submitted"
     assert events == ["push:report", "build", "submit:batch-1"]
     events.append("commit:math")
     prepared = trainer.prepare_commit(result)
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     assert events == ["push:report", "build", "submit:batch-1", "commit:math", "ack:batch-1"]
 
 
 @pytest.mark.unit
 def test_a_job_without_a_checkpoint_ends_without_an_artifact() -> None:
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     records.append(
         AgentRecord.create(
             scenario="math",
@@ -182,24 +181,24 @@ def test_a_job_without_a_checkpoint_ends_without_an_artifact() -> None:
         root=STUB_ROOT,
     )
     make_samples(trainer)
-    submitted = trainer.run_once()
+    submitted = trainer.advance_job()
     assert submitted is not None
-    trainer.commit(trainer.prepare_commit(submitted))
+    trainer.settle_commit(trainer.prepare_commit(submitted))
 
-    ended = trainer.run_once()
+    ended = trainer.advance_job()
 
     assert ended is not None and ended.artifact is None
     assert ended.metrics["training_job"]["event"] == "finished"
-    trainer.commit(trainer.prepare_commit(ended))
+    trainer.settle_commit(trainer.prepare_commit(ended))
     assert JobLoopState.from_dict(trainer.state).finished_jobs == 1
 
 
 @pytest.mark.unit
 def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
     events: list[str] = []
-    records = SQLiteRecordStore()
+    records = memory_records("math")
 
-    def fail_commit(result: TrainStepResult) -> None:
+    def fail_commit(result: TrainingCommit) -> None:
         events.append("commit")
         raise RuntimeError("storage failed")
 
@@ -217,20 +216,20 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
     )
     make_samples(trainer)
 
-    result = trainer.run_once()
+    result = trainer.advance_job()
     assert result is not None
     with pytest.raises(RuntimeError, match="storage failed"):
         fail_commit(result)
 
     assert "ack:batch-1" not in events
     assert trainer.state == JobLoopState("example:base").to_dict()
-    assert trainer.run_once() is result
+    assert trainer.advance_job() is result
 
 
 @pytest.mark.unit
 def test_trainer_reads_only_new_records() -> None:
     events: list[str] = []
-    records = SQLiteRecordStore()
+    records = memory_records("math")
     report = AgentRecord.create(
         scenario="math", request_type=RequestType.REPORT, payload={"score": 1}, agent_record_id="report"
     )
@@ -244,13 +243,13 @@ def test_trainer_reads_only_new_records() -> None:
     )
 
     make_samples(trainer)
-    first = trainer.run_once()
+    first = trainer.advance_job()
     assert first is not None
     prepared = trainer.prepare_commit(first)
-    trainer.commit(prepared)
+    trainer.settle_commit(prepared)
     records.append(report)
     make_samples(trainer)
-    trainer.run_once()
+    trainer.advance_job()
 
     assert events.count("push:report") == 1
     assert trainer.data_offset == 1

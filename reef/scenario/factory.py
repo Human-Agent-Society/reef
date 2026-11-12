@@ -1,6 +1,6 @@
 """Create and restore scenarios from durable registration and committed state.
 
-A new scenario owns its root release: the recipe's default start, or an artifact item of its owner. Storage repair
+A new scenario owns its root snapshot: the recipe's default start, or an artifact item of its owner. Storage repair
 precedes checkpoint synchronization and activation. The trainer
 is then built from committed state and retained records are replayed. Any
 failure closes the trainer and opened storage session owned by this attempt.
@@ -22,26 +22,26 @@ from reef.artifact.artifact import (
     artifact_components,
 )
 from reef.artifact.components import ScenarioComponents
-from reef.artifact.composite import compose_release
+from reef.artifact.composite import compose_snapshot
 from reef.artifact.repository import (
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
     RepositoryBackendFactory,
-    StagedReleaseRepositoryBackend,
+    StagedSnapshotRepositoryBackend,
     selection_digest,
 )
 from reef.artifact.sources import SourceFiles
-from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
-from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ReleaseComponents, release_components
+from reef.core.artifact_selection import ArtifactSelection
+from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
-from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
+from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
-from reef.scenario.binding import ScenarioBinding, activate_release
-from reef.scenario.release_files import ScenarioArtifactFiles
+from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
+from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     UNLOCATED_SNAPSHOT,
@@ -63,11 +63,11 @@ from reef.train.training_requests import TrainingRequestQueue
 class RepositoryCommitSnapshots(CommitSnapshots):
     """Finds each record's snapshot from its selection and the backend's bindings of artifact IDs.
 
-    Values: ``backend`` is the scenario's backend, and ``start`` is its root release. Bindings never change, so one
+    Values: ``backend`` is the scenario's backend, and ``start`` is its root snapshot. Bindings never change, so one
     lookup per artifact ID is enough. The ``snapshot`` of a record without one is:
 
     - a step or import that made an artifact: the binding of the artifact that this record names first;
-    - a training step that made none: the release that was active then;
+    - a training step that made none: the snapshot that was active then;
     - any other record of one component, or a new training start: the binding of its artifact;
     - any other record of several components: the local view of its selection.
     """
@@ -112,6 +112,15 @@ class RepositoryCommitSnapshots(CommitSnapshots):
         return SnapshotRef(f"{SELECTION_VIEW_PREFIX}{selection_digest(selection)}", None)
 
     def locate(self, records: Sequence[CommitRecord]) -> tuple[CommitRecord, ...]:
+        wanted = {
+            artifact_id
+            for record in records
+            if record.snapshot == UNLOCATED_SNAPSHOT and (record.checkpoint or record.operation != "training")
+            for artifact_id in (record.artifact_ids or {}).values()
+            if artifact_id not in self.bindings
+        }
+        if wanted:
+            self.bindings.update(self.backend.artifact_snapshots(wanted))
         seen: set[str] = set()
         active = self.start
         located = []
@@ -139,24 +148,26 @@ def committed_records(store: ScenarioStore, head_record: CommitRecord | None) ->
 
 @dataclass(frozen=True)
 class ItemStart:
-    """The artifact item that a new scenario's root release holds.
+    """The artifact item that a new scenario's root snapshot holds.
 
-    Values: ``item_id`` is the item's non-empty ID, and ``uri`` its non-empty ``source_uri``. ``files`` is the
+    Values: ``item`` is the item's ``ItemIdentity``, and ``uri`` its non-empty ``source_uri``. ``files`` is the
     ``SourceFiles`` that ``uri`` names, not yet checked. ``component`` is the component that the item fills, or
-    ``None`` for the scenario's one component.
+    ``None`` for the scenario's one component. The root's artifact of ``component`` keeps the item's artifact ID.
 
     Purpose: ``ArtifactImports.create_from_item`` makes it for ``POST /reef/scenarios`` with ``artifact_id``.
-    ``ScenarioFactory.register`` checks it and writes it as the root release.
+    ``ScenarioFactory.register`` checks it and writes it as the root snapshot.
     """
 
-    item_id: str
+    item: ItemIdentity
     uri: str
     files: SourceFiles
     component: str | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.item_id, str) or not self.item_id or not isinstance(self.uri, str) or not self.uri:
-            raise ValueError("an item start names a non-empty item_id and uri")
+        if not isinstance(self.item, ItemIdentity):
+            raise TypeError("an item start's item is an ItemIdentity")
+        if not isinstance(self.uri, str) or not self.uri:
+            raise ValueError("an item start names a non-empty uri")
         if not isinstance(self.files, SourceFiles):
             raise TypeError("an item start's files are SourceFiles")
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
@@ -165,42 +176,39 @@ class ItemStart:
 
 @dataclass(frozen=True)
 class RecoveredTrainerState:
-    """What one component's trainer recovers from its own commits and drops: state, cursor, and consumed rows."""
+    """What one component's trainer recovers from its own commits: state and consumed rows.
+
+    ``committed_ids`` holds the IDs that its commits named. ``consumed_ids`` holds those and the records that
+    its stored samples consumed.
+    """
 
     algorithm_state: Mapping[str, Any] | None
-    high_water: tuple[int, int] | None
     consumed_ids: frozenset[str]
+    committed_ids: frozenset[str]
 
 
 def recovered_trainer_states(
     store: ScenarioStore, scenario: str, head_record: CommitRecord | None, components: ScenarioComponents
 ) -> dict[str, RecoveredTrainerState]:
-    """What each component's trainer recovers from its own commits and its own stale drops.
+    """What each component's trainer recovers from its own commits.
 
     The only trainer of a one-component (or record-only) scenario owns every
-    training commit and consumption receipt, which name no component.
+    training commit, which names no component.
     Activations and new training starts carry no trainer state, so no
     trainer recovers from them. The records that a trainer's stored samples
     consumed (``TrainingState.consumed_record_ids``) count as consumed too, so a
-    replay never makes their samples again. A drop is a step without
-    a commit that an earlier Reef version recorded as a consumption receipt:
-    its rows count as consumed, and the state and the cursor stay the last
-    commit's.
+    replay never makes their samples again.
 
     Rehydration must skip consumed rows: retention may keep a consumed row
     stored (audit-only retention is contract-legal), and pushing one again would
     train it twice. Consumption is permanent, so the union over the whole log
-    and every receipt is the exclusion set; with several trainers each keeps
-    its own share, the rows of its own commits and of its own stale drops.
+    is the exclusion set; with several trainers each keeps its own share, the rows
+    of its own commits.
     """
     records = committed_records(store, head_record)
     consumed_by_component: dict[str | None, set[str]] = {}
     for record in records:
         consumed_by_component.setdefault(record.component, set()).update(record.consumed_ids)
-    for receipt in store.records.consumption_receipts(scenario):
-        named = receipt["metadata"].get("component")
-        owner = named if isinstance(named, str) else None
-        consumed_by_component.setdefault(owner, set()).update(receipt["consumed_ids"])
     names = components.names or (RECORDS_COMPONENT,)
     alone = len(names) == 1
     states: dict[str, RecoveredTrainerState] = {}
@@ -214,15 +222,15 @@ def recovered_trainer_states(
         last = own[-1] if own else None
         # The records that the trainer's stages consumed: its key is "" when it is alone.
         stored = store.training_state.consumed_record_ids("" if alone else component)
+        committed = (
+            frozenset().union(*consumed_by_component.values())
+            if alone
+            else frozenset(consumed_by_component.get(component, ()))
+        )
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
-            high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
-            consumed_ids=stored
-            | (
-                frozenset().union(*consumed_by_component.values())
-                if alone
-                else frozenset(consumed_by_component.get(component, ()))
-            ),
+            consumed_ids=stored | committed,
+            committed_ids=committed,
         )
     return states
 
@@ -230,8 +238,7 @@ def recovered_trainer_states(
 class ScenarioFactory:
     """Register, assemble, and recover complete scenario instances.
 
-    ``activates_runtime`` permits direct activation on load and commit for standalone scenarios.
-    Service scenarios leave activation to inference. ``served_models`` supplies the actual serving artifact for training.
+    Inference loads each selected release. ``served_models`` supplies the actual serving artifact for training.
     """
 
     def __init__(
@@ -243,14 +250,12 @@ class ScenarioFactory:
         experiment_tracker: ExperimentTracker,
         scenario_storage: ScenarioStorage,
         experiment_reports: ExperimentReportQueue | None = None,
-        activates_runtime: bool = True,
         served_models: ServedModels | None = None,
         training_requests: TrainingRequestQueue | None = None,
     ) -> None:
         self._recipe = recipe
         #: The training requests of every scenario; None builds scenarios that take no request.
         self._training_requests = training_requests
-        self._activates_runtime = activates_runtime
         self.served_models = served_models
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
@@ -269,17 +274,17 @@ class ScenarioFactory:
     def load_or_create(self, scenario: str, start: ItemStart | None = None) -> Scenario:
         """Recover the scenario ``scenario``, or create it when the backend has no registration of it.
 
-        A new scenario gets its own root release (``register``): the artifact item ``start``, or the recipe's
+        A new scenario gets its own root snapshot (``register``): the artifact item ``start``, or the recipe's
         default start when ``start`` is ``None``. An existing scenario ignores ``start``.
         """
         backend = self._backend_factory(scenario)
-        if self._storage.durable and not isinstance(backend, StagedReleaseRepositoryBackend):
+        if self._storage.durable and not isinstance(backend, StagedSnapshotRepositoryBackend):
             raise ArtifactPublicationError(
-                "scenarios with durable commit storage require a backend implementing StagedReleaseRepositoryBackend"
+                "scenarios with durable commit storage require a backend implementing StagedSnapshotRepositoryBackend"
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
-        components = self._recipe.scenario_components(scenario)
+        components = self._recipe.build_components(scenario)
         if registration is None:
             self.register(scenario, backend, components, start)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from
@@ -293,13 +298,13 @@ class ScenarioFactory:
             backend,
             registration,
             components=components,
-            registered_components=release_components(metadata),
+            registered_components=snapshot_components(metadata),
         )
 
     def register(
         self, scenario: str, backend: RepositoryBackend, components: ScenarioComponents, start: ItemStart | None
     ) -> None:
-        """Write the root release of the new scenario ``scenario`` and register it with ``backend``.
+        """Write the root snapshot of the new scenario ``scenario`` and register it with ``backend``.
 
         The root holds the artifact item ``start`` in its component, or the recipe's default start
         (``Recipe.default_start``) when ``start`` is ``None``. A root of several components holds each other
@@ -312,7 +317,7 @@ class ScenarioFactory:
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
-            root, source = self.root_release(components, start, Path(work))
+            root, source = self.root_snapshot(components, start, Path(work))
             if start is not None:
                 self._recipe.check_root_start(ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {
@@ -327,10 +332,10 @@ class ScenarioFactory:
                 registration_metadata[COMPONENTS_METADATA_KEY] = root.metadata[COMPONENTS_METADATA_KEY]
             backend.register(root, metadata=registration_metadata)
 
-    def root_release(
+    def root_snapshot(
         self, components: ScenarioComponents, start: ItemStart | None, work: Path
     ) -> tuple[Artifact, RootSource]:
-        """The unpublished root release of a new scenario that ``components`` serves, under ``work``, and its source."""
+        """The unpublished root snapshot of a new scenario that ``components`` serves, under ``work``, and its source."""
         item: tuple[str, Artifact] | None = None
         if start is None:
             default = self._recipe.default_start()
@@ -339,10 +344,10 @@ class ScenarioFactory:
             component, layout = components.import_target(start.component)
             directory = work / "item"
             directory.mkdir()
-            stored = layout.stored(start.files, directory)
-            source = RootSource("item", item=start.item_id, uri=start.uri, version=start.files.version)
-            # The admission checks of an import: the release's own with one component, else the component's here and
-            # the release's on the composed root.
+            stored = layout.stored(start.files, directory, artifact_id=start.item.artifact_id)
+            source = RootSource("item", item=start.item.item_id, uri=start.uri, version=start.files.version)
+            # The admission checks of an import: the snapshot's own with one component, else the component's here and
+            # the snapshot's on the composed root.
             if components.single:
                 components.validate(stored)
                 return stored, source
@@ -360,14 +365,14 @@ class ScenarioFactory:
         )
         if stray:
             raise ReefError(
-                f"the default start keeps {stray} outside its components {list(components.names)}: a release serving "
+                f"the default start keeps {stray} outside its components {list(components.names)}: a snapshot serving "
                 "several components keeps one directory per component"
             )
         artifacts = {name: Artifact.local(tree / name) for name in components.names}
         if item is None:
-            return compose_release(artifacts, directory=work / "root"), source
+            return compose_snapshot(artifacts, directory=work / "root"), source
         artifacts[item[0]] = item[1]
-        root = compose_release(artifacts, directory=work / "root")
+        root = compose_snapshot(artifacts, directory=work / "root")
         components.validator.validate(root)
         return root, source
 
@@ -378,12 +383,12 @@ class ScenarioFactory:
         registration: object,
         *,
         components: ScenarioComponents,
-        registered_components: ReleaseComponents | None,
+        registered_components: SnapshotComponents | None,
     ) -> Scenario:
         if not isinstance(registration, Mapping):
             raise ValueError(f"invalid scenario metadata for {name!r}")
         if not components.single:
-            # A registration names the components its releases bind. One made by a
+            # A registration names the components its snapshots bind. One made by a
             # recipe serving a single component, or none, has releases with no
             # component directories to carry forward; refuse rather than compose
             # the whole flat tree into every component.
@@ -401,7 +406,7 @@ class ScenarioFactory:
             unserved = [component for component in registered_components.names if component not in components.names]
             if unserved:
                 # A step carries forward the components the recipe serves: one it does not serve would leave
-                # every later release, and the head would then refuse the recipe that registered them.
+                # every later snapshot, and the head would then refuse the recipe that registered them.
                 raise ReefError(
                     f"scenario {name!r} was registered with components {list(registered_components.names)}; "
                     f"the recipe does not serve {unserved}"
@@ -418,9 +423,7 @@ class ScenarioFactory:
             registration,
             checkpoint_head=checkpoint_head,
             components=(
-                None
-                if components.single or registered_components is None
-                else registered_components.artifact_ids(checkpoint_head.revision)
+                None if registered_components is None else registered_components.artifact_ids(checkpoint_head.revision)
             ),
         )
         if registered_name != name:
@@ -428,8 +431,6 @@ class ScenarioFactory:
         # What served after the artifact head's commit; the commit history's activations come after it.
         served_at_head = served_snapshot(registration, checkpoint_head=checkpoint_head)
         start_artifact = backend.resolve_snapshot(start_artifact.revision)
-        # A root registered before artifact IDs existed has no bindings yet; indexing a bound root changes nothing.
-        backend.index_snapshot(start_artifact)
         checkpoint_step = 0 if checkpoint is None else checkpoint.step
         runtime = self._recipe.runtime
         store = self._storage.open(name)
@@ -463,26 +464,12 @@ class ScenarioFactory:
             )
             active_selection = registration.get("active_selection")
             records = committed_records(store, head_record)
-            # Older selections name the storage snapshots of their artifacts; index them, so the IDs resolve.
-            legacy_locators = {
-                *(() if active_selection is None else legacy_selection_locators(active_selection).values()),
-                *(locator for record in records for locator in record.legacy_locators.values()),
-            }
-            for locator in legacy_locators:
-                backend.index_snapshot(locator)
             if active_selection is not None:
                 repository.remember_selection(served_at_head, ArtifactSelection.from_dict(active_selection))
             for record in records:
                 if record.selection is not None:
                     repository.remember_selection(record.snapshot, record.selection)
-                elif record.snapshot.durable:
-                    # Only an older record has no selection: current records bind their IDs when they publish.
-                    backend.index_snapshot(record.snapshot)
             repository.synchronize_checkpoint()
-            # Traffic must not reach a recovered scenario before its committed
-            # head is servable; a failed activation leaves the scenario unloaded.
-            if self._activates_runtime:
-                activate_release(components, Artifact(current_artifact, repository), runtime, name)
 
             root_artifacts = repository.selection(start_artifact, components.names or (RECORDS_COMPONENT,))
             training_artifacts = root_artifacts
@@ -494,14 +481,17 @@ class ScenarioFactory:
                 source_artifacts=training_artifacts,
                 run_segment=store.training_run_position()[0] if store.durable else 0,
             )
-            trainers = self._recipe.build_trainers(
+            # The scenario's own record-to-sample keys (RFC #1362). The instance keeps them, so that a process that
+            # loaded the scenario can see that control changed them (``Scenario.record2sample_config``).
+            record2sample_config = self._storage.read_settings(name).record2sample_config
+            trainers = self._recipe.for_record2sample_configs(components, record2sample_config).build_trainers(
                 name,
                 store.records,
                 components=components,
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
-                releases=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
+                artifacts=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
                 samples=self._storage.sample_store(name, store),
                 root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
             )
@@ -536,7 +526,6 @@ class ScenarioFactory:
                     runtime=runtime,
                     training_component=self._recipe.training_component,
                     activation_rule=self._recipe.activation_rule(),
-                    activates_runtime=self._activates_runtime,
                     served_models=self.served_models,
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.
@@ -551,28 +540,16 @@ class ScenarioFactory:
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,
                 training_requests=None if self._training_requests is None else self._training_requests.of(name),
+                record2sample_config=record2sample_config,
             )
-            # Replay retained, unconsumed rows behind each trainer's watermark
-            # before resuming its cursor. Retention may keep already-consumed
-            # rows for audit.
+            # Each trainer reads its records from the start again and skips the consumed ones. A commit's record
+            # progress is not a cursor here: it can name a sequence of a record store that came before the record
+            # items (RFC #1219).
             for component_trainer in trainers:
                 # Scenario() checked that every trainer names a component the scenario serves: each has a state.
                 recovered = recovered_states[component_trainer.component]
-                if recovered.high_water is not None:
-                    scenario.replay_retained(
-                        up_to_sequence=recovered.high_water[0],
-                        consumed_ids=recovered.consumed_ids,
-                        component=component_trainer.component,
-                    )
-                    scenario.restore_record_progress(
-                        after_sequence=recovered.high_water[0],
-                        offset=recovered.high_water[1],
-                        component=component_trainer.component,
-                    )
-                elif recovered.consumed_ids:
-                    scenario.replay_retained(
-                        up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
-                    )
+                component_trainer.trainer.restore_committed_records(recovered.committed_ids)
+                component_trainer.trainer.restore_consumed_records(recovered.consumed_ids)
             scenario.resume_training_starts()
             return scenario
         except BaseException:
