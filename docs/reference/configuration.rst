@@ -2200,6 +2200,16 @@ its reason, so a restart continues the pool in the same order. When a
 deployment sets ``pool_capacity`` on a scenario whose train tasks trained
 once, those tasks join the pool at the start.
 
+Two limits of the training pool:
+
+- When the trainer starts the next job before the stage reads the end of a
+  failed task job, the tasks of the next job also get a use with no rewards,
+  and their rewards in that job are not kept.
+- The tasks of a job that a new training start cancelled return to the pool
+  only when a later job ends. When that job held so many tasks that fewer than
+  ``job_samples`` wait and the pool is full, no job and no round can start,
+  also after a restart. Restart with a larger ``pool_capacity``.
+
 The saved train tasks become task items that the scenario uses,
 ``<scenario>.generated-tasks.<task name>``, and train like every other
 sample. ``GeneratedTaskJobData`` makes one task job of the next job's tasks,
