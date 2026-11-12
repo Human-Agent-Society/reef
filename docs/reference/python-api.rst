@@ -319,9 +319,16 @@ parser, and an optional environment fallback:
    clip_ratio: float = config_field(0.2, env="REEF_MY_METHOD_CLIP_RATIO")
 
 Precedence is explicit configuration, then environment, then the default.
-``from_environment()`` builds the recipe. On weight-training recipes,
-``service_config()`` forwards declared fields and shared artifact settings
-from the service configuration. A setting that a pipeline stage reads belongs
+A recipe class does not load itself: ``reef.recipe.loading.load_recipe(recipe_class, config, environ)``
+reads the declarations of the class and builds the recipe, and
+``build_recipe(reference, environ, config)`` does the same for a class
+reference. The declarations are the ``config_field`` fields, the
+``section_field`` fields (one parsed config section each) and
+``refused_sections`` (the config sections that the class refuses, each with
+its error message). For a weight-training deployment,
+``reef.service.deploy.training.training_recipe_config`` forwards the declared
+fields from the service configuration and refuses a key that the class does
+not declare. A setting that a pipeline stage reads belongs
 in the stage's settings, under the deployment's ``pipeline`` section, not in a
 recipe field. Never read deployment YAML from inside a stage.
 

@@ -35,7 +35,8 @@ from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.base import ServedEndpoint, close_runtimes
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
-from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
+from reef.recipe.loading import build_named_recipe, build_recipe, load_recipe, weight_training_selection
+from reef.recipe.registry import recipe_class_for
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
@@ -45,7 +46,7 @@ from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.service_config import ServiceSettings, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
-from reef.service.deploy.training import training_deployment_for
+from reef.service.deploy.training import training_deployment_for, training_recipe_config
 from reef.service.harness_imports import HarnessSyncWorker
 from reef.service.lifecycle import LifecycleSettings
 from reef.service.request_service import RequestService
@@ -84,7 +85,7 @@ def _recipe_owned_settings(settings: ServiceSettings) -> dict[str, Any]:
     config spellings that map onto them (``reef.token`` feeds ``tokens``), so
     it never drifts from what the settings layer consumes. Everything else
     the operator wrote under ``reef:`` is recipe configuration and must be
-    consumed by a recipe config field. ``WeightTrainingRecipe.service_config`` raises for
+    consumed by a recipe config field. ``training_recipe_config`` raises for
     any key the selected recipe does not declare, instead of letting the
     deployment silently run on recipe defaults.
     """
@@ -151,7 +152,7 @@ def _training_recipe(
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     # Resolve the recipe fields once before connecting its runtime.
     # Construction consumes those same resolved values.
-    recipe_config = recipe_type.service_config(_recipe_owned_settings(settings), model_path=model_path)
+    recipe_config = training_recipe_config(recipe_type, _recipe_owned_settings(settings), model_path=model_path)
     if settings.activation_settings is not None:
         recipe_config["activation"] = dict(settings.activation_settings)
     if settings.pipeline_settings is not None:
@@ -163,8 +164,13 @@ def _training_recipe(
         default_parameters=recipe_type.configured_parameters(resolved_recipe_data.get("job_parameters")),
     )
     try:
-        return recipe_type.from_resolved_config(
-            recipe_config, resolved_recipe_data, environ=env, runtime=runtime, training_component=training_component
+        return load_recipe(
+            recipe_type,
+            recipe_config,
+            env,
+            runtime=runtime,
+            training_component=training_component,
+            field_values=resolved_recipe_data,
         )
     except BaseException:
         close_runtimes(() if training_component is None else (training_component,), runtime)
@@ -258,7 +264,7 @@ def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, 
                 }
             )
         recipe_type = recipe_class_for(selected)
-        weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
+        weight_training = None if recipe_type is None else weight_training_selection(recipe_type, config)
         if weight_training is not None and recipe_type is not None:
             return composed_training_recipe(selected, recipe_type, config, *weight_training, settings, env)
         if settings.pipeline_settings is not None:

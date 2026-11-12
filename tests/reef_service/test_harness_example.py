@@ -39,7 +39,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.recipe.registry import build_named_recipe
+from reef.recipe.loading import build_named_recipe, load_recipe
 from reef.service.assembly import _serving_recipe, _upstream_runtime
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.commits import CommitRecord
@@ -203,9 +203,10 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert json.loads((tmp_path / "work/tasks.json").read_text()) == tasks
     # Boot the real recipe; a retained selector without its profile would fail here.
     monkeypatch.chdir(serve_file_base(filename))
-    recipe = HarnessEvolutionRecipe.from_environment(
+    recipe = load_recipe(
+        HarnessEvolutionRecipe,
+        recipe_config_from_file_layout(settings),
         {},
-        config=recipe_config_from_file_layout(settings),
         runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"),
     )
     assert recipe.worker_executor.backend == "mp"
@@ -252,12 +253,12 @@ def boot_serve_file(tmp_path: Path, monkeypatch, filename: str, **evolution) -> 
     write_recipe_file(materialized, config, {**config["evolution"], **state, **evolution})
     monkeypatch.chdir(serve_file_base(filename))
     service = service_config_from_mapping(config)
-    return HarnessEvolutionRecipe.from_environment(
-        {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
+    return load_recipe(
+        HarnessEvolutionRecipe, load_recipe_config(materialized), {}, runtime=_upstream_runtime(service)
     )
 
 
-def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monkeypatch, evolution) -> None:
+def test_the_serve_file_boots_the_recipe_through_the_loader(tmp_path, monkeypatch, evolution) -> None:
     """The run.sh contract, hermetic: interpolate serve.yaml through reef's config loader, materialize the recipe
     sections as a named config, and boot the recipe (seed validation included) with a fake binary."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")

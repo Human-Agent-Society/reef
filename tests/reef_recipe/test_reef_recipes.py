@@ -27,7 +27,8 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe, RecipeConfigError, load_recipe_config
 from reef.recipe.config import recipe_config_from_mapping
-from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
+from reef.recipe.loading import build_named_recipe, build_recipe
+from reef.recipe.registry import recipe_class_for
 from reef.sample2job import NoJobData
 from reef.train.pipeline import PipelineSettings, TrainingPipeline
 from reef.train.slime_backend.objectives import resolve_objective

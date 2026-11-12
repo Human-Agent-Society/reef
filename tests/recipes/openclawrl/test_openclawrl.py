@@ -25,6 +25,8 @@ from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.loading import load_recipe
+from reef.service.deploy.training import training_recipe_config
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.schedule import StepScheduling
@@ -338,7 +340,7 @@ def openclawrl_recipe(pipeline: dict | None = None, **data) -> OpenClawRLRecipe:
     config: dict = {"data": data}
     if pipeline is not None:
         config["pipeline"] = pipeline
-    recipe = OpenClawRLRecipe.from_environment({}, config=config, **runtime_bindings())
+    recipe = load_recipe(OpenClawRLRecipe, config, {}, **runtime_bindings())
     assert isinstance(recipe, OpenClawRLRecipe)
     return recipe
 
@@ -404,7 +406,7 @@ def test_a_stage_setting_in_the_recipe_config_is_refused(key: str, stage: str) -
 @pytest.mark.unit
 def test_the_retired_teacher_settings_are_refused() -> None:
     with pytest.raises(RecipeConfigError, match=r"does not consume reef\.prm_teacher_timeout_s"):
-        OpenClawRLRecipe.service_config({"prm_teacher_timeout_s": 5.0}, model_path="/models/policy")
+        training_recipe_config(OpenClawRLRecipe, {"prm_teacher_timeout_s": 5.0}, model_path="/models/policy")
 
 
 @pytest.mark.unit

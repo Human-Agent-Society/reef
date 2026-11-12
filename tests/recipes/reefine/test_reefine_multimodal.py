@@ -5,11 +5,14 @@ Reef's inference service relays no multimodal call; only the agent's trials reac
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from recipes.beta.reefine.multimodal import MultimodalSettings
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.loading import load_recipe
 
 
 @pytest.mark.unit
@@ -53,11 +56,11 @@ def test_reefine_hands_its_gateway_to_the_agent() -> None:
             "agent": None,
         }
     }
-    kwargs = ReefineRecipe._recipe_kwargs(settings, {})
     upstream = InferenceProxyRuntime(base_url="https://openrouter.ai/api", api_key="sk-upstream", model_path="m")
-    recipe = ReefineRecipe(**kwargs, runtime=upstream)
+    recipe = load_recipe(ReefineRecipe, settings, {}, runtime=upstream)
+    assert isinstance(recipe, ReefineRecipe)
     assert recipe.multimodal_provider is not None and recipe.multimodal_provider.api_key == "sk-upstream"
     elsewhere = InferenceProxyRuntime(base_url="http://127.0.0.1:11434", api_key="ollama", model_path="m")
-    assert ReefineRecipe(**kwargs, runtime=elsewhere).multimodal_provider is None
+    assert replace(recipe, runtime=elsewhere).multimodal_provider is None
     with pytest.raises(RecipeConfigError, match=r"evolution\.multimodal"):
-        ReefineRecipe._recipe_kwargs({"evolution": {**settings["evolution"], "multimodal": "openrouter"}}, {})
+        load_recipe(ReefineRecipe, {"evolution": {**settings["evolution"], "multimodal": "openrouter"}}, {})

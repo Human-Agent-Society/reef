@@ -165,12 +165,26 @@ optional forms. Object fields can use ``config_field(default_factory=dict)``.
 Keep range and cross-field checks in ``__post_init__``. Do not repeat scalar
 conversion in the service layer or recipe hooks.
 
-``WeightTrainingRecipe.service_config`` translates the flat deployment layout
-and rejects unknown fields; it does not convert scalar values. The service
-resolves those fields before it builds the training component and passes them
-to ``from_resolved_config``. ``from_environment`` uses that same resolution
-path for standalone recipe construction. Custom construction hooks should
-consume the resolved values; ``_recipe_kwargs`` owns non-field sections.
+A recipe class declares its configuration and does not load itself. One
+loader, ``reef.recipe.loading.load_recipe``, makes the recipe value from the
+declarations of the class:
+
+- ``config_field`` fields, from ``recipe.config`` and their environment
+  fallbacks.
+- ``section_field`` fields. Each holds one config section, parsed into the
+  ``Settings`` dataclass of the field's annotation.
+- ``refused_sections``, a class attribute that maps a config section to an
+  error message. The loader raises ``RecipeConfigError`` with that message
+  when the deployment sets the section. SAO refuses ``optimization`` this way.
+- The ``pipeline`` and ``activation`` sections, which every recipe has.
+
+For a weight-training deployment,
+``reef.service.deploy.training.training_recipe_config`` translates the flat
+deployment layout and rejects unknown fields; it does not convert scalar
+values. The service resolves the fields before it builds the training
+component and passes them to the loader. ``build_recipe`` loads a recipe from
+a class reference for standalone use. Do not add a loading method to a recipe
+class: check the relation between fields in ``__post_init__``.
 
 Train each kind of sample with its own method
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

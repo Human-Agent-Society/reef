@@ -66,6 +66,7 @@ from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
+from reef.recipe.config_fields import section_field
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
@@ -100,8 +101,8 @@ class EvolutionSettings(Settings):
     (``reef.execution.sandbox.config.build_executor``), and ``agent`` which coding
     agent a method runs and where (``reef.train.harness_backend.agent.settings``),
     ``None`` for none.
-    Purpose: ``HarnessEvolutionRecipe`` parses it from the deployment and
-    builds the backend from it.
+    Purpose: the recipe loader parses it from the deployment for the ``evolution`` field of
+    ``HarnessEvolutionRecipe`` (``section_field``), and the recipe builds the backend from it.
     """
 
     method: str | Mapping[str, Any] | None = config_option(None, help="The Method that evolves the tree.")
@@ -237,8 +238,12 @@ class HarnessEvolutionRecipe(Recipe):
     """
 
     method: Method
-    evolution: EvolutionSettings
-    evaluation: EvaluationSettings
+    evolution: EvolutionSettings = section_field(
+        "evolution", required="harness evolution requires an 'evolution' config section"
+    )
+    evaluation: EvaluationSettings = section_field(
+        "evolution.evaluation", required="harness evolution requires an 'evolution' config section"
+    )
     seed: HarnessTree = field(default_factory=lambda: HarnessTree({}))
     scorer: TaskScorer | None = None
     collector: TaskCollector | None = None
@@ -375,16 +380,21 @@ class HarnessEvolutionRecipe(Recipe):
         return self.evolution.adapter
 
     @classmethod
-    def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
-        section = settings.get("evolution")
-        if not isinstance(section, Mapping):
-            raise RecipeConfigError("harness evolution requires an 'evolution' config section")
+    def built_fields(
+        cls, settings: Mapping[str, Any], values: Mapping[str, str], sections: Mapping[str, Settings]
+    ) -> dict[str, Any]:
+        """The method, the scorer and the collector that the parsed sections name, the executor of the runs, and
+        the values read beside them: the named models, the model metadata, the worker executor, the agent
+        settings, the seed tree and the served model's name.
+
+        ``settings`` is the flat recipe config and ``values`` the environment. Step 4 of RFC #1390 moves this
+        construction to the harness training component.
+        """
+        section = settings["evolution"]
+        evolution, evaluation = sections["evolution"], sections["evaluation"]
+        if not isinstance(evolution, EvolutionSettings) or not isinstance(evaluation, EvaluationSettings):
+            raise TypeError("the evolution and evaluation fields hold EvolutionSettings and EvaluationSettings")
         try:
-            evaluation_section = section.get("evaluation", {})
-            evolution = EvolutionSettings.from_config(
-                {key: value for key, value in section.items() if key != "evaluation"}, setting="evolution"
-            )
-            evaluation = EvaluationSettings.from_config(evaluation_section, setting="evolution.evaluation")
             if evolution.method is None:
                 raise ValueError("evolution.method must name the Method that evolves the tree")
             method = Method.from_setting(evolution.method, setting="evolution.method")
@@ -419,10 +429,7 @@ class HarnessEvolutionRecipe(Recipe):
         model = settings.get("model")
         model_name = model.get("path") if isinstance(model, Mapping) else None
         return {
-            **super()._recipe_kwargs(settings, values),
             "method": method,
-            "evolution": evolution,
-            "evaluation": evaluation,
             "seed": seed,
             "scorer": scorer,
             "collector": collector,

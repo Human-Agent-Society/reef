@@ -20,6 +20,7 @@ from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 
 
 class _Response(io.BytesIO):
@@ -461,7 +462,7 @@ def test_recipe_binds_the_model_metadata_of_the_served_model() -> None:
         "model": {"path": "small"},
         **evolution_config(adapter="codex", model_metadata={"small": {"context_window": 640_000, "reasoning": True}}),
     }
-    codex = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime)
+    codex = load_recipe(HarnessEvolutionRecipe, config, {}, runtime=runtime)
     assert codex.model_binding().metadata.context_window == 640_000
 
 
@@ -550,7 +551,7 @@ def test_recipe_declares_named_models_under_evolution_models() -> None:
 
     def recipe(models: dict[str, Any], environ: dict[str, str]) -> HarnessEvolutionRecipe:
         config = {"model": {"path": "small"}, **evolution_config(models=models)}
-        return HarnessEvolutionRecipe.from_environment(environ, config=config, runtime=runtime)
+        return load_recipe(HarnessEvolutionRecipe, config, environ, runtime=runtime)
 
     teacher = {"url": "http://big", "model": "large", "api_key_env": "TEACHER_KEY"}
     models = recipe({"teacher": teacher}, {"TEACHER_KEY": "sk-t"}).model_bindings()

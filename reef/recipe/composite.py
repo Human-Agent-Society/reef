@@ -39,15 +39,11 @@ from typing import Any, ClassVar
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.components import validate_component_name
-from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
-from reef.evaluation.activation import activation_reference
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.inference.interfaces import InferenceRuntime
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
-from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
+from reef.recipe.config import recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.storage.data import DataStore
 from reef.train.component import ScenarioRoot, TrainingComponent, component_root
 
@@ -106,7 +102,11 @@ def component_recipe_config(component: str, section: Any) -> dict[str, Any]:
 
 @dataclass(frozen=True, kw_only=True)
 class CompositeRecipe(Recipe):
-    """Bind one recipe per snapshot component; the scenario runs their trainers side by side."""
+    """Bind one recipe per snapshot component; the scenario runs their trainers side by side.
+
+    The loader makes the component recipes from the ``components`` section
+    (``reef.recipe.loading.load_composite_recipe``).
+    """
 
     components: Mapping[str, Recipe] = field(default_factory=dict)
     name: str = "composite"
@@ -139,88 +139,6 @@ class CompositeRecipe(Recipe):
                 f"components {weight_components} all train weights; a snapshot loads one component"
             )
         object.__setattr__(self, "components", dict(self.components))
-
-    @classmethod
-    def from_resolved_config(
-        cls,
-        config: Mapping[str, Any],
-        field_values: Mapping[str, Any],
-        *,
-        environ: Mapping[str, str],
-        runtime: InferenceRuntime | None = None,
-        training_component: TrainingComponent | None = None,
-    ) -> CompositeRecipe:
-        raw = config.get("components")
-        if not isinstance(raw, Mapping) or not raw:
-            raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
-        for component in raw:
-            if component in RESERVED_COMPONENT_NAMES:
-                raise RecipeConfigError(
-                    f"components.{component} is a metric prefix experiment tracking reserves "
-                    f"({', '.join(RESERVED_COMPONENT_NAMES)}); rename the component"
-                )
-        # Resolve the deployment's runtime once, so the composite and every component share it.
-        runtime = cls._resolve_runtime(environ, runtime)
-        configured_mode = configured_training_mode(config)
-        components: dict[str, Recipe] = {}
-        for component, section in raw.items():
-            settings = component_recipe_config(str(component), section)
-            settings["model"] = dict(config.get("model", {}))
-            if configured_mode is not None and configured_training_mode(settings) is None:
-                # The composite's mode is every component's mode: a component sets its own only to disagree.
-                settings["data"]["training_mode"] = configured_mode
-            settings = recipe_config_from_mapping(settings)
-            components[str(component)] = build_recipe(
-                settings["implementation"],
-                environ,
-                config=settings,
-                runtime=runtime,
-                training_component=training_component,
-            )
-        modes = {recipe.training_mode for recipe in components.values()}
-        if len(modes) != 1:
-            raise RecipeConfigError(f"components run different training modes {sorted(modes)}; they share one")
-        values = dict(field_values)
-        if configured_mode is None:
-            values["training_mode"] = next(iter(modes))
-        if config.get("activation") is not None:
-            # One rule activates the artifacts of every component.
-            try:
-                values["activation"] = activation_reference(config["activation"])
-            except PluginConfigError as exc:
-                raise RecipeConfigError(str(exc)) from exc
-        try:
-            return cls(components=components, runtime=runtime, training_component=training_component, **values)
-        except RecipeConfigError:
-            raise
-        except ValueError as exc:
-            raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
-
-    @classmethod
-    def select_weight_training(
-        cls, config: Mapping[str, Any]
-    ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
-        """The one component that trains weights, so the deployment connects its training component.
-
-        A snapshot loads one component into a runtime, so two weight training
-        components are refused here, before any runtime is connected. The
-        selected component's config is returned flat, as its recipe reads it.
-        """
-        components = config.get("components")
-        if not isinstance(components, Mapping):
-            return None
-        selected: list[tuple[str, tuple[type[WeightTrainingRecipe], Mapping[str, Any]]]] = []
-        for name, section in components.items():
-            settings = component_recipe_config(str(name), section)
-            recipe_type = recipe_class_for(settings["implementation"])
-            weight_training = None if recipe_type is None else recipe_type.select_weight_training(settings)
-            if weight_training is not None:
-                selected.append((str(name), weight_training))
-        if len(selected) > 1:
-            raise RecipeConfigError(
-                f"components {[name for name, _ in selected]} all train weights; a snapshot loads one component"
-            )
-        return selected[0][1] if selected else None
 
     def with_served_endpoint(self, endpoint: ServedEndpoint) -> CompositeRecipe:
         # Each component's evaluation runs a candidate of that component alone: the endpoint names it.

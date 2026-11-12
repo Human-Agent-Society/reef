@@ -10,10 +10,14 @@ weights or the harness*. This package holds everything a method binds to:
   evolution method extends; it assembles ``reef.train.harness_backend``.
 - ``composite`` — ``CompositeRecipe`` binds one recipe per snapshot component
   and runs their trainers side by side in one scenario.
-- ``registry`` — dotted class resolution (``recipe_class_for``) and
-  ``build_named_recipe`` for a deployment preset.
+- ``loading`` — the one loader: ``load_recipe`` makes the recipe value of a
+  class from its config, ``build_recipe`` from a class reference and
+  ``build_named_recipe`` from a deployment preset. A recipe class declares
+  its configuration and does not load itself.
+- ``registry`` — dotted class resolution (``recipe_class_for``).
 - ``config_fields`` — one dataclass field as the whole configuration surface
-  for one setting (YAML key, env fallback, shared typed parser).
+  for one setting (YAML key, env fallback, shared typed parser), and
+  ``section_field`` for a field that holds a parsed config section.
 - ``config`` — recipe-config YAML loading; ``errors`` — the error family.
 
 The activation rule is part of this contract, not a separate subsystem:
@@ -42,7 +46,8 @@ from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config import load_recipe_config
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
+from reef.recipe.loading import build_named_recipe, build_recipe, load_recipe
+from reef.recipe.registry import recipe_class_for
 
 __all__ = [
     "CompositeRecipe",
@@ -52,6 +57,7 @@ __all__ = [
     "build_named_recipe",
     "build_recipe",
     "config_field",
+    "load_recipe",
     "load_recipe_config",
     "recipe_class_for",
 ]

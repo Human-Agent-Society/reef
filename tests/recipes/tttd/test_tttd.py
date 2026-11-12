@@ -17,6 +17,7 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
+from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -97,9 +98,7 @@ def _processor(experiment_logger=None, job_samples=None) -> TrainingPipeline:
 
 
 def _recipe(config: dict) -> TTTDRecipe:
-    recipe = TTTDRecipe.from_environment(
-        {}, config={"model": {"path": "Qwen/Qwen3-8B"}, **config}, **runtime_bindings()
-    )
+    recipe = load_recipe(TTTDRecipe, {"model": {"path": "Qwen/Qwen3-8B"}, **config}, {}, **runtime_bindings())
     assert isinstance(recipe, TTTDRecipe)
     return recipe
 

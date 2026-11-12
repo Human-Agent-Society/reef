@@ -30,6 +30,7 @@ from recipes.beta.reefine.answer import EXTENSION_ADAPTER
 from recipes.beta.reefine.method import ReefineMethod
 from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettings
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
+from reef.core.config import Settings
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.recipe.config_fields import config_field
@@ -90,7 +91,12 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         )
 
     @classmethod
-    def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
+    def config_with_defaults(cls, settings: Mapping[str, Any]) -> Mapping[str, Any]:
+        """``settings`` with Reefine's defaults in its ``evolution`` and ``activation`` sections, and Reefine's own
+        ``evolution.multimodal`` key moved to a top-level ``multimodal`` key, where ``built_fields`` reads it.
+
+        Step 4 of RFC #1390 removes this override.
+        """
         section = settings.get("evolution")
         if not isinstance(section, Mapping):
             raise RecipeConfigError("reefine requires an 'evolution' config mapping")
@@ -114,7 +120,6 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         # The agent answers requests on pi alone; on another adapter the served model does, so no agent is
         # built, jailed or warned about. On pi it runs unless the section is null, on the harness's own binary.
         agent = section.get("agent", {}) if adapter == EXTENSION_ADAPTER else None
-        trial_timeout_s: Any = DEFAULT_TRIAL_TIMEOUT_S
         if agent is not None:
             if not isinstance(agent, Mapping):
                 raise RecipeConfigError("evolution.agent must be a mapping")
@@ -130,21 +135,30 @@ class ReefineRecipe(HarnessEvolutionRecipe):
             binary = section.get("binary")
             agent = {**({"binary": binary} if binary else {}), **agent}
         reviewed = [part for part in REVIEWED_PARTS if part in descriptor.layout.parts]
-        kwargs = super()._recipe_kwargs(
-            {
-                **settings,
-                "evolution": {**EVOLUTION_DEFAULTS, **own, "agent": agent, "evaluation": evaluation},
-                # An extension runs in the harness's process with the user's privileges, so by default a person
-                # activates a tree that changes one.
-                "activation": settings.get("activation", {"module": "always", "config": {"review_kinds": reviewed}}),
-            },
-            values,
-        )
+        return {
+            **settings,
+            "evolution": {**EVOLUTION_DEFAULTS, **own, "agent": agent, "evaluation": evaluation},
+            # An extension runs in the harness's process with the user's privileges, so by default a person
+            # activates a tree that changes one.
+            "activation": settings.get("activation", {"module": "always", "config": {"review_kinds": reviewed}}),
+            "multimodal": section.get("multimodal"),
+        }
+
+    @classmethod
+    def built_fields(
+        cls, settings: Mapping[str, Any], values: Mapping[str, str], sections: Mapping[str, Settings]
+    ) -> dict[str, Any]:
+        """The fields that ``HarnessEvolutionRecipe.built_fields`` returns, with the multimodal settings and the
+        time limit of a trial of the agent. Step 4 of RFC #1390 removes this override."""
+        kwargs = super().built_fields(settings, values, sections)
         try:
-            kwargs["multimodal"] = MultimodalSettings.from_config(section.get("multimodal"), values)
+            kwargs["multimodal"] = MultimodalSettings.from_config(settings.get("multimodal"), values)
         except ValueError as exc:
             raise RecipeConfigError(f"evolution.{exc}") from exc
-        kwargs["trial_timeout_s"] = float(trial_timeout_s)
+        agent = settings["evolution"]["agent"]
+        kwargs["trial_timeout_s"] = float(
+            DEFAULT_TRIAL_TIMEOUT_S if agent is None else agent.get("trial_timeout_s", DEFAULT_TRIAL_TIMEOUT_S)
+        )
         return kwargs
 
     def build_backend(

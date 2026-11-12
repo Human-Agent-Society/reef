@@ -17,6 +17,7 @@ reef_recipe = pytest.importorskip("reef.recipe.base", reason="requires a reef ch
 from reef.core.plugins import PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.loading import load_recipe
 from reef.train.slime_backend.objectives import resolve_objective
 
 
@@ -30,7 +31,7 @@ EXAMPLE = Path(__file__).resolve().parents[3] / "recipes" / "beta" / "coral" / "
 
 
 def coral_recipe(config):
-    return _recipe_cls().from_environment({}, config=config, **runtime_bindings())
+    return load_recipe(_recipe_cls(), config, {}, **runtime_bindings())
 
 
 def test_the_recipe_binds_processor_and_grouped_machinery():
