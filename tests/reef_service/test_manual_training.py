@@ -1234,7 +1234,11 @@ def test_a_training_manager_decides_the_jobs_of_a_scenario_in_auto_mode(tmp_path
         scenario = dispatcher.get_or_create_scenario("s")
         samples = stored_samples_of(dispatcher, "a", "b")
         # Reef starts no job by its own rule, although the samples of a job wait: one sample, the stage's job size.
-        assert became_true(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
+        # The selection serves once the serving worker took it, on another thread, so the wait covers both.
+        assert became_true(
+            lambda: [(view.untrained_samples, view.selection_serves) for view in dispatcher.manager_views()]
+            == [(samples[:1], True)]
+        )
         [view] = dispatcher.manager_views()
         assert (view.scenario, view.job_samples, view.selection_serves, view.jobs) == ("s", 1, True, ())
         assert view.training_start is not None and component.submitted == []
