@@ -131,6 +131,44 @@ job runs, including the jobs that a restart left. After a restart,
 `Tinker integration <../reference/python-api.rst#tinker-integration>`__ in
 the Python API describes the Tinker component.
 
+Facts without a component
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A service that does not run a training component still needs some answers
+about it. A backend states them from its configuration as a
+``reef.train.component.TrainingBackendFacts`` value.
+``TrainingComponentFactory.facts(config, model_path, environ)`` returns it from
+the config that ``__call__`` builds the component from, and
+``training_backend_facts(config, model_path=...)`` calls it. Stating the facts
+builds no component, starts nothing, calls no service and imports no training
+framework or SDK. The members are:
+
+``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs``
+   The component's members of the same names.
+``default_start_inputs``
+   The ``inputs`` of the component's default start: the model and the
+   settings that decide its content.
+``parameters_schema(kind)``
+   The JSON Schema of a job's parameters, or ``None``.
+``check_root_start(root)``
+   Raise ``ValueError`` for a scenario root that the component's
+   ``root_start`` refuses. It reads the root's files and writes nothing.
+
+The component holds a value of the same type and answers these members from
+it, so the facts and the component give the same answers. The Slime component
+also refuses to start when its options, as written, state other facts than
+Slime's parser read from them.
+
+Everything else stays a call to the component, because it needs the training
+service, its files or its framework: the files of the default start,
+``root_start`` and ``import_start`` (they write a start), ``check_artifact``,
+``check_task_jobs``, ``check_job``, ``changed_parts`` and the jobs.
+
+The default ``facts`` returns ``None``: the backend states no facts from its
+configuration, and a caller builds the component and reads the members there.
+The harness component has no factory; ``HarnessFacts.from_settings`` makes its
+facts from the ``HarnessSettings``.
+
 Decide what a scenario trains
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 

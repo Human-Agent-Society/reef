@@ -27,7 +27,8 @@ prompts.
 
 The rest supports a job: ``services`` implements the services of a job, ``calls``
 its model budget, ``state`` the committed algorithm state, and ``records`` the
-job records.
+job records. ``facts`` is what the backend states from its settings without a
+component (``reef.train.component.TrainingBackendFacts``).
 The tree itself is ``reef.harness.tree``; the evaluation, the history and the
 publication policies are ``reef.evaluation.harness``.
 """

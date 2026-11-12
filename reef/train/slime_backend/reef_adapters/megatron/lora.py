@@ -10,16 +10,9 @@ from typing import Any
 
 import torch
 
+from reef.train.slime_backend.facts import DEFAULT_MEGATRON_TARGETS, hf_lora_target_modules
+
 logger = logging.getLogger(__name__)
-
-
-_MEGATRON_TO_HF_TARGETS = {
-    "linear_qkv": ("q_proj", "k_proj", "v_proj"),
-    "linear_proj": ("o_proj",),
-    "linear_fc1": ("gate_proj", "up_proj"),
-    "linear_fc2": ("down_proj",),
-}
-_DEFAULT_MEGATRON_TARGETS = tuple(_MEGATRON_TO_HF_TARGETS)
 
 
 def validate_megatron_lora_args(args: Namespace) -> None:
@@ -61,20 +54,13 @@ def megatron_lora_target_modules(args: Namespace) -> list[str]:
     """Return the effective Megatron target list used by Bridge LoRA."""
 
     configured = getattr(args, "megatron_lora_target_modules", None)
-    return list(configured) if configured is not None else list(_DEFAULT_MEGATRON_TARGETS)
+    return list(configured) if configured is not None else list(DEFAULT_MEGATRON_TARGETS)
 
 
 def sglang_lora_target_modules(args: Namespace) -> list[str]:
     """Convert Megatron Bridge target names to SGLang/HF leaf names."""
 
-    converted: list[str] = []
-    for target in megatron_lora_target_modules(args):
-        leaf = target.rsplit(".", 1)[-1]
-        hf_targets = _MEGATRON_TO_HF_TARGETS.get(leaf, (leaf,))
-        for hf_target in hf_targets:
-            if hf_target not in converted:
-                converted.append(hf_target)
-    return converted
+    return hf_lora_target_modules(megatron_lora_target_modules(args))
 
 
 def build_sglang_lora_config(args: Namespace) -> dict[str, Any]:

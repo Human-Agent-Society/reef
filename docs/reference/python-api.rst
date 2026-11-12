@@ -2175,6 +2175,10 @@ alone; a serving factory returns an ``InferenceRuntime``.
 ``TrainingComponentFactory`` and ``build_training_component`` in
 ``reef.train.component`` define and build the first; ``RuntimeFactory`` and
 ``RuntimeRegistry`` in ``reef.inference.registry`` define and build the second.
+``TrainingComponentFactory.facts`` and ``training_backend_facts`` state a
+backend's ``TrainingBackendFacts`` from the same config without a component:
+its name, artifact format, default start inputs, parameters schema, root start
+check, and whether scenarios and jobs share it.
 The HTTP service builds the training component first, then the serving
 runtime that ``reef.service.deploy.serving.serving_runtime_config`` describes
 from the ``inference`` settings and the component's ``artifact_format``.
