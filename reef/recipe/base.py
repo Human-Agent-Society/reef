@@ -411,6 +411,10 @@ class Recipe:
         ``None`` for a recipe that serves no harness tree. Every scenario of
         the process shares it, so the scenario list names it before a
         scenario loads.
+
+        The value is configuration: an override reads only the recipe's own configuration fields, such as
+        ``evolution.adapter``, and no runtime, training component or store. A service that holds any recipe
+        reads it here.
         """
         return None
 

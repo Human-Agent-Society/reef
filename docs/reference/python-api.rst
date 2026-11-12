@@ -271,7 +271,9 @@ Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
 adapter ``GET /reef/harness`` renders the recipe's harness artifacts for
 (``None``, the default, for a recipe with no harness tree;
-``HarnessEvolutionRecipe`` names ``evolution.adapter``).
+``HarnessEvolutionRecipe`` names ``evolution.adapter``, and ``CompositeRecipe``
+the adapter of its harness component). It is a configuration value: an
+override reads only the recipe's own configuration fields.
 The scenario list names it for every scenario. Every recipe declares
 ``pipeline_spec()``, the default class of each pipeline stage (see `Pipeline
 stages <#pipeline-stages>`__). Weight-training recipes add these members:

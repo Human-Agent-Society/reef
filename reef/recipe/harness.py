@@ -367,6 +367,7 @@ class HarnessEvolutionRecipe(Recipe):
 
     @property
     def harness_adapter(self) -> str | None:
+        """``evolution.adapter``."""
         return self.evolution.adapter
 
     @classmethod

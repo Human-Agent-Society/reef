@@ -12,7 +12,7 @@ from reef.evaluation.harness import EvaluationSettings
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
-from reef.recipe import Recipe
+from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.service.app import RequestService
 from reef.storage.sql_coordination import memory_coordination
@@ -150,3 +150,6 @@ def test_harness_recipes_name_their_adapter() -> None:
     )
     assert built.harness_adapter == "claude"
     assert Recipe().harness_adapter is None
+    # A composite names the adapter of its harness component, wherever that component stands.
+    assert CompositeRecipe(components={"config": Recipe(), "harness": built}).harness_adapter == "claude"
+    assert CompositeRecipe(components={"config": Recipe(), "records": Recipe()}).harness_adapter is None
