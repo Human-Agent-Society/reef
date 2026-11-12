@@ -34,6 +34,7 @@ from reef.observability import NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.scenario.binding import activate_snapshot
 from reef.scenario.factory import ScenarioFactory
+from reef.scenario.live_objects import LiveObjects
 from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -239,10 +240,11 @@ class HarnessTrainer(TrainerBuilder):
 @pytest.mark.unit
 def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp_path: Path) -> None:
     runtime = StubInferenceRuntime()
-    recipe = _TwoComponentRecipe(runtime=runtime)
+    recipe = _TwoComponentRecipe()
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=runtime),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),

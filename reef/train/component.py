@@ -500,8 +500,8 @@ class TrainingArtifactLayout(ArtifactLayout):
     """The layout of the snapshots of ``component``: an import of the component it trains must meet it.
 
     ``check`` is ``component.check_artifact``. The snapshots resolve a reference when they hold weight files
-    (``artifact_format``), which the serving runtimes read through ``ArtifactWeightFiles``. A weight recipe binds it on
-    its ``weights`` component.
+    (``artifact_format``), which the serving runtimes read through ``ArtifactWeightFiles``.
+    ``reef.scenario.live_objects.scenario_components`` binds it on the weight component of a weight recipe.
     """
 
     component: TrainingComponent

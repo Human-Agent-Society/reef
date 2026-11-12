@@ -1,8 +1,9 @@
 """One scenario served and evolved by several recipes, one per snapshot component.
 
 A composite recipe binds a recipe to each component name. It declares
-each recipe's component under that component's name, its default start keeps each
-component's seed under that component's directory, and its trainers are
+each recipe's component under that component's name. The scenario's default
+start keeps each component's seed under that component's directory
+(``reef.scenario.live_objects.default_start``), and its trainers are
 the components' trainers, run as independent workers that meet at the
 scenario's commit boundary (see ``docs/advanced_topics/state-model.rst``).
 
@@ -37,15 +38,11 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.artifact.components import ComponentSpec, ScenarioComponents
-from reef.artifact.repository import DefaultStart
 from reef.core.components import validate_component_name
 from reef.core.reports import ReportBase, ReportValidationError
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
+from reef.recipe.base import Recipe, WeightTrainingRecipe, every_check
 from reef.recipe.config import recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.data import DataStore
-from reef.train.component import ScenarioRoot, TrainingComponent, component_root
 
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
 RESERVED_COMPONENT_NAMES = ("train", "step", "reef", "operations")
@@ -104,7 +101,8 @@ def component_recipe_config(component: str, section: Any) -> dict[str, Any]:
 class CompositeRecipe(Recipe):
     """Bind one recipe per snapshot component; the scenario runs their trainers side by side.
 
-    The loader makes the component recipes from the ``components`` section
+    Values: ``components`` maps each component name to its recipe value; the composite holds child recipe values
+    and no live object. The loader makes the component recipes from the ``components`` section
     (``reef.recipe.loading.load_composite_recipe``).
     """
 
@@ -140,55 +138,14 @@ class CompositeRecipe(Recipe):
             )
         object.__setattr__(self, "components", dict(self.components))
 
-    def with_served_endpoint(self, endpoint: ServedEndpoint) -> CompositeRecipe:
-        # Each component's evaluation runs a candidate of that component alone: the endpoint names it.
-        return replace(
-            self,
-            components={
-                name: recipe.with_served_endpoint(replace(endpoint, component=name))
-                for name, recipe in self.components.items()
-            },
-        )
-
     @property
     def harness_adapter(self) -> str | None:
         """The adapter of the component recipe that serves a harness tree; a composite serves at most one."""
         return next((recipe.harness_adapter for recipe in self.components.values() if recipe.harness_adapter), None)
 
-    def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
-        recipe = self.components.get(component)
-        return None if recipe is None else recipe.harness_served_model(scenario, component)
-
     def harness_state_dir(self, scenario: str, component: str) -> Path | None:
         recipe = self.components.get(component)
         return None if recipe is None else recipe.harness_state_dir(scenario, component)
-
-    def job_components(self) -> tuple[TrainingComponent, ...]:
-        """The job components of every component recipe, each once: the components share the composite's
-        training component. Raise ``ValueError`` when two different components share a name."""
-        found: dict[str, TrainingComponent] = {}
-        for recipe in self.components.values():
-            for component in recipe.job_components():
-                known = found.setdefault(component.name, component)
-                if known is not component:
-                    raise ValueError(f"two job components of this composite are named {component.name!r}")
-        return tuple(found.values())
-
-    def with_job_components(
-        self, components: Mapping[str, TrainingComponent], data_store: DataStore
-    ) -> CompositeRecipe:
-        check_job_components(self, components)
-        return replace(
-            self,
-            training_component=(None if self.training_component is None else components[self.training_component.name]),
-            data_store=data_store,
-            components={
-                name: recipe.with_job_components(
-                    {component.name: components[component.name] for component in recipe.job_components()}, data_store
-                )
-                for name, recipe in self.components.items()
-            },
-        )
 
     @property
     def report_type(self) -> type[ReportBase] | None:
@@ -216,7 +173,7 @@ class CompositeRecipe(Recipe):
         return any_component_report(tuple(declared))
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        """Each recipe's one component under the name the composite binds it to."""
+        """Each recipe's one declared component under the name the composite binds it to."""
         specs: dict[str, ComponentSpec] = {}
         for component, recipe in self.components.items():
             declared = recipe.build_components(scenario)
@@ -241,36 +198,6 @@ class CompositeRecipe(Recipe):
             components={
                 component: recipe.with_record2sample_config(configs.get(component, {}))
                 for component, recipe in self.components.items()
-            },
-        )
-
-    def check_root_start(self, root: ScenarioRoot) -> None:
-        """Check every component's view of ``root`` with its recipe; propagate any ``ValueError`` refusal."""
-        for component, recipe in self.components.items():
-            recipe.check_root_start(component_root(root, component))
-
-    def default_start(self) -> DefaultStart:
-        """Each component's default start under that component's directory.
-
-        The files and the model files of a component go under its name; each input is named ``<component>.<input>``.
-        Raise ``RecipeConfigError`` when two components hold model files.
-        """
-        sources = {component: recipe.default_start() for component, recipe in self.components.items()}
-        models = [component for component, source in sources.items() if source.model_files is not None]
-        if len(models) > 1:
-            raise RecipeConfigError(f"components {models} each hold a base model; a composite trains one model")
-        return DefaultStart(
-            files={
-                f"{component}/{path}": text
-                for component, source in sources.items()
-                for path, text in source.files.items()
-            },
-            model_files=sources[models[0]].model_files if models else None,
-            model_component=models[0] if models else None,
-            inputs={
-                f"{component}.{name}": value
-                for component, source in sources.items()
-                for name, value in source.inputs.items()
             },
         )
 

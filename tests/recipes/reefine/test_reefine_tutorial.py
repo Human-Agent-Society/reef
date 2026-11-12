@@ -27,6 +27,7 @@ from reef.dispatcher.ingest import training_request_refusal
 from reef.evaluation.activation import AlwaysActivate
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
+from reef.scenario.live_objects import LiveObjects, harness_models
 from reef.service.deploy.service_config import service_config_from_mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -64,8 +65,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     """The demos use the built-in recipe with tutorial-local state, no agent, training_mode manual (one step per
     accepted instruction and no failure driven step between them) and the evaluation's floor over the one health task,
     so a change publishes when the tree still works and an extension still waits."""
-    from reef.recipe.loading import build_named_recipe
-    from reef.service.assembly import _upstream_runtime
+    from reef.service.assembly import _upstream_runtime, load_named_recipe
 
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "provider/model-a")
@@ -100,7 +100,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     assert config["reef"]["port"] == 8901 and config["reef"]["token"] == "reef-local"
 
     service = service_config_from_mapping(config)
-    built = build_named_recipe(
+    built, runtime = load_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(TUTORIAL / "configs")},
         default_runtime=_upstream_runtime(service),
@@ -109,12 +109,13 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
     # No agent: the method answers each request in text.
-    component = configured_component(built)
+    live = LiveObjects(runtime=runtime)
+    component = configured_component(built, live)
     assert isinstance(component.method, ReefineMethod) and component.agent is None
     assert built.training_mode == "manual"
     assert (built.evaluation.policy, built.evaluation.floor_score) == ("floor", 1.0)
     assert isinstance(component.scorer, AnswerScorer)
-    assert built.harness_models().served().model == "provider/model-a"
+    assert harness_models(built, live).served().model == "provider/model-a"
     # No seed in the deployment: the first tree is the recipe's own, the starter skill.
     assert built.seed == HarnessTree.read(SEED_DIRECTORY)
 

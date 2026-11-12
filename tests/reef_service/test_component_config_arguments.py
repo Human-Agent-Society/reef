@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
 from reef.core.config import config_arguments, config_option, parse_config_values
 from reef.core.errors import RuntimeConfigError
@@ -182,7 +182,7 @@ def test_runtime_definition_is_loaded_from_selected_dotted_factory(extension):
     assert runtime.parsed_config["label"] == "true"
     assert runtime.parsed_config["enabled"] is False
     assert runtime.parsed_config["type"] == "reef_config_extension:Runtime"
-    recipe = load_recipe(ExtensionServingRecipe, config["reef"], {}, **runtime_bindings(runtime))
+    recipe = load_recipe(ExtensionServingRecipe, config["reef"], {})
     assert recipe.label == "001"
 
 
@@ -295,7 +295,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
         training_backend_options={"global-batch-size": 1},
         recipe_settings={"count": "2", "label": "run-a"},
     )
-    recipe = assembly._training_recipe(ExtensionRecipe, settings, {})
+    recipe, _ = assembly._training_recipe(ExtensionRecipe, settings, {})
     assert recipe.count == 2 and recipe.label == "run-a"
     assert len(resolved) == 1
 

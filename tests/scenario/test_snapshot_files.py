@@ -29,9 +29,11 @@ MARKED = PI_SEED.apply(MARKER)
 
 
 def harness_scenario(tmp_path: Path, method, *, durable: bool = True, **fields) -> tuple[Dispatcher, Scenario]:
+    recipe, live = harness_recipe(tmp_path, method, **fields)
     dispatcher = Dispatcher(
-        harness_recipe(tmp_path, method, **fields),
+        recipe,
         harness_repository(tmp_path),
+        live=live,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record" if durable else None),
         # The tests commit each step themselves (``run_step``), so no local cycle commits the same job.

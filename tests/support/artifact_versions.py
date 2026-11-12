@@ -6,7 +6,7 @@ import time
 
 from tests.support import records
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord
@@ -99,8 +99,9 @@ def dispatcher(tmp_path, *, experiment_tracker=None):
     runtime = ImportingComponent(tmp_path / "exported")
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     value = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(runtime, runtime.inference),
         local_artifact_dir=tmp_path / "staged",
         experiment_tracker=experiment_tracker,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),

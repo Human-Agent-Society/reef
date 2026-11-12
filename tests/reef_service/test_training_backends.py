@@ -127,17 +127,17 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     config, _ = resolve_deployment_config(
         {**deployment(), "pipeline": {"sample2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
     )
-    recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
+    recipe, live = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     records = memory_records("scenario")
     try:
-        trainer = recipe_trainer(recipe, "scenario", records, root=STUB_ROOT)
-        assert trainer.job_loop.component is recipe.training_component
-        assert type(recipe.training_component).__name__ == "LocalRuntime"
+        trainer = recipe_trainer(recipe, live, "scenario", records, root=STUB_ROOT)
+        assert trainer.job_loop.component is live.training_component
+        assert type(live.training_component).__name__ == "LocalRuntime"
         # The deployment's pipeline section sets the job size.
         assert trainer.job_samples == 2
     finally:
-        recipe.runtime.shutdown()
-        recipe.training_component.close()
+        live.runtime.shutdown()
+        live.training_component.close()
         records.close()
 
 

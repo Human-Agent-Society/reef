@@ -25,6 +25,7 @@ from reef.core.errors import RuntimeConfigError, UpstreamStatusError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.inference.tinker import TinkerInferenceRuntime
+from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
@@ -885,8 +886,9 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         component.start_jobs()
         inference = TinkerInferenceRuntime(client, base_model=MODEL)
         dispatcher = Dispatcher(
-            PolicyRecipe(component, runtime=inference, pipeline_stages=job_sized_stages(PolicyRecipe.pipeline_spec())),
+            PolicyRecipe(pipeline_stages=job_sized_stages(PolicyRecipe.pipeline_spec())),
             factory,
+            live=LiveObjects(runtime=inference, training_component=component),
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             coordination=memory_coordination(),
@@ -1002,8 +1004,9 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
         environ={},
     )
     dispatcher = Dispatcher(
-        TTTDRecipe(component, runtime=inference, pipeline_stages=step_grid),
+        TTTDRecipe(pipeline_stages=step_grid),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=inference, training_component=component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),

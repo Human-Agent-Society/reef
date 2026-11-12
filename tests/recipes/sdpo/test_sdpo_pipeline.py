@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.records import memory_records
-from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT
 
 from recipes.sdpo import SDPOJobData, SDPORecipe, SDPOReport, SDPOSamples
 from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOSettings
@@ -256,7 +256,7 @@ def test_the_prompt_window_sits_inside_the_teacher_window() -> None:
 
 
 def recipe_from(config: Mapping[str, Any]) -> SDPORecipe:
-    recipe = load_recipe(SDPORecipe, config, {}, **runtime_bindings())
+    recipe = load_recipe(SDPORecipe, config, {})
     assert isinstance(recipe, SDPORecipe)
     return recipe
 

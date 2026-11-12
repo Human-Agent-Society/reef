@@ -11,7 +11,6 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import EvaluationSettings
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
-from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
@@ -145,9 +144,7 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
 
 def test_harness_recipes_name_their_adapter() -> None:
     config = {"model": {"path": "small"}, **evolution_config(adapter="claude")}
-    built = load_recipe(
-        HarnessEvolutionRecipe, config, {}, runtime=InferenceProxyRuntime(model_path="small", base_url="http://up")
-    )
+    built = load_recipe(HarnessEvolutionRecipe, config, {})
     assert built.harness_adapter == "claude"
     assert Recipe().harness_adapter is None
     # A composite names the adapter of its harness component, wherever that component stands.

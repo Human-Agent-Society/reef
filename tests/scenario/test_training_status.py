@@ -20,7 +20,7 @@ from typing import Literal
 
 import pytest
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.samples import made_task
 from tests.support.threshold_processor import ThresholdJobData
 from tests.support.trainers import OneTrainerBuilder
@@ -33,6 +33,7 @@ from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, Loca
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import NoSamples
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.samples import stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -201,11 +202,12 @@ class ResidencyRuntime(StubInferenceRuntime):
         return self.residency
 
 
-def serving_status(recipe: Recipe, tmp_path: Path) -> Mapping[str, object]:
-    """The ``serving`` block of the status that a dispatcher of ``recipe`` builds."""
+def serving_status(recipe: Recipe, live: LiveObjects, tmp_path: Path) -> Mapping[str, object]:
+    """The ``serving`` block of the status that a dispatcher of ``recipe`` and ``live`` builds."""
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -217,19 +219,23 @@ def serving_status(recipe: Recipe, tmp_path: Path) -> Mapping[str, object]:
 
 def test_status_reports_the_adapter_residency_that_the_runtime_of_the_weights_reports(tmp_path: Path) -> None:
     residency = {"resident": 1, "capacity": 2}
-    weights = TestPolicyRecipe(**runtime_bindings(runtime=ResidencyRuntime(residency)))
+    weights = TestPolicyRecipe()
+    resident = live_objects(runtime=ResidencyRuntime(residency))
 
-    assert serving_status(weights, tmp_path) == {"test_policy": {"adapters": residency}}
+    assert serving_status(weights, resident, tmp_path) == {"test_policy": {"adapters": residency}}
     # A composite holds the block under the name of its weight component.
     composite = CompositeRecipe(components={"records": Recipe(), "policy": weights})
-    assert serving_status(composite, tmp_path) == {"composite": {"policy": {"adapters": residency}}}
+    assert serving_status(composite, resident, tmp_path) == {"composite": {"policy": {"adapters": residency}}}
     # A runtime that reports no residency, and a recipe that trains no weights, add nothing.
-    assert serving_status(TestPolicyRecipe(**runtime_bindings()), tmp_path) == {}
-    assert serving_status(Recipe(runtime=ResidencyRuntime(residency)), tmp_path) == {}
-    assert serving_status(CompositeRecipe(components={"records": Recipe(), "other": Recipe()}), tmp_path) == {}
+    assert serving_status(TestPolicyRecipe(), live_objects(), tmp_path) == {}
+    assert serving_status(Recipe(), LiveObjects(runtime=ResidencyRuntime(residency)), tmp_path) == {}
+    no_weights = CompositeRecipe(components={"records": Recipe(), "other": Recipe()})
+    assert serving_status(no_weights, LiveObjects(), tmp_path) == {}
     # A runtime that cannot answer leaves the rest of the status readable.
-    failing = TestPolicyRecipe(**runtime_bindings(runtime=ResidencyRuntime(failure=RuntimeError("engines are down"))))
-    assert serving_status(failing, tmp_path) == {"test_policy": {"error": "RuntimeError: engines are down"}}
+    failing = live_objects(runtime=ResidencyRuntime(failure=RuntimeError("engines are down")))
+    assert serving_status(TestPolicyRecipe(), failing, tmp_path) == {
+        "test_policy": {"error": "RuntimeError: engines are down"}
+    }
 
 
 def test_status_of_a_trainer_without_a_job_loop_has_no_job_fields() -> None:
@@ -390,10 +396,11 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
     initial = tmp_path / "initial"
     initial.mkdir()
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    recipe = BackgroundStepRecipe(**runtime_bindings(component))
+    recipe = BackgroundStepRecipe()
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

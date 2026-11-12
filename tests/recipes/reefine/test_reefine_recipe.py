@@ -23,6 +23,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
+from reef.scenario.live_objects import LiveObjects
 
 HEALTH = "[health] Run `echo reef-ok` and reply with its output."
 
@@ -144,11 +145,11 @@ def test_off_pi_no_agent_is_built_or_warned_about(caplog) -> None:
     environ = {"REEF_AGENT_SANDBOX": "none"}
     with caplog.at_level("WARNING"):
         built = load_recipe(ReefineRecipe, {"evolution": evolution(adapter="dsh")}, environ)
-        off_pi = configured_component(built, environ)
+        off_pi = configured_component(built, environ=environ)
     assert built.evolution.agent is None and off_pi.agent is None
     assert "sandbox is none" not in caplog.text
     with caplog.at_level("WARNING"):
-        pi = configured_component(load_recipe(ReefineRecipe, {"evolution": evolution()}, environ), environ)
+        pi = configured_component(load_recipe(ReefineRecipe, {"evolution": evolution()}, environ), environ=environ)
     assert pi.agent is not None and isinstance(pi.agent.executor, LocalExecutor)
     assert "sandbox is none" in caplog.text
 
@@ -174,13 +175,13 @@ def test_each_scenarios_backend_binds_the_agent_and_the_method_holds_its_own_con
     )
     upstream = InferenceProxyRuntime(base_url="https://openrouter.ai/api", api_key="sk-upstream", model_path="m")
     environ = {"REEF_AGENT_SANDBOX": "none"}
-    built = load_recipe(ReefineRecipe, {"evolution": section}, environ, runtime=upstream)
+    built = load_recipe(ReefineRecipe, {"evolution": section}, environ)
     assert isinstance(built, ReefineRecipe)
     # The deployment's method config goes over the recipe's default method.
     assert built.evolution.method == {"module": "recipes.beta.reefine.method:ReefineMethod", "config": method_config}
     # The agent runs on the harness's own binary.
     assert built.evolution.agent == {"binary": str(binary), "timeout_s": 120}
-    component = configured_component(built, environ)
+    component = configured_component(built, LiveObjects(runtime=upstream), environ)
     method = component.method
     assert isinstance(method, ReefineMethod) and method.trial_timeout_s == 30.0
     assert isinstance(method.multimodal, MultimodalSettings)

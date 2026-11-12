@@ -51,7 +51,8 @@ Implementation
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
 - Override ``build_components`` only when the method's snapshots bind
-  components beyond those of the recipe it extends.
+  components beyond those of the recipe it extends. It reads the recipe's
+  configuration alone: a recipe has no runtime and no training component.
 
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
@@ -263,7 +264,10 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   request on its way to the engine: a client pulls the artifacts that shape
   its requests.
 - Declare the components in the owning recipe's ``build_components``; do not
-  make a component choose a method or evaluate a candidate.
+  make a component choose a method or evaluate a candidate. A fact that only
+  a runtime or a training component knows belongs in
+  ``reef.scenario.live_objects``, whose functions take the recipe and the
+  process's ``LiveObjects``.
 - Test component behavior in ``tests/artifact/test_scenario_components.py`` or
   ``tests/artifact/test_snapshot_components.py``. Test storage backends against
   the contracts in ``tests/artifact/test_reef_artifacts.py``.

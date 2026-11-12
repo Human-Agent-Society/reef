@@ -90,8 +90,8 @@ def train_request(text: str, *, session: str = "3f1c2a9d0b7e", artifact_id: str 
 
 def _dispatcher(tmp_path: Path) -> Dispatcher:
     activation = PluginReference(AlwaysActivate, {"review_kinds": ["extension"]})
-    recipe = harness_recipe(tmp_path, answer, seed=SEED, score=evaluate, activation=activation)
-    return harness_dispatcher(tmp_path, replace(recipe, training_mode="manual"))
+    recipe, live = harness_recipe(tmp_path, answer, seed=SEED, score=evaluate, activation=activation)
+    return harness_dispatcher(tmp_path, replace(recipe, training_mode="manual"), live)
 
 
 def _chain(tmp_path: Path) -> Dispatcher:

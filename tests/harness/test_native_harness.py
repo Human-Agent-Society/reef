@@ -59,6 +59,7 @@ from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, 
 from reef.harness.tree.checks import validate_native_agent, validate_native_graph
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.scenario.live_objects import LiveObjects
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.harness_backend.state import HarnessState
@@ -247,19 +248,18 @@ PASS_THROUGH_BWRAP = "import os, sys\nargv = sys.argv[sys.argv.index('--') + 1:]
 
 def native_backend(tmp_path: Path, model, method, score, tasks: tuple[str, ...]) -> HarnessBackend:
     """A native backend over the launcher, bound to ``model``, whose head is the seed's native files."""
-    recipe = with_harness_component(
-        HarnessEvolutionRecipe(
-            evolution=EvolutionSettings(
-                adapter="native", binary=_launcher(tmp_path), state_dir=str(tmp_path / "harness")
-            ),
-            evaluation=EvaluationSettings(tasks=tasks),
-            seed=HarnessTree(NATIVE_SEED_FILES),
-            runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy"),
-        ),
+    recipe = HarnessEvolutionRecipe(
+        evolution=EvolutionSettings(adapter="native", binary=_launcher(tmp_path), state_dir=str(tmp_path / "harness")),
+        evaluation=EvaluationSettings(tasks=tasks),
+        seed=HarnessTree(NATIVE_SEED_FILES),
+    )
+    live = with_harness_component(
+        recipe,
         method,
         score=score,
+        live=LiveObjects(runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy")),
     )
-    return build_harness_backend(recipe, "demo")
+    return build_harness_backend(recipe, live, "demo")
 
 
 def _events(trajectory, type_):

@@ -11,6 +11,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
@@ -29,7 +30,7 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             Recipe(),
             InMemoryRepositoryBackend.factory(),
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records", data=data),
-            data_store=data,
+            live=LiveObjects(data_store=data),
             coordination=memory_coordination(),
         )
         scenario = dispatcher.get_or_create_scenario("one")

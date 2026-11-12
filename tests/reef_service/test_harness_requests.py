@@ -22,7 +22,9 @@ from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.scenario import Scenario
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import Workspace
@@ -49,11 +51,12 @@ async def post_request(client: TestClient, body: object, scenario: str = "agents
     return await client.post("/reef/train", headers={"x-reef-scenario": scenario}, json=body)
 
 
-def manual_recipe(tmp_path: Path, method, **fields):
-    return dataclasses.replace(harness_recipe(tmp_path, method, **fields), training_mode="manual")
+def manual_recipe(tmp_path: Path, method, **fields) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
+    recipe, live = harness_recipe(tmp_path, method, **fields)
+    return dataclasses.replace(recipe, training_mode="manual"), live
 
 
-def growing_recipe(tmp_path: Path, method, **fields):
+def growing_recipe(tmp_path: Path, method, **fields) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
     """A manual recipe whose scorer prefers the longer rules text, so every step that lengthens the rules publishes."""
 
     def longer(task: str, result) -> float:
@@ -99,8 +102,7 @@ def test_a_request_needs_a_request_mode_and_commits_through_the_train_route(tmp_
         return MARKER
 
     # A large auto batch must not keep an explicit manual request waiting.
-    recipe = harness_recipe(tmp_path, method, job_samples=100)
-    dispatcher = harness_dispatcher(tmp_path, recipe)
+    dispatcher = harness_dispatcher(tmp_path, *harness_recipe(tmp_path, method, job_samples=100))
     scenario = dispatcher.get_or_create_scenario("agents")
 
     async def run():
@@ -208,7 +210,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
         entered.set()
         release.wait(10)
 
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
+    dispatcher = harness_dispatcher(tmp_path, *manual_recipe(tmp_path, method))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")
@@ -325,7 +327,7 @@ def test_the_commit_carries_requires_and_merges_what_the_method_added_by_name(tm
         if patch is not None:
             answered(workspace, patch, requires=requires)
 
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
+    dispatcher = harness_dispatcher(tmp_path, *manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -415,7 +417,7 @@ def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
             workspace, MARKER, requires=tuple({"name": f"ENV_{index}", "kind": "env"} for index in range(8))
         )
 
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
+    dispatcher = harness_dispatcher(tmp_path, *manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -460,10 +462,11 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
 
     for index, (method, expected) in enumerate(((adding, merged), (keeping, REQUIRES))):
         (tmp_path / str(index)).mkdir()
-        recipe = manual_recipe(tmp_path / str(index), method)
+        recipe, live = manual_recipe(tmp_path / str(index), method)
         records = memory_records("agents")
         trainer = recipe_trainer(
             recipe,
+            live,
             "agents",
             records,
             artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT),
@@ -488,7 +491,7 @@ def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) ->
     def method(workspace, services):
         return MARKER if workspace.request() is not None else None
 
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
+    dispatcher = harness_dispatcher(tmp_path, *manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -520,7 +523,7 @@ def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) ->
 def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
     """A request's items are per snapshot: a snapshot still needs what an earlier one named, so its manifest lists
     the union over its chain, while each snapshots row keeps its own step's list."""
-    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, adding_rules))
+    dispatcher = harness_dispatcher(tmp_path, *growing_recipe(tmp_path, adding_rules))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
     first, second = REQUIRES
@@ -564,7 +567,7 @@ def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
 def test_a_chain_union_past_one_requests_cap_is_still_the_manifests_requires(tmp_path: Path) -> None:
     """The cap of eight is per request: three published requests of three items each make a union of nine, which
     the manifest carries; the cap never refuses a snapshot for what its chain named."""
-    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, adding_rules))
+    dispatcher = harness_dispatcher(tmp_path, *growing_recipe(tmp_path, adding_rules))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -604,7 +607,7 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
         return TreePatch({**changed_rules("marker rules, a longer text\n"), "config/primary.json": tuned})
 
     dispatcher = harness_dispatcher(
-        tmp_path, growing_recipe(tmp_path, method, activation=PluginReference(NeverActivate, {}))
+        tmp_path, *growing_recipe(tmp_path, method, activation=PluginReference(NeverActivate, {}))
     )
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None

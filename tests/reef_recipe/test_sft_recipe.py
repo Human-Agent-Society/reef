@@ -11,7 +11,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
-from tests.support.runtime_stubs import runtime_bindings
 
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TokenizerChatTemplate, render_trajectory, rendered_job_data
@@ -337,7 +336,6 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
                 "sample2job": {"config": {"buffer_size": 256}},
             }
         },
-        **runtime_bindings(),
     )
 
     assert isinstance(recipe, SFTRecipe)
@@ -356,7 +354,7 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
 @pytest.mark.unit
 def test_sft_recipe_builds_without_stage_config_and_rejects_removed_keys_and_objective_options() -> None:
     def sft_recipe(config: Mapping[str, Any]) -> SFTRecipe:
-        recipe = load_recipe(SFTRecipe, config, {}, **runtime_bindings())
+        recipe = load_recipe(SFTRecipe, config, {})
         assert isinstance(recipe, SFTRecipe)
         return recipe
 
@@ -546,6 +544,6 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
 
 
 def test_sft_configures_trajectory_jobs_and_trains_imported_tasks_only_by_request() -> None:
-    recipe = SFTRecipe(**runtime_bindings(), job_parameters={"save_interval": 50})
+    recipe = SFTRecipe(job_parameters={"save_interval": 50})
     assert recipe.parameters_by_kind() == {"trajectory": {"objective": "sft", "save_interval": 50}}
     assert SFTJobData.accepts_trajectories and SFTJobData.accepts_imported_tasks

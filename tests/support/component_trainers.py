@@ -23,6 +23,7 @@ from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.scenario import Scenario
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
 from reef.train import ComponentTrainer, Trainer
@@ -167,6 +168,8 @@ class _TwoTrainerRecipe(Recipe):
 
     backends: Mapping[str, ComponentJobs]
     auto_only_components: frozenset[str] = frozenset()
+    #: Whether the deployment's training component trains the weights; then the runtime loads them.
+    trains_weights: bool = False
     #: The content of a new scenario's root snapshot.
     start: DefaultStart = field(default_factory=lambda: seeded_start((WEIGHTS, HARNESS)))
 
@@ -180,7 +183,7 @@ class _TwoTrainerRecipe(Recipe):
         return ScenarioComponents(
             components={
                 # A training component's weights load through the runtime, so train-from imports them as a start.
-                WEIGHTS: (ComponentSpec() if self.training_component is None else ComponentSpec(kind="model")),
+                WEIGHTS: (ComponentSpec(kind="model") if self.trains_weights else ComponentSpec()),
                 HARNESS: ComponentSpec(files=TextFileTree()),
             }
         )
@@ -195,14 +198,15 @@ class _TwoTrainerRecipe(Recipe):
 
 class TwoTrainerBuilder(TrainerBuilder):
     """Builds the trainers of a ``_TwoTrainerRecipe``: one for each of its backends, whose jobs run on the trainer's
-    own thread, and the weights trainer when the recipe has a training component.
+    own thread, and the weights trainer when ``live`` has a training component.
 
-    ``recipe`` gives the backends, the pipelines and the training component. ``_dispatcher`` sets it to the
-    dispatcher's recipe, whose training component is the jobs queue's view of it.
+    ``recipe`` gives the backends and the pipelines. ``live`` gives the training component; ``_dispatcher`` sets it
+    to the dispatcher's live objects, whose training component is the jobs queue's view of it.
     """
 
-    def __init__(self, recipe: _TwoTrainerRecipe) -> None:
+    def __init__(self, recipe: _TwoTrainerRecipe, live: LiveObjects | None = None) -> None:
         self.recipe = recipe
+        self.live = LiveObjects() if live is None else live
 
     def build_trainers(
         self,
@@ -224,7 +228,7 @@ class TwoTrainerBuilder(TrainerBuilder):
             return lambda context: recipe.pipeline_for(component, context)
 
         # Each trainer reads the samples as the component that its commits name; the only trainer names none.
-        alone = len(recipe.backends) + (recipe.training_component is not None) == 1
+        alone = len(recipe.backends) + (self.live.training_component is not None) == 1
 
         def samples_for(component: str) -> TrainerSamples | None:
             return None if samples is None else samples.for_trainer("" if alone else component)
@@ -245,7 +249,7 @@ class TwoTrainerBuilder(TrainerBuilder):
             )
             for component, backend in recipe.backends.items()
         )
-        training = recipe.training_component
+        training = self.live.training_component
         if training is None:
             return trainers
         # The weights trainer submits jobs to the training component; it comes first, as the local weights trainer does.
@@ -376,13 +380,16 @@ def _dispatcher(
     components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
     start: DefaultStart | None = None,
     trainer_builder: TrainerBuilder | None = None,
+    live: LiveObjects | None = None,
 ) -> tuple[Dispatcher, dict[str, ComponentJobs]]:
-    """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` when one is given. ``start`` is the
+    """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` and its ``live`` objects when
+    one is given. ``start`` is the
     two trainer recipe's default start, one seed file per component by default. ``components`` are the services that
     it runs; without ``samples``, only the test makes samples (``make_samples``). ``trainer_builder`` builds the
     trainers; None is a ``TwoTrainerBuilder`` for a ``_TwoTrainerRecipe``."""
     repository = _repository(tmp_path) if backend_factory is None else backend_factory
     seeds = {} if start is None else {"start": start}
+    live = LiveObjects() if live is None else live
     if recipe is not None:
         backends = {} if backends is None else backends
     elif training is None:
@@ -393,12 +400,9 @@ def _dispatcher(
         # harness keeps its local backend.
         backends = {HARNESS: ComponentJobs(HARNESS, tmp_path / "candidates")} if backends is None else backends
         recipe = _TwoTrainerRecipe(
-            backends=backends,
-            auto_only_components=auto_only_components,
-            runtime=StubInferenceRuntime(),
-            training_component=training,
-            **seeds,
+            backends=backends, auto_only_components=auto_only_components, trains_weights=True, **seeds
         )
+        live = LiveObjects(runtime=StubInferenceRuntime(), training_component=training)
     records = tmp_path / "records" if records_dir is None else records_dir
     storage = data_storage(records)
     if trainer_builder is None and isinstance(recipe, _TwoTrainerRecipe):
@@ -406,10 +410,10 @@ def _dispatcher(
     dispatcher = Dispatcher(
         recipe,
         repository,
+        live=replace(live, data_store=storage.data),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage,
         record_storage=storage.inner,
-        data_store=storage.data,
         experiment_tracker=experiment_tracker,
         hold_local_cycles=hold_local_cycles,
         # The work queues live beside the records, so a restarted dispatcher finds the running job, as in a deployment.
@@ -417,8 +421,8 @@ def _dispatcher(
         components=components,
         trainer_builder=trainer_builder,
     )
-    if isinstance(trainer_builder, TwoTrainerBuilder) and isinstance(dispatcher.recipe, _TwoTrainerRecipe):
-        trainer_builder.recipe = dispatcher.recipe
+    if isinstance(trainer_builder, TwoTrainerBuilder):
+        trainer_builder.live = dispatcher.live
     return dispatcher, backends
 
 

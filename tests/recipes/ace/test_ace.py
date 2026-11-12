@@ -17,7 +17,6 @@ from tests.support.harness_jobs import (
     build_harness_backend,
     configured_component,
     job_services,
-    runtime,
     with_harness_component,
 )
 from tests.support.harness_methods import QueueChat
@@ -110,19 +109,15 @@ def test_two_steps_grow_the_playbook_that_pi_serves_with_no_run(tmp_path: Path) 
         reflection(("ace-00001", "helpful")),
         curation(add("Common mistakes to avoid", "Do not report a fix before the tests pass.")),
     )
-    recipe = with_harness_component(
-        HarnessEvolutionRecipe(
-            evolution=EvolutionSettings(state_dir=str(tmp_path / "harness")),
-            evaluation=EvaluationSettings(policy="none"),
-            seed=PI_SEED,
-            models={"ace": chat},
-            runtime=runtime(),
-        ),
-        ACE(ACESettings(model="ace")),
-        score=None,
+    recipe = HarnessEvolutionRecipe(
+        evolution=EvolutionSettings(state_dir=str(tmp_path / "harness")),
+        evaluation=EvaluationSettings(policy="none"),
+        seed=PI_SEED,
+        models={"ace": chat},
     )
+    live = with_harness_component(recipe, ACE(ACESettings(model="ace")), score=None)
     releases = TreeArtifacts(recipe.seed)
-    backend = build_harness_backend(recipe, "demo", releases)
+    backend = build_harness_backend(recipe, live, "demo", releases)
     # The first trace has no score and no feedback: ACE needs no correct answer.
     first = backend_step(
         backend,
@@ -244,7 +239,7 @@ def test_a_reply_that_is_not_the_asked_json_skips_its_trace(tmp_path: Path) -> N
 def test_the_example_serves_ace_on_pi_with_no_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
     # reef serve runs the example from the repository root, where its paths start.
     monkeypatch.chdir(EXAMPLE.parents[3])
-    recipe = load_recipe(HarnessEvolutionRecipe, load_recipe_config(EXAMPLE), {}, runtime=runtime())
+    recipe = load_recipe(HarnessEvolutionRecipe, load_recipe_config(EXAMPLE), {})
     component = configured_component(recipe)
     assert isinstance(component.method, ACE)
     assert component.method.settings == ACESettings(max_bullets=100, prune_margin=2)

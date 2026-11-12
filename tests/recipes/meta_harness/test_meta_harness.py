@@ -19,7 +19,7 @@ from tests.support.harness_jobs import (
     COMPONENT,
     TreeArtifacts,
     build_harness_backend,
-    configured_recipe,
+    configured_live,
     harness_component,
     harness_recipe,
     head_of,
@@ -49,6 +49,7 @@ from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import ComparePolicy
 from reef.harness.tree import HarnessTree
 from reef.recipe.loading import build_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.backend import HarnessBackend
@@ -65,10 +66,10 @@ def meta_harness_backend(
 ) -> tuple[HarnessBackend, TreeArtifacts]:
     """The backend of one scenario whose method is ``MetaHarness(settings)`` and whose proposer model is ``chat``."""
     method = MetaHarness(MetaHarnessSettings(**settings))
-    recipe = harness_recipe(tmp_path, method, seed=seed, score=MarkerScorer(), tasks=(TASK,))
-    recipe = rebuilt_recipe(recipe, models={"proposer": chat})
+    recipe, live = harness_recipe(tmp_path, method, seed=seed, score=MarkerScorer(), tasks=(TASK,))
+    recipe, live = rebuilt_recipe(recipe, live, models={"proposer": chat})
     artifacts = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, "demo", artifacts), artifacts
+    return build_harness_backend(recipe, live, "demo", artifacts), artifacts
 
 
 def run(
@@ -266,17 +267,17 @@ def test_a_proposer_model_that_the_deployment_does_not_declare_is_refused(tmp_pa
 def test_a_deployment_names_the_method_for_any_adapter(tmp_path: Path, adapter: str) -> None:
     config = meta_harness_sections(tmp_path, adapter=adapter, mode="incumbent_only", components=["rules"])
     api = "openai"
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime(api))
+    recipe = build_recipe(config["implementation"], {}, config=config)
 
-    recipe = configured_recipe(recipe)
-    method = harness_component(recipe).method
+    live = configured_live(recipe, LiveObjects(runtime=served_runtime(api)))
+    method = harness_component(live).method
     assert isinstance(method, MetaHarness)
     assert method.settings == MetaHarnessSettings(mode="incumbent_only", components=("rules",))
     assert recipe.evolution.adapter == adapter and recipe.seed == SEED
     artifacts = ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
     assert isinstance(
         recipe_trainer(
-            recipe, "general-task", memory_records("general-task"), artifacts=artifacts, root=seed_root(recipe)
+            recipe, live, "general-task", memory_records("general-task"), artifacts=artifacts, root=seed_root(recipe)
         ),
         Trainer,
     )
@@ -344,13 +345,14 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
     )
     evolution["evaluation"].update(task_timeout_s=17, forbid_residue=True, tasks=["test/hello-world"])
     environ = {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"}
-    recipe = build_recipe(config["implementation"], environ, config=config, runtime=served_runtime())
-    recipe = rebuilt_recipe(
-        configured_recipe(recipe, environ),
+    recipe = build_recipe(config["implementation"], environ, config=config)
+    recipe, live = rebuilt_recipe(
+        recipe,
+        configured_live(recipe, LiveObjects(runtime=served_runtime()), environ),
         scorer=resolve_task_scorer(lambda task, result: result.trajectory[0]["reward"]),
         models={"proposer": QueueChat(proposal_reply(SEED, proposed))},
     )
-    dispatcher = harness_dispatcher(tmp_path, recipe, hold_local_cycles=True)
+    dispatcher = harness_dispatcher(tmp_path, recipe, live, hold_local_cycles=True)
     try:
         scenario = dispatcher.get_or_create_scenario("terminus-meta")
         report_once(scenario, "1")

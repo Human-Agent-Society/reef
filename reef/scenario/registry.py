@@ -38,6 +38,7 @@ from reef.recipe.base import Recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ItemStart, ScenarioFactory
+from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.served_models import ServedModels
@@ -106,6 +107,7 @@ class ScenarioRegistry:
         recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
+        live: LiveObjects | None = None,
         local_artifact_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
@@ -123,6 +125,7 @@ class ScenarioRegistry:
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
+            live=live,
             local_artifact_dir=local_artifact_dir,
             scenario_storage=scenario_storage,
             experiment_reports=self.experiment_reports,

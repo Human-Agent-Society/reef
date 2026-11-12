@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 from tests.support.chat_templates import CharTemplate
-from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.opd import OPDRecipe, OPDSamples, OPDSettings
 from recipes.opd.slime import OpdObjective, OpdSettings
@@ -106,7 +105,6 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
         "recipes.opd.recipe:OPDRecipe",
         {},
         {},
-        **runtime_bindings(),
     )
     assert isinstance(recipe, OPDRecipe)
     assert recipe.report_type is TeacherContextReport

@@ -108,7 +108,7 @@ def native_backend(
     **fields,
 ) -> tuple[HarnessBackend, TreeArtifacts]:
     """The native backend over the fake native binary, and its in-memory history whose base is the native seed."""
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path,
         method,
         seed=NATIVE_SEED,
@@ -117,9 +117,9 @@ def native_backend(
         binary=binary or str(make_native_binary(tmp_path)),
         **fields,
     )
-    recipe = rebuilt_recipe(recipe, worker_executor=ExecutorSettings(workers=workers))
+    recipe, live = rebuilt_recipe(recipe, live, worker_executor=ExecutorSettings(workers=workers))
     releases = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, "demo", releases), releases
+    return build_harness_backend(recipe, live, "demo", releases), releases
 
 
 def steps_dir(tmp_path: Path) -> Path:

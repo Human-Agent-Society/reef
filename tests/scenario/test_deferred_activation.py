@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from tests.support.component_trainers import _records
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.samples_service import make_samples
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -28,8 +28,9 @@ def deferred_factory(tmp_path: Path):
         closing(memory_coordination()) as coordination,
     ):
         factory = ScenarioFactory(
-            TestPolicyRecipe(training, runtime=runtime),
+            TestPolicyRecipe(),
             InMemoryRepositoryBackend.factory(directory=tmp_path / "releases"),
+            live=live_objects(training, runtime),
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
             served_models=coordination.served_models,

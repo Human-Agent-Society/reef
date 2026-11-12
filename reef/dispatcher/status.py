@@ -7,8 +7,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.dispatcher.errors import TrainingErrors, error_text
-from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
+from reef.scenario.live_objects import LiveObjects, weight_component_name
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.train.jobs import JobLoopState
@@ -17,10 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 class TrainingStatus:
-    """Build the training status from the registry and the recorded errors."""
+    """Build the training status from the registry and the recorded errors; ``live`` holds the runtime that the
+    serving status asks."""
 
-    def __init__(self, recipe: Recipe, registry: ScenarioRegistry, errors: TrainingErrors) -> None:
+    def __init__(self, recipe: Recipe, live: LiveObjects, registry: ScenarioRegistry, errors: TrainingErrors) -> None:
         self.recipe = recipe
+        self.live = live
         self.registry = registry
         self.errors = errors
 
@@ -140,21 +143,15 @@ class TrainingStatus:
         result is empty for a recipe that trains no weights and for a runtime that reports no residency. A
         runtime that raises gives ``{"error": text}``.
         """
-        recipe = self.recipe
-        component: str | None = None
-        if isinstance(recipe, CompositeRecipe):
-            # A composite binds at most one weight component.
-            for name, child in recipe.components.items():
-                if isinstance(child, WeightTrainingRecipe):
-                    component, recipe = name, child
-                    break
-        if not isinstance(recipe, WeightTrainingRecipe):
+        component = weight_component_name(self.recipe)
+        runtime = self.live.runtime
+        if component is None or runtime is None:
             return {}
         try:
-            residency = recipe.runtime.adapter_residency_status()
+            residency = runtime.adapter_residency_status()
         except Exception as exc:
             return {self.recipe.name: {"error": error_text(exc)}}
         if residency is None:
             return {}
         status: dict[str, Any] = {"adapters": residency}
-        return {self.recipe.name: status if component is None else {component: status}}
+        return {self.recipe.name: {component: status} if isinstance(self.recipe, CompositeRecipe) else status}

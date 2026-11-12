@@ -16,6 +16,8 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceBackend
 from reef.inference.serving import OpenedEngines, ServingEngines
+from reef.scenario.live_objects import LiveObjects
+from reef.storage.data import DataStore
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
@@ -214,14 +216,19 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         return version
 
 
-def runtime_bindings(
-    component: TrainingComponent | None = None, runtime: StubInferenceRuntime | None = None
-) -> dict[str, object]:
-    """The recipe arguments for a training component and its inference runtime; stubs fill what is missing."""
-    return {
-        "training_component": StubTrainingComponent() if component is None else component,
-        "runtime": StubInferenceRuntime() if runtime is None else runtime,
-    }
+def live_objects(
+    component: TrainingComponent | None = None,
+    runtime: StubInferenceRuntime | None = None,
+    *,
+    data_store: DataStore | None = None,
+) -> LiveObjects:
+    """The live objects of a test deployment that trains weights: the training component ``component`` and the
+    inference runtime ``runtime``; stubs fill what is missing. ``data_store`` is the deployment's data store."""
+    return LiveObjects(
+        runtime=StubInferenceRuntime() if runtime is None else runtime,
+        training_component=StubTrainingComponent() if component is None else component,
+        data_store=data_store,
+    )
 
 
 def job_sized_stages(

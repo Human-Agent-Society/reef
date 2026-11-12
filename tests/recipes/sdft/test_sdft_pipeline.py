@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 from tests.support.chat_templates import CharTemplate
-from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.sdft import SDFTRecipe
 from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSamples, SDFTSettings
@@ -183,7 +182,7 @@ def test_processor_emits_one_sample_with_the_teacher_request() -> None:
 
 
 def sdft_recipe(config: Mapping[str, Any]) -> SDFTRecipe:
-    recipe = load_recipe(SDFTRecipe, config, {}, **runtime_bindings())
+    recipe = load_recipe(SDFTRecipe, config, {})
     assert isinstance(recipe, SDFTRecipe)
     return recipe
 
@@ -193,7 +192,7 @@ def test_sdft_recipe_resolves_by_dotted_reference() -> None:
     reference = "recipes.sdft.recipe:SDFTRecipe"
     assert recipe_class_for(reference) is SDFTRecipe
 
-    recipe = build_recipe(reference, {}, {}, **runtime_bindings())
+    recipe = build_recipe(reference, {}, {})
 
     assert isinstance(recipe, SDFTRecipe)
     assert recipe.name == "sdft"

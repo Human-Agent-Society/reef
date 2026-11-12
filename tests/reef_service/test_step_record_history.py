@@ -24,7 +24,8 @@ def train_request(text: str) -> dict:
 
 def manual_dispatcher(tmp_path: Path, method):
     """A manual pi scenario; every step keeps its record under the recipe's state directory."""
-    return harness_dispatcher(tmp_path, replace(harness_recipe(tmp_path, method), training_mode="manual"))
+    recipe, live = harness_recipe(tmp_path, method)
+    return harness_dispatcher(tmp_path, replace(recipe, training_mode="manual"), live)
 
 
 def test_record_scope_and_limits(tmp_path: Path) -> None:

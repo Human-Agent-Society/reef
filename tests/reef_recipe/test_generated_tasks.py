@@ -51,6 +51,7 @@ from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sample2job import Sample2JobSettings
+from reef.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
@@ -933,10 +934,13 @@ def test_rounds_need_a_description_the_generator_service_and_task_storage() -> N
 
 
 def training_recipe(**fields: Any) -> GeneratedTaskRecipe:
+    return GeneratedTaskRecipe(**{"job_parameters": {"rollout": ROLLOUT}, **fields})
+
+
+def training_live(component: TrainingComponent | None = None) -> LiveObjects:
+    """The live objects that ``training_recipe`` runs on: a proxy runtime and ``component``, a stub by default."""
     runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
-    return GeneratedTaskRecipe(
-        StubTrainingComponent(), runtime=runtime, **{"job_parameters": {"rollout": ROLLOUT}, **fields}
-    )
+    return LiveObjects(runtime=runtime, training_component=StubTrainingComponent() if component is None else component)
 
 
 def test_the_recipe_binds_the_objective_and_its_stages() -> None:
@@ -944,6 +948,7 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     assert GeneratedTaskRecipe.default_parameters() == {}, "the deployment names the objective"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
     recipe = training_recipe()
+    check_recipe_objects(recipe, training_live())
     assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"
     built = recipe.stages().build(PipelineContext("one"))
     assert (
@@ -957,16 +962,15 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
 @pytest.mark.parametrize("job_parameters", [None, {}, {"rollout": 4}])
 def test_the_recipe_refuses_jobs_without_the_rollout_job_parameter(job_parameters: Any) -> None:
     with pytest.raises(RecipeConfigError, match=r"needs the rollout parameter as an object"):
-        training_recipe(job_parameters=job_parameters)
+        check_recipe_objects(training_recipe(job_parameters=job_parameters), training_live())
 
 
 def test_the_recipe_refuses_a_training_component_that_runs_no_task_jobs() -> None:
     class TrajectoryOnly(StubTrainingComponent):
         check_task_jobs = TrainingComponent.check_task_jobs
 
-    runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
     with pytest.raises(RecipeConfigError, match="the stub training component trains no task jobs"):
-        GeneratedTaskRecipe(TrajectoryOnly(), runtime=runtime, job_parameters={"rollout": ROLLOUT})
+        check_recipe_objects(training_recipe(), training_live(TrajectoryOnly()))
 
 
 def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str, Any]) -> WeightTrainingRecipe:
@@ -978,8 +982,6 @@ def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str,
             "pipeline": pipeline,
         },
         environ,
-        runtime=InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000"),
-        training_component=StubTrainingComponent(),
     )
 
 

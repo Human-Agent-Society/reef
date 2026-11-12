@@ -12,6 +12,7 @@ from reef.artifact.components import ScenarioComponents
 from reef.dispatcher import Dispatcher
 from reef.recipe import CompositeRecipe, Recipe
 from reef.scenario.factory import read_trainer_specs
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer_builder import SpecTrainerBuilder
@@ -42,7 +43,7 @@ def test_each_composite_component_opens_its_own_task_stores_and_shares_the_sampl
     with closing(data_storage()) as storage, closing(storage.open("math")) as session:
         samples = sample_store(storage, "math", session)
         trainers = SpecTrainerBuilder().build_trainers(
-            read_trainer_specs(CompositeRecipe(components={"first": Recipe(), "second": Recipe()})),
+            read_trainer_specs(CompositeRecipe(components={"first": Recipe(), "second": Recipe()}), LiveObjects()),
             "math",
             session.records,
             components=ScenarioComponents(),

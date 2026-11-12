@@ -14,6 +14,7 @@ from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -67,8 +68,9 @@ def test_a_report_creates_or_reuses_the_scenario(registered: bool, headers: dict
 def test_inference_answers_a_created_scenario_and_never_creates_one(tmp_path, headers: dict) -> None:
     async def run() -> None:
         dispatcher = Dispatcher(
-            Recipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
+            Recipe(),
             InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+            live=LiveObjects(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
             scenario_storage=SQLiteScenarioStorage(),
             coordination=memory_coordination(),
         )
