@@ -407,6 +407,14 @@ on its command line. A process keeps its working copy of the artifact
 repository there, and two processes in one working copy break each other's
 fetches.
 
+**Training dependencies.** The inference service builds no training component
+for the ``slime``, ``tinker`` and ``spindle_full`` backends. It reads what it
+needs about the backend from the config. With ``slime``, its environment needs
+no Slime, Megatron, Ray, PyTorch or Transformers. For a training backend
+plugin that states no facts from its config, the inference service builds the
+backend's training component, as the other services do. Install that
+backend's dependencies there.
+
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
 coding agent and the evaluation runs. Install the adapter's binary and the

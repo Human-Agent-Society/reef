@@ -234,3 +234,58 @@ main(sys.argv[1:])
                 process.wait()
         assert process.returncode == 0, log_path.read_text()
     assert Path(str(marker) + ".closed").exists()
+
+
+def test_the_inference_service_of_a_slime_deployment_loads_no_training_framework(tmp_path):
+    # Slime states its facts from its options, so the inference service builds its engines' runtime from them and
+    # never builds the Slime component: the process imports none of the training stack.
+    # Supply the cookbook and test support; keep Reef resolved from the installed wheel.
+    (tmp_path / "recipes").symlink_to(Path(__file__).resolve().parents[2] / "recipes", target_is_directory=True)
+    (tmp_path / "tests").symlink_to(Path(__file__).resolve().parents[1], target_is_directory=True)
+    script = """
+import asyncio, sys
+from dataclasses import replace
+from pathlib import Path
+BLOCKED = {'torch', 'slime', 'ray', 'sglang', 'megatron', 'transformers', 'mlx'}
+class NoTrainingStack:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in BLOCKED:
+            raise RuntimeError('unexpected training dependency: ' + fullname)
+sys.meta_path.insert(0, NoTrainingStack())
+from reef.service.components import build_component_app
+from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.service.deploy.service_config import service_config_from_mapping
+directory = Path(sys.argv[1])
+raw = {
+    'recipe': {'implementation': 'recipes.sao.recipe:SAORecipe'},
+    'inference': {'model-path': '/models/demo', 'num-gpus': 2},
+    'training': {
+        'backend': 'slime',
+        'ray-address': 'ray://head:10001',
+        'options': {'global-batch-size': 4, 'lr': 1e-6, 'megatron-lora-rank': 8},
+    },
+    'pipeline': {'sample2job': {'config': {'job_samples': 2}}},
+}
+config, _ = resolve_deployment_config(raw, None, directory / 'serve.yaml')
+settings = replace(
+    service_config_from_mapping(config),
+    agent_record_dir=str(directory / 'records'),
+    artifact_work_dir=str(directory / 'work'),
+    artifact_cache_dir=str(directory / 'cache'),
+    artifact_backend={'module': 'tests.support.artifact_backend_plugin:MemoryArtifactBackend', 'config': {'label': 'm'}},
+)
+app = build_component_app('inference', settings, environ={})
+app.freeze()
+asyncio.run(app.cleanup())
+loaded = sorted(name for name in sys.modules if name.split('.')[0] in BLOCKED)
+assert not loaded, loaded
+assert 'reef.train.slime_backend.component' not in sys.modules
+assert 'reef.train.slime_backend.facts' in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "stores")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

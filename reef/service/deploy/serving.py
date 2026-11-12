@@ -3,8 +3,9 @@
 The serving runtime is chosen and configured here, not by the training
 backend. ``serving_mode`` reads ``inference.serving`` (or its default), and
 ``serving_runtime_config`` writes the runtime config that the HTTP service
-builds once the training component exists, because the engines need the
-component's ``ArtifactFormat``. The training backend contributes only its
+builds from the training backend's ``ArtifactFormat``, which the engines need:
+the training component's, or the backend's facts' in a process that builds no
+component. The training backend contributes only its
 default mode and, for ``trainer`` serving, the config of its own serving
 runtime.
 """

@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from reef.artifact.components import ScenarioComponents
+from reef.artifact.components import ArtifactLayout, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError
 from reef.harness.tasks.harness_models import HarnessModels
@@ -26,7 +26,14 @@ from reef.recipe.composite import CompositeRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.storage.data import DataStore
-from reef.train.component import ScenarioRoot, TrainingArtifactLayout, TrainingComponent, component_root
+from reef.train.component import (
+    ScenarioRoot,
+    TrainingArtifactLayout,
+    TrainingBackendFacts,
+    TrainingComponent,
+    TrainingFactsLayout,
+    component_root,
+)
 
 
 @dataclass(frozen=True)
@@ -57,14 +64,20 @@ class LiveObjects:
 
     - ``runtime`` is the serving runtime, or ``None`` for a process with none.
     - ``training_component`` runs the jobs of the recipe that trains weights, or is ``None`` when no recipe of the
-      deployment trains weights.
+      deployment trains weights or the process built no component for it.
+    - ``training_facts`` are the facts of the training backend of that recipe, in a process that built them in
+      place of the component, or ``None``. The inference service of a backend that states its facts holds them
+      (``reef.service.assembly.load_serving_deployment``).
     - ``harness_component`` runs the jobs of the deployment's harness recipe, or is ``None`` when the deployment
       evolves no harness or the process built no component for it.
     - ``data_store`` keeps the data directory of each training job, or is ``None`` for no store.
     - ``served_endpoint`` is where this Reef answers inference itself, or ``None`` when a harness run calls the
       runtime's own endpoint.
 
-    The two components, when both are set, have different names: a job names its component by that name.
+    At most one of ``training_component`` and ``training_facts`` is set. A process has the component, which
+    answers everything about the backend; or the facts, which answer what ``TrainingBackendFacts`` states and run
+    no job; or neither. The two components, when both are set, have different names: a job names its component by
+    that name.
 
     Purpose: the service assembly builds one value for each process (``reef.service.assembly``). The dispatcher
     gets it and gives the scenario factory a copy whose components are the jobs queue's views. The functions of
@@ -73,6 +86,7 @@ class LiveObjects:
 
     runtime: InferenceRuntime | None = None
     training_component: TrainingComponent | None = None
+    training_facts: TrainingBackendFacts | None = None
     harness_component: TrainingComponent | None = None
     data_store: DataStore | None = None
     served_endpoint: ServedEndpoint | None = None
@@ -86,6 +100,10 @@ class LiveObjects:
         ):
             if component is not None and not isinstance(component, TrainingComponent):
                 raise TypeError(f"{name} must be a TrainingComponent, got {type(component).__name__}")
+        if self.training_facts is not None and not isinstance(self.training_facts, TrainingBackendFacts):
+            raise TypeError(f"training_facts must be TrainingBackendFacts, got {type(self.training_facts).__name__}")
+        if self.training_component is not None and self.training_facts is not None:
+            raise ValueError("a process holds the training component or the backend's facts, not both")
         if self.data_store is not None and not isinstance(self.data_store, DataStore):
             raise TypeError(f"data_store must be a DataStore, got {type(self.data_store).__name__}")
         if self.served_endpoint is not None and not isinstance(self.served_endpoint, ServedEndpoint):
@@ -156,14 +174,19 @@ def weight_objects(recipe: Recipe, live: LiveObjects) -> tuple[TrainingComponent
 def check_recipe_objects(recipe: Recipe, live: LiveObjects) -> None:
     """Check that ``live`` has the objects that ``recipe`` needs.
 
-    A recipe that trains weights, alone or as a component of a composite, needs a training component and a runtime.
-    A weight recipe whose jobs are task jobs (``WeightTrainingRecipe.trains_task_jobs``) needs a training component
-    that takes the recipe's task parameters (``TrainingComponent.check_task_jobs``). Raise ``RecipeConfigError``
-    otherwise.
+    A recipe that trains weights, alone or as a component of a composite, needs a runtime, and a training component
+    or the backend's facts (``LiveObjects.training_facts``). A weight recipe whose jobs are task jobs
+    (``WeightTrainingRecipe.trains_task_jobs``) needs a training component that takes the recipe's task parameters
+    (``TrainingComponent.check_task_jobs``); a process that holds the facts runs no job and leaves that check to
+    the processes that hold the component. Raise ``RecipeConfigError`` otherwise.
     """
     recipes = recipe.components.values() if isinstance(recipe, CompositeRecipe) else (recipe,)
     for one in recipes:
         if not isinstance(one, WeightTrainingRecipe):
+            continue
+        if live.training_facts is not None:
+            if live.runtime is None:
+                raise RecipeConfigError("weight recipes require an independent inference runtime")
             continue
         training_component, _ = weight_objects(one, live)
         if type(one).trains_task_jobs:
@@ -181,20 +204,25 @@ def scenario_components(recipe: Recipe, live: LiveObjects, scenario: str) -> Sce
 
     The result is what the recipe declares from its configuration (``Recipe.build_components``), with the facts of
     the weight component that only live objects know: its kind is the runtime's ``served_weight_kind``, and its
-    layout is the training component's (``TrainingArtifactLayout``). A recipe that trains no weights gets its
-    declaration unchanged. Raise ``RecipeConfigError`` when the recipe trains weights and ``live`` has no training
-    component or no runtime.
+    layout is the training component's (``TrainingArtifactLayout``). In a process that holds the backend's facts
+    and no component, the layout is the facts' (``TrainingFactsLayout``), which checks no import. A recipe that
+    trains no weights gets its declaration unchanged. Raise ``RecipeConfigError`` when the recipe trains weights
+    and ``live`` has no runtime, or neither a training component nor the backend's facts.
     """
     declared = recipe.build_components(scenario)
     name = weight_component_name(recipe)
     if name is None:
         return declared
-    training_component, runtime = weight_objects(recipe, live)
-    weights = replace(
-        declared.components[name],
-        kind=runtime.served_weight_kind,
-        layout=TrainingArtifactLayout(training_component),
-    )
+    layout: ArtifactLayout
+    if live.training_facts is not None:
+        layout = TrainingFactsLayout(live.training_facts)
+    elif live.training_component is not None:
+        layout = TrainingArtifactLayout(live.training_component)
+    else:
+        raise RecipeConfigError(f"{type(recipe).__name__} requires a training component")
+    if live.runtime is None:
+        raise RecipeConfigError("weight recipes require an independent inference runtime")
+    weights = replace(declared.components[name], kind=live.runtime.served_weight_kind, layout=layout)
     return ScenarioComponents({**declared.components, name: weights}, declared.validator)
 
 

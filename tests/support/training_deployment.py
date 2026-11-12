@@ -4,11 +4,11 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import FULL_WEIGHTS, StubInferenceRuntime, StubTrainingComponent
 
 from reef.core.config import config_option
 from reef.inference.registry import RuntimeFactory
-from reef.train.component import TrainingComponentFactory
+from reef.train.component import TrainingBackendFacts, TrainingComponentFactory
 from reef.train.deployment import InProcessTrainingDeployment
 
 
@@ -73,3 +73,58 @@ class LocalDeployment(InProcessTrainingDeployment):
 
     def trainer_serving_config(self, settings):
         return {"type": LocalServingFactory.kind}
+
+
+class LocalFacts(TrainingBackendFacts):
+    """The facts of ``LocalRuntime``, which are those of a ``StubTrainingComponent`` with its defaults."""
+
+    @property
+    def name(self):
+        return "stub"
+
+    @property
+    def artifact_format(self):
+        return FULL_WEIGHTS
+
+    @property
+    def shares_scenarios(self):
+        return False
+
+    @property
+    def concurrent_jobs(self):
+        return False
+
+    @property
+    def default_start_inputs(self):
+        return {"model": "stub"}
+
+    def parameters_schema(self, kind):
+        return None
+
+    def check_root_start(self, root):
+        return None
+
+
+class FactsFactory(LocalFactory):
+    """A factory that states the facts of its component; ``built`` counts the components that it built."""
+
+    kind = "test-local-facts"
+
+    def __init__(self):
+        self.built = 0
+
+    def facts(self, config, model_path, environ):
+        return LocalFacts()
+
+    def __call__(self, config, model_path, environ):
+        self.built += 1
+        return super().__call__(config, model_path, environ)
+
+
+facts_component_factory = FactsFactory()
+
+
+class FactsDeployment(LocalDeployment):
+    """``LocalDeployment`` on a backend that states its facts from configuration."""
+
+    component_type = "tests.support.training_deployment:facts_component_factory"

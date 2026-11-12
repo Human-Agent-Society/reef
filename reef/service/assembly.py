@@ -74,7 +74,7 @@ from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
-from reef.train.component import TrainingComponent, build_training_component
+from reef.train.component import TrainingComponent, build_training_component, training_backend_facts
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.manager import TrainingManager
 
@@ -137,6 +137,49 @@ def connect_training_component(
     return component, serving
 
 
+def connect_serving(
+    settings: ServiceSettings, *, model_path: str, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
+) -> LiveObjects:
+    """The live objects of a process that serves the snapshots of the selected training backend and runs no job.
+
+    When the backend states its facts from the component config (``training_backend_facts``), the result holds the
+    serving runtime and the facts, and no training component is built: the runtime config reads the facts'
+    ``artifact_format``. When the backend states none, the result holds the component and the runtime of
+    ``connect_training_component``. The serving runtime has the same config in both cases, because the facts'
+    ``artifact_format`` equals the component's.
+    """
+    backend = training_deployment_for(settings.training_backend)
+    facts = training_backend_facts(
+        backend.component_config(asdict(settings), default_parameters=default_parameters), model_path=model_path
+    )
+    if facts is None:
+        component, runtime = connect_training_component(
+            settings, model_path=model_path, default_parameters=default_parameters
+        )
+        return LiveObjects(runtime=runtime, training_component=component)
+    serving = RuntimeRegistry().build(
+        serving_runtime_config(settings, backend, facts.artifact_format), model_path=model_path
+    )
+    return LiveObjects(runtime=serving, training_facts=facts)
+
+
+def connect_weight_objects(
+    settings: ServiceSettings,
+    *,
+    model_path: str,
+    default_parameters: Mapping[JobDataKind, Mapping[str, Any]],
+    serving_only: bool,
+) -> LiveObjects:
+    """The runtime and the training objects of a weight-training deployment in one process: those of
+    ``connect_serving`` when ``serving_only``, else the component and the runtime of ``connect_training_component``."""
+    if serving_only:
+        return connect_serving(settings, model_path=model_path, default_parameters=default_parameters)
+    training_component, runtime = connect_training_component(
+        settings, model_path=model_path, default_parameters=default_parameters
+    )
+    return LiveObjects(runtime=runtime, training_component=training_component)
+
+
 def _upstream_runtime(settings: ServiceSettings) -> InferenceRuntime | None:
     """The proxy runtime ``reef.upstream_url`` names, or None to leave recipes
     to their own resolution (a recipe-config ``runtime`` section, else the
@@ -156,8 +199,13 @@ def _training_recipe(
     recipe_type: type[WeightTrainingRecipe],
     settings: ServiceSettings,
     env: Mapping[str, str],
+    *,
+    serving_only: bool = False,
 ) -> tuple[Recipe, LiveObjects]:
-    """Load a weight-training recipe, and connect the selected training component and its serving runtime."""
+    """Load a weight-training recipe, and connect the selected training component and its serving runtime.
+
+    With ``serving_only``, the process runs no training job: it connects the objects of ``connect_serving``.
+    """
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     # Resolve the recipe fields once before connecting its runtime.
     # Construction consumes those same resolved values.
@@ -167,18 +215,18 @@ def _training_recipe(
     if settings.pipeline_settings is not None:
         recipe_config["pipeline"] = dict(settings.pipeline_settings)
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
-    training_component, runtime = connect_training_component(
+    live = connect_weight_objects(
         settings,
         model_path=model_path,
         default_parameters=recipe_type.configured_parameters(resolved_recipe_data.get("job_parameters")),
+        serving_only=serving_only,
     )
     try:
-        live = LiveObjects(runtime=runtime, training_component=training_component)
         recipe = load_recipe(recipe_type, recipe_config, env, field_values=resolved_recipe_data)
         check_recipe_objects(recipe, live)
         return recipe, live
     except BaseException:
-        close_runtimes((training_component,), runtime)
+        close_runtimes(live.job_components(), live.runtime)
         raise
 
 
@@ -194,12 +242,15 @@ def composed_training_recipe(
     weight_config: Mapping[str, Any],
     settings: ServiceSettings,
     env: Mapping[str, str],
+    *,
+    serving_only: bool = False,
 ) -> tuple[Recipe, LiveObjects]:
     """Load a recipe that trains weights through one of its components, and connect the selected training
     component and its serving runtime.
 
     The deployment's model path is every component's model, and a top level evaluation section
-    belongs to the component that trains.
+    belongs to the component that trains. With ``serving_only``, the process runs no training job: it connects the
+    objects of ``connect_serving``.
     """
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     if config.get("runtime"):
@@ -212,10 +263,11 @@ def composed_training_recipe(
             f"reef.{unknown[0]} is not a setting of {recipe_type.__name__}; a component's settings go under "
             "components.<name>.config"
         )
-    training_component, runtime = connect_training_component(
+    live = connect_weight_objects(
         settings,
         model_path=model_path,
         default_parameters=weight_type.configured_parameters(weight_config.get("job_parameters")),
+        serving_only=serving_only,
     )
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
     if settings.pipeline_settings is not None:
@@ -232,12 +284,11 @@ def composed_training_recipe(
         # The composite activates the artifacts of all its components with one rule.
         config = {**config, "activation": dict(settings.activation_settings)}
     try:
-        live = LiveObjects(runtime=runtime, training_component=training_component)
         recipe = build_recipe(selected, env, config=config)
         check_recipe_objects(recipe, live)
         return recipe, live
     except BaseException:
-        close_runtimes((training_component,), runtime)
+        close_runtimes(live.job_components(), live.runtime)
         raise
 
 
@@ -324,15 +375,31 @@ def load_named_recipe(
 
 
 def load_deployment(settings: ServiceSettings, env: Mapping[str, str]) -> tuple[Recipe, LiveObjects]:
-    """The deployment's recipe, and the runtime and the training component that every process of the deployment
-    builds for it. The runtime is the same in each process, and only the inference service opens it
-    (``InferenceRuntime.open``). The result has no harness component, data store or served endpoint yet: the caller
-    adds what its process needs (``with_harness_components``)."""
+    """The deployment's recipe, and the runtime and the training component that a process of the deployment builds
+    for it; the inference service builds its own (``load_serving_deployment``). The runtime is the same in each
+    process, and only the inference service opens it (``InferenceRuntime.open``). The result has no harness
+    component, data store or served endpoint yet: the caller adds what its process needs
+    (``with_harness_components``)."""
     return _load_deployment(_require_non_empty(settings.recipe, "reef.recipe"), settings, env)
 
 
-def _load_deployment(selected: str, settings: ServiceSettings, env: Mapping[str, str]) -> tuple[Recipe, LiveObjects]:
+def load_serving_deployment(settings: ServiceSettings, env: Mapping[str, str]) -> tuple[Recipe, LiveObjects]:
+    """The deployment's recipe and the objects of a process that serves and runs no training job: the inference
+    service.
+
+    The result equals that of ``load_deployment``, except for a deployment that trains weights on a backend that
+    states its facts (``TrainingComponentFactory.facts``): then no training component is built, and the result
+    holds the facts in ``training_facts`` (``connect_serving``). The runtime has the same config either way.
+    """
+    return _load_deployment(_require_non_empty(settings.recipe, "reef.recipe"), settings, env, serving_only=True)
+
+
+def _load_deployment(
+    selected: str, settings: ServiceSettings, env: Mapping[str, str], *, serving_only: bool = False
+) -> tuple[Recipe, LiveObjects]:
     """Load the one recipe ``reef.recipe`` names, and build its runtime and training component.
+
+    With ``serving_only``, a deployment that trains weights gets the objects of ``connect_serving``.
 
     The spellings differ only in where config and runtime come from: a dotted
     weight-training class reads the flat ``reef.*`` section and connects the
@@ -344,7 +411,7 @@ def _load_deployment(selected: str, settings: ServiceSettings, env: Mapping[str,
     """
     training_recipe_type = _training_recipe_type(selected)
     if training_recipe_type is not None:
-        return _training_recipe(training_recipe_type, settings, env)
+        return _training_recipe(training_recipe_type, settings, env, serving_only=serving_only)
     if ":" in selected:
         config = _recipe_owned_settings(settings)
         if settings.preset_config is not None:
@@ -358,7 +425,9 @@ def _load_deployment(selected: str, settings: ServiceSettings, env: Mapping[str,
         recipe_type = recipe_class_for(selected)
         weight_training = None if recipe_type is None else weight_training_selection(recipe_type, config)
         if weight_training is not None and recipe_type is not None:
-            return composed_training_recipe(selected, recipe_type, config, *weight_training, settings, env)
+            return composed_training_recipe(
+                selected, recipe_type, config, *weight_training, settings, env, serving_only=serving_only
+            )
         if settings.pipeline_settings is not None:
             config["pipeline"] = dict(settings.pipeline_settings)
         if settings.activation_settings is not None:

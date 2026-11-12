@@ -154,6 +154,11 @@ Implementation
   service SDK. Define the facts type in the integration's own package, from
   its own settings, and let the component answer the same members from a value
   of it, so the two cannot differ. Share no facts code with another backend.
+  With the facts, ``reef serve --component inference`` builds the serving
+  runtime from ``facts.artifact_format`` and never builds the component, so
+  its environment does not need the framework. A factory that inherits
+  ``facts``, which returns ``None``, makes the inference service build the
+  component.
   Add a test that compares the facts with the component for two configs, and
   one that builds the facts without the framework. See `Facts without a
   component <../developer-guide/executors.rst#facts-without-a-component>`__.
