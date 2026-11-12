@@ -379,6 +379,17 @@ def test_hooks_form_a_waterfall_where_next_runs_once_and_a_raising_hook_is_skipp
     assert _waterfall([], 0, {}, _DEFAULTS["post_execute"], trace) is not _DEFAULTS["post_execute"]
 
 
+@pytest.mark.parametrize("state", [[], {"cache": 1}, {1: "cache"}])
+def test_invalid_hook_state_is_logged_and_skipped(state) -> None:
+    def invalid_state(payload, next_):
+        return {**next_(), "state": state}
+
+    trace = []
+    decision = _waterfall([_hook_module("invalid", "pre_step", invalid_state)], 0, {}, _DEFAULTS["pre_step"], trace)
+    assert decision == _DEFAULTS["pre_step"]
+    assert trace == [{"hook": "invalid", "error": "ValueError: hook state must map strings to strings"}]
+
+
 def test_hooks_get_a_copy_so_in_place_edits_are_traced_and_bad_decisions_are_skipped() -> None:
     def in_place(payload, next_):
         decision = next_()
@@ -569,6 +580,27 @@ def test_native_loop_records_provider_reasoning_without_changing_reply_or_tool_r
         replayed = next(message for message in model.requests[1]["messages"] if message["role"] == "assistant")
         assert {key: replayed[key] for key in reasoning} == reasoning
         assert messages[-1]["content"] == "The file says: hello"
+
+
+def test_pre_step_system_suffix_reaches_the_model_without_accumulating(tmp_path: Path, fake_model) -> None:
+    hook = native_hook(
+        "context",
+        "pre_step",
+        "def listen(payload, next):\n"
+        "    decision = next()\n"
+        "    if payload['step'] < 3:\n"
+        "        decision['system_suffix'] = 'Memory data for this turn.'\n"
+        "    return decision\n",
+    )
+    result = loop_turn(tmp_path, rendered(fake_model, {**NATIVE_SEED_TOOLS, **hook}))
+    assert result.exit_code == 0
+    prompts = [request["messages"][0]["content"] for request in fake_model.requests]
+    assert len(prompts) == 3
+    assert prompts[0].count("Memory data for this turn.") == 1
+    assert prompts[1] == prompts[0]
+    assert "Memory data" not in prompts[2]
+    logged = [event["data"]["system"] for event in result.trajectory if event["type"] == "request/header"]
+    assert logged == [prompts[0], prompts[2]]
 
 
 def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
@@ -1590,8 +1622,23 @@ def test_native_agent_checks_and_validation_name_what_is_missing() -> None:
 
 def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_back(tmp_path: Path) -> None:
     with _TeamModel() as model:
-        files = {**NATIVE_SEED_TOOLS, **native_json("graphs", _delegating_graph()), **CHECKER}
+        hook = native_hook(
+            "counter",
+            "pre_step",
+            "def listen(payload, next):\n"
+            "    decision = next()\n"
+            "    count = int(payload['state'].get('counter', '0')) + 1\n"
+            "    decision['state'] = {'counter': str(count)}\n"
+            "    decision['system_suffix'] = 'Task visits: ' + str(count)\n"
+            "    return decision\n",
+        )
+        files = {**NATIVE_SEED_TOOLS, **native_json("graphs", _delegating_graph()), **CHECKER, **hook}
         result = _run(tmp_path, model, files, prompt="how many primes are below 100000?")
+        assert [request["messages"][0]["content"].rsplit("Task visits: ", 1)[1] for request in model.requests] == [
+            "1",
+            "1",
+            "2",
+        ]
         headers = [e["data"] for e in result.trajectory if e["type"] == "session"]
         # The agent's file sorts before the root's, so the root's final answer is the trajectory's last text.
         assert [(h["agent"], h["turn"], h.get("parent")) for h in headers] == [

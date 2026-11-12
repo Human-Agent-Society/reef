@@ -563,6 +563,12 @@ def _waterfall(
     try:
         decision = hook.listen(copy.deepcopy(dict(payload)), below)
         if isinstance(decision, dict):
+            if hook.event == "pre_step" and "state" in decision:
+                state = decision["state"]
+                if not isinstance(state, dict) or any(
+                    not isinstance(key, str) or not isinstance(value, str) for key, value in state.items()
+                ):
+                    raise ValueError("hook state must map strings to strings")
             decision = _plain(decision)
     except Exception as exc:
         trace.append({"hook": hook.name, "error": f"{type(exc).__name__}: {exc}"[:600]})

@@ -230,7 +230,9 @@ class Run:
     """One turn's state, shared by every stage handler: the messages, the step counter, the log.
 
     The tools, hooks, agents and prompt are read from the host at each use;
-    ``allow`` narrows the tools to the names an agent may see."""
+    ``allow`` narrows the tools to the names an agent may see. ``hook_state`` maps string keys to string values
+    returned by pre_step hooks. It starts empty each turn, survives host changes, and is separate for each agent.
+    """
 
     def __init__(
         self,
@@ -272,6 +274,7 @@ class Run:
             {"role": "user", "content": prompt},
         ]
         self.step = 0
+        self.hook_state: dict[str, str] = {}
         self.step_open = False
         self.last: dict[str, Any] = {}
         # What the last request/header said the model sees; the next step writes a new one when it differs.
@@ -326,11 +329,16 @@ class Run:
         self.system = self.host.system_prompt(skills=self.skills, prompt=self.agent_prompt)
         self.messages[0] = {"role": "system", "content": self.system}
         self.declarations = [tool.declaration() for tool in self.tools.values()]
-        payload = {"step": step, "task": self.prompt, "messages": self.messages}
+        payload = {"step": step, "task": self.prompt, "messages": self.messages, "state": self.hook_state}
         entry = loop._decide(self.session, self.hooks["pre_step"], "pre_step", step, payload)
         if entry.get("kind") == "reject":
             reason = {"kind": "rejected", "step": step, "message": str(entry.get("reason") or "")}
             self.end_turn(reason, "gave_up")
+        self.hook_state = entry.get("state", self.hook_state)
+        system_suffix = entry.get("system_suffix")
+        if isinstance(system_suffix, str) and system_suffix:
+            self.system = f"{self.system}\n\n{system_suffix}"
+            self.messages[0] = {"role": "system", "content": self.system}
         self.session.write("step/start", {"turn": self.turn, "step": step})
         self.step_open = True
         # Model visible means logged: the header is written at step 1 and again whenever what the model sees changed.

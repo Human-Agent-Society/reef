@@ -524,7 +524,9 @@ The deployment names one method in ``evolution.method``:
      - A reflector and a curator edit a playbook in ``rules.md``.
      - ``none``
    * - `ReasoningBank <../../recipes/reasoning_bank/README.md>`__
-     - Judged successes and failures become memory skills.
+     - Judged successes and failures become memory skills, or retrieved
+       memory on pi and native. Optional periodic evaluation compares runs
+       with and without the bank.
      - ``none``
    * - `Reefine <../../recipes/beta/reefine/README.md>`__ (beta)
      - A coding agent answers plain-language requests.
