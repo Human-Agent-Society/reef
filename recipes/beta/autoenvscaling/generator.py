@@ -11,7 +11,9 @@ of its own. ``generate`` keeps the open generation in the document ``open/<gener
 generation number as five digits, and ``validate`` adds each task's check results to it. ``record_results`` closes
 it, also after later generations started or after a restart: it places each task that ran against the band
 ``[band_low, band_high]`` and writes the generation report to the document ``report/<number>``, named by the
-generator's own number of the generation. A second call for a closed generation does nothing.
+generator's own number of the generation. A second call for a closed generation does nothing. An attempt that an
+outage leaves with no task has no results to wait for, so ``generate`` writes its report at once and raises: the
+recipe's retry keeps its open generation under the same name and would replace the attempt's.
 Eval tasks run no training rollouts and receive no band measurement. A task that could not run is an outage, not a
 band measurement. The generator reports nothing to the Designer, which is not trained here. The document ``cursor``
 lets a restart continue with the next session. The directory of a run and the repository snapshots are in a
@@ -1188,9 +1190,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
         when its variants and seeds run out. Up to ``concurrency`` tasks are written at once, started in slot order
         (:meth:`slot_task`); the slots are still taken in order.
 
-        Raises :class:`DesignerOutage` when an outage leaves the generation with no task, after its report is saved:
-        the recipe tries the generation again, and a round whose generation runs out of attempts is not complete,
-        so a restart gives it back. An empty generation that ends would count as a complete round.
+        Raises :class:`DesignerOutage` when an outage leaves the generation with no task, after it saved the report of
+        the attempt (:meth:`save_report`), since no task waits for results: the recipe tries the generation again,
+        and a round whose generation runs out of attempts is not complete, so a restart gives it back. An empty
+        generation that ends would count as a complete round.
         """
         # The recipe keeps its generation numbers when an upgrade drops this generator's state: never number below
         # them, so a new task never takes the name of a task that is already published.
@@ -1266,13 +1269,17 @@ class AutoEnvScalingGenerator(TaskGenerator):
             for running in writing.values():
                 running.cancel()
             await asyncio.gather(*writing.values(), return_exceptions=True)
-        self.save_open(request.generation, OpenGeneration(self.generation, tuple(refused), pending, error))
+        open_generation = OpenGeneration(self.generation, tuple(refused), pending, error)
+        if ended_on_outage and not tasks:
+            # No task waits for results, so the attempt closes now. The recipe's retry saves its open generation under
+            # the same name, which would leave this attempt's taken sessions and its outage in no report.
+            self.save_report(open_generation, refused, {})
+            raise DesignerOutage(error)
+        self.save_open(request.generation, open_generation)
         # The seeds are taken once the open generation holds them, so a restart continues with the next one. An
         # attempt that raised or was cancelled returned no task, so it takes no seed: the retry uses them again.
         if next_seed != self.cursor.next_seed:
             self.save_cursor(replace(self.cursor, next_seed=next_seed))
-        if ended_on_outage and not tasks:
-            raise DesignerOutage(error)
         return tuple(tasks)
 
     def slots(self) -> list[TaskSlot | HarborTask]:
@@ -1645,29 +1652,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
             replace(proposal, stage=STAGE_UNREACHED, refusal="the round ended before it ran the task")
             for proposal in pending.values()
         )
-        proposals.sort(key=lambda proposal: proposal.index)
-        document = {
-            "generation": open_generation.number,
-            "error": open_generation.error,
-            "band": {"low": self.band.low, "high": self.band.high},
-            # A calibration that is off leaves no trace in the report.
-            **({} if self.calibration is None else {"calibration": self.calibration.settings()}),
-            "next_position": self.cursor.next_position,
-            # Without seeds, the report has no seed fields.
-            **({"next_seed": self.cursor.next_seed} if self.seeds else {}),
-            "proposals": [
-                {**proposal_document(proposal), "checks": checks_document(open_generation, proposal.task_name)}
-                for proposal in proposals
-            ],
-            "tasks": [
-                {**asdict(outcome), "checks": checks_document(open_generation, outcome.name)}
-                for outcome in outcomes.values()
-            ],
-        }
         if self.is_adaptive:
             self.keep_parents(open_generation.number, outcomes, ran)
-        report_key = f"{REPORT_PREFIX}{open_generation.number:05d}"
-        self.state.write(report_key, json.dumps(document, indent=2) + "\n")
+        report_key = self.save_report(open_generation, proposals, outcomes)
         self.state.remove(open_key)
         logger.info(
             "AutoEnvScaling generation %d on scenario %r: %d tasks inside the band of %d that ran, %d sessions; "
@@ -1679,6 +1666,37 @@ class AutoEnvScalingGenerator(TaskGenerator):
             len(proposals),
             report_key,
         )
+
+    def save_report(
+        self,
+        open_generation: OpenGeneration,
+        proposals: list[SessionProposal],
+        outcomes: Mapping[str, TaskOutcome],
+    ) -> str:
+        """Write the report of ``open_generation`` to the state document ``report/<number>``, replacing the document,
+        and return its key: the generation's error, the band, the cursor, ``proposals`` in index order and the tasks
+        that ran (``outcomes``), each with its check results."""
+        document = {
+            "generation": open_generation.number,
+            "error": open_generation.error,
+            "band": {"low": self.band.low, "high": self.band.high},
+            # A calibration that is off leaves no trace in the report.
+            **({} if self.calibration is None else {"calibration": self.calibration.settings()}),
+            "next_position": self.cursor.next_position,
+            # Without seeds, the report has no seed fields.
+            **({"next_seed": self.cursor.next_seed} if self.seeds else {}),
+            "proposals": [
+                {**proposal_document(proposal), "checks": checks_document(open_generation, proposal.task_name)}
+                for proposal in sorted(proposals, key=lambda proposal: proposal.index)
+            ],
+            "tasks": [
+                {**asdict(outcome), "checks": checks_document(open_generation, outcome.name)}
+                for outcome in outcomes.values()
+            ],
+        }
+        report_key = f"{REPORT_PREFIX}{open_generation.number:05d}"
+        self.state.write(report_key, json.dumps(document, indent=2) + "\n")
+        return report_key
 
 
 def proposal_document(proposal: SessionProposal) -> dict[str, object]:

@@ -286,6 +286,26 @@ def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(tm
 
 
 @pytest.mark.unit
+def test_a_retry_after_an_outage_that_made_no_task_keeps_the_failed_attempts_report(tmp_path: Path) -> None:
+    designer = StandInDesigner(unusable=("session-1",), unreachable=("session-2",))
+    generator = autoenvscaling(tmp_path, designer, source_count=5, count=3)
+    with pytest.raises(DesignerOutage, match="the Designer could not rebuild session-2"):
+        asyncio.run(generator.generate(REQUEST))
+    # The recipe tries the same generation again, and this attempt makes its tasks.
+    asyncio.run(generator.record_results(run_tasks(generator), generation=REQUEST.generation))
+    failed = report(tmp_path, 0)
+    assert failed["error"].startswith("the Designer could not rebuild session-2")
+    assert [(entry["source_record_id"], entry["stage"]) for entry in failed["proposals"]] == [
+        ("session-1", "source"),
+        ("session-2", "outage"),
+    ]
+    assert failed["next_position"] == 2 and failed["tasks"] == []
+    retried = report(tmp_path, 1)
+    assert [entry["source_record_id"] for entry in retried["proposals"]] == ["session-3", "session-4", "session-5"]
+    assert retried["error"] == "" and state(tmp_path).keys("open/") == ()
+
+
+@pytest.mark.unit
 def test_a_task_the_authoring_checks_refuse_is_refused_and_names_the_last_call(tmp_path: Path) -> None:
     designer = StandInDesigner(has_tmux=False)
     service = StandInGenerator(tmp_path / "tasks")

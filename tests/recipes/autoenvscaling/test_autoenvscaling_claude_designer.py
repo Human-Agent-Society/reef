@@ -560,10 +560,12 @@ def test_a_refused_variant_takes_its_parents_slot_and_a_lost_sign_in_leaves_it(
     if is_refused:
         [task] = asyncio.run(generator.generate(REQUEST))
         assert "parent_task" not in task.metadata, "the generation goes on to the session's slot"
+        [variant] = state_document(tmp_path, f"open/{REQUEST.generation:05d}")["refused"]
     else:
         with pytest.raises(DesignerOutage, match="Please run /login"):
             asyncio.run(generator.generate(REQUEST))
-    [variant] = state_document(tmp_path, f"open/{REQUEST.generation:05d}")["refused"]
+        # An attempt that made no task has no results to wait for: its report is saved before it raises.
+        [variant] = report(tmp_path, generator.generation)["proposals"]
     assert (variant["parent_task"], variant["stage"]) == (NAMES[0], "authoring" if is_refused else "outage")
     assert ("safeguards flagged this message" in variant["refusal"]) is is_refused
     [parent] = state_document(tmp_path, "adaptive")
