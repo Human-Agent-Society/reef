@@ -3,7 +3,7 @@
 ``QueueChat`` is a model that answers canned replies: the Meta-Harness, ACE
 and ReasoningBank tests give it to their method. ``proposal_reply`` is one
 reply of the Meta-Harness proposer. ``MarkerScorer`` scores a run of the
-fake pi binary of ``tests.support.harness_steps`` by the marker in the rules
+fake pi binary of ``tests.support.harness_jobs`` by the marker in the rules
 it rendered. ``meta_harness_sections`` is a deployment's recipe section over
 that binary, and ``meta_harness_recipe`` the recipe built from it with a
 ``QueueChat``.
@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tests.support.harness_steps import make_pi_binary
+from tests.support.harness_jobs import make_pi_binary
 
 from reef.evaluation.harness import TaskScorer
 from reef.harness.tasks.model_binding import ModelBinding

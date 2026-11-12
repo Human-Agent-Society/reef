@@ -19,6 +19,7 @@ from types import ModuleType
 
 import pytest
 from tests.harness.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
+from tests.support.harness_jobs import build_harness_backend, head_of
 from tests.support.harness_render import (
     NATIVE_SEED_FILES,
     NATIVE_SEED_TOOLS,
@@ -27,7 +28,6 @@ from tests.support.harness_render import (
     native_tool,
     write_rendered,
 )
-from tests.support.harness_steps import build_harness_backend, head_of
 from tests.support.strategies import resolve_method, resolve_task_scorer
 from tests.support.trajectories import recorded_trajectory
 
@@ -694,13 +694,13 @@ def test_native_harness_runs_through_the_evaluation(tmp_path: Path, fake_model) 
         ("put hello in notes.txt and read it back",),
     )
     batch = JobData("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-    prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(batch, HarnessState().to_json(), 0, head=head_of(backend))
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_tree.files
     assert "native/hooks/loop_guard.py" in prepared.candidate.candidate_tree.files
     policy = ComparePolicy(backend)
     decision = policy.decide(prepared.candidate, policy.evaluate(prepared.candidate))
-    result = backend.settle_step(prepared, decision)
+    result = backend.settle_job(prepared, decision)
     # Both trees complete the scripted task, so the comparison is a tie and nothing publishes.
     assert result.metrics["wins"] == 0 and result.metrics["losses"] == 0 and result.metrics["ties"] == 1
     assert result.metrics["selected"] is False
@@ -1024,13 +1024,13 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_comparison(tmp_pat
             ),
         )
         batch = JobData("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-        prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
+        prepared = backend.prepare_job(batch, HarnessState().to_json(), 0, head=head_of(backend))
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_tree.files["native/graphs/main.json"]) == SEED_GRAPH
         assert "check" in json.loads(prepared.candidate.candidate_tree.files["native/graphs/main.json"])["stages"]
         policy = ComparePolicy(backend)
         decision = policy.decide(prepared.candidate, policy.evaluate(prepared.candidate))
-        settled = backend.settle_step(prepared, decision)
+        settled = backend.settle_job(prepared, decision)
         assert (settled.metrics["wins"], settled.metrics["losses"], settled.metrics["ties"]) == (1, 0, 0)
         assert settled.metrics["selected"] is True
 
@@ -1889,10 +1889,10 @@ def test_the_binding_rides_in_the_run_render_and_the_published_tree_is_the_sourc
     task_run = backend.evaluator.render(HarnessTree(NATIVE_SEED_FILES))
     assert json.loads(task_run["native/models.json"])["base_url"] == fake_model.base_url
     batch = JobData("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-    prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(batch, HarnessState().to_json(), 0, head=head_of(backend))
     assert prepared.candidate is not None
     policy = NoEvaluationPolicy()
-    settled = backend.settle_step(prepared, policy.decide(prepared.candidate, policy.evaluate(prepared.candidate)))
+    settled = backend.settle_job(prepared, policy.decide(prepared.candidate, policy.evaluate(prepared.candidate)))
     assert settled.metrics["selected"] is True and settled.artifact is not None
     published = settled.artifact.local_path
     assert published is not None

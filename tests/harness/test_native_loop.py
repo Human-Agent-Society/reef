@@ -27,9 +27,9 @@ from tests.harness.test_native_serve import (
     tool_files,
     typed,
 )
+from tests.support.harness_jobs import MODEL, harness_backend, harness_recipe
 from tests.support.harness_render import NATIVE_SEED_FILES, NATIVE_SEED_TOOLS, native_loop, native_tool, write_rendered
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import MODEL, harness_backend, harness_recipe
 from tests.support.polling import wait_until
 from tests.support.strategies import resolve_task_scorer
 from tests.support.trajectories import recorded_trajectory

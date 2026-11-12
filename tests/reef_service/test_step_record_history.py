@@ -8,12 +8,12 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import changed_rules, harness_recipe
 from tests.support.harness_service import catalog, harness_dispatcher, wait_for_rows
-from tests.support.harness_steps import changed_rules, harness_recipe
 
 from reef.harness.tree import TreePatch
 from reef.service.app import create_app
-from reef.train.harness_backend.records import MAX_RECORD_BYTES, read_step_records
+from reef.train.harness_backend.records import MAX_RECORD_BYTES, read_job_records
 
 SCENARIO = "agents"
 
@@ -37,19 +37,19 @@ def test_record_scope_and_limits(tmp_path: Path) -> None:
     (other / "secret.json").write_text('"private"')
     (step / "link.json").symlink_to(other / "secret.json")
     (step / "agents").symlink_to(other, target_is_directory=True)
-    assert read_step_records(root, str(step), None)["files"] == [{"path": "calls.json", "bytes": 19}]
-    assert json.loads(read_step_records(root, str(step), "calls.json")["text"])[0]["reply"] == "hello"
+    assert read_job_records(root, str(step), None)["files"] == [{"path": "calls.json", "bytes": 19}]
+    assert json.loads(read_job_records(root, str(step), "calls.json")["text"])[0]["reply"] == "hello"
     for relative in ("../1/calls.json", str(other / "secret.json"), "link.json", "agents/secret.json"):
         with pytest.raises(ValueError):
-            read_step_records(root, str(step), relative)
+            read_job_records(root, str(step), relative)
     with pytest.raises(ValueError, match="outside"):
-        read_step_records(root, str(other), "secret.json")
+        read_job_records(root, str(other), "secret.json")
     with pytest.raises(FileNotFoundError):
-        read_step_records(root, str(step), "absent.json")
+        read_job_records(root, str(step), "absent.json")
     (step / "large.json").write_bytes(b"x" * (MAX_RECORD_BYTES + 1))
     with pytest.raises(ValueError, match="4 MiB"):
-        read_step_records(root, str(step), "large.json")
-    assert read_step_records(root, str(root / "missing"), None)["status"] == "missing"
+        read_job_records(root, str(step), "large.json")
+    assert read_job_records(root, str(root / "missing"), None)["status"] == "missing"
 
 
 def test_step_record_http_contract(tmp_path: Path) -> None:

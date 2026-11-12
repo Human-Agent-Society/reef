@@ -1,9 +1,9 @@
-"""What an objective computes from one job's data, and what a training component prepares from it.
+"""What a Slime objective computes from one job's data, and what the Slime component prepares from it.
 
-``TrainingSignal`` is an objective's result. ``PreparedJob`` is that result as
-one backend's payload. How a component cuts the job data into optimizer steps
-is part of neither: the component reads it from its job parameters
-(``reef.train.algos.schedule.StepScheduling``).
+``TrainingSignal`` is the result of ``SlimeObjective.prepare``. ``PreparedJob``
+is that result as Slime's payload. How the component cuts the job data into
+optimizer steps is part of neither: the component reads it from its job
+parameters (``reef.train.slime_backend.schedule.StepScheduling``).
 """
 
 from __future__ import annotations
@@ -15,7 +15,12 @@ from typing import Any, Literal
 
 @dataclass(frozen=True, slots=True)
 class TrainingSignal:
-    """Algorithm output before any backend's wire payload is materialized."""
+    """What a Slime objective computes from one job's data, before Slime's wire payload is made.
+
+    ``action`` is ``train`` or ``skip``. ``next_algorithm_state`` is the objective's state after the job data.
+    ``metrics`` is the objective's telemetry. ``advantages`` has one value per trajectory, or is None for a loss
+    family that reads none. ``SlimeObjective.prepare`` returns the value; ``prepare_slime_job`` reads it.
+    """
 
     action: Literal["train", "skip"]
     next_algorithm_state: Mapping[str, Any]
@@ -25,7 +30,7 @@ class TrainingSignal:
 
 @dataclass(frozen=True, slots=True)
 class PreparedJob:
-    """What a training component prepared from one job's data: the objective's signal as its backend's payload.
+    """What the Slime component prepared from one job's data: the objective's signal as Slime's payload.
 
     ``action`` is ``train`` exactly when ``payload`` is given. A ``skip`` step
     (the objective skipped the job data) trains nothing. ``next_algorithm_state``

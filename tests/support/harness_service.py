@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 from weakref import WeakKeyDictionary
 
-from tests.support.harness_steps import head_of
+from tests.support.harness_jobs import head_of
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 
@@ -232,16 +232,16 @@ def backend_step(
     lost commit or a resumed scenario sees it. A failure aborts the step.
     """
     commit_number = COMMIT_NUMBERS.get(backend, 0) if commit_number is None else commit_number
-    prepared = backend.prepare_step(data, state, commit_number, head=head_of(backend))
+    prepared = backend.prepare_job(data, state, commit_number, head=head_of(backend))
     if prepared.candidate is None:
         result = TrainingCommit(prepared.state, prepared.metrics)
     else:
         selection = ComparePolicy(backend) if policy is None else policy
         try:
             decision = selection.decide(prepared.candidate, selection.evaluate(prepared.candidate))
-            result = backend.settle_step(prepared, decision)
+            result = backend.settle_job(prepared, decision)
         except BaseException:
-            backend.abort_step(prepared)
+            backend.abort_job(prepared)
             raise
     COMMIT_NUMBERS[backend] = commit_number + 1
     return result

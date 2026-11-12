@@ -114,10 +114,10 @@ class HarnessCandidate(UpdateCandidate):
     """One candidate tree, evaluated against the head tree.
 
     Values: ``candidate_tree`` is the tree under evaluation, and
-    ``current_tree`` is the head tree the step started from.
+    ``current_tree`` is the head tree the job started from.
     ``evaluation_tasks`` are the tasks both sides run, the seed tasks first.
-    ``step`` ≥ 1 is the step that made it.
-    Purpose: ``HarnessBackend.prepare_step`` makes it; the evaluator scores
+    ``step`` ≥ 1 is the number of the job that made it.
+    Purpose: ``HarnessBackend.prepare_job`` makes it; the evaluator scores
     both trees and the publication policy decides on it.
     """
 
@@ -435,7 +435,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
             # Per run, in pairing order: the root's stage path and how its turn ended.
             metrics[f"{side}_paths"] = tuple(record.path for record in runs[side])
         if "candidate" in sides:
-            # What the first candidate runs were graded on, so a rejected step names the task, the reply and why.
+            # What the first candidate runs were graded on, so a rejected job names the task, the reply and why.
             metrics["candidate_runs"] = [
                 {
                     "task": clip_record_text(record.task, RUN_SUMMARY_CHARS),

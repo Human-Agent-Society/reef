@@ -275,7 +275,9 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
     # registry / named Ray actors — it never imports reef.train.slime or
     # reef.train.slime_backend at module scope. A lazy import inside a
     # function (an adapter reaching for the backend it was configured with)
-    # is the allowed escape hatch.
+    # is the allowed escape hatch. A method package's public half imports one
+    # name of the backend: ``register_objective``, which records the reference
+    # of the method's objective without importing it.
     core_packages = (
         "reef/core",
         "reef/dispatcher",
@@ -303,8 +305,15 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         tree = ast.parse(path.read_text(encoding="utf-8"))
         imported = _imported_modules(tree, package=package, module_scope_only=True)
+        allowed = (
+            {"reef.train.slime_backend.objectives.register_objective"} if package.startswith("recipes") else set()
+        )
         for prefix in ("reef.train.slime", "reef.train.slime_backend"):
-            offenders.extend(f"{path.relative_to(REPO_ROOT)}: {target}" for target in _imports_of(imported, prefix))
+            offenders.extend(
+                f"{path.relative_to(REPO_ROOT)}: {target}"
+                for target in _imports_of(imported, prefix)
+                if target not in allowed
+            )
     assert offenders == []
 
 

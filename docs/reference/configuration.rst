@@ -1359,7 +1359,7 @@ Records arrive and stages make samples in both modes, so a switch from
 ``manual`` to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
 declares ``supported_training_modes``; an unsupported mode raises
 ``NotImplementedError``. Harness evolution supports both modes, and every
-method takes a request step. Setting ``manual`` on an
+method takes a request job. Setting ``manual`` on an
 inference-only recipe does not create a training backend.
 
 .. code:: yaml
@@ -1611,7 +1611,7 @@ describes the method contract. A key may use underscores or hyphens, and
 startup refuses an unknown key.
 
 The default stages train on every valid scored report as a trace, including
-successful outcomes. A step starts when ``pipeline.sample2job.config.job_samples``
+successful outcomes. A job starts when ``pipeline.sample2job.config.job_samples``
 traces are held, 1 by default. To train on recorded traffic alone, every ``job_samples``
 requests with unscored samples, set
 ``pipeline.record2sample.module: reef.record2sample.traces:InferenceSamples``.
@@ -1622,7 +1622,7 @@ To evolve offline, on the train split of the scenario's imported tasks
 instead of on traffic, set
 ``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskJobData``. Each
 uploaded train task then trains once, in upload order. A
-step holds either traces or train tasks; a step of train tasks rolls out up to
+job holds either traces or train tasks; a job of train tasks rolls out up to
 ``pipeline.sample2job.config.buffer_size`` of them (default ``job_samples``) on
 the head tree as the method's traces. Startup refuses it without an adapter
 that plays task directories (an npm ``install``) and
@@ -1631,7 +1631,7 @@ that plays task directories (an npm ``install``) and
 .. container:: config
 
    ``evolution.method``
-       required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``step(context)`` makes each step's candidate
+       required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``run(job)`` makes each job's candidate
 
    ``evolution.adapter`` : pi
        ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` parts), ``python`` (a Python program that uv runs, whose modules are tree files of the ``program`` part), or an entry-point adapter, such as ``terminus`` from the Meta-Harness Terminal-Bench campaign
@@ -1649,19 +1649,19 @@ that plays task directories (an npm ``install``) and
        optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
 
    ``evolution.state_dir`` : .reef/harness
-       the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the snapshot component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, the component's own name in a composite recipe), holds ``history/``, every candidate, run and decision, which is the score cache; and ``steps/``, one step record per step (the workspace with its ``output/``, and ``calls.json``; ``<step>`` is the scenario step, and a retried step lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
+       the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the snapshot component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, the component's own name in a composite recipe), holds ``history/``, every candidate, run and decision, which is the score cache; and ``steps/``, one job record per job (the workspace with its ``output/``, and ``calls.json``; ``<step>`` is the scenario step, and a retried job lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
 
    ``evolution.max_steps`` : 0
-       skip automatic evolve steps once the scenario's step number passes this; the scenario numbers every commit, activations, train-from operations, imports and syncs included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
+       skip automatic evolve jobs once the scenario's step number passes this; the scenario numbers every commit, activations, train-from operations, imports and syncs included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
 
    ``evolution.max_failure_streak`` : 0
-       stop automatic evolve steps after this many consecutive rejected steps, request steps included; 0 disables the limit; a request from ``POST /reef/train`` still runs while the breaker is open
+       stop automatic evolve jobs after this many consecutive rejected jobs, request jobs included; 0 disables the limit; a request from ``POST /reef/train`` still runs while the breaker is open
 
    ``evolution.max_model_calls_per_step`` : 0
-       cap the method's model calls in one step, through ``services.models`` or ``services.calls``; a call past the cap raises ``RuntimeError``; 0 disables the limit
+       cap the method's model calls in one job, through ``services.models`` or ``services.calls``; a call past the cap raises ``RuntimeError``; 0 disables the limit
 
    ``evolution.max_runs_per_step`` : 0
-       cap the runs that the method's ``services.evaluate`` runs in one step; reused runs and the evaluation's own runs do not count; 0 disables the limit
+       cap the runs that the method's ``services.evaluate`` runs in one job; reused runs and the evaluation's own runs do not count; 0 disables the limit
 
    ``evolution.executor`` : local
        ``local`` runs tasks as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` and ``modal`` create a cloud sandbox per run and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
@@ -1679,7 +1679,7 @@ that plays task directories (an npm ``install``) and
        for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
 
    ``evolution.agent``
-       the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its steps (``services.run_agent``); unset, no agent runs, and such a method is refused at startup
+       the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its jobs (``services.run_agent``); unset, no agent runs, and such a method is refused at startup
 
    ``evolution.agent.adapter`` : pi
        the agent's harness: any adapter whose prompt is text
@@ -1720,7 +1720,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
        the directory the manifest's task names live under; set together with ``task_manifest``
 
    ``evolution.evaluation.imported_tasks`` : false
-       true makes each step evaluate on the task directories of the eval split of the scenario's imported tasks (the ``task-import`` section, or task items whose metadata names the scenario's ``eval`` split) as the step reads them, so tasks that the scenario gets later join the next step. The eval split may be empty when the scenario loads. The same adapter rule as ``task_manifest``. The former ``evolution.evaluation.task_store`` is refused with a message that names this key
+       true makes each job evaluate on the task directories of the eval split of the scenario's imported tasks (the ``task-import`` section, or task items whose metadata names the scenario's ``eval`` split) as the job reads them, so tasks that the scenario gets later join the next job. The eval split may be empty when the scenario loads. The same adapter rule as ``task_manifest``. The former ``evolution.evaluation.task_store`` is refused with a message that names this key
 
    ``evolution.evaluation.scorer``
        a ``TaskScorer`` class, in the same form as ``evolution.method``; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory run by its Harbor verifier's reward
@@ -1750,7 +1750,7 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
        when true, a run leaving files outside the cleanup whitelist scores 0, as a run that gave no answer
 
    ``evolution.evaluation.collect_failures`` : false
-       when true, prompts of each step's traces become permanent evaluation tasks, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused when the evaluation tasks are task directories
+       when true, prompts of each job's traces become permanent evaluation tasks, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused when the evaluation tasks are task directories
 
    ``evolution.evaluation.collector``
        optional ``TaskCollector`` class, in the same form as ``evolution.method``, only with ``collect_failures``; its ``collect(samples)`` chooses which trace prompts to collect; without it every trace's user prompt is collected, and the caps and the credential and directive screens still apply
@@ -1775,7 +1775,7 @@ The beta Reefine recipe runs its agent on pi with ``evolution.agent``, adds
 
 The served model's binding is merged in when a run renders the tree; it
 never enters a published tree. The seed is the baseline the first candidate
-is measured against. The step records hold the method's raw model traffic and
+is measured against. The job records hold the method's raw model traffic and
 the clients' traces, and the history holds every evaluation run's session
 log, so treat ``evolution.state_dir`` like the commit history.
 

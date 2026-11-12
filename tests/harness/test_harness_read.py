@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-from tests.support.harness_steps import IdleMethod, evolution_config
+from tests.support.harness_jobs import IdleMethod, evolution_config
 
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.components import ScenarioComponents

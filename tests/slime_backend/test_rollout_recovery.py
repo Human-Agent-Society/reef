@@ -196,13 +196,13 @@ def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch:
         "prm_teacher_topk_log_probs_cand": [[[[-0.1, -0.2], [-0.3, -0.4]]]],
     }
 
-    from reef.train.slime_backend.loss_families import LOSS_FAMILIES
+    from reef.train.slime_backend.loss_families import resolve_loss_family
 
     # Each family declares its own columns; the manager applies whatever the
     # active family declared. Both sets here, so one call covers the table.
     declared = {
-        **LOSS_FAMILIES.resolve("sao").rollout_tensor_dtypes,
-        **LOSS_FAMILIES.resolve("openclawrl").rollout_tensor_dtypes,
+        **resolve_loss_family("sao").rollout_tensor_dtypes,
+        **resolve_loss_family("openclawrl").rollout_tensor_dtypes,
     }
     tensorize_external_fields(data, declared)
 

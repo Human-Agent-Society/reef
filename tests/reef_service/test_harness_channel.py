@@ -15,9 +15,9 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import changed_rules, harness_recipe
 from tests.support.harness_render import descriptor_data, write_descriptor
 from tests.support.harness_service import EchoInference, harness_dispatcher, job_backend
-from tests.support.harness_steps import changed_rules, harness_recipe
 
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher

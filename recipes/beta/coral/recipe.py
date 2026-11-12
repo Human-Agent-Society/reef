@@ -20,8 +20,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-# The tttd training objective and loss-family reference live in the repository
-# cookbook; importing them is what registers both names this recipe binds.
+# The tttd training objective lives in the repository cookbook; importing the
+# package registers the objective that this recipe binds, on each backend.
 import recipes.tttd  # noqa: F401  (registration side effect)
 from recipes.beta.coral.processor import CoralJobData, CoralSamples
 from reef.recipe.base import WeightTrainingRecipe

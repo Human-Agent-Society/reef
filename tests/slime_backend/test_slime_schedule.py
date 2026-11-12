@@ -1,4 +1,4 @@
-"""Backend-neutral schedule materialization: rollouts → ordered rows and steps."""
+"""Slime's schedule materialization: rollouts → ordered rows and steps."""
 
 from __future__ import annotations
 
@@ -7,10 +7,11 @@ from dataclasses import replace
 import pytest
 from tests.support.trajectories import policy_trajectory
 
-from reef.train.algos.schedule import (
+from reef.train.slime_backend.schedule import (
     MaterializedSchedule,
     StepScheduling,
     materialize_schedule,
+    next_steps,
     pack_rollouts,
     rollout_ids,
     schedule_job_data,
@@ -217,3 +218,12 @@ def test_a_schedule_refuses_values_outside_its_definition(changes, message) -> N
     )
     with pytest.raises(ValueError, match=message):
         replace(valid, **changes)
+
+
+@pytest.mark.unit
+def test_next_steps_counts_from_the_state_and_refuses_a_malformed_counter() -> None:
+    assert next_steps({}) == 1
+    assert next_steps({"steps": 4}) == 5
+    for steps in (-1, True, "4", 1.0):
+        with pytest.raises(ValueError, match="'steps' must be a non-negative integer"):
+            next_steps({"steps": steps})

@@ -11,8 +11,8 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import COMPONENT, TreeArtifacts, changed_rules, harness_backend, harness_recipe
 from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher, seed_root
-from tests.support.harness_steps import COMPONENT, TreeArtifacts, changed_rules, harness_backend, harness_recipe
 from tests.support.records import memory_records
 from tests.support.samples_service import make_samples
 

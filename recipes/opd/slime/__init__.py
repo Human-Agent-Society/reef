@@ -4,11 +4,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import TrainingSignal
-from reef.train.slime_backend.algorithm import register_loss_family
 from reef.train.slime_backend.distill import DistillAlgorithm, DistillAlgorithmSettings
-from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
+from reef.train.slime_backend.loss_families import register_loss_family
+from reef.train.slime_backend.objectives import SlimeObjective
+from reef.train.slime_backend.schedule import next_steps
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, trajectories
 
 
@@ -41,7 +41,6 @@ class OpdAlgorithm(DistillAlgorithm):
     settings_type = OpdSettings
 
 
-@register_slime_objective
 class OpdObjective(SlimeObjective):
     name = "opd"
     loss_family = "opd"

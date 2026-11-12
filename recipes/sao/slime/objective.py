@@ -16,7 +16,7 @@ from typing import Any
 
 import torch
 
-from reef.train.slime_backend.algorithm import objective
+from reef.train.slime_backend.algorithm import worker_hook
 
 
 @torch.compile(dynamic=True)
@@ -52,7 +52,7 @@ def compute_sao_loss(
     return pg_losses, clipfrac
 
 
-@objective("custom_pg_loss_function_path")
+@worker_hook("custom_pg_loss_function_path")
 def sao_loss(
     args: Namespace,
     ppo_kl: torch.Tensor,
@@ -138,7 +138,7 @@ def get_skip_observation_advantages_and_returns(
     return advantages.detach(), returns
 
 
-@objective("custom_advantage_function_path")
+@worker_hook("custom_advantage_function_path")
 def sao_advantages(args: Namespace, rollout_data: dict[str, Any]) -> None:
     """Populate SAO advantages/returns via Slime's custom-advantage hook.
 

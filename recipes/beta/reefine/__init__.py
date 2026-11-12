@@ -7,14 +7,14 @@ The parts:
     the method, the seed, the floor evaluation, the agent's isolation
     (``evolution.agent``) and the multimodal gateway.
 ``method``
-    ``ReefineMethod``: a step with a request answers it, a step without one
+    ``ReefineMethod``: a job with a request answers it, a job without one
     learns one skill from its failing traces.
 ``answer``
     The text answer: the served model writes the design and the files, and
     reviews them. Its prompts are the templates in ``prompts/``, and each
     adapter's facts are in ``harness_facts/``.
 ``agent``
-    The agent answer: a pi session changes the step's ``harness/``, checks
+    The agent answer: a pi session changes the job's ``harness/``, checks
     and tries the change, and stops. ``agent_gateway`` and ``trial`` serve
     it, and ``multimodal`` relays the provider calls of the harness and its
     trials.

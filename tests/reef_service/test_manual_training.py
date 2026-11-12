@@ -12,8 +12,8 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import COMPONENT, UNCHANGED, TreeArtifacts, changed_rules, harness_recipe
 from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
-from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeArtifacts, changed_rules, harness_recipe
 from tests.support.polling import became_true
 from tests.support.records import item_records, memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, StubInferenceRuntime, StubTrainingComponent
@@ -1366,7 +1366,7 @@ def test_a_request_runs_past_the_step_budget_and_the_failure_streak(tmp_path, re
 
     # An automatic step past the budget skips; the two requests above ran past it.
     backend = job_backend(trainer)
-    automatic = backend.prepare_step(JobData("auto", ()), HarnessState().to_json(), 5, head=head)
+    automatic = backend.prepare_job(JobData("auto", ()), HarnessState().to_json(), 5, head=head)
     assert automatic.metrics["skipped"] == "step budget of 1 exhausted"
     assert seen == ["one", "two"]
     trainer.close()
@@ -1375,10 +1375,10 @@ def test_a_request_runs_past_the_step_budget_and_the_failure_streak(tmp_path, re
     trainer = recipe_trainer(recipe_in("manual", tmp_path / "streak", method, max_failure_streak=1), records)
     backend = job_backend(trainer)
     state = HarnessState(failure_streak=1).to_json()
-    automatic = backend.prepare_step(JobData("auto", ()), state, 0, head=head)
+    automatic = backend.prepare_job(JobData("auto", ()), state, 0, head=head)
     assert automatic.metrics["skipped"] == "failure streak of 1 rejections"
     request = TrainingRequest("Follow the request", "session", "r", "request-id")
-    answered = backend.prepare_step(JobData("request-id", (), request=request), state, 0, head=head)
+    answered = backend.prepare_job(JobData("request-id", (), request=request), state, 0, head=head)
     assert answered.metrics["skipped"] == UNCHANGED and seen[-1] == "Follow the request"
     trainer.close()
 
