@@ -202,6 +202,17 @@ def test_a_restarted_generator_carries_on_from_the_reports_in_its_state(tmp_path
     assert "harbor-00000-000-inspection" in service.proposals[0]["request"].experience_text
 
 
+def test_a_generator_without_state_numbers_from_the_recipe_generation_and_never_goes_back(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    generator = spade(tmp_path, service, count=1)
+    tasks = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=7)))
+    assert [task.name for task in tasks] == ["harbor-00007-000-inspection"]
+    opened = generator_state(tmp_path / "state", "spade").read("open/00007")
+    assert opened is not None and json.loads(opened)["number"] == 7
+    tasks = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=2)))
+    assert [task.name for task in tasks] == ["harbor-00008-000-inspection"]
+
+
 def test_a_service_that_goes_away_ends_the_generation_with_what_ran(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", fail_after=1)
     generator = spade(tmp_path, service, skills=())
