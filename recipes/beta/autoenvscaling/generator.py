@@ -1168,7 +1168,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
         the recipe tries the generation again, and a round whose generation runs out of attempts is not complete,
         so a restart gives it back. An empty generation that ends would count as a complete round.
         """
-        self.generation = self.cursor.next_generation
+        # The recipe keeps its generation numbers when an upgrade drops this generator's state: never number below
+        # them, so a new task never takes the name of a task that is already published.
+        self.generation = max(self.cursor.next_generation, request.generation)
         # A generation number is used once, so no attempt meets the task names of an attempt a reload cancelled.
         self.save_cursor(replace(self.cursor, next_generation=self.generation + 1))
         if request.source_records:
