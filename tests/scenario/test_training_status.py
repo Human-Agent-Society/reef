@@ -376,7 +376,8 @@ class BackgroundStepTrainers(OneTrainerBuilder):
             scenario,
             records,
             pipeline_factory=self.recipe.background_pipeline,
-            job_loop=JobLoop(spec.job_component, scenario=scenario),
+            # The jobs' data goes to the deployment's data store, whose task file store keeps the step's task.
+            job_loop=JobLoop(spec.job_component, scenario=scenario, data_store=spec.data_store),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             samples=samples,
