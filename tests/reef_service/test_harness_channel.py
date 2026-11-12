@@ -285,7 +285,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 
     async def run() -> None:
         dispatcher = channel_dispatcher(tmp_path, PATCHES)
-        backend = job_backend(dispatcher.get_or_create_scenario("delivery").trainer)
+        backend = job_backend(dispatcher.get_or_create_scenario("delivery").trainer, dispatcher=dispatcher)
         evaluate_candidate = backend.evaluate
 
         def blocked_evaluate(candidate: UpdateCandidate, **options) -> EvaluationResult:

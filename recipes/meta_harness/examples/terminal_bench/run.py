@@ -85,7 +85,7 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> tuple[HarnessEv
     )
     if not isinstance(component.method, MetaHarness):
         raise TypeError("the example runs the Meta-Harness method")
-    return recipe, LiveObjects(runtime=runtime, harness_component=component)
+    return recipe, LiveObjects(runtime=runtime, harness_component=component, harness_facts=component.facts)
 
 
 def open_campaign(recipe: HarnessEvolutionRecipe, live: LiveObjects, directory: Path) -> Dispatcher:
@@ -132,6 +132,10 @@ def commit_job(scenario: Scenario) -> bool:
     trainer = scenario.trainer
     if not trainer.job_running:
         submitted = scenario.next_commit()
+        # The training service checks the job before it is submitted: the first calls only ask.
+        while submitted is None and trainer.job_check_waits:
+            time.sleep(0.2)
+            submitted = scenario.next_commit()
         if submitted is None:
             return False
         scenario.commit(submitted)

@@ -18,7 +18,7 @@ from tests.support.trajectories import recorded_trajectory
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.train.component import JobStatus, TrainingJob
+from reef.train.component import JobStatus, TrainingArtifactLayout, TrainingJob
 from reef.train.harness_backend.backend import JobProgress
 from reef.train.harness_backend.component import (
     PROGRESS_FILE,
@@ -178,7 +178,7 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)
     # An import's directory holds the tree alone.
-    component.check_artifact(DirectoryFiles(release))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
     (release / ".gitattributes").write_text("* filter=lfs\n")
     (release / "reef-artifact.json").write_text("{}\n")
     start = component.import_start(release)

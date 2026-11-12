@@ -406,7 +406,7 @@ def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> Non
         assert "activation" not in load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")
     # The recipe that reef serve builds from the deployment, whose top-level activation section it reads.
     service = service_config_from_mapping(config)
-    built, _ = _load_deployment(service.recipe, service, dict(os.environ))
+    built, _ = _load_deployment(service.recipe, service, dict(os.environ), runs_training=True)
     assert isinstance(built, HarnessEvolutionRecipe)
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}

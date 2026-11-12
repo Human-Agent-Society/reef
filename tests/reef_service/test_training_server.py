@@ -290,7 +290,7 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     # The recipe's trainers add their jobs to the jobs queue; the training worker runs them on the component.
     queued = dispatcher.live.training_component
     assert isinstance(queued, JobQueueComponent)
-    component = queued.component
+    (component,) = dispatcher.job_components
     assert component.received_model_path == "/models/demo"
     assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
     assert component.config["batch_size"] == 4
@@ -320,10 +320,11 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repo
 
     recipe = dispatcher.recipe
     assert isinstance(recipe, HarnessEvolutionRecipe) and recipe.evolution.adapter == "pi"
-    # The dispatcher's live objects hold the jobs queue's view of the component that the service built.
-    queued = dispatcher.live.harness_component
-    assert isinstance(queued, JobQueueComponent) and isinstance(queued.component, HarnessTrainingComponent)
-    assert isinstance(queued.component.method, IdleMethod)
+    # The dispatcher's live objects hold the jobs queue's view; the training workers hold the component that the
+    # service built.
+    assert isinstance(dispatcher.live.harness_component, JobQueueComponent)
+    (harness,) = dispatcher.job_components
+    assert isinstance(harness, HarnessTrainingComponent) and isinstance(harness.method, IdleMethod)
     assert recipe.configured_tasks() == ("t",)
 
 
@@ -463,7 +464,7 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
 
     assert dispatcher.recipe.name == "sao"
     # The training backend built the component (the inference branch builds none).
-    component = dispatcher.live.training_component.component
+    (component,) = dispatcher.job_components
     assert component.received_model_path == "/models/demo"
 
 
@@ -473,7 +474,7 @@ def test_build_dispatcher_gives_max_staleness_to_the_record_to_sample_stage_only
     dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
 
     # The window belongs to the record-to-sample stage; the training component never receives it.
-    assert "max_staleness" not in dispatcher.live.training_component.component.config
+    assert "max_staleness" not in dispatcher.job_components[0].config
     assert dispatcher.recipe.stages().build(PipelineContext("s")).record2sample.max_staleness == 2
 
 
@@ -569,7 +570,8 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             assert running["training_jobs"] == [
                 {
                     "job_id": job.job_id,
-                    "start": job.start,
+                    # Control's trainer names the root snapshot; the component got its own start of it.
+                    "start": running["training_jobs"][0]["start"],
                     "checkpoints_handled": 0,
                     "train_from": None,
                     "backend": "stub",

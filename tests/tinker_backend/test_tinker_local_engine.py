@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
+from tests.support.config_helpers import connect_training_objects
 from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import RunningEngines
 
@@ -20,7 +21,6 @@ from reef.inference.interfaces import InferenceBackend, InferenceHandler
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.inference.residency import adapter_name
 from reef.inference.serving import AdapterServingRuntime
-from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -227,7 +227,7 @@ def build(config, monkeypatch, engines):
         return runtime
 
     monkeypatch.setattr(RemoteServingRuntimeFactory, "__call__", serve)
-    component, inference = connect_training_component(
+    component, inference = connect_training_objects(
         service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", default_parameters={}
     )
     # The test runs the jobs in this process, as the training service does.
@@ -396,7 +396,7 @@ def test_engines_serve_tinker_adapters_only_on_an_engine_that_loads_them(tmp_pat
     raw["inference"]["num-gpus"] = 1
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     with pytest.raises(RuntimeConfigError, match="vllm serves full weights only"):
-        connect_training_component(
+        connect_training_objects(
             service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", default_parameters={}
         )
 

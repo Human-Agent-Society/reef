@@ -161,7 +161,11 @@ def load_recipe(
         collector=built.collector,
         agent=built.agent,
     )
-    return recipe.name, recipe, LiveObjects(runtime=runtime, harness_component=component)
+    return (
+        recipe.name,
+        recipe,
+        LiveObjects(runtime=runtime, harness_component=component, harness_facts=component.facts),
+    )
 
 
 def harness_component(live: LiveObjects) -> HarnessTrainingComponent:

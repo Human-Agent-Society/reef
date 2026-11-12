@@ -34,7 +34,7 @@ from reef.service.deploy.training import local_model_required
 from reef.storage.sql_coordination import memory_coordination
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.component import ScenarioRoot, TrainingJob, job_id_for
+from reef.train.component import ScenarioRoot, SnapshotStart, TrainingArtifactLayout, TrainingJob, job_id_for
 from reef.train.jobs import JobLoopState
 from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
 from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
@@ -438,7 +438,7 @@ def test_the_default_start_is_a_base_root_that_the_facts_write_without_the_servi
     root = tmp_path / "root"
     root.mkdir()
     default.write(root)
-    component.check_artifact(DirectoryFiles(root))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(root))
     # A trainer's first job starts from the base start, which holds the same file and no manifest.
     start = component.root_start(ScenarioRoot(Artifact.local(root), RootSource("default", inputs=inputs)))
     assert start == component.base_start == str(component.state_dir / "base")
@@ -466,7 +466,7 @@ def test_a_root_of_an_older_reef_that_holds_the_untrained_adapter_starts_from_th
     component, client, objective, tmp_path
 ):
     old_root = empty_artifact(tmp_path)
-    component.check_artifact(DirectoryFiles(old_root.local_path))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(old_root.local_path))
     start = component.root_start(ScenarioRoot(old_root, RootSource("default", inputs=component.default_start_inputs)))
     assert Path(start).parent == component.state_dir / "imported"
     assert train(component, batch(), objective.name, start=start).state == "finished"
@@ -517,18 +517,18 @@ def test_a_component_without_a_seed_pins_one_untrained_adapter_for_its_jobs_from
 def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(component, client, tmp_path):
     release = tmp_path / "release"
     with pytest.raises(ValueError, match=r"holds tinker-checkpoint\.json"):
-        component.check_artifact(DirectoryFiles(release))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
     UNTRAINED.write(release)
-    component.check_artifact(DirectoryFiles(release))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
     client.missing = {UNTRAINED.state_path}
     with pytest.raises(ValueError, match=f"{UNTRAINED.state_path} does not resolve"):
-        component.check_artifact(DirectoryFiles(release))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
     TinkerCheckpoint(MODEL, 8, "tinker://r8/state", "tinker://r8/sampler").write(release)
     with pytest.raises(ValueError, match=r"no rank 32 LoRA of .*: its rank is 8"):
-        component.check_artifact(DirectoryFiles(release))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
     (release / MANIFEST).write_text(json.dumps({**UNTRAINED.to_dict(), "unknown": 1}))
     with pytest.raises(ValueError, match="is no Tinker checkpoint manifest"):
-        component.check_artifact(DirectoryFiles(release))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
 
 
 def base_root(directory: Path, inputs: dict[str, str]) -> Artifact:
@@ -543,7 +543,7 @@ def test_a_base_root_of_the_model_rank_and_service_is_admitted_and_samples_the_b
 ):
     base = base_root(tmp_path / "base", {"model": MODEL, "lora_rank": "32"})
     # Admission compares the inputs with the component's default start.
-    component.check_artifact(DirectoryFiles(base.local_path))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(base.local_path))
     for name, inputs, message in (
         ("rank", {"model": MODEL, "lora_rank": "8"}, "lora_rank: '8', not '32'"),
         ("model", {"model": "org/other", "lora_rank": "32"}, "model: 'org/other', not"),
@@ -551,10 +551,10 @@ def test_a_base_root_of_the_model_rank_and_service_is_admitted_and_samples_the_b
     ):
         other = base_root(tmp_path / name, inputs)
         with pytest.raises(ValueError, match=message):
-            component.check_artifact(DirectoryFiles(other.local_path))
+            TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(other.local_path))
     UNTRAINED.write(base.local_path)
     with pytest.raises(ValueError, match=r"holds base\.json alone"):
-        component.check_artifact(DirectoryFiles(base.local_path))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(base.local_path))
     (base.local_path / MANIFEST).unlink()
 
     # The runtime samples the base model for it, before and after a trained release.
@@ -1076,7 +1076,11 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         wait_for_serving(second)
         # The root is a base root: serving samples the base model, and the next job starts a new LoRA of it.
         assert inference.served_model_name("math") == MODEL
-        assert loop_state(scenario).start == component.base_start
+        # The training start names the root snapshot; the training service imports it when a job starts from it.
+        named = SnapshotStart.from_text(loop_state(scenario).start)
+        assert named == SnapshotStart(base)
+        root_files = scenario.repository.resolve(scenario.repository.start_artifact)
+        assert component.snapshot_start(root_files) == component.base_start
         assert component.start_at(Path(component.base_start)) == FRESH
         assert component._client.initializations == 0
     finally:

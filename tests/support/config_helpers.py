@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+from reef.service.assembly import connect_weight_objects
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
 
@@ -42,3 +43,12 @@ def load_harness_deployment(path):
     raw = load_config(path)
     config = load_deployment(path)
     return {**config, **recipe_config_from_file_layout(raw)}
+
+
+def connect_training_objects(settings, *, model_path, default_parameters):
+    """The training component and the serving runtime that a training service builds for ``settings``
+    (``connect_weight_objects`` with ``runs_training``)."""
+    live = connect_weight_objects(
+        settings, model_path=model_path, default_parameters=default_parameters, runs_training=True
+    )
+    return live.training_component, live.runtime

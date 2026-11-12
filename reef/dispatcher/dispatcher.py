@@ -63,6 +63,7 @@ from reef.storage.work_queue import FINAL_STATES, WorkItem
 from reef.train.job_queue import (
     JobExperimentRecorder,
     JobQueueComponent,
+    TrainingCheckWorker,
     TrainingJobWorker,
     cancel_request_jobs,
     cancel_scenario_job,
@@ -178,10 +179,12 @@ class Dispatcher(
         The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
         the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
 
-        Each job component of ``live`` gets its jobs through the jobs queue: the dispatcher gives the trainers a
-        ``JobQueueComponent`` over it and, with ``training``, runs a ``TrainingJobWorker`` on it. ``self.live`` is
-        the value that the trainers see: the jobs queue's views of the components, and the store of the job data
-        directories.
+        Each training backend whose facts ``live`` holds gets its jobs through the jobs queue: the dispatcher gives
+        the trainers a ``JobQueueComponent`` of the facts. ``live`` holds a backend's component only in a process
+        that runs ``training``; the dispatcher then runs a ``TrainingJobWorker`` and a ``TrainingCheckWorker`` on
+        it, and nothing else reads the component. ``self.live`` is the value that the trainers see: the jobs
+        queue's views, and the store of the job data directories. A process that runs every service takes the same
+        path as control of a split deployment.
 
         ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
         constructor first waits for the control lease, while another control instance holds it; then the
@@ -218,33 +221,43 @@ class Dispatcher(
         self.job_directory_store: DataStore = (
             MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
         )
+        #: The components that the process built. Its training workers run their jobs and close them; a process
+        #: that runs no training service should hold none, and the dispatcher closes those that it holds.
+        self.job_components = live.job_components()
         if self.services.runs_training:
-            for component in live.job_components():
+            for component in self.job_components:
                 self.workers.add(
                     TrainingJobWorker(
                         component,
                         self.queue,
                         self.job_directory_store,
+                        backend_factory,
                         worker_id=instance_id(f"training-{component.name}"),
+                        local_artifact_dir=local_artifact_dir,
                         slots=training_max_jobs,
                     )
                 )
-        owns_components = not self.services.runs_training
+                self.workers.add(
+                    TrainingCheckWorker(
+                        component,
+                        self.queue,
+                        self.job_directory_store,
+                        backend_factory,
+                        worker_id=instance_id(f"training-check-{component.name}"),
+                        local_artifact_dir=local_artifact_dir,
+                    )
+                )
         #: The deployment's recipe: configuration only.
         self.recipe = recipe
-        #: The live objects as the trainers see them: each job component is the jobs queue's view of the one that
-        #: the process built, and the data store is the store of the job data directories.
+        #: The live objects as the trainers see them: each component is the jobs queue's view of the backend whose
+        #: facts the process holds, and the data store is the store of the job data directories.
         self.live = replace(
             live,
             training_component=(
-                None
-                if live.training_component is None
-                else JobQueueComponent(live.training_component, self.queue, owns_component=owns_components)
+                None if live.training_facts is None else JobQueueComponent(live.training_facts, self.queue)
             ),
             harness_component=(
-                None
-                if live.harness_component is None
-                else JobQueueComponent(live.harness_component, self.queue, owns_component=owns_components)
+                None if live.harness_facts is None else JobQueueComponent(live.harness_facts, self.queue)
             ),
             data_store=self.job_directory_store,
         )
@@ -1321,7 +1334,7 @@ class Dispatcher(
             self.storage.close()
         except BaseException as exc:
             errors.append(exc)
-        errors.extend(close_runtimes(self.live.job_components(), self.live.runtime))
+        errors.extend(close_runtimes(() if self.services.runs_training else self.job_components, self.live.runtime))
         # Send the experiment events that are still queued before the tracker closes.
         self.registry.experiment_reports.close()
         try:

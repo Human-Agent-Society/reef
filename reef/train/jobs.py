@@ -174,7 +174,8 @@ class JobLoop:
     never share a job. ``scenario_component`` is the scenario component that the jobs train, or None.
     ``data_store`` keeps the job data directory of each job that ``submit`` submits; None keeps
     them in a new temporary directory, for a process that keeps no state across restarts. ``submit`` and
-    ``poll`` return the ``JobCommit`` that the trainer commits next.
+    ``poll`` return the ``JobCommit`` that the trainer commits next. ``waiting_job`` is the job whose data
+    directory ``submit`` wrote and that the component has not taken yet (``JobCheckPendingError``), or None.
     """
 
     def __init__(
@@ -193,6 +194,7 @@ class JobLoop:
         self.scenario = scenario
         self.scenario_component = scenario_component
         self.data_store = MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
+        self.waiting_job: TrainingJob | None = None
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
@@ -239,7 +241,9 @@ class JobLoop:
         ``data``, which encodes as JSON. The loop writes ``data`` as the job's data directory first. The directory
         holds no request: the job keeps only its ID (``TrainingJob.request_id``). ``train_from_artifact_id`` is the
         artifact of the training start, for the job listing of a job that continues it, or None. Raise ``ValueError``
-        when ``accepts_job`` is false.
+        when ``accepts_job`` is false, and when the component refuses the job. Raise ``JobCheckPendingError`` while
+        the component waits for the check of the job: a later call with the same rows, start and parameters names
+        the same job and submits it, and its data directory is written once.
         """
         if (start is None) != (train_from is None):
             raise ValueError("a job names its start and the start's artifact together, or neither")
@@ -248,19 +252,23 @@ class JobLoop:
         backend = self.component.name
         start = state.start if start is None else start
         job_id = self.job_id(state, start, data, parameters)
-        job = TrainingJob(
-            job_id,
-            backend,
-            start,
-            self.data_store.write_job_directory(data),
-            parameters,
-            scenario=self.scenario,
-            request_id=None if data.request is None else data.request.id,
-            component=self.scenario_component,
-            previous_job_id=None if state.last_job is None else state.last_job.job_id,
-            train_from_artifact_id=train_from if train_from is not None else train_from_artifact_id,
-        )
+        job = self.waiting_job
+        if job is None or job.job_id != job_id:
+            job = TrainingJob(
+                job_id,
+                backend,
+                start,
+                self.data_store.write_job_directory(data),
+                parameters,
+                scenario=self.scenario,
+                request_id=None if data.request is None else data.request.id,
+                component=self.scenario_component,
+                previous_job_id=None if state.last_job is None else state.last_job.job_id,
+                train_from_artifact_id=train_from if train_from is not None else train_from_artifact_id,
+            )
+        self.waiting_job = job
         self.component.submit(job)
+        self.waiting_job = None
         submitted = replace(state, jobs=(*state.jobs, RunningJob(job_id, start, train_from=train_from)))
         event: dict[str, Any] = {"job_id": job_id, "backend": backend, "event": "submitted"}
         return JobCommit(

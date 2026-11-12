@@ -246,8 +246,9 @@ def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher
     submissions: list[str] = []
 
     def lose_first_acknowledgement(self: JobQueueComponent, job: TrainingJob) -> None:
-        submissions.append(job.job_id)
+        # A submission that waits for the job's check raises before this line.
         queued_submit(self, job)
+        submissions.append(job.job_id)
         if len(submissions) == 1:
             raise ConnectionError("lost submission acknowledgement")
 

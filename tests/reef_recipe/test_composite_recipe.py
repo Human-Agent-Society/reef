@@ -335,6 +335,7 @@ def test_each_component_of_an_item_root_is_checked_by_its_own_backend(tmp_path: 
         training_component=weights,
         training_facts=StubFacts(weights),
         harness_component=harness,
+        harness_facts=StubFacts(harness),
     )
     # The facts of the weight backend check the weights alone: the harness tree holds no manifest of theirs.
     check_root_start(recipe, live, root("good", "manifest.json", "rules.md"))
@@ -344,8 +345,9 @@ def test_each_component_of_an_item_root_is_checked_by_its_own_backend(tmp_path: 
         check_root_start(recipe, live, root("no-weights", "notes.txt", "rules.md"))
     with pytest.raises(ValueError, match=r"artifact is missing rules\.md"):
         check_root_start(recipe, live, root("no-tree", "manifest.json", "notes.txt"))
-    # A process that holds no harness component checks the weights alone.
-    check_root_start(recipe, replace(live, harness_component=None), root("control", "manifest.json", "notes.txt"))
+    # A process that holds no facts of the harness checks the weights alone.
+    weights_only = replace(live, harness_component=None, harness_facts=None)
+    check_root_start(recipe, weights_only, root("control", "manifest.json", "notes.txt"))
 
 
 @pytest.mark.unit
@@ -415,7 +417,7 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
         }
         return service_config_from_mapping(settings if activation is None else {**settings, "activation": activation})
 
-    recipe, live = _load_deployment(COMPOSITE, composite_service(), {})
+    recipe, live = _load_deployment(COMPOSITE, composite_service(), {}, runs_training=True)
     assert isinstance(recipe, CompositeRecipe)
     assert isinstance(live.training_component, LocalRuntime)
     assert live.training_component.received_model_path == "demo-model"
@@ -429,13 +431,13 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
 
     # A flat weight recipe setting has no place at the top of a composite.
     with pytest.raises(ValueError, match=r"reef\.training_mode is not a setting of CompositeRecipe"):
-        _load_deployment(COMPOSITE, composite_service(training_mode="manual"), {})
+        _load_deployment(COMPOSITE, composite_service(training_mode="manual"), {}, runs_training=True)
 
     # A top level activation section is the composite's own: one rule activates the artifacts of every component.
-    never, _ = _load_deployment(COMPOSITE, composite_service({"module": "never"}), {})
+    never, _ = _load_deployment(COMPOSITE, composite_service({"module": "never"}), {}, runs_training=True)
     assert isinstance(never.activation_rule(), NeverActivate)
     with pytest.raises(RecipeConfigError, match=r"cannot import activation 'no\.such\.module:Rule'"):
-        _load_deployment(COMPOSITE, composite_service({"module": "no.such.module:Rule"}), {})
+        _load_deployment(COMPOSITE, composite_service({"module": "no.such.module:Rule"}), {}, runs_training=True)
 
 
 @pytest.mark.unit
@@ -890,7 +892,7 @@ def test_only_a_composite_evaluates_through_the_service(
         built.update(live=kwargs["live"], hold=kwargs["hold_local_cycles"])
         return SimpleNamespace(services=ServiceSet.of(kwargs["components"]))
 
-    monkeypatch.setattr(assembly, "_load_deployment", lambda *args: (recipe, LiveObjects()))
+    monkeypatch.setattr(assembly, "_load_deployment", lambda *args, **kwargs: (recipe, LiveObjects()))
     monkeypatch.setattr(assembly, "Dispatcher", dispatcher)
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
     settings = ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path), port=8900)

@@ -6,15 +6,16 @@ import json
 
 import pytest
 from tests.support.job_data import job_data_ref
-from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.runtime_stubs import StubFacts, StubTrainingComponent
 
 from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
-from reef.core.errors import RuntimeConfigError
+from reef.core.errors import InternalError, RuntimeConfigError
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.train.component import (
     JobStatus,
     SavedCheckpoint,
+    TrainingArtifactLayout,
     TrainingBackendFacts,
     TrainingComponent,
     TrainingComponentFactory,
@@ -166,14 +167,14 @@ def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp
     (adapter / ADAPTER_DIR).mkdir(parents=True)
     full_weights = StubTrainingComponent(artifact_format=ArtifactFormat("full"))
     with pytest.raises(ValueError, match=r"config\.json and weight files"):
-        full_weights.check_artifact(DirectoryFiles(full))
+        StubFacts(full_weights).check_artifact(DirectoryFiles(full))
     (full / "config.json").write_text("{}")
     (full / "model-00001-of-00002.safetensors").write_bytes(b"w")
-    full_weights.check_artifact(DirectoryFiles(full))
+    StubFacts(full_weights).check_artifact(DirectoryFiles(full))
 
     rank_8 = StubTrainingComponent(artifact_format=ArtifactFormat("adapter", 8, ("q_proj", "v_proj")))
     with pytest.raises(ValueError, match="holds a PEFT adapter in adapter/"):
-        rank_8.check_artifact(DirectoryFiles(adapter))
+        StubFacts(rank_8).check_artifact(DirectoryFiles(adapter))
     (adapter / ADAPTER_DIR / "adapter_model.safetensors").write_bytes(b"a")
     for config, message in (
         ({"r": 16, "target_modules": ["q_proj"]}, "at most 8"),
@@ -182,15 +183,47 @@ def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp
     ):
         (adapter / ADAPTER_DIR / "adapter_config.json").write_text(json.dumps(config))
         with pytest.raises(ValueError, match=message):
-            rank_8.check_artifact(DirectoryFiles(adapter))
+            StubFacts(rank_8).check_artifact(DirectoryFiles(adapter))
     (adapter / ADAPTER_DIR / "adapter_config.json").write_text(json.dumps({"r": 4, "target_modules": ["q_proj"]}))
-    rank_8.check_artifact(DirectoryFiles(adapter))
+    StubFacts(rank_8).check_artifact(DirectoryFiles(adapter))
     # ``("all",)`` takes any target modules.
-    StubTrainingComponent(artifact_format=ArtifactFormat("adapter", 8, ("all",))).check_artifact(
+    StubFacts(StubTrainingComponent(artifact_format=ArtifactFormat("adapter", 8, ("all",)))).check_artifact(
         DirectoryFiles(adapter)
     )
     with pytest.raises(ValueError, match="takes no imported snapshots"):
-        StubTrainingComponent(artifact_format=None).check_artifact(DirectoryFiles(full))
+        StubFacts(StubTrainingComponent(artifact_format=None)).check_artifact(DirectoryFiles(full))
+
+
+@pytest.mark.unit
+def test_the_layout_asks_the_component_for_what_the_facts_leave_to_the_service(tmp_path):
+    class NamingFacts(StubFacts):
+        def check_artifact(self, files):
+            if "manifest.json" not in files.paths():
+                raise ValueError("an artifact holds manifest.json")
+            return {"path": files.read_bytes("manifest.json").decode()}
+
+    class Service(StubTrainingComponent):
+        def check_remote_artifact(self, names):
+            if names["path"] != "known":
+                raise ValueError(f"the service holds no {names['path']}")
+
+    component = Service()
+    facts = NamingFacts(component)
+    files = DirectoryFiles(tmp_path)
+    # The facts refuse at once what the files show; nothing is asked then.
+    with pytest.raises(ValueError, match=r"holds manifest\.json"):
+        TrainingArtifactLayout(facts).check(files)
+    (tmp_path / "manifest.json").write_text("known")
+    TrainingArtifactLayout(facts, component).check(files)
+    # A process with no way to the training service cannot finish the check, and says so with no refusal.
+    with pytest.raises(InternalError, match="the control service checks an import"):
+        TrainingArtifactLayout(facts).check(files)
+    (tmp_path / "manifest.json").write_text("lost")
+    with pytest.raises(ValueError, match="the service holds no lost"):
+        TrainingArtifactLayout(facts, component).check(files)
+    # A component whose facts name nothing is never asked.
+    with pytest.raises(InternalError, match="checks no artifact on a service"):
+        StubTrainingComponent().check_remote_artifact({})
 
 
 @pytest.mark.unit
@@ -199,16 +232,16 @@ def test_a_base_root_is_admitted_exactly_for_the_default_start_that_it_names(tmp
     component = StubTrainingComponent(artifact_format=artifact_format)
     assert component.default_start_inputs == {"model": "stub"}
     (tmp_path / BASE_FILE).write_text(BaseRoot({"model": "stub"}).to_text())
-    component.check_artifact(DirectoryFiles(tmp_path))
+    StubFacts(component).check_artifact(DirectoryFiles(tmp_path))
     (tmp_path / BASE_FILE).write_text(BaseRoot({"model": "stub", "lora_rank": "8"}).to_text())
     with pytest.raises(ValueError, match=r"another default start than this deployment's \(lora_rank: '8', not None"):
-        component.check_artifact(DirectoryFiles(tmp_path))
+        StubFacts(component).check_artifact(DirectoryFiles(tmp_path))
     (tmp_path / BASE_FILE).write_text(BaseRoot({"model": "other"}).to_text())
     with pytest.raises(ValueError, match="model: 'other', not 'stub'"):
-        component.check_artifact(DirectoryFiles(tmp_path))
+        StubFacts(component).check_artifact(DirectoryFiles(tmp_path))
     (tmp_path / BASE_FILE).write_text("{}")
     with pytest.raises(ValueError, match=r"the object \{format, inputs\}"):
-        component.check_artifact(DirectoryFiles(tmp_path))
+        StubFacts(component).check_artifact(DirectoryFiles(tmp_path))
 
 
 #: The factory of the stand-in backend of ``tests.support.training_deployment``.

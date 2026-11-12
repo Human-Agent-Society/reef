@@ -246,9 +246,9 @@ def recovered_trainer_states(
 def read_trainer_spec(recipe: Recipe, live: LiveObjects) -> TrainerSpec:
     """The spec of the one trainer of ``recipe``, which is not a composite, on the objects of ``live``.
 
-    - A ``HarnessEvolutionRecipe`` submits each step as a job of ``live.harness_component``, which the service
-      built (``reef.service.assembly.with_harness_components``).
+    - A ``HarnessEvolutionRecipe`` submits each step as a job of ``live.harness_component``.
     - A ``WeightTrainingRecipe`` submits jobs to ``live.training_component``, with its ``parameters_by_kind``.
+      In a dispatcher's ``live``, both are the jobs queue's views (``reef.train.job_queue.JobQueueComponent``).
     - Any other recipe only reads records.
 
     The trainer writes the data of each job to ``live.data_store``.

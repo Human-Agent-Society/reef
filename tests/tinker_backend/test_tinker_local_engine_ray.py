@@ -26,10 +26,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.config_helpers import connect_training_objects
+
 from reef.dispatcher import Dispatcher
 from reef.inference.serving import AdapterServingRuntime
 from reef.scenario.live_objects import LiveObjects
-from reef.service.assembly import connect_training_component
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.train.jobs import JobLoopState
@@ -264,7 +265,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     }
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [service["name"] for service in config["services"]] == ["reef"]
-    component, inference = connect_training_component(
+    component, inference = connect_training_objects(
         service_config_from_mapping(config), model_path=MODEL, default_parameters={}
     )
     dispatcher = None

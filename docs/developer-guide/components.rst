@@ -178,5 +178,5 @@ ID. An inference runtime that serves immutable remote snapshots validates the
 checkpoint and binds its remote sampler. Tinker's inference runtime uses this
 to serve the authoritative artifact before the scenario serves requests. The
 training component does not read the head: the next job starts from the
-trainer's committed start, and a ``train-from`` imports the snapshot into the
-component with ``import_start``.
+trainer's committed start, and after a ``train-from`` the training service
+imports the snapshot into the component with ``import_start``.

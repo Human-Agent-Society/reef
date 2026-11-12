@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.training_deployment import LocalFacts
 
 from reef.core.config import config_arguments, config_option, parse_config_values
@@ -22,6 +22,7 @@ from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, config_field
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.loading import load_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
@@ -282,14 +283,13 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
         resolved.append(values)
         return values
 
-    def connect(settings, *, model_path, default_parameters, services=None):
+    def connect(settings, *, model_path, default_parameters, runs_training):
         assert len(resolved) == 1
         assert model_path == "model"
-        return StubTrainingComponent(), StubInferenceRuntime()
+        return LiveObjects(runtime=StubInferenceRuntime(), training_facts=LocalFacts())
 
     monkeypatch.setattr(assembly, "resolve_config_field_values", resolve)
-    monkeypatch.setattr(assembly, "connect_training_component", connect)
-    monkeypatch.setattr(assembly, "training_backend_facts", lambda config, *, model_path: LocalFacts())
+    monkeypatch.setattr(assembly, "connect_weight_objects", connect)
     settings = ServiceSettings(
         recipe="reef_config_extension:Training",
         model_path="model",
@@ -297,7 +297,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
         training_backend_options={"global-batch-size": 1},
         recipe_settings={"count": "2", "label": "run-a"},
     )
-    recipe, _ = assembly._training_recipe(ExtensionRecipe, settings, {})
+    recipe, _ = assembly._training_recipe(ExtensionRecipe, settings, {}, runs_training=False)
     assert recipe.count == 2 and recipe.label == "run-a"
     assert len(resolved) == 1
 

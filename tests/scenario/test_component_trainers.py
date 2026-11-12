@@ -30,6 +30,7 @@ from tests.support.component_trainers import (
     _repository,
     _scenario,
     _TwoTrainerRecipe,
+    checked_commit,
     component_files,
     component_id,
     finish_job,
@@ -54,6 +55,7 @@ from reef.core.requirements import required_by
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.execution.jobs import SupportsReceipt
+from reef.execution.workers import SERVICE_COMPONENTS
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
@@ -72,8 +74,8 @@ from reef.storage.commits import (
 )
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.train import ComponentTrainer, Trainer
-from reef.train.component import JobStatus, TrainingJob
-from reef.train.job_queue import JOBS_QUEUE
+from reef.train.component import JobStatus, SnapshotStart, TrainingJob
+from reef.train.job_queue import CHECKS_QUEUE, JOBS_QUEUE, TrainingCheckWorker
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer_builder import TrainerBuilder
@@ -213,7 +215,7 @@ def append_commit(
     ``make`` False trains the samples that are stored already."""
     if make:
         make_samples(scenario)
-    result = scenario.next_commit(component)
+    result = checked_commit(scenario, component)
     if result is None:
         return None
     batch = scenario.trainer_for(component).pending_job_data
@@ -797,7 +799,7 @@ def test_a_report_on_an_inference_the_weights_job_trained_is_skipped_not_raised(
     restart."""
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True)
     scenario = loaded(dispatcher, 1)
-    submitted = scenario.next_commit(WEIGHTS)
+    submitted = checked_commit(scenario, WEIGHTS)
     assert submitted is not None
     assert append_commit(scenario, HARNESS) is not None
     scenario.records.append(agent_report("r1b", "i1"))
@@ -1043,7 +1045,7 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True)
     scenario = loaded(dispatcher, 1)
     scenario.records.append(_records(2, scenario.serving_artifact_id())[0])
-    submitted = scenario.next_commit(WEIGHTS)
+    submitted = checked_commit(scenario, WEIGHTS)
     assert submitted is not None
     assert append_commit(scenario, HARNESS) is not None
     scenario.records.append(agent_report("run", "i1", "i2"))
@@ -1090,7 +1092,7 @@ def test_a_job_submitted_on_an_instance_reloaded_under_it_is_the_same_job_on_the
     training = WeightsJobComponent(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     old = loaded(dispatcher, 1)
-    assert old.next_commit(WEIGHTS) is not None
+    assert checked_commit(old, WEIGHTS) is not None
     [job] = submitted_jobs(training, 1)
     new = reload_agent(dispatcher)
     assert new is not old
@@ -1801,16 +1803,93 @@ def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
     scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
     # The training worker stops the job on the component once it sees the cancelled item.
     assert became_true(lambda: training.statuses[running.job_id].error == "cancelled")
-    [imported] = training.imported
+    # Control names the snapshot and imports nothing: the training service imports it for the next job.
+    assert training.imported == []
     assert scenario.current_snapshot() == served
     assert component_files(scenario, served)[WEIGHTS] == "weights job 1"
     # The harness trainer's start is its own: it does not move.
     assert scenario.store.history()[-1].component == WEIGHTS
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
-    assert (state.jobs, state.start) == ((), str(imported))
+    assert state.jobs == () and SnapshotStart.from_text(state.start) == SnapshotStart(
+        scenario.repository.start_artifact.revision
+    )
     _append_records(scenario, 3)
     assert append_commit(scenario, WEIGHTS) == [("i3", "r3")]
-    assert submitted_jobs(training, 3)[-1].start == str(imported)
+    assert submitted_jobs(training, 3)[-1].start == str(training.imported[-1])
+
+
+@pytest.mark.unit
+def test_a_job_that_waits_for_its_check_holds_nothing_of_the_scenario(
+    tmp_path: Path, dispatchers: _Dispatchers
+) -> None:
+    """No training service answers. The job's data is not reserved between two polls, so the scenario's other
+    operations run, and nothing is consumed. Once the check is answered, the next poll submits the job."""
+    training = WeightsJobComponent(tmp_path / "checkpoints")
+    factory = _repository(tmp_path)
+    dispatcher, _ = dispatchers.open(
+        training=training,
+        hold_local_cycles=True,
+        backend_factory=factory,
+        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+    )
+    scenario = loaded(dispatcher, 1)
+    trainer = scenario.trainer_for(WEIGHTS)
+    for _ in range(3):
+        assert scenario.next_commit(WEIGHTS) is None
+    # The worker polls for the answer at its usual interval, and the trainer holds no reservation meanwhile.
+    assert trainer.job_check_waits and trainer.needs_polling() and not trainer.has_pending_commit
+    [check] = dispatcher.queue.items(CHECKS_QUEUE)
+    assert check.state == "queued"
+
+    root = scenario.artifact_status()[WEIGHTS]["training_start"]
+    # Each of these raised CommitPendingError while a waiting job kept its data reserved.
+    scenario.activate(root, WEIGHTS)
+    scenario.train_from(root, WEIGHTS)
+    assert scenario.store.history()[-1].operation == "train_from"
+    assert all(record.training_job_id is None for record in scenario.store.history())
+    # The job now starts from another start, so it is another job with a check of its own.
+    assert scenario.next_commit(WEIGHTS) is None
+    first, second = dispatcher.queue.items(CHECKS_QUEUE)
+    assert first.id == check.id and second.state == "queued"
+
+    # The training service comes up and answers; the next poll submits the job with the samples that waited.
+    checks = TrainingCheckWorker(
+        training, dispatcher.queue, dispatcher.job_directory_store, factory, worker_id="checks", poll_seconds=0.01
+    )
+    checks.start()
+    try:
+        assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
+    finally:
+        checks.stop()
+    assert not trainer.job_check_waits
+    [queued] = dispatcher.queue.items(JOBS_QUEUE)
+    assert SnapshotStart.from_text(queued.payload["start"]) == SnapshotStart(
+        scenario.repository.start_artifact.revision
+    )
+
+
+@pytest.mark.unit
+def test_a_check_that_could_not_run_consumes_no_sample(tmp_path: Path, dispatchers: _Dispatchers) -> None:
+    """The training service cannot run the check. The trainer's cycle fails with an error that is no refusal, no
+    commit is made, and the samples train once the check runs."""
+
+    class Unreachable(WeightsJobComponent):
+        reachable = False
+
+        def check_job(self, job: TrainingJob) -> None:
+            if not self.reachable:
+                raise ConnectionError("the artifact store did not answer")
+
+    training = Unreachable(tmp_path / "checkpoints")
+    dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
+    scenario = loaded(dispatcher, 1)
+    commits = scenario.commit_number
+    with pytest.raises(RuntimeError, match=r"so nothing was decided about it: .*the artifact store did not answer"):
+        checked_commit(scenario, WEIGHTS)
+    assert scenario.commit_number == commits and training.submitted == []
+    assert scenario.trainer_for(WEIGHTS).holds_untrained_records()
+    training.reachable = True
+    assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
 
 
 @pytest.mark.unit
@@ -1818,7 +1897,7 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
     """The process stops after the ``train_from`` record and before the trainer's next commit records the start.
-    The trainer's state recovers from its earlier commit, so the restarted scenario imports the snapshot again."""
+    The trainer's state recovers from its earlier commit, so the restarted scenario names the snapshot again."""
     training = HeldJobs(tmp_path / "checkpoints")
     factory = _repository(tmp_path)
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)
@@ -1828,7 +1907,8 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     settle_weights_job(scenario)
     served = scenario.current_snapshot()
     scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
-    assert JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).start == str(training.imported[0])
+    named = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).start
+    assert SnapshotStart.from_text(named) == SnapshotStart(scenario.repository.start_artifact.revision)
     dispatcher.close()
 
     restarted, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)
@@ -1837,12 +1917,11 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     # The previous owner's routes can remain until recovery starts. Wait for the new runtime to load its weights.
     assert became_true(lambda: runtime.served == "w1")
     scenario = loaded(restarted, 2)
-    assert len(training.imported) == 2
     assert scenario.current_snapshot() == served
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
-    assert state.start == str(training.imported[-1])
+    assert state.start == named and training.imported == []
     assert append_commit(scenario, WEIGHTS) == [("i2", "r2")]
-    assert submitted_jobs(training, 2)[-1].start == state.start
+    assert submitted_jobs(training, 2)[-1].start == str(training.imported[-1])
 
 
 @pytest.mark.unit

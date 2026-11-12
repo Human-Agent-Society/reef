@@ -169,7 +169,7 @@ def test_service_app_cleanup_closes_its_owned_runtime_once(monkeypatch, tmp_path
     monkeypatch.setattr(
         assembly,
         "_load_deployment",
-        lambda *args: (
+        lambda *args, **kwargs: (
             Recipe(),
             LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
         ),
@@ -193,7 +193,7 @@ def test_failed_service_assembly_releases_its_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(
         assembly,
         "_load_deployment",
-        lambda *args: (
+        lambda *args, **kwargs: (
             Recipe(),
             LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
         ),

@@ -747,9 +747,10 @@ class ScenarioCommitter:
                 self.start_trainer(component_trainer, self._artifacts.resolve(start.snapshot))
 
     def training_start(self, component_trainer: ComponentTrainer, snapshot: Artifact) -> str:
-        """The start of a job of ``component_trainer`` that trains from its component of ``snapshot``: what the
-        training component imports of it (``Trainer.import_start``), which can copy weights for minutes. Raise
-        ``TrainingStartRefusedError`` when the trainer cannot start from it."""
+        """The start of a job of ``component_trainer`` that trains from its component of ``snapshot``: the name of
+        the snapshot, after the backend's facts checked the component (``Trainer.import_start``). The training
+        service imports it when it takes the job. Raise ``TrainingStartRefusedError`` when the trainer cannot start
+        from it."""
         artifact = self._binding.components.component_artifact(snapshot, component_trainer.component).materialize()
         return component_trainer.trainer.import_start(artifact)
 

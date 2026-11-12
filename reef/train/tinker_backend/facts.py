@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import Any, Self
 
 from reef.artifact.base_root import BASE_FILE, BaseRoot, read_base_root
+from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, read_reference
+from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.job_data import JobDataKind
 from reef.tinker.checkpoint import MANIFEST
@@ -39,8 +41,10 @@ class TinkerFacts(TrainingBackendFacts):
     checkpoint of the manifest in ``directory``. ``default_start`` is a base root of ``default_start_inputs``
     (``reef.artifact.base_root``): a job from it trains a new LoRA of ``model``. ``base_root_in(directory)`` is
     the base root that ``directory`` holds, or None; it raises ``ValueError`` for a base root of other inputs.
-    ``check_root_start`` accepts a root whose files are such a base root or hold a manifest that ``validated``
-    takes.
+    ``check_root_start`` and ``check_import_start`` accept files that are such a base root or hold a manifest that
+    ``validated`` takes. ``check_artifact`` accepts such a base root with nothing left to check; for a manifest that
+    ``validated`` takes it returns ``{"manifest": <the manifest>}``, whose state path the component looks up on
+    the service (``TinkerJobComponent.check_remote_artifact``).
 
     Purpose: ``TinkerComponentFactory.facts`` makes one from the deployment's ``TinkerSettings`` (``of``);
     ``TinkerTrainingComponent`` makes one from the same settings and answers from it.
@@ -121,9 +125,27 @@ class TinkerFacts(TrainingBackendFacts):
         return base
 
     def check_root_start(self, root: ScenarioRoot) -> None:
-        directory = root.local_directory()
-        if self.base_root_in(directory) is None:
-            self.checkpoint_in(directory)
+        self.check_import_start(root.local_directory())
+
+    def check_import_start(self, artifact_dir: Path) -> None:
+        if self.base_root_in(artifact_dir) is None:
+            self.checkpoint_in(artifact_dir)
+
+    def check_artifact(self, files: ArtifactFiles) -> Mapping[str, JsonValue] | None:
+        if self.is_own_base_root(files):
+            return None
+        return {"manifest": self.validated(manifest_of(files)).to_dict()}
+
+
+def manifest_of(files: ArtifactFiles) -> TinkerCheckpoint:
+    """The checkpoint of the manifest that ``files`` hold; ``ValueError`` without a readable manifest."""
+    if MANIFEST not in files.paths():
+        raise ValueError(f"a Tinker artifact holds {MANIFEST}")
+    try:
+        return TinkerCheckpoint.from_dict(json.loads(files.read_bytes(MANIFEST)))
+    except (TypeError, ValueError) as exc:
+        # A manifest from outside Reef may have any shape; ``from_dict`` refuses unknown fields with TypeError.
+        raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -140,8 +162,11 @@ class SpindleFullFacts(TrainingBackendFacts):
     validated checkpoint of the manifest in ``directory``. ``check_base_files(directory)`` raises ``ValueError``
     when ``directory`` refers to another revision than ``base``. ``default_start`` is the reference to ``base``
     (``reef.artifact.sources.REFERENCE_FILE``), not a base root: the base's weights are a commit on the Hub.
-    ``check_root_start`` accepts a root whose files hold a manifest that ``validated`` takes, and one without a
-    manifest that refers to ``base`` or to nothing.
+    ``check_root_start`` and ``check_import_start`` accept files that hold a manifest that ``validated`` takes,
+    and files without a manifest that refer to ``base`` or to nothing. ``check_artifact`` checks no weights
+    itself, since they are on the Hub: for a manifest that ``validated`` takes beside a reference it returns
+    ``{"manifest", "weights"}``, and for files without a manifest ``{"files": <their checksum>}``, which the
+    component compares with the service and the Hub (``SpindleFullTrainingComponent.check_remote_artifact``).
 
     Purpose: ``SpindleFullComponentFactory.facts`` makes one from the deployment's ``SpindleFullSettings``
     (``of``); ``SpindleFullTrainingComponent`` makes one from the same settings and answers from it.
@@ -213,11 +238,22 @@ class SpindleFullFacts(TrainingBackendFacts):
             raise ValueError(f"the {self.name} training component starts only from its base {self.base.uri}")
 
     def check_root_start(self, root: ScenarioRoot) -> None:
-        directory = root.local_directory()
-        if (directory / MANIFEST).exists():
-            self.checkpoint_in(directory)
+        self.check_import_start(root.local_directory())
+
+    def check_import_start(self, artifact_dir: Path) -> None:
+        if (artifact_dir / MANIFEST).exists():
+            self.checkpoint_in(artifact_dir)
         else:
-            self.check_base_files(directory)
+            self.check_base_files(artifact_dir)
+
+    def check_artifact(self, files: ArtifactFiles) -> Mapping[str, JsonValue] | None:
+        if MANIFEST not in files.paths():
+            return {"files": files.checksum()}
+        manifest = self.validated(manifest_of(files)).to_dict()
+        if REFERENCE_FILE not in files.paths():
+            raise ValueError(f"a {self.name} release holds {REFERENCE_FILE} beside its manifest")
+        revision = HuggingFaceRevision.from_dict(json.loads(files.read_bytes(REFERENCE_FILE)))
+        return {"manifest": manifest, "weights": revision.to_dict()}
 
 
 __all__ = ["SpindleFullFacts", "TinkerFacts"]

@@ -1,9 +1,31 @@
 """Training jobs through the jobs queue: control adds jobs, the training service runs them.
 
-Control does not call a training component directly. ``JobQueueComponent`` is the component that a trainer's
-``JobLoop`` sees: it adds each ``TrainingJob`` to the ``jobs`` queue and reads the job's ``JobStatus`` back from
-the queue item. ``TrainingJobWorker`` runs in the training service: it takes the jobs of its component, has the
-component run each one, copies each saved checkpoint into the item's progress, and ends the item with the job.
+Control builds no training component. ``JobQueueComponent`` is the component that a trainer's ``JobLoop`` sees. It
+holds the backend's facts (``TrainingBackendFacts``) and the work queue: it answers from the facts, adds each
+``TrainingJob`` to the ``jobs`` queue, and reads the job's ``JobStatus`` back from the queue item.
+``TrainingJobWorker`` runs in the training service: it takes the jobs of its component, has the component run each
+one, copies each saved checkpoint into the item's progress, and ends the item with the job.
+
+What only the component can answer, control asks through the ``training_checks`` queue, and
+``TrainingCheckWorker`` answers in the training service. An item of that queue:
+
+- ``kind`` is ``training_check:<component name>``;
+- ``payload`` is ``{"check": "job", "job_id", "job"}``, where ``job`` is a ``job_payload``, for
+  ``TrainingComponent.check_job``; or ``{"check": "artifact", "names"}`` for
+  ``TrainingComponent.check_remote_artifact``;
+- ``result`` is ``{"refusal": <message>}`` when the component raised ``ValueError``, else ``{"refusal": null}``;
+- ``id`` is ``job:<job ID>`` for a job check, so control finds the check of a job in the queue, and
+  ``artifact:<random>`` for an artifact check;
+- ``metadata["asked_at"]`` is the time in seconds when control last asked for the answer, and
+  ``metadata["answer_read"]`` is true once control read it.
+
+What bounds the life of a check item: the check worker fails a check that control did not ask for within
+``UNASKED_CHECK_SECONDS`` instead of answering it, control cancels an artifact check that it stops waiting for,
+and control's sweep deletes every final item after the work retention (``EndedWorkSweeper``).
+
+A job's start can name a snapshot of its scenario (``SnapshotStart``). Both workers replace it by the component's
+own start before the component reads the job (``resolved_job``), so the training service reads the scenario's
+artifact store.
 
 A jobs-queue item:
 
@@ -12,7 +34,8 @@ A jobs-queue item:
 - ``scenario`` is the job's scenario; the item has no ``serial_key``, so a free worker takes it at once;
 - ``payload`` is the job (``job_payload``): its backend, start, parameters, component and previous job, the reference of its job data
   directory (``JobDataRef.to_dict``), and the summary of its training request for the job listing;
-- each ``progress`` entry is one ``SavedCheckpoint``, in step order;
+- each ``progress`` entry is one ``SavedCheckpoint``, in step order, with the parts that it changed
+  (``TrainingComponent.changed_parts``);
 - ``result`` is ``{"state": "finished", "metrics": {...}}``;
 - ``metadata["experiment"]``, when present, is the ``ExperimentRun`` that records the job, as ``to_dict`` gives
   it. Control writes it (``JobExperimentRecorder``) when its experiment tracker records a commit of the job, so the
@@ -30,13 +53,18 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
-from reef.artifact.files import ArtifactFiles
+from reef.artifact.artifact import Artifact, ArtifactError
+from reef.artifact.repository import Repository, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.errors import InternalError
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.observability.base import (
@@ -50,13 +78,32 @@ from reef.observability.base import (
 from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
-from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
+from reef.train.component import (
+    JobCheckPendingError,
+    JobStatus,
+    SavedCheckpoint,
+    ScenarioRoot,
+    SnapshotStart,
+    TrainingBackendFacts,
+    TrainingComponent,
+    TrainingJob,
+)
 from reef.train.training_requests import REQUEST_FAILURE_KEY, TRAINING_REQUESTS_QUEUE
 
 logger = logging.getLogger(__name__)
 
 #: The queue of training jobs.
 JOBS_QUEUE = "jobs"
+#: The queue of the questions that control asks the training service.
+CHECKS_QUEUE = "training_checks"
+#: The key of a check item's ``metadata`` that holds when control last asked for its answer, in seconds.
+ASKED_AT_KEY = "asked_at"
+#: The key of a check item's ``metadata`` that is true once control read its answer.
+ANSWER_READ_KEY = "answer_read"
+#: The seconds after which the check worker answers no check that control did not ask for again.
+UNASKED_CHECK_SECONDS = 600.0
+#: The error of a check that control stopped asking for.
+UNASKED_CHECK_ERROR = "no trainer asked for this check any more"
 #: The key of a job item's ``metadata`` that holds the experiment run that records the job.
 EXPERIMENT_METADATA_KEY = "experiment"
 
@@ -64,6 +111,11 @@ EXPERIMENT_METADATA_KEY = "experiment"
 def job_kind(component_name: str) -> str:
     """The work-item kind of the jobs of the component named ``component_name``."""
     return f"training_job:{component_name}"
+
+
+def check_kind(component_name: str) -> str:
+    """The work-item kind of the checks that the component named ``component_name`` answers."""
+    return f"training_check:{component_name}"
 
 
 def job_payload(job: TrainingJob, request: Mapping[str, JsonValue] | None = None) -> dict[str, JsonValue]:
@@ -99,19 +151,26 @@ def json_text(value: JsonValue, name: str) -> str:
 
 
 def job_from_item(item: WorkItem, data_store: DataStore) -> TrainingJob:
-    """The ``TrainingJob`` that ``job_payload`` wrote into ``item``, with its data directory opened in
-    ``data_store``; ``ValueError`` for another payload."""
-    payload = item.payload
+    """The ``TrainingJob`` that ``job_payload`` wrote into the jobs-queue ``item``, with its data directory opened
+    in ``data_store``; ``ValueError`` for another payload."""
+    return job_from_payload(item.id, item.scenario, item.payload, data_store)
+
+
+def job_from_payload(
+    job_id: str, scenario: str, payload: Mapping[str, JsonValue], data_store: DataStore
+) -> TrainingJob:
+    """The ``TrainingJob`` ``job_id`` of ``scenario`` that ``job_payload`` wrote as ``payload``, with its data
+    directory opened in ``data_store``; ``ValueError`` for another payload."""
     data = json_object(payload.get("data"), "a job's data")
-    request = request_summary(item)
+    request = payload_request(payload)
     ref = data_store.open_job_directory(data)
     return TrainingJob(
-        item.id,
+        job_id,
         json_text(payload.get("backend"), "a job's backend"),
         json_text(payload.get("start"), "a job's start"),
         ref,
         json_object(payload.get("parameters"), "a job's parameters"),
-        scenario=item.scenario,
+        scenario=scenario,
         request_id=None if request is None else cast(str, request["id"]),
         component=optional_text(payload.get("component"), "a job's component"),
         previous_job_id=optional_text(payload.get("previous_job_id"), "a job's previous job"),
@@ -126,7 +185,11 @@ def optional_text(value: JsonValue, name: str) -> str | None:
 
 def request_summary(item: WorkItem) -> dict[str, JsonValue] | None:
     """The ``{id, text, parameters}`` of the training request of the job in ``item``, or None."""
-    payload = item.payload
+    return payload_request(item.payload)
+
+
+def payload_request(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | None:
+    """The ``{id, text, parameters}`` of the training request in a job's ``payload``, or None."""
     value = payload.get("request")
     if value is None:
         return None
@@ -142,11 +205,14 @@ def request_summary(item: WorkItem) -> dict[str, JsonValue] | None:
 
 
 def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:
+    """``checkpoint`` as a progress entry: ``{step, path, artifact_path, metrics, changed_parts}``, with the
+    changed parts as a sorted list."""
     return {
         "step": checkpoint.step,
         "path": checkpoint.path,
         "artifact_path": checkpoint.artifact_path,
         "metrics": cast(JsonValue, dict(checkpoint.metrics)),
+        "changed_parts": cast(JsonValue, sorted(checkpoint.changed_parts)),
     }
 
 
@@ -155,12 +221,57 @@ def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
     step = entry.get("step")
     if isinstance(step, bool) or not isinstance(step, int):
         raise ValueError("a checkpoint's step is an integer")
+    parts = entry.get("changed_parts")
+    if not isinstance(parts, list) or not all(isinstance(part, str) for part in parts):
+        raise ValueError("a checkpoint's changed_parts is a list of strings")
     return SavedCheckpoint(
         step,
         json_text(entry.get("path"), "a checkpoint's path"),
         json_text(entry.get("artifact_path"), "a checkpoint's artifact_path"),
         json_object(entry.get("metrics"), "a checkpoint's metrics"),
+        frozenset(cast(list[str], parts)),
     )
+
+
+def resolved_job(
+    component: TrainingComponent,
+    job: TrainingJob,
+    backends: RepositoryBackendFactory | None,
+    local_artifact_dir: Path | None,
+) -> TrainingJob:
+    """``job`` with the start that ``component`` reads.
+
+    A job whose start is the component's own is returned as it is. A start that names a snapshot
+    (``SnapshotStart``) is replaced: the snapshot is read from the artifact store of the job's scenario
+    (``backends``) and made local under ``local_artifact_dir``, and the component makes its start of the job's
+    component of it, with ``root_start`` for a scenario root and ``snapshot_start`` for any other snapshot. The
+    component can write the start into its own state, and the same snapshot gives the same start again.
+
+    Raise ``ValueError`` when the component refuses the snapshot, or when ``backends`` is None. Raise
+    ``InternalError`` when the component returns a start that names a snapshot.
+    """
+    named = SnapshotStart.from_text(job.start)
+    if named is None:
+        return job
+    if backends is None:
+        raise ValueError(f"job {job.job_id} starts from a snapshot, and this worker opens no artifact store")
+    backend = backends(job.scenario)
+    snapshot = Artifact(
+        backend.resolve_snapshot(named.revision),
+        Repository(backend, backend.current(), local_dir=local_artifact_dir),
+    )
+    materialized = snapshot.materialize()
+    manifest = materialized.components
+    # A snapshot of one component is that component, whatever the trainer calls it.
+    whole = job.component is None or manifest is None or manifest.single
+    artifact = materialized if whole else materialized.component(cast(str, job.component))
+    if named.root is None:
+        start = component.snapshot_start(artifact)
+    else:
+        start = component.root_start(ScenarioRoot(artifact, named.root))
+    if SnapshotStart.from_text(start) is not None:
+        raise InternalError(f"the {component.name} training component made a start that names a snapshot")
+    return replace(job, start=start)
 
 
 #: The metadata entry of a failed job's item that holds the metrics the component reported for it.
@@ -193,7 +304,8 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
     The object has these keys:
 
     - ``id``, ``state``, ``attempt_count`` and ``error``: the item's fields (``WorkItem``).
-    - ``checkpoints``: the saved checkpoints that the job reported, in step order, each as ``checkpoint_json``.
+    - ``checkpoints``: the saved checkpoints that the job reported, in step order, each as ``checkpoint_json``
+      gives it, with its ``changed_parts``.
     - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job finished, else None.
     - ``parameters``: the job's parameters, a JSON object: the recipe's parameters for the kind of the job's
       samples, with the request's parameters merged in. They hold the training ``method`` and the
@@ -277,73 +389,157 @@ def cancel_request_jobs(queue: WorkQueue, scenario: str, request_id: str) -> dic
 class JobQueueComponent(TrainingComponent):
     """The training component that control uses: it adds jobs to the jobs queue instead of running them.
 
-    Values: ``component`` is the training component whose jobs the queue carries; its name, release format, base
-    artifact and starts describe the jobs. ``queue`` is the work queue. ``owns_component`` is whether ``close``
-    closes ``component``; a training worker owns it otherwise. A job goes to the queue under its scenario, with no
-    serial key: the trainer decides which jobs of a scenario run at the same time (``JobLoop.accepts_job``).
+    Values: ``facts`` are the facts of the backend whose component runs the jobs in the training service.
+    ``queue`` is the work queue. ``answer_seconds`` is the longest time that ``check_remote_artifact`` waits for
+    the training service, a positive number. A job goes to the queue under its scenario, with no serial key: the
+    trainer decides which jobs of a scenario run at the same time (``JobLoop.accepts_job``).
 
-    Purpose: control's trainers submit jobs and read their status through it (``JobLoop``); the training service
-    runs the jobs with ``TrainingJobWorker``.
+    Each member, with ``component`` the backend's component of the same settings:
+
+    - ``name``, ``artifact_format``, ``default_start_inputs``, ``shares_scenarios``, ``concurrent_jobs`` and
+      ``parameters_schema`` are the facts' members, which equal the component's.
+    - ``root_start(root)`` raises as ``component.root_start(root)`` does (``facts.check_root_start``). Otherwise it
+      returns the name of the root snapshot, ``SnapshotStart(revision, root.source).to_text()``.
+      ``snapshot_start(artifact)`` raises as ``component.snapshot_start(artifact)`` does
+      (``facts.check_import_start``), else returns ``SnapshotStart(revision).to_text()``. The training service
+      makes the component's start of the snapshot when it takes a job that names it (``resolved_job``).
+    - ``submit(job)`` adds ``job`` to the jobs queue after the training service accepted it
+      (``component.check_job``). The view keeps no state of its own: the check of a job is the item
+      ``job:<job ID>`` of the ``training_checks`` queue. A call adds the item when there is none, and raises
+      ``JobCheckPendingError`` until the item has an answer that no call read. The call that reads the answer adds
+      the job, or raises ``ValueError`` with the component's message for a refused job, or ``RuntimeError`` when
+      the training service could not run the check; that error says so and is no refusal. A call after an answer
+      was read, or after the check worker dropped the check as no longer asked for, queues the check again.
+    - ``status(job_id)`` is the status of the job's queue item. An item that does not parse, such as one that
+      another release wrote, is a failed job whose error names what does not parse; the view cancels the item, so
+      no worker runs it further. ``cancel`` cancels the item.
+    - ``check_remote_artifact(names)`` adds a check item and waits for its answer: it returns, raises
+      ``ValueError`` with the component's message, raises ``RuntimeError`` when the training service could not run
+      the check, or raises ``ArtifactError`` when it gave no answer within ``answer_seconds``.
+    - ``changed_parts(start, checkpoint)`` is ``checkpoint.changed_parts``, which the training worker recorded.
+    - ``import_start``, ``check_job`` and ``check_task_jobs`` raise ``InternalError``: control reaches the
+      component only through the members above.
+
+    Purpose: the dispatcher makes one for each backend whose facts its process holds, and control's trainers
+    submit jobs and read their status through it (``JobLoop``). The training service runs the jobs with
+    ``TrainingJobWorker`` and answers the checks with ``TrainingCheckWorker``.
     """
 
-    def __init__(
-        self,
-        component: TrainingComponent,
-        queue: WorkQueue,
-        *,
-        owns_component: bool = False,
-    ) -> None:
-        if isinstance(component, JobQueueComponent):
-            raise TypeError("a jobs-queue component wraps the component that runs the jobs")
-        self.component = component
+    def __init__(self, facts: TrainingBackendFacts, queue: WorkQueue, *, answer_seconds: float = 60.0) -> None:
+        if not isinstance(facts, TrainingBackendFacts):
+            raise TypeError(f"facts must be TrainingBackendFacts, got {type(facts).__name__}")
+        if answer_seconds <= 0:
+            raise ValueError("answer_seconds is positive")
+        self.facts = facts
         self.queue = queue
-        #: Whether ``close`` closes ``component``: true in a process that runs no training worker for it.
-        self.owns_component = owns_component
+        self.answer_seconds = answer_seconds
 
     @property
     def name(self) -> str:
-        return self.component.name
+        return self.facts.name
 
     @property
     def artifact_format(self) -> ArtifactFormat | None:
-        return self.component.artifact_format
+        return self.facts.artifact_format
 
     @property
     def default_start_inputs(self) -> Mapping[str, str]:
-        return self.component.default_start_inputs
-
-    def root_start(self, root: ScenarioRoot) -> str:
-        return self.component.root_start(root)
+        return self.facts.default_start_inputs
 
     @property
     def shares_scenarios(self) -> bool:
-        return self.component.shares_scenarios
+        return self.facts.shares_scenarios
 
     @property
     def concurrent_jobs(self) -> bool:
-        return self.component.concurrent_jobs
-
-    def check_job(self, job: TrainingJob) -> None:
-        self.component.check_job(job)
+        return self.facts.concurrent_jobs
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
-        return self.component.parameters_schema(kind)
+        return self.facts.parameters_schema(kind)
 
-    def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
-        self.component.check_task_jobs(parameters)
+    def root_start(self, root: ScenarioRoot) -> str:
+        self.facts.check_root_start(root)
+        return SnapshotStart(root.artifact.ref.revision, root.source).to_text()
 
-    def check_artifact(self, files: ArtifactFiles) -> None:
-        self.component.check_artifact(files)
+    def snapshot_start(self, artifact: Artifact) -> str:
+        if artifact.local_path is None:
+            raise ValueError(f"artifact {artifact.ref.revision!r} has no local files to train from")
+        self.facts.check_import_start(artifact.local_path)
+        return SnapshotStart(artifact.ref.revision).to_text()
 
     def import_start(self, artifact_dir: Path) -> str:
-        return self.component.import_start(artifact_dir)
+        raise InternalError("control names the snapshot of a start (snapshot_start); the training service imports it")
+
+    def check_job(self, job: TrainingJob) -> None:
+        raise InternalError("the training service checks a job; control asks it in submit")
+
+    def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
+        raise InternalError("the training service checks the recipe's task jobs when it starts")
 
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
-        return self.component.changed_parts(start, checkpoint)
+        return checkpoint.changed_parts
+
+    def read_answer(self, item: WorkItem, subject: str) -> None:
+        """Read the answer of the final check ``item`` about ``subject``: return when the component accepted, raise
+        ``ValueError`` with its message when it refused, and ``RuntimeError`` when the check did not run."""
+        if item.result is None:
+            raise RuntimeError(
+                f"the {self.name} training service could not check {subject}, so nothing was decided about it: "
+                f"{item.error}"
+            )
+        refusal = item.result.get("refusal")
+        if refusal is not None:
+            raise ValueError(str(refusal))
+
+    def require_checked(self, job: TrainingJob) -> None:
+        """Return when the training service accepted ``job``; raise as ``submit`` does otherwise."""
+        item_id = f"job:{job.job_id}"
+        pending = JobCheckPendingError(f"the {self.name} training service has not checked job {job.job_id} yet")
+        item = self.queue.read(CHECKS_QUEUE, item_id)
+        if item is None:
+            payload: dict[str, JsonValue] = {"check": "job", "job_id": job.job_id, "job": job_payload(job)}
+            self.queue.append(NewWork(CHECKS_QUEUE, item_id, job.scenario, check_kind(self.name), payload))
+            raise pending
+        self.queue.write_metadata(CHECKS_QUEUE, item_id, ASKED_AT_KEY, time.time())
+        if not item.final:
+            raise pending
+        if item.metadata.get(ANSWER_READ_KEY) is True or item.error == UNASKED_CHECK_ERROR:
+            # The answer was for an earlier submit, or the check was dropped: ask again.
+            self.queue.retry(CHECKS_QUEUE, item_id)
+            self.queue.write_metadata(CHECKS_QUEUE, item_id, ANSWER_READ_KEY, False)
+            raise pending
+        self.queue.write_metadata(CHECKS_QUEUE, item_id, ANSWER_READ_KEY, True)
+        self.read_answer(item, f"job {job.job_id}")
+
+    def check_remote_artifact(self, names: Mapping[str, JsonValue]) -> None:
+        # The check belongs to no scenario's work, so the item carries the backend's name in that place.
+        item = self.queue.append(
+            NewWork(
+                CHECKS_QUEUE,
+                f"artifact:{uuid.uuid4().hex}",
+                f"training:{self.name}",
+                check_kind(self.name),
+                {"check": "artifact", "names": dict(names)},
+            )
+        )
+        deadline = time.monotonic() + self.answer_seconds
+        while not item.final:
+            if time.monotonic() >= deadline:
+                self.queue.cancel(CHECKS_QUEUE, item.id, "control stopped waiting")
+                raise ArtifactError(
+                    f"the {self.name} training service did not check the artifact within "
+                    f"{self.answer_seconds:g} seconds; try again when it runs"
+                )
+            time.sleep(0.05)
+            held = self.queue.read(CHECKS_QUEUE, item.id)
+            if held is None:
+                raise RuntimeError(f"the check of the artifact left the {CHECKS_QUEUE} queue without an answer")
+            item = held
+        self.read_answer(item, "the artifact")
 
     def submit(self, job: TrainingJob) -> None:
-        """Check ``job`` and add it to the jobs queue, with the summary of its training request, which the queue
-        of training requests still holds, for the job listing.
+        """Add ``job`` to the jobs queue once the training service accepted it (see the class), with the summary
+        of its training request, which the queue of training requests still holds, for the job listing.
 
         A job of a request that failed meanwhile, such as one that a client cancelled while control built the job's
         data, is cancelled as soon as it is in the queue. A cancel marks the request first and cancels its jobs
@@ -352,7 +548,7 @@ class JobQueueComponent(TrainingComponent):
             raise ValueError(f"the job is for {job.backend!r}, not the {self.name!r} training component")
         if self.queue.read(JOBS_QUEUE, job.job_id) is not None:
             return
-        self.component.check_job(job)
+        self.require_checked(job)
         request: dict[str, JsonValue] | None = None
         if job.request_id is not None:
             held = self.queue.read(TRAINING_REQUESTS_QUEUE, job.request_id)
@@ -370,14 +566,16 @@ class JobQueueComponent(TrainingComponent):
         item = self.queue.read(JOBS_QUEUE, job_id)
         if item is None:
             raise KeyError(job_id)
-        return status_from_item(item)
+        try:
+            return status_from_item(item)
+        except ValueError as exc:
+            error = f"the job's queue item cannot be read; another release of Reef may have written it: {exc}"
+            # An item that is not final still has a worker or a place in the queue: end it.
+            self.queue.cancel(JOBS_QUEUE, job_id, error)
+            return JobStatus(job_id, "failed", error=error)
 
     def cancel(self, job_id: str) -> None:
         self.queue.cancel(JOBS_QUEUE, job_id, "cancelled")
-
-    def close(self) -> None:
-        if self.owns_component:
-            self.component.close()
 
 
 class JobExperimentRecorder(ExperimentTracker):
@@ -444,8 +642,10 @@ class TrainingJobWorker(QueueWorker):
     """One worker of the training service: it takes the jobs of one component from the jobs queue and runs them.
 
     Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``data_store`` is the data store,
-    which keeps the data directory of each job; ``poll_seconds`` is also the wait between two looks at a
-    running job; ``slots`` is the number of jobs that the worker runs at the same time.
+    which keeps the data directory of each job; ``backends`` opens the artifact store of a scenario, for a job
+    whose start names a snapshot, and ``local_artifact_dir`` is where such a snapshot is made local
+    (``resolved_job``); None opens no store, and such a job fails. ``poll_seconds`` is also the wait between two
+    looks at a running job; ``slots`` is the number of jobs that the worker runs at the same time.
 
     Purpose: the training service starts one per training component (``start``); ``stop`` stops taking jobs and
     closes the component, which the worker owns. Each job runs to its end on this worker unless the worker loses
@@ -458,8 +658,10 @@ class TrainingJobWorker(QueueWorker):
         component: TrainingComponent,
         queue: WorkQueue,
         data_store: DataStore,
+        backends: RepositoryBackendFactory | None,
         *,
         worker_id: str,
+        local_artifact_dir: Path | None = None,
         poll_seconds: float = 0.5,
         slots: int = 1,
     ) -> None:
@@ -470,6 +672,8 @@ class TrainingJobWorker(QueueWorker):
         )
         self.component = component
         self.data_store = data_store
+        self.backends = backends
+        self.local_artifact_dir = local_artifact_dir
 
     def start(self) -> None:
         """Start the component's jobs in this process (``TrainingComponent.start_jobs``), then the worker."""
@@ -486,13 +690,17 @@ class TrainingJobWorker(QueueWorker):
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         """Run the job of ``item`` on the component and mirror its checkpoints, by step, into the item's progress.
 
-        At each poll the worker reads the item: a job that control cancelled, or that another worker took, ends
-        here, and the component cancels its local run. A worker that continues a job reports only the checkpoints
+        The component gets the job with its own start (``resolved_job``), and each mirrored checkpoint carries
+        the parts that it changed from that start (``TrainingComponent.changed_parts``). At each poll the worker
+        reads the item: a job that control cancelled, or that another worker took, ends here, and the component
+        cancels its local run. A worker that continues a job reports only the checkpoints
         whose step the item does not hold yet. When the worker stops, the job goes back to the queue, so another
         worker continues it at once: the component keeps running it, and that worker's ``submit`` continues from
         the job's latest checkpoint.
         """
-        job = job_from_item(item, self.data_store)
+        job = resolved_job(
+            self.component, job_from_item(item, self.data_store), self.backends, self.local_artifact_dir
+        )
         self.component.submit(job)
         reported = {checkpoint_from_json(entry).step for entry in item.progress}
         progress_count = len(item.progress)
@@ -502,8 +710,9 @@ class TrainingJobWorker(QueueWorker):
                 for checkpoint in status.checkpoints:
                     if checkpoint.step in reported:
                         continue
+                    changed = replace(checkpoint, changed_parts=self.component.changed_parts(job.start, checkpoint))
                     self.queue.append_progress(
-                        JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(checkpoint), number=progress_count
+                        JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(changed), number=progress_count
                     )
                     reported.add(checkpoint.step)
                     progress_count += 1
@@ -527,20 +736,94 @@ class TrainingJobWorker(QueueWorker):
             raise
 
 
+class TrainingCheckWorker(QueueWorker):
+    """The worker of the training service that answers control's checks with one component.
+
+    Values: as ``QueueWorker``, on the ``training_checks`` items of ``component``, one at a time; ``data_store``
+    and ``backends`` with ``local_artifact_dir`` are those of ``TrainingJobWorker``, for the job of a job check.
+
+    ``run_item`` answers ``{"refusal": None}`` when the component accepted and ``{"refusal": message}`` when it
+    raised ``ValueError(message)``: ``check_job`` of the job with its own start (``resolved_job``) for a ``job``
+    check, ``check_remote_artifact`` for an ``artifact`` check. A payload that is neither fails the item. So does
+    a check that control last asked for more than ``UNASKED_CHECK_SECONDS`` ago (``metadata["asked_at"]``, else the
+    item's ``created_at``), with ``UNASKED_CHECK_ERROR``: nobody waits for it, so it imports no start.
+
+    Purpose: the training service starts one beside each ``TrainingJobWorker``. It has no job slot, so a check is
+    answered while jobs run. The job worker owns and closes the component.
+    """
+
+    def __init__(
+        self,
+        component: TrainingComponent,
+        queue: WorkQueue,
+        data_store: DataStore,
+        backends: RepositoryBackendFactory | None,
+        *,
+        worker_id: str,
+        local_artifact_dir: Path | None = None,
+        poll_seconds: float = 0.2,
+    ) -> None:
+        if isinstance(component, JobQueueComponent):
+            raise TypeError("a check worker asks the component itself, not a jobs-queue component")
+        super().__init__(
+            queue, CHECKS_QUEUE, [check_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds
+        )
+        self.component = component
+        self.data_store = data_store
+        self.backends = backends
+        self.local_artifact_dir = local_artifact_dir
+
+    def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
+        payload = item.payload
+        asked_at = item.metadata.get(ASKED_AT_KEY, item.created_at)
+        if isinstance(asked_at, int | float) and time.time() - asked_at > UNASKED_CHECK_SECONDS:
+            raise ItemFailedError(UNASKED_CHECK_ERROR)
+        check = payload.get("check")
+        if check == "job":
+            job = job_from_payload(
+                json_text(payload.get("job_id"), "a job check's job_id"),
+                item.scenario,
+                json_object(payload.get("job"), "a job check's job"),
+                self.data_store,
+            )
+            try:
+                self.component.check_job(resolved_job(self.component, job, self.backends, self.local_artifact_dir))
+            except ValueError as exc:
+                return {"refusal": str(exc)}
+        elif check == "artifact":
+            names = json_object(payload.get("names"), "an artifact check's names")
+            try:
+                self.component.check_remote_artifact(names)
+            except ValueError as exc:
+                return {"refusal": str(exc)}
+        else:
+            raise ItemFailedError(f"a training check is of a job or of an artifact, not {check!r}")
+        return {"refusal": None}
+
+
 __all__ = [
+    "ANSWER_READ_KEY",
+    "ASKED_AT_KEY",
+    "CHECKS_QUEUE",
     "EXPERIMENT_METADATA_KEY",
     "JOBS_QUEUE",
     "JOB_CANCELLED_ERROR",
+    "UNASKED_CHECK_ERROR",
+    "UNASKED_CHECK_SECONDS",
     "JobExperimentRecorder",
     "JobQueueComponent",
+    "TrainingCheckWorker",
     "TrainingJobWorker",
     "cancel_request_jobs",
     "cancel_scenario_job",
+    "check_kind",
     "job_from_item",
+    "job_from_payload",
     "job_json",
     "job_kind",
     "job_payload",
     "request_summary",
+    "resolved_job",
     "scenario_jobs",
     "status_from_item",
 ]

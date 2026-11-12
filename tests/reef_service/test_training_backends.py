@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.support.config_helpers import connect_training_objects
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.trainers import recipe_trainer
@@ -20,7 +21,7 @@ from tests.support.training_deployment import LocalDeployment
 
 from reef.core import plugins
 from reef.core.errors import RuntimeConfigError
-from reef.service.assembly import _training_recipe, connect_training_component
+from reef.service.assembly import _training_recipe
 from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.inference import command_line_config
@@ -55,9 +56,7 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         assert "execution" not in config
         assert not {"ray_address", "ray_namespace", "inference_handler_factory"} & config["reef"].keys()
         settings = service_config_from_mapping(config)
-        runtime, inference = connect_training_component(
-            settings, model_path=settings.model_path, default_parameters={}
-        )
+        runtime, inference = connect_training_objects(settings, model_path=settings.model_path, default_parameters={})
         assert runtime.received_model_path == "/models/test"
         assert runtime.config["lora_rank"] == 16
         assert runtime.config["checkpoint_layers"] is False
@@ -116,7 +115,7 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
     runtime = InferenceProxyRuntime(base_url="http://unused")
     monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="must build a TrainingComponent"):
-        connect_training_component(
+        connect_training_objects(
             ServiceSettings(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
         )
 
@@ -127,7 +126,7 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     config, _ = resolve_deployment_config(
         {**deployment(), "pipeline": {"sample2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
     )
-    recipe, live = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
+    recipe, live = _training_recipe(SAORecipe, service_config_from_mapping(config), {}, runs_training=True)
     records = memory_records("scenario")
     try:
         trainer = recipe_trainer(recipe, live, "scenario", records, root=STUB_ROOT)
@@ -158,7 +157,7 @@ def test_a_failed_recipe_build_closes_the_component_and_shuts_down_its_runtime(t
 
     monkeypatch.setattr("reef.service.assembly.load_recipe", refuse)
     with pytest.raises(ValueError, match="bad recipe config"):
-        _training_recipe(SAORecipe, service_config_from_mapping(config), {})
+        _training_recipe(SAORecipe, service_config_from_mapping(config), {}, runs_training=True)
     assert Path(f"{marker}.closed").exists()
     assert len(shutdowns) == 1
 

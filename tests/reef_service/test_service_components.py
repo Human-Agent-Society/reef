@@ -21,8 +21,8 @@ from tests.support.trajectories import policy_trajectory
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.sources import ArtifactSources, DirectorySource
-from reef.core.errors import InternalError
 from reef.core.job_data import JobData
+from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
 from reef.dispatcher.samples import LocalSampleProducers
@@ -46,7 +46,7 @@ from reef.record2sample.service import (
 from reef.scenario.live_objects import LiveObjects, check_recipe_objects, scenario_components
 from reef.service import assembly
 from reef.service import components as component_apps
-from reef.service.app import create_data_app
+from reef.service.app import create_data_app, get_dispatcher
 from reef.service.components import build_component_app
 from reef.service.data_service import DataJob, DataWorker
 from reef.service.data_transfer import ArchiveWriters
@@ -58,9 +58,10 @@ from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
-from reef.train.component import TrainingFactsLayout, TrainingJob
+from reef.train.component import JobCheckPendingError, SnapshotStart, TrainingArtifactLayout, TrainingJob
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JOBS_QUEUE, JobQueueComponent, TrainingJobWorker
+from reef.train.jobs import JobLoopState
 from reef.train.tinker_backend.facts import TinkerFacts
 from reef.train.tinker_backend.launch import TinkerComponentFactory
 from reef.train.training_requests import TrainingRequestQueue
@@ -118,26 +119,28 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
     config = replace(settings(tmp_path), task_file_dir=str(tmp_path / "task-files"))
     component = StubTrainingComponent(tmp_path / "checkpoints")
     deployment = (Recipe(), LiveObjects(training_component=component, training_facts=StubFacts(component)))
-    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ, runs_training: deployment)
     trajectory = policy_trajectory("sample", (1, 2), (1,), (-0.1,), 1.0, artifact_id="v1")
     coordination = assembly.open_service_coordination(config)
-    view = JobQueueComponent(component, coordination.work_queue, owns_component=False)
-    view.submit(
-        TrainingJob(
-            "one",
-            component.name,
-            component.base_start,
-            job_data_ref(JobData("data", (trajectory,))),
-            {},
-            scenario="math",
-        )
+    view = JobQueueComponent(StubFacts(component), coordination.work_queue)
+    job = TrainingJob(
+        "one", component.name, component.base_start, job_data_ref(JobData("data", (trajectory,))), {}, scenario="math"
     )
+    # Control only asks: the job enters the queue after the training service checked it.
+    with pytest.raises(JobCheckPendingError):
+        view.submit(job)
+    assert coordination.work_queue.read(JOBS_QUEUE, "one") is None
 
     async def run() -> None:
         app = build_component_app("training", config, environ={})
         async with TestClient(TestServer(app)) as client:
             assert (await client.get("/healthz")).status == 200
             deadline = asyncio.get_running_loop().time() + 5
+            while coordination.work_queue.read(JOBS_QUEUE, "one") is None:
+                assert asyncio.get_running_loop().time() < deadline, "the training service did not check the job"
+                with suppress(JobCheckPendingError):
+                    view.submit(job)
+                await asyncio.sleep(0.01)
             while view.status("one").state != "finished":
                 assert asyncio.get_running_loop().time() < deadline, "the training service did not finish its job"
                 await asyncio.sleep(0.01)
@@ -161,7 +164,7 @@ def test_a_training_worker_start_failure_closes_its_component_and_queue(
     component = StubTrainingComponent()
     deployment = (Recipe(), LiveObjects(training_component=component, training_facts=StubFacts(component)))
     coordination = memory_coordination()
-    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ, runs_training: deployment)
     monkeypatch.setattr(component_apps, "open_service_coordination", lambda settings: coordination)
     threads: list[Thread | None] = []
     start = TrainingJobWorker.start
@@ -200,7 +203,7 @@ def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_e
         CompositeRecipe(components={"harness": harness, "records": Recipe()}),
         LiveObjects(runtime=runtime()),
     )
-    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ, runs_training: deployment)
     bindings = []
     start = TrainingJobWorker.start
 
@@ -420,6 +423,54 @@ def weight_settings(tmp_path: Path, training: dict, inference: dict | None = Non
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("service", sorted(set(SERVICE_COMPONENTS) - {"training", "inference"}))
+def test_only_the_training_service_builds_the_training_component(tmp_path: Path, service: str) -> None:
+    # The factory of this deployment raises when it builds a component: only its facts work.
+    deployment = weight_settings(tmp_path, {"backend": "tests.support.training_deployment:FactsOnlyDeployment"})
+    dispatcher = assembly.build_dispatcher(deployment, environ={}, components=frozenset({service}))
+    try:
+        assert dispatcher.job_components == ()
+        view = dispatcher.live.training_component
+        assert isinstance(view, JobQueueComponent) and isinstance(view.facts, LocalFacts)
+    finally:
+        dispatcher.close()
+    with pytest.raises(AssertionError, match="builds no training component"):
+        assembly.build_dispatcher(deployment, environ={}, components=frozenset({service, "training"}))
+
+
+@pytest.mark.unit
+def test_control_of_a_split_deployment_serves_its_routes_without_a_training_component(tmp_path: Path) -> None:
+    deployment = weight_settings(tmp_path, {"backend": "tests.support.training_deployment:FactsOnlyDeployment"})
+    app = assembly.build_app(deployment, environ={}, components=frozenset({"control"}))
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+
+    async def run() -> None:
+        async with TestClient(TestServer(app)) as client:
+            created = await client.post("/reef/scenarios", headers=auth, json={"name": "math"})
+            assert created.status == 201, await created.text()
+            # The root holds the default start that the facts write, and the trainer's start names that root.
+            scenario = get_dispatcher(app).get_or_create_scenario("math")
+            start = SnapshotStart.from_text(JobLoopState.from_dict(scenario.trainer.state).start)
+            assert start == SnapshotStart(
+                scenario.repository.start_artifact.revision, RootSource("default", inputs={"model": "stub"})
+            )
+            contract = await client.get("/reef/scenarios/math/contract", headers=auth)
+            assert contract.status == 200 and (await contract.json())["parameters_schema"] == {}
+            listed = await (await client.get("/reef/scenarios/math/artifacts", headers=auth)).json()
+            [root] = listed["artifacts"]
+            # A train-from asks the facts, records the start by name, and imports nothing in control.
+            moved = await client.post(
+                "/reef/scenarios/math/train-from", headers=auth, json={"artifact_id": root["artifact_id"]}
+            )
+            assert moved.status == 200, await moved.text()
+            named = SnapshotStart.from_text(JobLoopState.from_dict(scenario.trainer.state).start)
+            assert named == SnapshotStart(scenario.repository.start_artifact.revision)
+            assert (await client.get("/reef/scenarios/math/settings", headers=auth)).status == 200
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
 def test_the_inference_service_serves_an_activated_artifact_without_a_training_component(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -479,16 +530,18 @@ def test_the_inference_service_of_a_tinker_deployment_builds_its_engines_from_th
         {"backend": "tinker", "options": {"state-dir": str(tmp_path / "state"), "lora-rank": 16}},
         {"model-path": "Qwen/Qwen3-8B", "backend": "sglang", "num-gpus": 2, "remote": {"url": "https://gpu.example"}},
     )
-    recipe, live = assembly.load_serving_deployment(deployment, {})
+    recipe, live = assembly.load_deployment(deployment, {}, runs_training=False)
     try:
         assert built == [] and live.training_component is None
         assert isinstance(live.training_facts, TinkerFacts)
         # Tinker's snapshots hold no weight files, so the engines load what the deployment's weights plugin fetches.
         assert isinstance(live.runtime, AdapterServingRuntime)
         weights = scenario_components(recipe, live, "math").components["weights"]
-        assert weights.loaded and isinstance(weights.layout, TrainingFactsLayout)
+        assert weights.loaded and isinstance(weights.layout, TrainingArtifactLayout)
         assert not weights.layout.resolves_references
-        with pytest.raises(InternalError, match="the control service checks an import"):
+        # The facts refuse files that are no Tinker artifact; nothing here asks the training service.
+        assert weights.layout.remote is None
+        with pytest.raises(ValueError, match="a Tinker artifact holds"):
             weights.layout.check(DirectoryFiles(tmp_path))
     finally:
         assert live.runtime is not None
@@ -505,7 +558,7 @@ def test_live_objects_hold_the_facts_of_the_training_backend_with_or_without_its
     with pytest.raises(TypeError, match="training_facts"):
         LiveObjects(training_facts=StubTrainingComponent())
     recipe = TestPolicyRecipe()
-    with pytest.raises(RecipeConfigError, match="requires a training component"):
+    with pytest.raises(RecipeConfigError, match="requires the facts of its training backend"):
         scenario_components(recipe, LiveObjects(runtime=runtime()), "math")
     with pytest.raises(RecipeConfigError, match="inference runtime"):
         scenario_components(recipe, LiveObjects(training_facts=LocalFacts()), "math")

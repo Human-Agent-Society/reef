@@ -28,7 +28,7 @@ from reef.inference.tinker import TinkerInferenceRuntime
 from reef.service.deploy.training import training_deployment_for
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.component import TrainingJob, job_id_for
+from reef.train.component import TrainingArtifactLayout, TrainingJob, job_id_for
 from reef.train.tinker_backend import client as client_module
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
@@ -227,32 +227,32 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
     full = TinkerCheckpoint(MODEL, None, "tinker://f/state", "tinker://f/sampler", service=SPINDLE)
     full.write(tmp_path / "full")
     with pytest.raises(ValueError, match=f"holds {REFERENCE_FILE} beside its manifest"):
-        component.check_artifact(DirectoryFiles(tmp_path / "full"))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "full"))
     # A snapshot's reference must resolve to full weights.
     (tmp_path / "full" / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision(MODEL, COMMIT).to_dict()))
-    component.check_artifact(DirectoryFiles(tmp_path / "full"))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "full"))
     assert client.checked[-1] == full
     del hub.files["config.json"]
     with pytest.raises(ValueError, match="holds no full weights"):
-        component.check_artifact(DirectoryFiles(tmp_path / "full"))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "full"))
     hub.files["config.json"] = b"{}"
     TinkerCheckpoint(MODEL, 32, "tinker://l/state", "tinker://l/sampler", service=SPINDLE).write(tmp_path / "lora")
     with pytest.raises(ValueError, match="rank 32 LoRA, not all the parameters"):
-        component.check_artifact(DirectoryFiles(tmp_path / "lora"))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "lora"))
 
     copy = tmp_path / "copy"
     copy.mkdir()
     for path, data in FILES.items():
         (copy / path).write_bytes(data)
-    component.check_artifact(DirectoryFiles(copy))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(copy))
     (copy / "model.safetensors").write_bytes(b"other-weights")
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
-        component.check_artifact(DirectoryFiles(copy))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(copy))
     # The base of this component is its reference to the base revision, so it takes no base root.
     (tmp_path / "base-root").mkdir()
     (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.default_start_inputs).to_text())
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
-        component.check_artifact(DirectoryFiles(tmp_path / "base-root"))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "base-root"))
 
 
 @pytest.mark.unit

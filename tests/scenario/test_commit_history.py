@@ -17,6 +17,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from tests.support.component_trainers import checked_commit
 from tests.support.harness_jobs import harness_recipe
 from tests.support.harness_service import harness_repository
 from tests.support.policy_recipe import TestPolicyRecipe
@@ -40,7 +41,7 @@ from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 from reef.train import Trainer
-from reef.train.component import SavedCheckpoint, TrainingJob
+from reef.train.component import SavedCheckpoint, SnapshotStart, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 
@@ -492,8 +493,16 @@ def test_each_commit_appends_one_atomic_record_and_a_restart_recovers_from_the_l
     submitted, _, finished = records[:3]
     # The submission consumes the batch's records; the later commits of the job consume none.
     assert submitted.algorithm_state["jobs"] == [
-        {"job_id": first_job, "start": component.submitted[0].start, "checkpoints_handled": 0, "train_from": None}
+        {
+            "job_id": first_job,
+            "start": submitted.algorithm_state["start"],
+            "checkpoints_handled": 0,
+            "train_from": None,
+        }
     ]
+    # Control named the root snapshot; the component got its own start of it.
+    assert SnapshotStart.from_text(submitted.algorithm_state["start"]) is not None
+    assert SnapshotStart.from_text(component.submitted[0].start) is None
     assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id(stage_item_id("math", "r1:0"))})
     assert submitted.high_water_sequence == 2
     assert finished.algorithm_state["finished_jobs"] == 1
@@ -1093,7 +1102,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
     scenario.records.append(report("r1", "i1"))
     make_samples(scenario)
     # The job's submission is the step that consumes the batch.
-    result = scenario.next_commit()
+    result = checked_commit(scenario)
     assert result is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None

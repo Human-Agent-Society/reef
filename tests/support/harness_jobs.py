@@ -192,7 +192,7 @@ def with_harness_component(
         collector=collector,
         agent=agent,
     )
-    return replace(live, harness_component=component)
+    return replace(live, harness_component=component, harness_facts=component.facts)
 
 
 def rebuilt_recipe(
@@ -217,7 +217,7 @@ def rebuilt_recipe(
         collector=component.collector,
         agent=component.agent,
     )
-    return changed, replace(live, harness_component=rebuilt)
+    return changed, replace(live, harness_component=rebuilt, harness_facts=rebuilt.facts)
 
 
 def configured_live(
@@ -227,7 +227,7 @@ def configured_live(
     its configuration alone (``with_harness_components``). ``live`` defaults to the runtime ``runtime()`` alone;
     ``environ`` holds the variables that the component's sandbox and agent read, none by default."""
     live = LiveObjects(runtime=runtime()) if live is None else live
-    return with_harness_components(recipe, live, {} if environ is None else environ)
+    return with_harness_components(recipe, live, {} if environ is None else environ, runs_training=True)
 
 
 def configured_component(

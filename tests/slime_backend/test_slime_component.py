@@ -541,7 +541,7 @@ def test_the_default_start_is_a_base_root_and_the_base_start_names_the_startup_w
     root_dir = tmp_path / "root"
     root_dir.mkdir()
     default.write(root_dir)
-    stack.component.check_artifact(DirectoryFiles(root_dir))
+    stack.component.facts.check_artifact(DirectoryFiles(root_dir))
     root = ScenarioRoot(Artifact.local(root_dir), RootSource("default", inputs=default.inputs))
     # The workers make the startup weights from the model, so a job from the base root starts at the base start.
     assert stack.component.root_start(root) == stack.component.base_start
