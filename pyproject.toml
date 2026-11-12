@@ -191,6 +191,10 @@ ignore = [
 # flagged; these three only trip RUF002/003 because they have ASCII lookalikes.
 allowed-confusables = ["α", "γ", "−"]
 
+[tool.ruff.lint.flake8-bugbear]
+# section_field and reader_field return a dataclasses.field, as config_field does.
+extend-immutable-calls = ["reef.recipe.config_fields.section_field", "reef.recipe.config_fields.reader_field"]
+
 [tool.ruff.lint.per-file-ignores]
 # Test code: perf lint and strict class/branch shape rules add churn, not safety.
 "tests/**/*.py" = ["N806", "PERF", "RUF012", "SIM108"]

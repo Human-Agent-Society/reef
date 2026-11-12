@@ -357,9 +357,19 @@ parser, and an optional environment fallback:
    clip_ratio: float = config_field(0.2, env="REEF_MY_METHOD_CLIP_RATIO")
 
 Precedence is explicit configuration, then environment, then the default.
-``from_environment()`` builds the recipe. On weight-training recipes,
-``service_config()`` forwards declared fields and shared artifact settings
-from the service configuration. A setting that a pipeline stage reads belongs
+A recipe class does not load itself: ``reef.recipe.loading.load_recipe(recipe_class, config, environ)``
+reads the declarations of the class and builds the recipe, and
+``build_recipe(reference, environ, config)`` does the same for a class
+reference. The declarations are the ``config_field`` fields, the
+``section_field`` fields (one parsed config section each), the
+``reader_field`` fields (each read by its ``ConfigReader``),
+``section_defaults`` (the class's defaults for its sections, under the
+deployment's keys) and ``refused_sections`` (the config sections that the
+class refuses, each with its error message). A recipe class has no method
+that the loader calls. For a weight-training deployment,
+``reef.service.deploy.training.training_recipe_config`` forwards the declared
+fields from the service configuration and refuses a key that the class does
+not declare. A setting that a pipeline stage reads belongs
 in the stage's settings, under the deployment's ``pipeline`` section, not in a
 recipe field. Never read deployment YAML from inside a stage.
 
@@ -1560,6 +1570,9 @@ A ``TaskSample`` names a `Harbor task directory <https://www.harborframework.com
 with ``task_path: Path``: the directory contains the instruction, environment
 and verifier configuration/files. The path is interpreted in the consuming
 algorithm's execution environment. The value also accepts optional ``metadata``.
+``files`` is a ``TaskFiles(partition, digest)`` that names the directory in the
+task file store, or ``None``. Only a task with ``files`` can go into a training
+job (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__).
 It performs no file I/O or rollout. Algorithms supporting tasks own validation,
 environment execution and conversion to trajectories. The Tinker component,
 and the Slime component with its own rollout engines, roll task samples out in
@@ -2187,7 +2200,7 @@ these fields:
 
 - ``job_id`` and ``backend``, the name of the training component.
 - ``data``, a ``JobDataRef``: the job data directory that the job trains.
-  ``data_dir`` is its local path, which ``read_job_data`` reads, and
+  ``read_data()`` returns its samples, ``data_dir`` is its local path, and
   ``data_uri`` its URI. ``data_id``, ``sample_count`` and ``kind`` describe
   the data.
 - ``request_id``: the ID of the training request that the job trains, or

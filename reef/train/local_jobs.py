@@ -39,7 +39,7 @@ def submitted_job(job_id: str, backend: str, submitted: Mapping[str, Any]) -> Tr
         job_id,
         backend,
         submitted["start"],
-        JobDataRef.from_dict(data, Path(data["path"])),
+        JobDataRef.from_dict(data, Path(data["path"]), tuple(Path(path) for path in data["task_paths"])),
         submitted["parameters"],
         scenario=submitted["scenario"],
         request_id=submitted.get("request_id"),
@@ -55,7 +55,7 @@ class LocalJobComponent(TrainingComponent):
 
     ``jobs_root`` holds one directory per job, named by the job ID, with
     ``job.json`` (the submitted job, whose data is the reference of its job data directory with its local
-    ``path``), ``checkpoints.json`` (the checkpoints
+    ``path`` and the local ``task_paths`` of its tasks), ``checkpoints.json`` (the checkpoints
     saved so far, each ``{"step", "path", "artifact_path", "metrics"}``) and,
     once the job ended, ``result.json`` (``{"state", "metrics", "error"?}``).
     A job's metrics and its checkpoints' metrics must encode as JSON. The job
@@ -169,7 +169,11 @@ class LocalJobComponent(TrainingComponent):
                 {
                     "scenario": job.scenario,
                     "start": job.start,
-                    "data": {**job.data.to_dict(), "path": str(job.data_dir)},
+                    "data": {
+                        **job.data.to_dict(),
+                        "path": str(job.data_dir),
+                        "task_paths": [str(path) for path in job.data.task_paths],
+                    },
                     "parameters": dict(job.parameters),
                     "request_id": job.request_id,
                     "component": job.component,

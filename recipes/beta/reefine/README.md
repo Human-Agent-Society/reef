@@ -53,7 +53,7 @@ reef serve -c recipes/beta/reefine/examples/configs/serve.yaml \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b \
   --inference.upstream-api-key dummy \
-  --recipe.config.evolution.multimodal.api_key sk-or-...
+  --recipe.config.evolution.method.config.multimodal.api_key sk-or-...
 ```
 
 `--model ollama/gemma4:26b` is a short form of the three `--inference`
@@ -344,7 +344,7 @@ The agent holds no credential. It and its trials reach models through a
 loopback gateway whose address carries a random token: the served model
 with the served key (always the served model, whatever a request names),
 and `/v1/images`, `/v1/embeddings`, `/v1/audio/speech` and
-`/v1/decisions` on the recipe's multimodal gateway (`evolution.multimodal`,
+`/v1/decisions` on the method's multimodal gateway (`evolution.method.config.multimodal`,
 see below), and the provider's
 model list (`GET /models?modality=`, fetched with its key), so the agent picks
 a model that exists without holding a key. Every call spends from
@@ -410,8 +410,8 @@ Isolation (`evolution.agent.sandbox`, or `REEF_AGENT_SANDBOX`):
 * Left unset on a host that cannot isolate, the agent is off and the served
   model answers in text; the service logs why.
 
-`timeout_s` (1800) bounds the whole agent run and `trial_timeout_s` (300)
-each trial. Trials also respect the remaining run budget, reserving the
+`evolution.agent.timeout_s` (1800) bounds the whole agent run, and the
+method's setting `evolution.method.config.trial_timeout_s` (300) each trial. Trials also respect the remaining run budget, reserving the
 last 10 percent (at most 60 seconds) for saving files and finishing. The
 agent receives a reminder to finish during this interval; it is still
 subject to the outer hard timeout. A run past its limit hands back no change.
@@ -420,12 +420,12 @@ Set
 an agent run makes a model call per turn and may probe several provider
 models before it settles on one.
 
-`ReefineRecipe` gives `evolution.agent.trial_timeout_s` and
-`evolution.multimodal` (below) to `ReefineMethod` as its config. The method
-takes the agent from its job's services (`job.services.agent`), so it needs
-no recipe of its own. A deployment that names
-`reef.recipe.harness:HarnessEvolutionRecipe` runs it without Reefine's
-defaults, and writes the two settings in the method's config:
+`ReefineMethod` reads two settings from its own config: `trial_timeout_s`
+and `multimodal` (below). It takes the agent from its job's services
+(`job.services.agent`), so it needs no recipe of its own. `ReefineRecipe`
+only declares defaults, and names the method when the deployment names none.
+A deployment that names `reef.recipe.harness:HarnessEvolutionRecipe` runs the
+method without Reefine's defaults. Both write the settings in one place:
 
 ```yaml
 evolution:
@@ -438,7 +438,7 @@ evolution:
 
 ## Images, speech, embeddings and decisions
 
-`evolution.multimodal` names one gateway that serves these modalities behind
+The method's `multimodal` setting names one gateway that serves these modalities behind
 a single key. The agent and its trials reach it through their loopback
 gateway, in the provider's own format, and hold no provider key. Reef's HTTP
 service does not relay these modalities: a scenario's clients call only the
@@ -446,15 +446,18 @@ chat model routes.
 
 ```yaml
 evolution:
-  multimodal:
-    preset: openrouter          # or openai-compatible (OrcaRouter, LiteLLM, ...)
-    url: https://openrouter.ai/api   # the preset's address unless set; required for openai-compatible
-    api_key: ${REEF_MULTIMODAL_API_KEY}   # or api_key_env: NAME
+  method:
+    module: recipes.beta.reefine:ReefineMethod
+    config:
+      multimodal:
+        preset: openrouter          # or openai-compatible (OrcaRouter, LiteLLM, ...)
+        url: https://openrouter.ai/api   # the preset's address unless set; required for openai-compatible
+        api_key: ${REEF_MULTIMODAL_API_KEY}   # or api_key_env: NAME
 ```
 
 `api_key` takes the key the way `inference.upstream_api_key` takes the chat
 key; the example configuration sets it to `${REEF_MULTIMODAL_API_KEY}`, and
-`--recipe.config.evolution.multimodal.api_key` sets it on the command line.
+`--recipe.config.evolution.method.config.multimodal.api_key` sets it on the command line.
 `api_key_env` names a variable of the service's environment instead.
 Empty, the served model's key serves when the served model is at the same address, so a
 deployment that chats through OpenRouter needs nothing more. Without a key,

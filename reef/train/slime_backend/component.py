@@ -58,7 +58,7 @@ from reef.core.job_data import TaskSample
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import resolve
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataKind, read_job_data
+from reef.storage.job_data import JobDataKind
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.learning_rate import (
     LearningRateScheduleState,
@@ -279,7 +279,7 @@ class SlimeJobs(LocalJobComponent):
         elif dataset_family and job.kind != "task":
             raise ValueError(f"the {SLIME_NATIVE_FAMILY!r} loss family trains only dataset jobs and task jobs")
         if job.kind == "task":
-            tasks = [item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)]
+            tasks = [item for item in job.read_data().samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
@@ -468,7 +468,7 @@ class SlimeJobRunner(SlimeJobs):
         if started is None or started["rollout_id"] != self.loaded_rollout_id:
             held = SlimeStart.read(Path(saved[-1].path)) if saved else start
             self.check_held_weights(held.rollout_id, job.start)
-        data = read_job_data(job.data_dir, job.data_id)
+        data = job.read_data()
         rollout_metrics: dict[str, Any] = {}
         # A trajectory that serving recorded carries no tokens: the component renders it with the trained model's
         # chat template, and the actor computes its log-probabilities with the weights of this job's start.
@@ -648,7 +648,7 @@ class SlimeJobRunner(SlimeJobs):
         done = self.resume_slime_loop(job, directory)
         tasks = tuple(
             (task_name(item), str(item.task_path.resolve()))
-            for item in read_job_data(job.data_dir, job.data_id).samples
+            for item in job.read_data().samples
             if isinstance(item, TaskSample)
         )
         source = TaskJobSource(

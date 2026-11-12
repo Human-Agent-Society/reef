@@ -24,6 +24,8 @@ from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.plugins import PluginConfigError
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.loading import load_recipe
+from reef.service.deploy.training import training_recipe_config
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
@@ -254,7 +256,7 @@ def test_the_prompt_window_sits_inside_the_teacher_window() -> None:
 
 
 def recipe_from(config: Mapping[str, Any]) -> SDPORecipe:
-    recipe = SDPORecipe.from_environment({}, config=config, **runtime_bindings())
+    recipe = load_recipe(SDPORecipe, config, {}, **runtime_bindings())
     assert isinstance(recipe, SDPORecipe)
     return recipe
 
@@ -318,7 +320,7 @@ def test_the_recipe_refuses_stage_settings_in_the_wrong_place() -> None:
     with pytest.raises(RecipeConfigError, match="does not consume"):
         recipe_from({"data": {"groups_per_step": 4}})
     with pytest.raises(RecipeConfigError, match="does not consume"):
-        SDPORecipe.service_config({"tokenizer-path": "/models/test"}, model_path="/models/test")
+        training_recipe_config(SDPORecipe, {"tokenizer-path": "/models/test"}, model_path="/models/test")
     # A key in the wrong stage, and an invalid teacher window, fail when the pipeline builds.
     context = PipelineContext("science", SDPOReport)
     with pytest.raises(PluginConfigError, match="success_reward_threshold"):

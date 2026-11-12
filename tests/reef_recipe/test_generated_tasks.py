@@ -47,6 +47,7 @@ from reef.recipe.generated_tasks.processor import (
     train_task_names,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
+from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sample2job import Sample2JobSettings
@@ -969,13 +970,14 @@ def test_the_recipe_refuses_a_training_component_that_runs_no_task_jobs() -> Non
 
 
 def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str, Any]) -> WeightTrainingRecipe:
-    return GeneratedTaskRecipe.from_environment(
-        environ,
-        config={
+    return load_recipe(
+        GeneratedTaskRecipe,
+        {
             "data": {"job_parameters": {"rollout": ROLLOUT}},
             "model": {"path": "Qwen/Qwen3-8B"},
             "pipeline": pipeline,
         },
+        environ,
         runtime=InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000"),
         training_component=StubTrainingComponent(),
     )

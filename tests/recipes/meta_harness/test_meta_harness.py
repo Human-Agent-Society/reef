@@ -48,7 +48,7 @@ from reef.core.plugins import PluginConfigError
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import ComparePolicy
 from reef.harness.tree import HarnessTree
-from reef.recipe.registry import build_recipe
+from reef.recipe.loading import build_recipe
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.backend import HarnessBackend

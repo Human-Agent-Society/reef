@@ -7,6 +7,7 @@ ends, its ``JobOutcome`` is what the training pipeline learns about it.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -101,12 +102,33 @@ class TrajectorySample:
 
 
 @dataclass(frozen=True)
+class TaskFiles:
+    """The name of one task directory in the task file store.
+
+    Values: ``partition`` is the non-empty name of the store's partition that keeps the directory, and ``digest`` the
+    non-empty digest of its files. Purpose: the code that takes a task's directory from the store makes the value
+    (``reef.storage.samples``, ``reef.recipe.generated_tasks``). A job data directory names a task by it, and a
+    reader gives it back to the store for the directory (``reef.storage.job_data``).
+    """
+
+    partition: str
+    digest: str
+
+    def __post_init__(self) -> None:
+        for name, value in (("partition", self.partition), ("digest", self.digest)):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"TaskFiles.{name} must be a non-empty string")
+
+
+@dataclass(frozen=True)
 class TaskSample:
     """A Harbor task directory containing its instruction, environment and verifier.
 
     Values: ``task_path`` is a ``Path``, ``source_agent_record_ids`` a tuple of
     the non-empty IDs of the agent records the task came from, and
-    ``metadata`` a mapping. Purpose: the record-to-sample stage makes the value,
+    ``metadata`` a mapping. ``files`` names the directory in the task file store, or is None for a directory that
+    the store does not keep; ``task_path`` is then the only place of the files, and the sample cannot go into a job
+    data directory. Purpose: the record-to-sample stage makes the value,
     and a training component that runs task jobs reads it.
 
     The path is resolved in the consuming algorithm's execution environment;
@@ -117,6 +139,7 @@ class TaskSample:
     task_path: Path
     source_agent_record_ids: tuple[str, ...] = ()
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    files: TaskFiles | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.task_path, Path):
@@ -124,6 +147,8 @@ class TaskSample:
         check_record_ids(self.source_agent_record_ids)
         if not isinstance(self.metadata, Mapping):
             raise TypeError("task metadata must be a mapping")
+        if self.files is not None and not isinstance(self.files, TaskFiles):
+            raise TypeError("task files must be a TaskFiles or None")
 
 
 #: One sample of job data: a trajectory that trains as it is, or a Harbor task that the training component rolls
@@ -196,6 +221,7 @@ class JobData:
                         "task_path": str(sample.task_path),
                         "source_agent_record_ids": list(sample.source_agent_record_ids),
                         "metadata": dict(sample.metadata),
+                        "files": None if sample.files is None else dataclasses.asdict(sample.files),
                     }
                 )
         request = None if self.request is None else {"id": self.request.id, **self.request.to_dict()}
@@ -221,7 +247,10 @@ class JobData:
                 elif entry["kind"] == "task":
                     samples.append(
                         TaskSample(
-                            Path(entry["task_path"]), tuple(entry["source_agent_record_ids"]), entry["metadata"]
+                            Path(entry["task_path"]),
+                            tuple(entry["source_agent_record_ids"]),
+                            entry["metadata"],
+                            None if entry["files"] is None else TaskFiles(**entry["files"]),
                         )
                     )
                 else:

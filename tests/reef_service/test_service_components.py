@@ -30,6 +30,7 @@ from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.recipe import CompositeRecipe, Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.record2sample.service import (
     RECORD_SELECTION_KIND,
     SAMPLES_QUEUE,
@@ -185,8 +186,8 @@ def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_e
     config = replace(settings(tmp_path), served_url="http://reef-control:8000")
     # The training service builds the harness training component from the recipe's settings, after the recipe
     # has the served endpoint.
-    harness = HarnessEvolutionRecipe.from_environment(
-        {}, config=evolution_config(state_dir=str(tmp_path / "harness")), runtime=runtime()
+    harness = load_recipe(
+        HarnessEvolutionRecipe, evolution_config(state_dir=str(tmp_path / "harness")), {}, runtime=runtime()
     )
     recipe = CompositeRecipe(components={"harness": harness, "records": Recipe()})
     monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)

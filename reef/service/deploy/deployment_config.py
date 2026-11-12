@@ -18,9 +18,11 @@ from reef.core.errors import DeployConfigError
 from reef.execution.executor.config import ExecutorSettings, WorkerResources, executor_settings
 from reef.inference.registry import runtime_factory_for
 from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.loading import weight_training_selection
 from reef.recipe.registry import recipe_class_for
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
 from reef.service.deploy.service_config import service_config_arguments, service_owned_keys
+from reef.service.deploy.training import training_recipe_config
 
 _MISSING = object()
 #: Appended to unknown-section and unknown-field errors.
@@ -232,7 +234,7 @@ def selected_weight_training(
     reef = config.get("reef", {})
     if not isinstance(reef, Mapping):
         return None
-    selected = recipe_type.select_weight_training(reef)
+    selected = weight_training_selection(recipe_type, reef)
     return None if selected is None else selected[0]
 
 
@@ -335,7 +337,7 @@ def normalize_component_config(config: Mapping[str, Any], arguments: tuple[Confi
     recipe_type, _ = _recipe_definition(normalized)
     if recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe):
         owned = {key: value for key, value in normalized["reef"].items() if key not in service_owned_keys()}
-        recipe_type.service_config(owned, model_path="")
+        training_recipe_config(recipe_type, owned, model_path="")
     elif recipe_type is not None:
         data = normalized.get("reef", {}).get("data", {})
         parse_config_values(config_arguments(recipe_type), data, include_defaults=False)

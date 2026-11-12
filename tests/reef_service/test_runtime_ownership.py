@@ -13,7 +13,7 @@ from reef.dispatcher import Dispatcher
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_named_recipe
+from reef.recipe.loading import build_named_recipe
 from reef.service import assembly
 from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination

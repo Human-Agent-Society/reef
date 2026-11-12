@@ -5,10 +5,12 @@ Reef's inference service relays no multimodal call; only the agent's trials reac
 
 from __future__ import annotations
 
+
 import pytest
 
 from recipes.beta.reefine.multimodal import MultimodalSettings
-from reef.recipe.errors import RecipeConfigError
+from reef.core.plugins import PluginConfigError
+from reef.recipe.loading import load_recipe
 
 
 @pytest.mark.unit
@@ -41,23 +43,23 @@ def test_multimodal_settings_read_the_preset_address_and_key() -> None:
 
 
 @pytest.mark.unit
-def test_reefine_hands_its_gateway_to_the_method() -> None:
-    """The recipe gives ``evolution.multimodal`` to the method as its config; the method settles the gateway's key
-    against the served model of its job, so the agent's trials reach the gateway."""
+def test_the_method_settles_its_gateway_key_against_the_served_model() -> None:
+    """The deployment writes ``multimodal`` in the method's config; the method settles the gateway's key against
+    the served model of its job, so the agent's trials reach the gateway."""
     from recipes.beta.reefine import ReefineMethod, ReefineRecipe
 
     settings = {
         "evolution": {
             "evaluation": {"tasks": ["[health] reply reef-ok"]},
-            "multimodal": {"preset": "openrouter"},
+            "method": {"config": {"multimodal": {"preset": "openrouter"}}},
             "agent": None,
         }
     }
-    evolution = ReefineRecipe._recipe_kwargs(settings, {})["evolution"]
-    assert evolution.method["config"]["multimodal"] == {"preset": "openrouter"}
-    method = ReefineMethod.from_config(evolution.method["config"])
+    recipe = load_recipe(ReefineRecipe, settings, {})
+    assert isinstance(recipe, ReefineRecipe)
+    method = ReefineMethod.from_config(recipe.evolution.method["config"])
     assert method.multimodal is not None
     assert method.multimodal.provider("https://openrouter.ai/api", "sk-upstream").api_key == "sk-upstream"
     assert method.multimodal.provider("http://127.0.0.1:11434", "ollama") is None
-    with pytest.raises(RecipeConfigError, match=r"evolution\.multimodal"):
-        ReefineRecipe._recipe_kwargs({"evolution": {**settings["evolution"], "multimodal": "openrouter"}}, {})
+    with pytest.raises(PluginConfigError, match="multimodal must be a mapping"):
+        ReefineMethod.from_config({"multimodal": "openrouter"})

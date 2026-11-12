@@ -26,6 +26,7 @@ from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch, validate_tree
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.record2sample.traces import InferenceSamples
 from reef.train.harness_backend import MethodJob, Workspace
 from reef.train.harness_backend.workspace import JobOutput
@@ -181,7 +182,7 @@ def test_a_reply_that_is_not_the_asked_json_skips_its_run_and_an_item_with_a_cre
 
 def test_the_example_deploys_the_method_without_runs_and_a_bad_setting_is_refused() -> None:
     config = recipe_config_from_file_layout(yaml.safe_load(EXAMPLE.read_text(encoding="utf-8")))
-    recipe = HarnessEvolutionRecipe.from_environment({}, config=config)
+    recipe = load_recipe(HarnessEvolutionRecipe, config, {})
     component = configured_component(recipe)
     assert isinstance(component.method, ReasoningBank) and component.method.settings.max_items == 50
     assert (recipe.evaluation.policy, component.scorer) == ("none", None)

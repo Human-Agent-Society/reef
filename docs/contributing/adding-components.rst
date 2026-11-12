@@ -29,7 +29,9 @@ Implementation
   import from ``reef/__init__.py``. The contract it implements is
   ``reef/recipe/``.
 - Declare recipe-owned settings with ``config_field``. Do not parse those
-  settings again in ``reef/service/``.
+  settings again in ``reef/service/``. Do not add a loading method to the
+  recipe class: ``reef.recipe.loading.load_recipe`` builds the recipe from its
+  declarations.
 - Put the method's record-to-sample and sample-to-job stages in
   ``<method-package>/processor.py``, subclassing ``ReportSamples`` or
   ``JudgedSamples`` (``reef/record2sample/``) and ``Sample2Job``

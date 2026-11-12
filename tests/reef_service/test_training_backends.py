@@ -153,10 +153,10 @@ def test_a_failed_recipe_build_closes_the_component_and_shuts_down_its_runtime(t
     shutdowns = []
     monkeypatch.setattr(StubInferenceRuntime, "shutdown", lambda runtime: shutdowns.append(runtime))
 
-    def refuse(cls, *args, **kwargs):
+    def refuse(*args, **kwargs):
         raise ValueError("bad recipe config")
 
-    monkeypatch.setattr(SAORecipe, "from_resolved_config", classmethod(refuse))
+    monkeypatch.setattr("reef.service.assembly.load_recipe", refuse)
     with pytest.raises(ValueError, match="bad recipe config"):
         _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     assert Path(f"{marker}.closed").exists()

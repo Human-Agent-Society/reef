@@ -34,7 +34,8 @@ from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComp
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
-from reef.core.errors import ConfigError, InternalError, ReefError
+from reef.core.config import Settings
+from reef.core.errors import ConfigError
 from reef.core.model_metadata import ModelMetadata
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
@@ -49,6 +50,7 @@ from reef.harness.tasks.harness_models import HarnessModels
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
+from reef.recipe.config_fields import ConfigReader, reader_field, section_field
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
@@ -78,11 +80,95 @@ class HarnessLayout(ArtifactLayout):
             raise ValueError(f"the harness tree fails validation: {validation.message()}")
 
 
+def evolution_section(sections: Mapping[str, Settings]) -> EvolutionSettings:
+    """The parsed ``evolution`` section among a harness recipe's ``sections``; ``TypeError`` without it."""
+    evolution = sections.get("evolution")
+    if not isinstance(evolution, EvolutionSettings):
+        raise TypeError("a harness recipe's evolution field holds EvolutionSettings")
+    return evolution
+
+
+class SeedTree(ConfigReader):
+    """Reads the seed tree: the files of the directory that ``evolution.seed`` names, the empty tree for none.
+
+    Purpose: ``HarnessEvolutionRecipe.seed`` declares it.
+    """
+
+    def read(
+        self, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]
+    ) -> HarnessTree:
+        seed = evolution_section(sections).seed
+        try:
+            return HarnessTree({}) if seed is None else HarnessTree.read(Path(seed).expanduser())
+        except ValueError as exc:
+            raise RecipeConfigError(f"evolution.seed: {exc}") from exc
+
+
+class NamedModels(ConfigReader):
+    """Reads the method's named models: one ``ModelBinding`` for each ``evolution.models`` entry, its key from the
+    entry or from the environment variable that the entry names.
+
+    Purpose: ``HarnessEvolutionRecipe.models`` declares it.
+    """
+
+    def read(
+        self, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]
+    ) -> dict[str, ModelBinding]:
+        return {
+            name: ModelBinding.from_config(section, environ, where=f"evolution.models.{name}")
+            for name, section in evolution_section(sections).models.items()
+        }
+
+
+class NamedModelMetadata(ConfigReader):
+    """Reads the model metadata: one ``ModelMetadata`` for each ``evolution.model_metadata`` entry, by model name.
+
+    Purpose: ``HarnessEvolutionRecipe.model_metadata`` declares it.
+    """
+
+    def read(
+        self, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]
+    ) -> dict[str, ModelMetadata]:
+        return {
+            name: ModelMetadata.from_config(section)
+            for name, section in evolution_section(sections).model_metadata.items()
+        }
+
+
+class RunWorkers(ConfigReader):
+    """Reads the placement of the run workers: the executor that ``execution.evolution`` selects, by name from the
+    ``executors`` profiles or inline.
+
+    Purpose: ``HarnessEvolutionRecipe.worker_executor`` declares it.
+    """
+
+    def read(
+        self, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]
+    ) -> ExecutorSettings:
+        return role_executor_settings(config, "evolution")
+
+
+class ServedModelName(ConfigReader):
+    """Reads the served model's name: ``model.path`` when it is a non-empty string, else ``None``.
+
+    Purpose: ``HarnessEvolutionRecipe.model_name`` declares it.
+    """
+
+    def read(
+        self, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]
+    ) -> str | None:
+        model = config.get("model")
+        path = model.get("path") if isinstance(model, Mapping) else None
+        return path if isinstance(path, str) and path else None
+
+
 @dataclass(frozen=True)
 class HarnessEvolutionRecipe(Recipe):
     """The configuration of harness evolution of one adapter's harness tree by one method.
 
-    Values: ``evolution`` and ``evaluation`` are the parsed sections;
+    Values: ``evolution`` and ``evaluation`` are the parsed sections, which the loader reads (``section_field``);
+    the loader reads the next five fields with their readers (``reader_field``).
+    ``evolution`` and ``evaluation`` hold these settings:
     ``evolution.method`` names the deployment's ``Method``, and
     ``evaluation.scorer`` and ``evaluation.collector`` the scorer and the
     collector. ``seed`` is the first tree of a new scenario. ``models`` and
@@ -107,13 +193,17 @@ class HarnessEvolutionRecipe(Recipe):
     ``harness_component``.
     """
 
-    evolution: EvolutionSettings
-    evaluation: EvaluationSettings
-    seed: HarnessTree = field(default_factory=lambda: HarnessTree({}))
-    models: Mapping[str, ModelBinding] = field(default_factory=dict)
-    model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
-    worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
-    model_name: str | None = None
+    evolution: EvolutionSettings = section_field(
+        "evolution", required="harness evolution requires an 'evolution' config section"
+    )
+    evaluation: EvaluationSettings = section_field(
+        "evolution.evaluation", required="harness evolution requires an 'evolution' config section"
+    )
+    seed: HarnessTree = reader_field(SeedTree(), default_factory=lambda: HarnessTree({}))
+    models: Mapping[str, ModelBinding] = reader_field(NamedModels(), default_factory=dict)
+    model_metadata: Mapping[str, ModelMetadata] = reader_field(NamedModelMetadata(), default_factory=dict)
+    worker_executor: ExecutorSettings = reader_field(RunWorkers(), default_factory=ExecutorSettings)
+    model_name: str | None = reader_field(ServedModelName(), default=None)
     #: Where this Reef answers inference: evaluation runs sample the snapshot it serves through it.
     served_endpoint: ServedEndpoint | None = None
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
@@ -234,48 +324,6 @@ class HarnessEvolutionRecipe(Recipe):
     def harness_adapter(self) -> str | None:
         """``evolution.adapter``."""
         return self.evolution.adapter
-
-    @classmethod
-    def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
-        section = settings.get("evolution")
-        if not isinstance(section, Mapping):
-            raise RecipeConfigError("harness evolution requires an 'evolution' config section")
-        try:
-            evaluation_section = section.get("evaluation", {})
-            evolution = EvolutionSettings.from_config(
-                {key: value for key, value in section.items() if key != "evaluation"}, setting="evolution"
-            )
-            evaluation = EvaluationSettings.from_config(evaluation_section, setting="evolution.evaluation")
-            if evolution.method is None:
-                raise ValueError("evolution.method must name the Method that evolves the tree")
-            models = {
-                name: ModelBinding.from_config(section, values, where=f"evolution.models.{name}")
-                for name, section in evolution.models.items()
-            }
-            model_metadata = {
-                name: ModelMetadata.from_config(section) for name, section in evolution.model_metadata.items()
-            }
-            worker_executor = role_executor_settings(settings, "evolution")
-        except InternalError:
-            raise
-        except (TypeError, ValueError, ReefError) as exc:
-            raise RecipeConfigError(str(exc)) from exc
-        try:
-            seed = HarnessTree({}) if evolution.seed is None else HarnessTree.read(Path(evolution.seed).expanduser())
-        except ValueError as exc:
-            raise RecipeConfigError(f"evolution.seed: {exc}") from exc
-        model = settings.get("model")
-        model_name = model.get("path") if isinstance(model, Mapping) else None
-        return {
-            **super()._recipe_kwargs(settings, values),
-            "evolution": evolution,
-            "evaluation": evaluation,
-            "seed": seed,
-            "models": models,
-            "model_metadata": model_metadata,
-            "worker_executor": worker_executor,
-            "model_name": model_name if isinstance(model_name, str) and model_name else None,
-        }
 
     def with_served_endpoint(self, endpoint: ServedEndpoint) -> HarnessEvolutionRecipe:
         return replace(self, served_endpoint=endpoint)

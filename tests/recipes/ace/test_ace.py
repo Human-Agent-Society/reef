@@ -32,6 +32,7 @@ from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe import load_recipe_config
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.train.harness_backend import MethodJob, Workspace
 from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.harness_backend.state import HarnessState
@@ -243,7 +244,7 @@ def test_a_reply_that_is_not_the_asked_json_skips_its_trace(tmp_path: Path) -> N
 def test_the_example_serves_ace_on_pi_with_no_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
     # reef serve runs the example from the repository root, where its paths start.
     monkeypatch.chdir(EXAMPLE.parents[3])
-    recipe = HarnessEvolutionRecipe.from_environment({}, config=load_recipe_config(EXAMPLE), runtime=runtime())
+    recipe = load_recipe(HarnessEvolutionRecipe, load_recipe_config(EXAMPLE), {}, runtime=runtime())
     component = configured_component(recipe)
     assert isinstance(component.method, ACE)
     assert component.method.settings == ACESettings(max_bullets=100, prune_margin=2)

@@ -25,7 +25,6 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.data import NewItem
-from reef.storage.job_data import read_job_data
 from reef.storage.record_items import ItemRecordStore
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
@@ -607,7 +606,7 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
     assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"objective": "sft", "learning_rate": 2e-5}
     rl = {"objective": "provided:Objective", "rollout": {"rollouts_per_task": 4}}
     assert train(train_record("rl", rl, "task-a")) == rl
-    assert [type(sample).__name__ for job in component.jobs for sample in read_job_data(job.data_dir).samples] == [
+    assert [type(sample).__name__ for job in component.jobs for sample in job.read_data().samples] == [
         "TrajectorySample",
         "TaskSample",
     ]

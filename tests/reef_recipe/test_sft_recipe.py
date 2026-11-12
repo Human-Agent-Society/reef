@@ -20,7 +20,8 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.recipe.loading import build_recipe, load_recipe
+from reef.recipe.registry import recipe_class_for
 from reef.recipe.sft import SFTJobData, SFTRecipe, SFTSamples, SFTSettings
 from reef.sample2job import DistillJobData
 from reef.storage.data import NewItem
@@ -355,7 +356,7 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
 @pytest.mark.unit
 def test_sft_recipe_builds_without_stage_config_and_rejects_removed_keys_and_objective_options() -> None:
     def sft_recipe(config: Mapping[str, Any]) -> SFTRecipe:
-        recipe = SFTRecipe.from_environment({}, config=config, **runtime_bindings())
+        recipe = load_recipe(SFTRecipe, config, {}, **runtime_bindings())
         assert isinstance(recipe, SFTRecipe)
         return recipe
 

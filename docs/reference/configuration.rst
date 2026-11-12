@@ -1769,10 +1769,9 @@ executor, ``evolution.executor`` and ``evolution.sandbox``. The history
 reuses a scored run only in the context it ran in, and never reuses a
 failed run.
 
-The beta Reefine recipe runs its agent on pi with ``evolution.agent``, adds
-``evolution.agent.trial_timeout_s``, and reads ``evolution.multimodal``. It
-gives the two to its method as ``evolution.method.config`` (``trial_timeout_s``
-and ``multimodal``). Its
+The beta Reefine recipe runs its agent on pi with ``evolution.agent``. Its
+method reads ``trial_timeout_s`` and ``multimodal`` from
+``evolution.method.config``. Its
 `README <../../recipes/beta/reefine/README.md>`__ documents them.
 
 The served model's binding is merged in when a run renders the tree; it

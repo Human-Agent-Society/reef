@@ -24,7 +24,7 @@ from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.recipe.registry import build_recipe
+from reef.recipe.loading import build_recipe
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import component_files
 from reef.service.deploy.config_utils import load_config

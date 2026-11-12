@@ -21,7 +21,8 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.recipe.loading import build_recipe, load_recipe
+from reef.recipe.registry import recipe_class_for
 
 HEALTH = "[health] Run `echo reef-ok` and reply with its output."
 
@@ -58,9 +59,9 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
     seed = tmp_path / "seed"
     seed.mkdir()
     (seed / "rules.md").write_text("Answer in one line.\n")
-    built = ReefineRecipe.from_environment(
-        {},
-        config={
+    built = load_recipe(
+        ReefineRecipe,
+        {
             "data": {"training_mode": "manual"},
             "pipeline": {"sample2job": {"config": {"batch_size": 3}}},
             "evolution": {
@@ -70,6 +71,7 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
             },
             "activation": {"module": "never"},
         },
+        {},
     )
     assert isinstance(built, ReefineRecipe)
     assert built.training_mode == "manual" and built.stages().sample2job.config == {"batch_size": 3}
@@ -87,7 +89,6 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
         {"evaluation": "floor"},
         {"evaluation": {"tasks": ["task"]}, "seed": 3},
         {"evaluation": {"tasks": ["task"]}, "seed": "/no/such/seed"},
-        {"evaluation": {"tasks": ["task"]}, "multimodal": "openrouter"},
         {"evaluation": {"tasks": ["task"]}, "agent": "bwrap"},
         # The key's old name is an unknown field.
         {"evaluation": {"tasks": ["task"]}, "proposer_agent": None},
@@ -95,20 +96,20 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
 )
 def test_invalid_evolution_config_is_rejected(section: object) -> None:
     with pytest.raises(RecipeConfigError):
-        ReefineRecipe.from_environment({}, config={"evolution": section})
+        load_recipe(ReefineRecipe, {"evolution": section}, {})
 
 
 def test_a_seed_that_fails_validation_is_refused_at_startup(tmp_path: Path) -> None:
     (tmp_path / "notes.txt").write_text("not a harness file")
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed fails validation: notes\.txt"):
-        ReefineRecipe.from_environment({}, config={"evolution": evolution(seed=str(tmp_path))})
+        load_recipe(ReefineRecipe, {"evolution": evolution(seed=str(tmp_path))}, {})
 
 
 def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path: Path) -> None:
     """reef-terminus runs a Harbor task directory, not a prompt: the profile's health prompt becomes the same check
     as the directory beside the recipe, and the bundled scorer reads that directory's verifier reward."""
     section = {"adapter": "terminus", "evaluation": {"tasks": [HEALTH, "/tasks/own-task"]}}
-    built = ReefineRecipe.from_environment({}, config={"evolution": section})
+    built = load_recipe(ReefineRecipe, {"evolution": section}, {})
     assert isinstance(built, ReefineRecipe)
     assert built.evaluation.tasks == (HEALTH_TASK_DIRECTORY, "/tasks/own-task")
     health = Path(HEALTH_TASK_DIRECTORY)
@@ -116,7 +117,7 @@ def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path
         assert (health / name).is_file(), name
     assert "reef-ok" in (health / "tests/test.sh").read_text()
     # A prompt adapter keeps the prompt.
-    pi = ReefineRecipe.from_environment({}, config={"evolution": {**section, "adapter": "pi", "agent": None}})
+    pi = load_recipe(ReefineRecipe, {"evolution": {**section, "adapter": "pi", "agent": None}}, {})
     assert isinstance(pi, ReefineRecipe) and pi.evaluation.tasks[0] == HEALTH
 
     def ran(rewards: dict[str, float], error: str = "") -> TaskResult:
@@ -134,7 +135,7 @@ def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path
 
 def test_an_unknown_adapter_is_a_config_error() -> None:
     with pytest.raises(RecipeConfigError, match="acme"):
-        ReefineRecipe.from_environment({}, config={"evolution": evolution(adapter="acme")})
+        load_recipe(ReefineRecipe, {"evolution": evolution(adapter="acme")}, {})
 
 
 def test_off_pi_no_agent_is_built_or_warned_about(caplog) -> None:
@@ -142,12 +143,12 @@ def test_off_pi_no_agent_is_built_or_warned_about(caplog) -> None:
     neither warns nor needs a sandbox there, while pi still warns."""
     environ = {"REEF_AGENT_SANDBOX": "none"}
     with caplog.at_level("WARNING"):
-        built = ReefineRecipe.from_environment(environ, config={"evolution": evolution(adapter="dsh")})
+        built = load_recipe(ReefineRecipe, {"evolution": evolution(adapter="dsh")}, environ)
         off_pi = configured_component(built, environ)
     assert built.evolution.agent is None and off_pi.agent is None
     assert "sandbox is none" not in caplog.text
     with caplog.at_level("WARNING"):
-        pi = configured_component(ReefineRecipe.from_environment(environ, config={"evolution": evolution()}), environ)
+        pi = configured_component(load_recipe(ReefineRecipe, {"evolution": evolution()}, environ), environ)
     assert pi.agent is not None and isinstance(pi.agent.executor, LocalExecutor)
     assert "sandbox is none" in caplog.text
 
@@ -155,7 +156,7 @@ def test_off_pi_no_agent_is_built_or_warned_about(caplog) -> None:
 @pytest.mark.parametrize("adapter", ["pi", "claude", "codex", "opencode", "hermes", "dsh", "terminus"])
 def test_the_packaged_seed_is_the_first_tree_on_every_adapter(adapter: str) -> None:
     """The recipe validates its seed for the adapter at startup: the starter skill renders everywhere."""
-    built = ReefineRecipe.from_environment({}, config={"evolution": evolution(adapter=adapter, agent=None)})
+    built = load_recipe(ReefineRecipe, {"evolution": evolution(adapter=adapter, agent=None)}, {})
     assert isinstance(built, ReefineRecipe) and built.evolution.adapter == adapter
     assert built.seed == HarnessTree.read(SEED_DIRECTORY)
 
@@ -164,19 +165,21 @@ def test_each_scenarios_backend_binds_the_agent_and_the_method_holds_its_own_con
     """The recipe gives the method Reefine's keys as its config; the component binds the agent to pi once per
     scenario, with the deployment's binary, for the method to read from its job's services."""
     binary = tmp_path / "pi"
+    method_config = {"trial_timeout_s": 30, "multimodal": {"preset": "openrouter"}}
     section = evolution(
         binary=str(binary),
         state_dir=str(tmp_path / "state"),
-        agent={"timeout_s": 120, "trial_timeout_s": 30},
-        multimodal={"preset": "openrouter"},
+        agent={"timeout_s": 120},
+        method={"config": method_config},
     )
     upstream = InferenceProxyRuntime(base_url="https://openrouter.ai/api", api_key="sk-upstream", model_path="m")
     environ = {"REEF_AGENT_SANDBOX": "none"}
-    built = ReefineRecipe.from_environment(environ, config={"evolution": section}, runtime=upstream)
-    assert built.evolution.method == {
-        "module": "recipes.beta.reefine.method:ReefineMethod",
-        "config": {"multimodal": {"preset": "openrouter"}, "trial_timeout_s": 30.0},
-    }
+    built = load_recipe(ReefineRecipe, {"evolution": section}, environ, runtime=upstream)
+    assert isinstance(built, ReefineRecipe)
+    # The deployment's method config goes over the recipe's default method.
+    assert built.evolution.method == {"module": "recipes.beta.reefine.method:ReefineMethod", "config": method_config}
+    # The agent runs on the harness's own binary.
+    assert built.evolution.agent == {"binary": str(binary), "timeout_s": 120}
     component = configured_component(built, environ)
     method = component.method
     assert isinstance(method, ReefineMethod) and method.trial_timeout_s == 30.0
@@ -201,14 +204,11 @@ def test_a_deployment_names_the_method_without_the_reefine_recipe() -> None:
     for config in ({"trial_timeout_s": 0}, {"multimodal": "openrouter"}, {"agent": {}}):
         with pytest.raises(PluginConfigError):
             ReefineMethod.from_config(config)
-    # A method that the deployment names itself keeps its own config; Reefine's keys fill what it leaves out.
-    named = {"module": "recipes.beta.reefine:ReefineMethod", "config": {"trial_timeout_s": 5}}
-    section = evolution(method=named, agent={"trial_timeout_s": 30})
-    built = ReefineRecipe.from_environment({"REEF_AGENT_SANDBOX": "none"}, config={"evolution": section})
-    assert built.evolution.method == {
-        "module": "recipes.beta.reefine.method:ReefineMethod",
-        "config": {"trial_timeout_s": 5},
-    }
+    # The limit of a trial is the method's setting: the agent section does not take it.
+    with pytest.raises(RecipeConfigError, match=r"evolution\.method\.config\.trial_timeout_s"):
+        load_recipe(ReefineRecipe, {"evolution": evolution(agent={"trial_timeout_s": 30})}, {})
+    with pytest.raises(RecipeConfigError, match="unknown config fields: multimodal"):
+        load_recipe(ReefineRecipe, {"evolution": evolution(multimodal={"preset": "openrouter"})}, {})
 
 
 @pytest.mark.unit

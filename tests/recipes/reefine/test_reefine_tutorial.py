@@ -64,7 +64,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     """The demos use the built-in recipe with tutorial-local state, no agent, training_mode manual (one step per
     accepted instruction and no failure driven step between them) and the evaluation's floor over the one health task,
     so a change publishes when the tree still works and an extension still waits."""
-    from reef.recipe.registry import build_named_recipe
+    from reef.recipe.loading import build_named_recipe
     from reef.service.assembly import _upstream_runtime
 
     monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:8000")

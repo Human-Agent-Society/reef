@@ -38,9 +38,7 @@ class ReefineMethod(Method):
     request job on pi, and answers every request with the served model's
     text when the deployment configures no agent (``runs_without_agent``).
     Purpose: a deployment names it in ``evolution.method``; ``ReefineRecipe``
-    names it by default, with the deployment's ``evolution.agent.trial_timeout_s``
-    and ``evolution.multimodal`` as its config. The backend calls ``run`` once
-    per job.
+    names it by default. The backend calls ``run`` once per job.
     """
 
     runs_agent = True

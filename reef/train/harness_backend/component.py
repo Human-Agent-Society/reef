@@ -67,7 +67,6 @@ from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import read_job_data
 from reef.train.backend import ArtifactTextFiles
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
@@ -228,6 +227,8 @@ class HarnessTrainingComponent(LocalJobComponent):
         """
         evolution, evaluation = settings.evolution, settings.evaluation
         try:
+            if evolution.method is None:
+                raise ValueError("evolution.method must name the Method that evolves the tree")
             method = Method.from_setting(evolution.method, setting="evolution.method")
             scorer = (
                 None
@@ -464,7 +465,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         raised, which counts as a job and keeps the state."""
         parameters = job.parameters
         request = request_from_parameters(parameters)
-        data = replace(read_job_data(job.data_dir, job.data_id), request=request)
+        data = replace(job.read_data(), request=request)
         # The row of a request's job names the request, so its request page settles on that row.
         named = {} if request is None else {"training_request": {"id": request.id, **request.to_dict()}}
         component = job_component(job)

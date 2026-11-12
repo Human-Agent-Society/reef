@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Literal, Self
 
 from reef.core.errors import ReefError
+from reef.core.job_data import TaskFiles
 from reef.core.plugins import NoSettings, Plugin
 
 SplitName = Literal["train", "eval"]
@@ -282,6 +283,13 @@ class TaskStore(ABC):
 
         The caller must not change the directory. Raises ``TaskStoreError`` if
         the scenario holds no files of ``files_digest``.
+        """
+
+    @abstractmethod
+    def task_files(self, files_digest: str) -> TaskFiles:
+        """Return the name in the task file store of the directory that ``path`` returns for ``files_digest``.
+
+        A job data directory names a task by it. The call does not check that the store holds the digest.
         """
 
 

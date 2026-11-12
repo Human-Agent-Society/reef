@@ -70,7 +70,6 @@ from reef.storage.commits import (
     parse_scenario_metadata,
     scenario_metadata_for,
 )
-from reef.storage.job_data import read_job_data
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, TrainingJob
@@ -323,7 +322,7 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
     assert [component_trainer.component for component_trainer in scenario.trainers] == [WEIGHTS, HARNESS]
     assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
     [job] = wait_for_jobs(dispatcher, training, 1)
-    assert [item.source_agent_record_ids for item in read_job_data(job.data_dir).samples] == [("i1", "r1")]
+    assert [item.source_agent_record_ids for item in job.read_data().samples] == [("i1", "r1")]
     assert append_commit(scenario, HARNESS) == [("i1", "r1")]
     for _ in range(2):
         wait_for_serving(dispatcher, "agent")
@@ -1753,9 +1752,7 @@ def test_a_restart_polls_the_running_weights_job_and_commits_its_checkpoint(
     served = scenario.snapshot_queries.served_history(scenario.commit_number, component, scenario.components.names)
     assert len(served) == 2 and served[-1] == scenario.serving_artifact_id()
     assert became_true(lambda: len(training.submitted) == 2)
-    assert [item.source_agent_record_ids for item in read_job_data(training.submitted[1].data_dir).samples] == [
-        ("i2", "r2")
-    ]
+    assert [item.source_agent_record_ids for item in training.submitted[1].read_data().samples] == [("i2", "r2")]
     assert training.submitted[1].start == str(tmp_path / "checkpoints" / "1")
 
 

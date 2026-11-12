@@ -12,10 +12,8 @@ from typing import Any
 
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
-from reef.inference.interfaces import InferenceRuntime
 from reef.recipe.base import WeightTrainingRecipe
 from reef.storage.samples import SAMPLE_KINDS, SampleKind
-from reef.train.component import TrainingComponent
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
@@ -28,20 +26,6 @@ class TestPolicyRecipe(WeightTrainingRecipe):
     #: The staleness limit of the record stage.
     max_staleness: int = 0
     name: str = "test_policy"
-
-    @classmethod
-    def from_environment(
-        cls,
-        environ: Mapping[str, str] | None = None,
-        *,
-        config: Mapping[str, Any] | None = None,
-        runtime: InferenceRuntime | None = None,
-        training_component: TrainingComponent | None = None,
-    ) -> TestPolicyRecipe:
-        del environ, config
-        if not isinstance(training_component, TrainingComponent):
-            raise TypeError("TestPolicyRecipe requires a TrainingComponent")
-        return cls(training_component, runtime=runtime)
 
     def __post_init__(self) -> None:
         if self.pipeline_stages is None:

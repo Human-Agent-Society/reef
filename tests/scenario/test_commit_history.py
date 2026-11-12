@@ -36,7 +36,6 @@ from reef.dispatcher import Dispatcher, local_workers
 from reef.recipe.base import Recipe
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_snapshot
-from reef.storage.job_data import read_job_data
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
@@ -337,7 +336,7 @@ class SourceRecordingComponent(StubTrainingComponent):
         self.trained_data: list[list[str]] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.trained_data.append([source_record_id(sample) for sample in read_job_data(job.data_dir).samples])
+        self.trained_data.append([source_record_id(sample) for sample in job.read_data().samples])
         return super().train(job)
 
 

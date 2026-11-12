@@ -229,6 +229,7 @@ def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskSamp
                 "split": stored.split,
             }
         },
+        files=store.task_files(stored.files_digest),
     )
 
 
