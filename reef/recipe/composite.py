@@ -359,10 +359,5 @@ class CompositeRecipe(Recipe):
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         return tuple(path for recipe in self.components.values() for path in recipe.scenario_state_dirs(scenario))
 
-    def serving_status(self) -> Mapping[str, Any] | None:
-        statuses = {component: recipe.serving_status() for component, recipe in self.components.items()}
-        status = {component: value for component, value in statuses.items() if value is not None}
-        return status or None
-
 
 __all__ = ["CompositeRecipe"]

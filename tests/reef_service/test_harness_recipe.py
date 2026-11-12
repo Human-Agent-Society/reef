@@ -322,7 +322,11 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
         runtime=runtime(),
     )
     state = tmp_path.resolve() / "state"
+    # The paths come from the ``evolution`` settings alone; the recipe names them for the delete and the pages.
+    assert built.evolution.scenario_state_dir("demo") == state / "demo"
+    assert built.evolution.component_state_dir("demo", "harness") == state / "demo" / "harness"
     assert built.scenario_state_dirs("demo") == (state / "demo",)
+    assert built.harness_state_dir("demo", "harness") == state / "demo" / "harness"
     records = memory_records("demo")
     for scenario in ("demo", "other"):
         trainer = recipe_trainer(built, scenario, records, artifacts=artifacts_for(built), root=seed_root(built))

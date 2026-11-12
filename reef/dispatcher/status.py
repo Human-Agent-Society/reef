@@ -7,7 +7,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.dispatcher.errors import TrainingErrors, error_text
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.composite import CompositeRecipe
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.train.jobs import JobLoopState
@@ -132,9 +133,28 @@ class TrainingStatus:
         return errors
 
     def serving_status(self) -> dict[str, Any]:
-        """Runtime-wide serving state for the deployment's recipe."""
+        """The adapter residency that the runtime of the recipe's weights reports, under the recipe's name.
+
+        The reader asks the runtime (``InferenceRuntime.adapter_residency_status``). A weight recipe's block is
+        ``{"adapters": residency}``; a composite's holds that block under the name of its weight component. The
+        result is empty for a recipe that trains no weights and for a runtime that reports no residency. A
+        runtime that raises gives ``{"error": text}``.
+        """
+        recipe = self.recipe
+        component: str | None = None
+        if isinstance(recipe, CompositeRecipe):
+            # A composite binds at most one weight component.
+            for name, child in recipe.components.items():
+                if isinstance(child, WeightTrainingRecipe):
+                    component, recipe = name, child
+                    break
+        if not isinstance(recipe, WeightTrainingRecipe):
+            return {}
         try:
-            status = self.recipe.serving_status()
+            residency = recipe.runtime.adapter_residency_status()
         except Exception as exc:
-            status = {"error": error_text(exc)}
-        return {} if status is None else {self.recipe.name: status}
+            return {self.recipe.name: {"error": error_text(exc)}}
+        if residency is None:
+            return {}
+        status: dict[str, Any] = {"adapters": residency}
+        return {self.recipe.name: status if component is None else {component: status}}
