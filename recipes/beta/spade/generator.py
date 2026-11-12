@@ -214,6 +214,9 @@ class SpadeTaskGenerator(TaskGenerator):
         """One generation: ``count`` Designer proposals; a failed service call ends it with what ran."""
         if any(record.scenario != self.scenario for record in request.source_records):
             raise ValueError("source records must belong to the generator's scenario")
+        # The recipe keeps its generation numbers when an upgrade drops this generator's state: never number below
+        # them, so a new task never takes the name of a task that is already published.
+        self.generation = max(self.generation, request.generation)
         refused: list[ProposalRecord] = []
         pending: dict[str, PendingProposal] = {}
         error = ""
