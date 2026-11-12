@@ -1,5 +1,4 @@
 import logging
-import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -390,48 +389,6 @@ def test_a_reader_sets_metadata_on_any_item_and_an_equal_value_changes_nothing(o
 
 
 @pytest.mark.unit
-def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path):
-    directory = tmp_path / "coordination"
-    with closing(SQLiteCoordinationDatabase(directory)) as database:
-        queue = SQLWorkQueue(database, lease_seconds=10)
-        queue.add(job("ended"), now=0)
-        queue.add(job("waiting", serial_key=None), now=0)
-        queue.take("jobs", "w", ["training_job:tinker"], now=1)
-        queue.finish("jobs", "ended", "w", {}, now=2)
-    with closing(sqlite3.connect(directory / "coordination.sqlite3")) as connection:
-        for column in ("started_at", "ended_at", "metadata_json", "stopped_attempt_count"):
-            connection.execute(f"ALTER TABLE work_item DROP COLUMN {column}")
-        connection.commit()
-
-    with closing(SQLiteCoordinationDatabase(directory)) as database:
-        queue = SQLWorkQueue(database, lease_seconds=10)
-        ended, waiting = queue.get("jobs", "ended"), queue.get("jobs", "waiting")
-        # An ended item ended at its last change; the start of an earlier item is not known.
-        assert (ended.started_at, ended.ended_at, ended.metadata) == (None, 2, {})
-        assert (waiting.started_at, waiting.ended_at, waiting.metadata) == (None, None, {})
-        # Every attempt of an earlier item counts.
-        assert (ended.attempt_count, ended.stopped_attempt_count) == (1, 0)
-
-
-def test_the_queued_training_requests_of_an_older_version_move_to_their_new_queue_and_kind(tmp_path):
-    directory = tmp_path / "coordination"
-    with closing(SQLiteCoordinationDatabase(directory)) as database:
-        queue = SQLWorkQueue(database, lease_seconds=10)
-        queue.add(NewWork("instructions", "ask-1", "my/agent", "train_instruction:my/agent", {"text": "t"}), now=0)
-        queue.add(job("other"), now=0)
-
-    with closing(SQLiteCoordinationDatabase(directory)) as database:
-        queue = SQLWorkQueue(database, lease_seconds=10)
-        moved = queue.get("training_requests", "ask-1")
-        assert (moved.kind, moved.payload, queue.get("instructions", "ask-1")) == (
-            "training_request:my/agent",
-            {"text": "t"},
-            None,
-        )
-        assert queue.get("jobs", "other").kind == job("other").kind
-
-
-@pytest.mark.unit
 def test_a_work_item_has_a_worker_exactly_while_it_is_held():
     with pytest.raises(ValueError, match="worker and a lease"):
         WorkItem("jobs", "a", "s", "k", {}, state="running")
@@ -542,20 +499,6 @@ def test_a_served_artifact_is_reachable_and_names_one_model():
     assert ServedArtifact.from_json(ServedArtifact("a", "http://e", "m").to_json()) == ServedArtifact(
         "a", "http://e", "m"
     )
-
-
-@pytest.mark.unit
-def test_an_upgrade_deletes_the_record_copies_of_an_older_version(tmp_path):
-    database = SQLiteCoordinationDatabase(tmp_path / "c")
-    queue = SQLWorkQueue(database)
-    queue.request("data", "s", "record_copy", "record_copy:s", {})
-    kept = queue.request("data", "s", "artifact_copy", "artifact_copy:s", {})
-    database.close()
-    reopened = SQLiteCoordinationDatabase(tmp_path / "c")
-    try:
-        assert [item.id for item in SQLWorkQueue(reopened).items("data")] == [kept.id]
-    finally:
-        reopened.close()
 
 
 @pytest.mark.unit

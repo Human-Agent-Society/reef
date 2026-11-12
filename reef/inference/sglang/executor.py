@@ -6,7 +6,7 @@ from reef.inference.engine_control import EngineExecutor
 
 
 class SGLangExecutor(EngineExecutor):
-    """One control rank manages multi-node SGLang engine groups."""
+    """One control rank manages the SGLang engine group."""
 
     def create_worker(self) -> object:
         from reef.inference.sglang.worker import SGLangWorker

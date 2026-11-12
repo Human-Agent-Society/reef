@@ -537,7 +537,7 @@ class Dispatcher(
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
         configs = self.storage.read_settings(scenario).record2sample_config
-        recipe = self.recipe.for_record2sample_configs(self.recipe.scenario_components(scenario), configs)
+        recipe = self.recipe.for_record2sample_configs(self.recipe.build_components(scenario), configs)
         directories = recipe.scenario_state_dirs(scenario)
         moved = list(self.registry.archive_store(scenario))
         for directory in directories:

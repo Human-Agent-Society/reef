@@ -4,7 +4,7 @@ import pytest
 
 from reef.execution.executor.failure import ExecutorFailureListener
 from reef.inference.interfaces import AdapterEngine, InferenceBackend, InferenceEngine
-from reef.inference.recovery import EngineHealthChecks, EngineHealthTarget, InferenceEngineGroup, InferenceMonitor
+from reef.inference.recovery import InferenceEngineGroup
 from reef.inference.sglang.engine import ReefSGLangEngine
 from reef.inference.vllm.engine import ReefVLLMEngine
 
@@ -13,9 +13,6 @@ from reef.inference.vllm.engine import ReefVLLMEngine
     "interface",
     [
         InferenceEngineGroup,
-        InferenceMonitor,
-        EngineHealthChecks,
-        EngineHealthTarget,
         InferenceBackend,
         InferenceEngine,
         AdapterEngine,

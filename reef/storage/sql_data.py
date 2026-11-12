@@ -88,20 +88,12 @@ from reef.storage.data import (
     check_owner,
     check_query,
     generation_origin,
-    item_digest_matches,
     patched_metadata,
     prepared_items,
     record_link_scope,
     replaced_task_digest,
 )
 from reef.storage.item_kinds import task_partition
-from reef.storage.migrations import (
-    migrate_data_indexes,
-    migrate_data_request_types,
-    migrate_data_segments,
-    migrate_data_trajectories,
-    migrate_data_uses,
-)
 from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
     SEGMENT_COLUMNS,
@@ -244,7 +236,7 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
     )
     # The calls of one evaluation are read by their evaluation_id, a page at a time in sequence order
     # (``SQLDataStore.query``). With ``sequence`` in the index, a page reads only its own rows, not every row of the
-    # evaluation. ``migrate_data_indexes`` adds the index to an older table.
+    # evaluation.
     Index(
         "data_item_by_evaluation_sequence",
         items.c.owner,
@@ -710,17 +702,12 @@ class SQLDataStore(DataStore):
             )
             # An ID that was stored before, or that a concurrent create stored first, keeps its row; another digest
             # there is a conflict, and the rollback removes the rows that this call inserted. A row of this call has
-            # the digest of its first item with that ID. Only another digest needs the stored content, which can be
-            # in S3, and this transaction holds its locks.
+            # the digest of its first item with that ID.
             kept = [item_id for item_id in values if item_id not in sequences]
             stored_rows = self.rows(connection, owner, kept) if kept else {}
-            for row in self.stored_items(
-                connection,
-                owner,
-                [row for item_id, row in stored_rows.items() if row["digest"] != values[item_id]["digest"]],
-            ):
-                if not item_digest_matches(row, values[row.item_id]["digest"]):
-                    raise ItemConflict(f"item {row.item_id!r} of {owner!r} is stored with other content")
+            for item_id, row in stored_rows.items():
+                if row["digest"] != values[item_id]["digest"]:
+                    raise ItemConflict(f"item {item_id!r} of {owner!r} is stored with other content")
             stored = {
                 item.item_id: item
                 for item in self.stored_items(connection, owner, list(stored_rows.values()), content=False)
@@ -1493,11 +1480,6 @@ class SQLiteDataStore(SQLDataStore):
             # Serialize the table creation of concurrent openers.
             self.connection.exec_driver_sql("BEGIN IMMEDIATE")
             metadata.create_all(self.connection)
-            migrate_data_segments(self.connection, self.items_table, self.nodes_table)
-            migrate_data_request_types(self.connection, self.items_table)
-            migrate_data_uses(self.connection, self.items_table, self.scenarios_table)
-            migrate_data_indexes(self.connection, self.items_table)
-            migrate_data_trajectories(self.connection, self.items_table, self.nodes_table)
 
     @classmethod
     def from_config(
@@ -1599,11 +1581,6 @@ class PostgresDataStore(SQLDataStore):
             connection.execute(select(func.pg_advisory_xact_lock(key)))
             connection.execute(CreateSchema(schema, if_not_exists=True))
             metadata.create_all(connection)
-            migrate_data_segments(connection, self.items_table, self.nodes_table)
-            migrate_data_request_types(connection, self.items_table)
-            migrate_data_uses(connection, self.items_table, self.scenarios_table)
-            migrate_data_indexes(connection, self.items_table)
-            migrate_data_trajectories(connection, self.items_table, self.nodes_table)
 
     @classmethod
     def from_config(

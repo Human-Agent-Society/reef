@@ -60,9 +60,7 @@ def captured_stack(monkeypatch):
 
 
 @pytest.mark.usefixtures("provider_environment")
-@pytest.mark.parametrize(
-    "spelling", ["--inference.upstream-model", "--upstream-model", "--upstream_model", "--reef.upstream-model"]
-)
+@pytest.mark.parametrize("spelling", ["--inference.upstream-model", "--inference.upstream_model"])
 def test_provider_settings_use_shared_types_and_reach_the_child(tmp_path, monkeypatch, captured_stack, spelling):
     monkeypatch.setenv("REEF_UPSTREAM_MODEL", "env-model")
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "test-provider-secret")
@@ -137,7 +135,7 @@ def test_provider_startup_can_take_all_inputs_from_declared_environment(monkeypa
 @pytest.mark.usefixtures("provider_environment")
 def test_model_shorthand_accepts_explicit_provider_key(captured_stack):
     with pytest.raises(SystemExit) as result:
-        main(["serve", "--model", "openai/demo", "--reef.upstream-api-key", "explicit-key"])
+        main(["serve", "--model", "openai/demo", "--inference.upstream-api-key", "explicit-key"])
     assert result.value.code == 0
     settings = service_config_from_mapping(captured_stack["config"])
     assert settings.upstream_url == "https://api.openai.com"
@@ -146,9 +144,19 @@ def test_model_shorthand_accepts_explicit_provider_key(captured_stack):
 
 @pytest.mark.usefixtures("provider_environment")
 @pytest.mark.parametrize("field", ["upstream_model", "upstream_api_key"])
-def test_model_defaults_preserve_the_last_explicit_alias(captured_stack, field):
+def test_model_defaults_preserve_the_last_explicit_spelling(captured_stack, field):
     with pytest.raises(SystemExit) as result:
-        main(["serve", "--model", "ollama/demo", f"--{field.replace('_', '-')}", "first", f"--{field}", "last"])
+        main(
+            [
+                "serve",
+                "--model",
+                "ollama/demo",
+                f"--inference.{field.replace('_', '-')}",
+                "first",
+                f"--inference.{field}",
+                "last",
+            ]
+        )
     assert result.value.code == 0
     assert captured_stack["config"]["reef"][field] == "last"
 
@@ -166,7 +174,9 @@ def test_provider_temp_config_is_removed_if_stack_preparation_fails(tmp_path, mo
     monkeypatch.setattr(orchestrator, "_write_resolved_config", write)
     (tmp_path / ".reef").write_text("not a directory")
     with pytest.raises(OSError):
-        orchestrator._run_orchestrator(None, {"upstream-url": "http://localhost:8000", "upstream-model": "demo"})
+        orchestrator._run_orchestrator(
+            None, {"inference.upstream-url": "http://localhost:8000", "inference.upstream-model": "demo"}
+        )
     assert len(written) == 1 and not written[0].exists()
 
 
@@ -181,21 +191,21 @@ def test_invalid_readiness_commands_are_rejected(ready):
     "options,match",
     [
         ([], "requires --inference.upstream-url"),
-        (["--upstream-url", "http://localhost:8000"], "requires --inference.upstream-url"),
+        (["--inference.upstream-url", "http://localhost:8000"], "requires --inference.upstream-url"),
         (["--model", "bare-model"], "requires --inference.upstream-url"),
-        (["--model", "ollama/demo", "--upstream-url", "file:///private/provider-secret"], "HTTP\\(S\\)"),
-        (["--model", "ollama/demo", "--port", "0"], "between 1 and 65535"),
-        (["--model", "ollama/demo", "--port", "nope"], "reef.port"),
-        (["--model", "ollama/demo", "--host", ""], "must be non-empty"),
+        (["--model", "ollama/demo", "--inference.upstream-url", "file:///private/provider-secret"], "HTTP\\(S\\)"),
+        (["--model", "ollama/demo", "--reef.port", "0"], "between 1 and 65535"),
+        (["--model", "ollama/demo", "--reef.port", "nope"], "reef.port"),
+        (["--model", "ollama/demo", "--reef.host", ""], "must be non-empty"),
         (["--model", "ollama/demo", "--no-config"], "unknown configuration flag"),
-        (["--model", "ollama/demo", "--model-path", "org/model"], "cannot be combined"),
+        (["--model", "ollama/demo", "--inference.model-path", "org/model"], "cannot be combined"),
         (
             ["--model", "ollama/demo", "--recipe.implementation", "missing.module:Recipe"],
             "cannot import recipe reference",
         ),
         (["--model", "ollama/demo", "--upstream-modle", "typo"], "unknown configuration flag"),
         (["--model", "ollama/demo", "--services", "[]"], "unknown configuration flag"),
-        (["--model", "ollama/demo", "--inference-timeout-s", "0"], "must be positive"),
+        (["--model", "ollama/demo", "--inference.timeout-s", "0"], "must be positive"),
     ],
 )
 def test_invalid_provider_inputs_fail_before_downloads_or_processes(tmp_path, monkeypatch, capsys, options, match):
@@ -370,10 +380,3 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
     assert "test-upstream-key" not in log_path.read_text()
     with socket.socket() as sock:
         assert sock.connect_ex(("127.0.0.1", port)) != 0
-
-
-def test_removed_recipe_profile_flag_names_the_config_file_instead(capsys):
-    with pytest.raises(SystemExit) as result:
-        main(["serve", "--recipe", "reefine", "--inference.upstream-model", "gemma4:26b"])
-    assert result.value.code == 2
-    assert "built in profiles were removed; pass -c <config file>" in capsys.readouterr().err

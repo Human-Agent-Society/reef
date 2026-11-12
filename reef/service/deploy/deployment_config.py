@@ -304,12 +304,11 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
             prefix = ("executors", name)
             arguments.extend(config_arguments(ExecutorSettings, prefix=prefix))
             arguments.extend(config_arguments(WorkerResources, prefix=(*prefix, "resources")))
-    # Namespaces may reuse field names. Only flat reef fields get short flags;
-    # component fields always retain their full path to avoid silent collisions.
+    # Namespaces may reuse field names; every flag is a full path.
     public_flags = {
         flag for argument in service_config_arguments() for flag in (*argument.flags, *argument.negative_flags)
     }
-    seen = public_flags | {"--recipe", "--model", "--config", "-c", "--help", "-h"}
+    seen = public_flags | {"--model", "--config", "-c", "--help", "-h"}
     for argument in arguments:
         for flag in (*argument.flags, *argument.negative_flags):
             if flag in seen:

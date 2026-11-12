@@ -89,25 +89,6 @@ def test_policy_sample_does_not_reconstruct_ids_from_chat_logprobs() -> None:
 
 
 @pytest.mark.unit
-def test_policy_sample_accepts_exact_harness_tensors() -> None:
-    item = _inference(
-        {
-            "tokens": [1, 2, 3],
-            "loss_mask": [1],
-            "rollout_log_probs": [-0.5],
-            "artifact_id": "artifact-2",
-        }
-    )
-
-    sample = make_policy_trajectory(item, 0.5)
-
-    assert tuple(sample.training.get("tokens", [])) == (1, 2, 3)
-    assert tuple(sample.training.get("loss_mask", [])) == (1,)
-    assert tuple(sample.training.get("rollout_log_probs", [])) == (-0.5,)
-    assert sample.training.get("artifact_id", None) == "artifact-2"
-
-
-@pytest.mark.unit
 def test_provider_response_drops_the_training_block() -> None:
     response = {
         "choices": [{"message": {"content": "answer"}}],
