@@ -21,7 +21,7 @@ from reef.tinker.sampling import TinkerSampler
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerBaseFiles, TinkerJobComponent
-from reef.train.tinker_backend.config import SpindleFullConfig
+from reef.train.tinker_backend.config import SpindleFullSettings
 from reef.train.tinker_backend.spindle_export import CheckpointExporter
 
 
@@ -52,7 +52,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
     def __init__(
         self,
         base_model: str,
-        config: SpindleFullConfig,
+        config: SpindleFullSettings,
         client: TinkerClient,
         exporter: CheckpointExporter,
         *,

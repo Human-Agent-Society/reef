@@ -14,7 +14,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import (
     MODEL,
@@ -28,6 +27,7 @@ from tests.support.harness_steps import (
     head_of,
     marker_score,
 )
+from tests.support.trajectories import recorded_trajectory
 
 import reef.evaluation.harness.runner as harness_runner
 from reef.core.evaluation import RolloutScore

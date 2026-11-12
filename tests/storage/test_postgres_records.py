@@ -13,7 +13,7 @@ from reef.core.snapshot import SnapshotRef
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceConfig, service_config_arguments, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_arguments, service_config_from_mapping
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresRecordDatabase, PostgresScenarioStorage, postgres_url
 from reef.storage.record_items import ItemRecordStore
@@ -113,7 +113,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path):
 )
 def test_deployment_rejects_invalid_record_backend(values):
     with pytest.raises(ValueError):
-        ServiceConfig(recipe="recipe", **values)
+        ServiceSettings(recipe="recipe", **values)
 
 
 def test_deployment_file_names_a_storage_plugin_with_its_config(tmp_path):
@@ -146,7 +146,7 @@ def test_config_interpolation_and_credentials(monkeypatch, tmp_path):
     assert settings.record_database_schema == "deployment_one"
     assert "secret" not in repr(settings)
     assert _recipe_owned_settings(settings) == {}
-    assert ServiceConfig(recipe="recipe").record_backend == "sqlite"
+    assert ServiceSettings(recipe="recipe").record_backend == "sqlite"
     with pytest.raises(ValueError) as error:
         postgres_url("secret is not a url")
     assert "secret" not in str(error.value)
@@ -177,7 +177,7 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
             "record_database_url": url,
             "record_database_schema": schema,
         }
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),
@@ -195,7 +195,7 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
             # The records are record items of the data store, which follows the record backend (RFC #1219).
             assert isinstance(scenario.records, ItemRecordStore)
             if restart:
-                assert scenario.records.get("math", "first") == record()
+                assert scenario.records.read("math", "first") == record()
             else:
                 scenario.records.append(record())
         finally:

@@ -15,8 +15,6 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._strategies import resolve_task_scorer
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import (
     backend_step,
     drive_job,
@@ -50,6 +48,8 @@ from tests.support.harness_steps import (
 )
 from tests.support.records import memory_records
 from tests.support.samples import data_storage, sample_store
+from tests.support.strategies import resolve_task_scorer
+from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact import Artifact
 from reef.core.activation import MadeArtifact
@@ -423,7 +423,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         def import_task(name: str, split: str) -> StoredSample:
             metadata = {"kind": "task", "scenarios": {"s": split}}
             samples.data.create(samples.owner, [NewItem(name, write_task(root, name), metadata)])
-            (task,) = samples.get([name])
+            (task,) = samples.read([name])
             return task
 
         backend = build_harness_backend(built, "s")

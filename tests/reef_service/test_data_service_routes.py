@@ -124,7 +124,7 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
         )
         missing_id = (await missing.json())["id"]
         assert (await finished(client, f"{DATA}/imports/{missing_id}"))["state"] == "failed"
-        assert dispatcher.queue.get(DATA_QUEUE, missing_id).attempt_count == 1
+        assert dispatcher.queue.read(DATA_QUEUE, missing_id).attempt_count == 1
         refused = await client.post(f"{DATA}/imports", headers=AUTH, json={"uri": "x", "metadata": {"kind": "task"}})
         assert refused.status == 400
 
@@ -153,7 +153,7 @@ def test_an_item_archive_downloads_with_the_token_or_with_a_signed_url_alone(tmp
 def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_from_the_queue(tmp_path: Path) -> None:
     # The root snapshot that each scenario starts with holds one file.
     dispatcher = dispatcher_for(tmp_path, UploadRecipe(start=DefaultStart(files={"model.txt": "w0"})))
-    dispatcher.queue.add(queued_job("job-1", "s"))
+    dispatcher.queue.append(queued_job("job-1", "s"))
 
     async def check(client: TestClient) -> None:
         assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
@@ -232,8 +232,8 @@ def test_an_artifacts_file_list_gives_the_repositorys_urls_without_materializing
 
 def test_a_client_cancels_a_training_job_of_its_scenario_and_an_ended_job_stays_as_it_is(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
-    dispatcher.queue.add(queued_job("job-1", "s"))
-    dispatcher.queue.add(queued_job("job-t", "t"))
+    dispatcher.queue.append(queued_job("job-1", "s"))
+    dispatcher.queue.append(queued_job("job-t", "t"))
 
     async def check(client: TestClient) -> None:
         for name in ("s", "t"):
@@ -253,6 +253,6 @@ def test_a_client_cancels_a_training_job_of_its_scenario_and_an_ended_job_stays_
         assert (await client.post("/reef/scenarios/s/jobs/job-t/cancel", headers=AUTH)).status == 404
         assert (await client.post("/reef/scenarios/s/jobs/missing/cancel", headers=AUTH)).status == 404
         assert (await client.post("/reef/scenarios/nothing/jobs/job-1/cancel", headers=AUTH)).status == 404
-        assert dispatcher.queue.get(JOBS_QUEUE, "job-t").state == "queued"
+        assert dispatcher.queue.read(JOBS_QUEUE, "job-t").state == "queued"
 
     served(dispatcher, check)

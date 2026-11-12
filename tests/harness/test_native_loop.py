@@ -15,24 +15,24 @@ from tests.harness.test_native_harness import _reply as _completion
 from tests.harness.test_native_serve import (
     SEED_EDGES,
     SEED_STAGES,
-    _call,
-    _events,
     _FakeReef,
-    _graph,
-    _reply,
-    _running,
-    _session_file,
-    _tool,
-    _tree,
-    _turn,
-    _typed,
-    _wait,
+    logged_events,
+    main_graph,
+    model_reply,
+    pulled_tree,
+    run_turn,
+    running,
+    session_file,
+    tool_call,
+    tool_files,
+    typed,
 )
-from tests.support._strategies import resolve_task_scorer
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_render import NATIVE_SEED_FILES, NATIVE_SEED_TOOLS, native_loop, native_tool, write_rendered
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import MODEL, harness_backend, harness_recipe
+from tests.support.polling import wait_until
+from tests.support.strategies import resolve_task_scorer
+from tests.support.trajectories import recorded_trajectory
 
 from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
@@ -284,7 +284,7 @@ def test_a_module_that_exits_at_import_is_a_load_error_in_the_file_form(tmp_path
     sessions, work = tmp_path / "sessions", tmp_path / "work"
     work.mkdir()
     exit_code = run_loop("hello", root, sessions, work)
-    events = _events(sessions / "session.jsonl")
+    events = logged_events(sessions / "session.jsonl")
     assert exit_code == 1 and events[0]["type"] == "session"
     error = events[-1]["data"]["reason"]["error"]
     assert error["code"] == "LOAD_ERROR" and error["message"] == "main.py failed to import: SystemExit: 3"
@@ -302,7 +302,7 @@ def test_a_module_that_does_not_parse_is_a_load_error_in_the_file_form(
     sessions, work = tmp_path / "sessions", tmp_path / "work"
     work.mkdir()
     exit_code = run_loop("hello", root, sessions, work)
-    events = _events(sessions / "session.jsonl")
+    events = logged_events(sessions / "session.jsonl")
     assert exit_code == 1 and events[0]["type"] == "session" and events[-1]["type"] == "turn/end"
     error = events[-1]["data"]["reason"]["error"]
     assert error["code"] == "LOAD_ERROR" and error["message"].startswith(
@@ -510,7 +510,7 @@ def _run(directory: Path, model: _FakeModel, files: dict[str, str], loop: _Given
     write_rendered(directory / "root", HarnessTree(files), NATIVE, binding)
     sessions, work = directory / "sessions", directory / "work"
     work.mkdir(parents=True)
-    return run_loop(prompt, directory / "root" / "native", sessions, work), _events(sessions / "session.jsonl")
+    return run_loop(prompt, directory / "root" / "native", sessions, work), logged_events(sessions / "session.jsonl")
 
 
 def _comparable(events: list[dict[str, Any]]) -> list[tuple[str, Any]]:
@@ -561,8 +561,8 @@ def test_the_seed_loop_as_code_logs_the_same_events_as_the_seed_graph(tmp_path: 
     # The header names the loop and keeps naming the graph the agents fall back to; a graph run names no loop.
     assert from_loop[0]["data"]["loop"] == "main" and from_loop[0]["data"]["graph"] == "main"
     assert from_graph[0]["data"]["loop"] is None and from_graph[0]["data"]["graph"] == "main"
-    assert _typed(from_loop, "loop/enter") == [{"name": "main"}]
-    assert _typed(from_loop, "loop/exit") == [{"reason": "completed"}]
+    assert typed(from_loop, "loop/enter") == [{"name": "main"}]
+    assert typed(from_loop, "loop/exit") == [{"reason": "completed"}]
     assert from_loop[-1]["data"]["reason"] == {"kind": "completed"}
     assert stage_path(from_loop) == {"stages": [], "reason": "completed"}
 
@@ -582,7 +582,7 @@ def test_the_context_reads_the_turn_and_say_is_a_loop_message(tmp_path: Path) ->
     with _TextModel() as model:
         exit_code, events = _run(tmp_path, model, NATIVE_SEED_TOOLS, _loop(code, max_steps=3))
     assert exit_code == 0 and events[-1]["data"]["reason"] == {"kind": "completed"}
-    assert _typed(events, "loop/before") == [
+    assert typed(events, "loop/before") == [
         {
             "step": 0,
             "tools": ["execute", "read_file", "run_bash", "write_file"],
@@ -593,7 +593,7 @@ def test_the_context_reads_the_turn_and_say_is_a_loop_message(tmp_path: Path) ->
         }
     ]
     # Copies: clearing what the context handed out changed nothing the run holds.
-    assert _typed(events, "loop/after") == [
+    assert typed(events, "loop/after") == [
         {
             "step": 1,
             "text": "done",
@@ -602,7 +602,7 @@ def test_the_context_reads_the_turn_and_say_is_a_loop_message(tmp_path: Path) ->
             "roles": ["system", "user", "user", "assistant"],
         }
     ]
-    assert _typed(events, "user/message") == [
+    assert typed(events, "user/message") == [
         {"step": 0, "source": {"kind": "loop", "loop": "main"}, "content": "Answer in one line."}
     ]
     assert [m["content"] for m in model.requests[0]["messages"][1:]] == [PROMPT, "Answer in one line."]
@@ -623,10 +623,10 @@ def test_log_events_are_namespaced_clipped_and_json(tmp_path: Path) -> None:
     with _TextModel() as model:
         exit_code, events = _run(tmp_path, model, NATIVE_SEED_TOOLS, _loop(code))
     assert exit_code == 0
-    assert _typed(events, "loop/note") == [{"n": 1, "path": "/x"}]
-    big = _typed(events, "loop/big")[0]
+    assert typed(events, "loop/note") == [{"n": 1, "path": "/x"}]
+    big = typed(events, "loop/big")[0]
     assert big["truncated"] is True and len(big["text"]) == LOOP_LOG_CHARS and big["text"].startswith('{"blob": "xxx')
-    refused = _typed(events, "loop/refused")
+    refused = typed(events, "loop/refused")
     assert [entry["event"] for entry in refused] == ["turn/end", "exit", "enter", "", "ok"]
     assert all("must match" in entry["error"] for entry in refused[:4]) and "must be an object" in refused[4]["error"]
     # No core event was written by the loop: the only turn/end is the frame's, after loop/exit.
@@ -644,7 +644,7 @@ def test_a_loop_that_raises_ends_the_turn_with_loop_error(tmp_path: Path) -> Non
         exit_code, events = _run(tmp_path, model, NATIVE_SEED_TOOLS, _loop(code))
     assert exit_code == 1
     assert [event["type"] for event in events][-4:] == ["assistant/message", "step/end", "loop/exit", "turn/end"]
-    assert _typed(events, "loop/exit") == [{"reason": "error"}]
+    assert typed(events, "loop/exit") == [{"reason": "error"}]
     assert events[-1]["data"]["reason"] == {
         "kind": "error",
         "error": {"code": "LOOP_ERROR", "message": "RuntimeError: boom"},
@@ -663,14 +663,14 @@ def test_a_loop_that_never_returns_hits_the_transition_cap(tmp_path: Path) -> No
         "code": "LOOP_ERROR",
         "message": f"loop 'main' took more than {limit} transitions",
     }
-    assert _typed(events, "loop/exit") == [{"reason": "error"}]
+    assert typed(events, "loop/exit") == [{"reason": "error"}]
 
 
 def test_max_steps_ends_the_turn_as_a_graph_does(tmp_path: Path, fake_model) -> None:
     code = "def run_turn(ctx):\n    while True:\n        ctx.model()\n        ctx.run_tools()\n"
     exit_code, events = _run(tmp_path, fake_model, NATIVE_SEED_TOOLS, _loop(code, max_steps=2))
-    assert exit_code == 0 and len(_typed(events, "step/start")) == 2
-    assert _typed(events, "loop/exit") == [{"reason": "max-steps"}]
+    assert exit_code == 0 and len(typed(events, "step/start")) == 2
+    assert typed(events, "loop/exit") == [{"reason": "max-steps"}]
     assert events[-1]["data"]["reason"] == {"kind": "max-steps", "steps": 2}
 
 
@@ -695,23 +695,23 @@ def test_agent_runs_an_agent_in_its_own_session_and_appends_its_text(tmp_path: P
             prompt="how many primes are below 100000?",
         )
     assert exit_code == 0 and events[-1]["data"]["reason"] == {"kind": "completed"}
-    assert [e["content"] for e in _typed(events, "assistant/message")] == [
+    assert [e["content"] for e in typed(events, "assistant/message")] == [
         "the count is 9592",
         "The checker agrees: 9592",
     ]
     # The checker's step came out of the root's budget, as a subagent stage draws it.
-    assert _typed(events, "loop/checked") == [
+    assert typed(events, "loop/checked") == [
         {"outcome": "completed", "text": "verified: the count is 9592", "step": 2}
     ]
-    assert _typed(events, "user/message") == [
+    assert typed(events, "user/message") == [
         {
             "step": 2,
             "source": {"kind": "agent", "agent": "checker", "outcome": "completed"},
             "content": "verified: the count is 9592",
         }
     ]
-    assert _typed(events, "loop/refused") == [{"error": "agent 'nobody' is not in the tree"}]
-    checker = _events(tmp_path / "sessions" / "agents" / "002-checker.jsonl")
+    assert typed(events, "loop/refused") == [{"error": "agent 'nobody' is not in the tree"}]
+    checker = logged_events(tmp_path / "sessions" / "agents" / "002-checker.jsonl")
     header = checker[0]["data"]
     assert header["agent"] == "checker" and header["parent"] == "root" and header["graph"] == "seed"
     assert header["task"] == "the count is 9592" and header["max_steps"] == 2
@@ -782,8 +782,8 @@ def test_end_ends_with_the_reason_and_refuses_an_unknown_one(tmp_path: Path) -> 
         "loop/exit",
         "turn/end",
     ]
-    assert "must be one of completed, gave_up" in _typed(events, "loop/refused")[0]["error"]
-    assert _typed(events, "loop/exit") == [{"reason": "gave_up"}]
+    assert "must be one of completed, gave_up" in typed(events, "loop/refused")[0]["error"]
+    assert typed(events, "loop/exit") == [{"reason": "gave_up"}]
     assert events[-1]["data"]["reason"] == {"kind": "gave_up"}
 
 
@@ -795,17 +795,25 @@ SEED_LOOP_FILE = native_loop("main", SEED_LOOP, max_steps=4)
 def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the_graph(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
-    graph_only = {**_tool("shout", "    return 'LOUD'"), **_graph(SEED_STAGES, SEED_EDGES)}
+    graph_only = {**tool_files("shout", "    return 'LOUD'"), **main_graph(SEED_STAGES, SEED_EDGES)}
     reef.release("r1", graph_only)
-    reef.replies = [_reply("one"), _reply(tool_calls=[_call("shout", {}, "c1")]), _reply("two"), _reply("three")]
-    with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1) as server:
-        first, streamed = _turn(server, "first")
+    reef.replies = [
+        model_reply("one"),
+        model_reply(tool_calls=[tool_call("shout", {}, "c1")]),
+        model_reply("two"),
+        model_reply("three"),
+    ]
+    with running(pulled_tree(tmp_path, reef, "r1"), poll_interval_s=0.1) as server:
+        first, streamed = run_turn(server, "first")
         assert first["text"] == "one" and [e["type"] for e in streamed][:3] == ["session", "turn/start", "stage/enter"]
-        assert _typed(streamed, "session")[0]["loop"] is None
+        assert typed(streamed, "session")[0]["loop"] is None
         log = server.sessions_dir / serve.SERVE_LOG
         reef.release("r2", {**graph_only, **SEED_LOOP_FILE}, parent="r1")
-        _wait(lambda: any(m["artifact_id"] == "r2" for m in _typed(_events(log), "harness/mount")))
-        second, streamed = _turn(server, "second")
+        wait_until(
+            lambda: any(m["artifact_id"] == "r2" for m in typed(logged_events(log), "harness/mount")),
+            timeout_seconds=5,
+        )
+        second, streamed = run_turn(server, "second")
         assert second["exit"] == 0 and second["text"] == "two"
         assert [e["type"] for e in streamed] == [
             "session",
@@ -823,18 +831,20 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
             "loop/exit",
             "turn/end",
         ]
-        header = _typed(streamed, "session")[0]
+        header = typed(streamed, "session")[0]
         assert header["loop"] == "main" and header["graph"] == "main" and header["artifact_id"] == "r2"
-        assert _typed(streamed, "loop/enter") == [{"name": "main"}]
+        assert typed(streamed, "loop/enter") == [{"name": "main"}]
         reef.release("r3", graph_only, parent="r2")
-        _wait(lambda: any(m["artifact_id"] == "r3" for m in _typed(_events(log), "harness/mount")))
-        third, streamed = _turn(server, "third", session=second["session"])
+        wait_until(
+            lambda: any(m["artifact_id"] == "r3" for m in typed(logged_events(log), "harness/mount")),
+            timeout_seconds=5,
+        )
+        third, streamed = run_turn(server, "third", session=second["session"])
         assert third["exit"] == 0 and third["text"] == "three" and third["turn"] == 2
         assert (
-            "loop/enter" not in {e["type"] for e in streamed}
-            and _typed(streamed, "stage/enter")[0]["stage"] == "think"
+            "loop/enter" not in {e["type"] for e in streamed} and typed(streamed, "stage/enter")[0]["stage"] == "think"
         )
-    events = _events(_session_file(server, second["session"]))
+    events = logged_events(session_file(server, second["session"]))
     assert [e["type"] for e in events if e["type"] in ("loop/enter", "loop/exit", "turn/end")] == [
         "loop/enter",
         "loop/exit",
@@ -844,28 +854,28 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
 
 
 def test_harness_try_refuses_a_native_loop_patch_on_a_served_loop(tmp_path: Path, reef: _FakeReef) -> None:
-    served = {**_tool("shout", "    return 'LOUD'"), **native_loop("main", SEED_LOOP, max_steps=8)}
+    served = {**tool_files("shout", "    return 'LOUD'"), **native_loop("main", SEED_LOOP, max_steps=8)}
     reef.release("r1", served)
     other = native_loop("other", SEED_LOOP)
     update = native_loop("main", SEED_LOOP, max_steps=4)
     remove = {"native/loops/main.py": None}
     reef.replies = [
-        _reply(tool_calls=[_call("harness_try", {"patch": other}, "c1")]),
-        _reply(tool_calls=[_call("harness_try", {"patch": {**_tool("whisper"), **update}}, "c2")]),
-        _reply(tool_calls=[_call("harness_try", {"patch": remove}, "c3")]),
-        _reply("done"),
+        model_reply(tool_calls=[tool_call("harness_try", {"patch": other}, "c1")]),
+        model_reply(tool_calls=[tool_call("harness_try", {"patch": {**tool_files("whisper"), **update}}, "c2")]),
+        model_reply(tool_calls=[tool_call("harness_try", {"patch": remove}, "c3")]),
+        model_reply("done"),
     ]
-    with _running(_tree(tmp_path, reef, "r1"), self_tools=True) as server:
-        result, streamed = _turn(server, "try a loop")
+    with running(pulled_tree(tmp_path, reef, "r1"), self_tools=True) as server:
+        result, streamed = run_turn(server, "try a loop")
         assert result["exit"] == 0 and result["text"] == "done"
         assert server.live_tree() == HarnessTree(served)
         assert sorted(server.host.tools) == ["harness_inspect", "harness_try", "shout"]
-    assert _typed(streamed, "loop/enter") == [{"name": "main"}]
-    results = _typed(streamed, "tool/result")
+    assert typed(streamed, "loop/enter") == [{"name": "main"}]
+    results = typed(streamed, "tool/result")
     assert [r["error"]["code"] for r in results] == ["TOOL_FAILED"] * 3
     assert all("is reviewed code: a person activates it" in r["content"] for r in results)
     # The refusal is whole: the tool beside the loop file did not mount either, and nothing was tried.
-    assert [m["source"] for m in _typed(streamed, "harness/mount")] == []
+    assert [m["source"] for m in typed(streamed, "harness/mount")] == []
     assert "harness/unmount" not in {event["type"] for event in streamed}
 
 
@@ -902,8 +912,8 @@ def test_loop_code_cannot_act_past_the_max_steps_end(tmp_path: Path, code: str) 
     writes nothing after it."""
     exit_code, events = _text_turn(tmp_path, code, max_steps=1)
     assert exit_code == 0 and _ends(events) == [{"kind": "max-steps", "steps": 1}]
-    assert not _typed(events, "loop/swallowed") and not _typed(events, "loop/after")
-    assert len(_typed(events, "step/start")) == 1
+    assert not typed(events, "loop/swallowed") and not typed(events, "loop/after")
+    assert len(typed(events, "step/start")) == 1
     assert [event["type"] for event in events][-2:] == ["loop/exit", "turn/end"]
     assert stage_path(events) == {"stages": [], "reason": "max-steps"}
 
@@ -923,7 +933,7 @@ def test_a_finally_cannot_replace_an_abort_with_its_own_end(tmp_path: Path, code
     error = {"code": "LOOP_ERROR", "message": f"loop 'main' took more than {3 * TRANSITIONS_PER_STEP} transitions"}
     assert exit_code == 1 and _ends(events) == [{"kind": "error", "error": error}]
     assert "loop/late" not in {event["type"] for event in events}
-    assert _typed(events, "loop/exit") == [{"reason": "error"}]
+    assert typed(events, "loop/exit") == [{"reason": "error"}]
 
 
 def test_an_exception_after_the_end_keeps_the_end_and_is_named_on_stderr(tmp_path: Path, capfd) -> None:
@@ -938,11 +948,11 @@ def test_say_and_log_count_against_the_transition_cap(tmp_path: Path) -> None:
     error = {"code": "LOOP_ERROR", "message": f"loop 'main' took more than {limit} transitions"}
     logs = "def run_turn(ctx):\n    while True:\n        ctx.log('tick', {})\n"
     exit_code, events = _text_turn(tmp_path / "log", logs, max_steps=1)
-    assert exit_code == 1 and len(_typed(events, "loop/tick")) == limit
+    assert exit_code == 1 and len(typed(events, "loop/tick")) == limit
     assert _ends(events) == [{"kind": "error", "error": error}]
     talks = "def run_turn(ctx):\n    while True:\n        ctx.say('again')\n        ctx.log('tick', {})\n"
     exit_code, events = _text_turn(tmp_path / "say", talks, max_steps=1)
-    assert exit_code == 1 and len(_typed(events, "user/message")) == len(_typed(events, "loop/tick")) == limit // 2
+    assert exit_code == 1 and len(typed(events, "user/message")) == len(typed(events, "loop/tick")) == limit // 2
     assert _ends(events) == [{"kind": "error", "error": error}]
 
 
@@ -958,7 +968,7 @@ def test_system_exit_out_of_run_turn_is_a_loop_error(tmp_path: Path) -> None:
 def test_log_writes_keys_that_are_not_strings_as_text(tmp_path: Path) -> None:
     code = "def run_turn(ctx):\n    ctx.log('keys', {(1, 2): 'pair', 3: [4], 'nested': {5: 6, (7,): [{None: 8}]}})\n"
     exit_code, events = _text_turn(tmp_path, code)
-    assert exit_code == 0 and _typed(events, "loop/keys") == [
+    assert exit_code == 0 and typed(events, "loop/keys") == [
         {"(1, 2)": "pair", "3": [4], "nested": {"5": 6, "(7,)": [{"None": 8}]}}
     ]
 

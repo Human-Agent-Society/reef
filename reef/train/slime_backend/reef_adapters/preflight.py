@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
+from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionSettings
 
 CRITIC_ARGS_HOOK_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.configure_critic_objective"
 REEF_ROLLOUT_DATA_KEYS = ("producing_artifact_ids",)
@@ -83,7 +83,7 @@ def validate_advantage_computation(args: SlimeArguments, spec: SlimeAlgorithm | 
     )
 
 
-def prepare_checkpoint_storage(args: SlimeArguments, retention: RetentionConfig) -> CheckpointStorage:
+def prepare_checkpoint_storage(args: SlimeArguments, retention: RetentionSettings) -> CheckpointStorage:
     """Build the checkpoint store, refuse a storage that cannot hold the next checkpoint, and pin paths.
 
     Rewrites ``args.save_hf`` / ``args.save`` (and ``args.critic_save`` when a

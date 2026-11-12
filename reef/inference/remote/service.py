@@ -13,10 +13,9 @@ from typing import Any, BinaryIO, Self
 from urllib.parse import quote, urlencode
 
 from reef.core.weight_layout import WeightFiles
-from reef.execution.executor.placement import DeploymentResources
-from reef.inference.deployment import InferenceConnection, InferenceService
+from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
 from reef.inference.interfaces import InferenceBackend
-from reef.inference.remote.config import CONTROL_PATH, CONTROL_PROTOCOL, RemoteInferenceSettings
+from reef.inference.remote.config import CONTROL_PATH, RemoteInferenceSettings
 
 #: Bound on one control call other than an engine start; a full-weight upload legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400
@@ -164,8 +163,6 @@ class RemoteInferenceService(InferenceService):
     ``close`` stops the engines.
     """
 
-    connection_protocol = CONTROL_PROTOCOL
-
     def __init__(
         self,
         settings: RemoteInferenceSettings,
@@ -217,15 +214,15 @@ class RemoteInferenceService(InferenceService):
             return None
         self.started = True
         self.instance = instance
-        return InferenceConnection(self.connection_protocol, None)
+        return InferenceConnection(None)
 
-    def start(self, resources: DeploymentResources | None = None) -> InferenceConnection:
+    def start(self, resources: InferenceResources | None = None) -> InferenceConnection:
         """Start the engines; ``resources`` are unused, since the component reserves its own GPUs."""
         if self.started or self.closed:
             raise RuntimeError("inference service can only be started once")
         self.started = True
         self.restart_engines()
-        return InferenceConnection(self.connection_protocol, None)
+        return InferenceConnection(None)
 
     def restart_engines(self) -> int:
         """Start the engines on the component, replacing any it runs; return the number of engines."""
@@ -251,7 +248,6 @@ class RemoteInferenceService(InferenceService):
         return answer.get("instance") != self.instance or not answer["engines"]
 
     def backend(self, connection: InferenceConnection) -> InferenceBackend:
-        self.require_connection(connection)
         return RemoteInferenceBackend(self.control, self)
 
     def check_health(self) -> None:
@@ -267,7 +263,3 @@ class RemoteInferenceService(InferenceService):
         self.closed = True
         if self.started:
             self.control.call("DELETE", "engines", timeout_s=HEALTH_TIMEOUT_S)
-
-    def require_connection(self, connection: InferenceConnection) -> None:
-        if connection.protocol != self.connection_protocol:
-            raise ValueError(f"incompatible remote inference connection: {connection.protocol!r}")

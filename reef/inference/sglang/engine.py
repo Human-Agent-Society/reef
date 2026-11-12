@@ -13,7 +13,7 @@ from urllib3.exceptions import NewConnectionError
 
 from reef.inference.interfaces import InferenceEngine
 from reef.inference.process import check_server_owner, ports_in_use
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.process import launch_engine, local_gpu_id, node_address_and_port, wait_ready
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ class ReefSGLangEngine(InferenceEngine):
     _get_current_node_ip_and_free_port = staticmethod(node_address_and_port)
     ports_in_use = staticmethod(ports_in_use)
 
-    def __init__(self, config: SGLangConfig, rank: int, base_gpu_id: int = 0) -> None:
+    def __init__(self, config: SGLangSettings, rank: int, base_gpu_id: int = 0) -> None:
         self.config = config
         self.rank = rank
         self.base_gpu_id = base_gpu_id

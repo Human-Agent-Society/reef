@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.support._activation_rule_plugin import ComponentRule
+from tests.support.activation_rule_plugin import ComponentRule
 from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.sao import SAORecipe
@@ -13,7 +13,7 @@ from reef.evaluation import AlwaysActivate, EvaluatedActivation, NeverActivate
 from reef.evaluation.activation import activation_reference, build_activation_rule
 from reef.recipe import RecipeConfigError
 
-PLUGIN = "tests.support._activation_rule_plugin"
+PLUGIN = "tests.support.activation_rule_plugin"
 
 
 def evaluation(*values: float) -> PolicyEvaluation:

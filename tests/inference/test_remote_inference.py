@@ -17,11 +17,12 @@ from aiohttp import web
 from reef.artifact import Artifact
 from reef.core.errors import ReefError, RuntimeConfigError
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat, WeightFiles
+from reef.inference import deployment as deployment_module
 from reef.inference.deployment import InferenceConnection, InferenceService
 from reef.inference.interfaces import InferenceBackend
 from reef.inference.registry import RuntimeRegistry, runtime_factory_for
 from reef.inference.remote import server as server_module
-from reef.inference.remote.config import CONTROL_PROTOCOL, RemoteInferenceSettings
+from reef.inference.remote.config import RemoteInferenceSettings
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.inference.remote.server import RemoteInferenceServer
 from reef.inference.remote.service import RemoteControl, RemoteInferenceBackend, RemoteInferenceService
@@ -118,8 +119,6 @@ class FakeEngines(InferenceBackend):
 
 
 class FakeService(InferenceService):
-    connection_protocol = "fake-engine-v1"
-
     def __init__(self, config, events, engine_url):
         self.config = config
         self.events = events
@@ -131,7 +130,7 @@ class FakeService(InferenceService):
 
     def start(self, resources):
         self.events.append(("start", dict(self.config), resources.inference_placement))
-        return InferenceConnection(self.connection_protocol, None)
+        return InferenceConnection(None)
 
     def backend(self, connection):
         return self.engines
@@ -181,7 +180,7 @@ def component(server, tmp_path, monkeypatch):
             return services[-1]
 
         monkeypatch.setattr(server_module, "inference_service_for", create_service)
-        monkeypatch.setattr(server_module, "reserve_model_gpus", lambda layout: FakeReservation(layout, events))
+        monkeypatch.setattr(deployment_module, "reserve_model_gpus", lambda layout: FakeReservation(layout, events))
         with serving(server.application()) as url:
             yield url, events, tmp_path / "work", services
 
@@ -195,7 +194,7 @@ def started_service(url: str) -> RemoteInferenceService:
         control_token=CONTROL_TOKEN,
     )
     connection = service.start(None)
-    assert connection == InferenceConnection(CONTROL_PROTOCOL, None)
+    assert connection == InferenceConnection(None)
     return service
 
 
@@ -208,7 +207,7 @@ def test_service_starts_engines_and_publishes_weight_files_through_the_component
         "health",
         "pause",
     ]
-    connection = InferenceConnection(CONTROL_PROTOCOL, None)
+    connection = InferenceConnection(None)
     backend = service.backend(connection)
     assert isinstance(backend, RemoteInferenceBackend)
     assert backend.inference_url() == url
@@ -286,7 +285,7 @@ def test_component_starts_only_the_engine_its_operator_chose(component):
 def test_health_reports_busy_engines_as_healthy_while_they_load_weights(component, tmp_path):
     url, events, _, services = component
     service = started_service(url)
-    backend = service.backend(InferenceConnection(CONTROL_PROTOCOL, None))
+    backend = service.backend(InferenceConnection(None))
     engines = services[0].engines
     engines.release_load.clear()
     weights = tmp_path / "hf"
@@ -323,7 +322,7 @@ def test_health_reports_the_component_process_and_whether_engines_run(component,
 def test_recovery_after_a_component_restart_starts_the_engines_again_at_the_initial_version(component, server):
     url, _, _, services = component
     service = started_service(url)
-    backend = service.backend(InferenceConnection(CONTROL_PROTOCOL, None))
+    backend = service.backend(InferenceConnection(None))
     backend.initialize_version("inc:1")
     restart(server)
     assert service.engines_lost()
@@ -535,7 +534,7 @@ def test_a_runtime_whose_handler_fails_starts_no_engine(component, tmp_path):
     assert events == []
 
 
-def test_the_serving_runtime_reloads_its_release_into_the_engines_of_a_restarted_component(
+def test_the_serving_runtime_reloads_its_snapshot_into_the_engines_of_a_restarted_component(
     component, server, tmp_path
 ):
     url, events, _, services = component

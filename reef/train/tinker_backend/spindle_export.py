@@ -16,7 +16,7 @@ from collections.abc import Callable
 from typing import Any
 
 from reef.artifact.sources import HuggingFaceRevision
-from reef.train.tinker_backend.config import SpindleFullConfig
+from reef.train.tinker_backend.config import SpindleFullSettings
 
 #: Where the export function mounts the checkpoint Volume; Spindle mounts it at the same path.
 CHECKPOINT_MOUNT = "/checkpoints"
@@ -69,7 +69,7 @@ class ModalCheckpointExporter(CheckpointExporter):
     ``config.hf_secret``, whose ``HF_TOKEN`` writes ``config.release_repo``. Each export starts an ephemeral app.
     """
 
-    def __init__(self, config: SpindleFullConfig, *, timeout_s: float = 3 * 3600) -> None:
+    def __init__(self, config: SpindleFullSettings, *, timeout_s: float = 3 * 3600) -> None:
         self.repo = config.release_repo
         self.volume = config.checkpoint_volume
         self.environment = config.modal_environment

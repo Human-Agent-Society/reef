@@ -10,7 +10,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     NAMES,
     REQUEST,
     NoChecks,

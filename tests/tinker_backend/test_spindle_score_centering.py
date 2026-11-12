@@ -20,7 +20,7 @@ from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob
 from reef.train.task_rollouts import ChatEndpoint, RolloutTokens, TaskJobRollouts
 from reef.train.tinker_backend import component as component_module
-from reef.train.tinker_backend.config import ScoreCentering, SpindleFullConfig
+from reef.train.tinker_backend.config import ScoreCentering, SpindleFullSettings
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
 from reef.train.tinker_backend.launch import spindle_full_settings
 from reef.train.tinker_backend.losses import (
@@ -103,9 +103,9 @@ def prepare(objective: TinkerObjective, *items: TrajectorySample):
     )
 
 
-def spindle(tmp_path, **options: object) -> SpindleFullConfig:
+def spindle(tmp_path, **options: object) -> SpindleFullSettings:
     values = {"state_dir": str(tmp_path / "state"), "base_url": SPINDLE, "base": BASE, "release_repo": RELEASES}
-    return SpindleFullConfig(**{**values, **options})
+    return SpindleFullSettings(**{**values, **options})
 
 
 @pytest.mark.unit

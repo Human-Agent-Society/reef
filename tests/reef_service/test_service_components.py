@@ -11,11 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._trajectories import policy_trajectory
 from tests.support.artifact_versions import ImportingComponent
 from tests.support.harness_steps import IdleMethod, harness_recipe
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.sources import ArtifactSources, DirectorySource
@@ -43,7 +43,7 @@ from reef.service.components import build_component_app
 from reef.service.data_service import DataJob, DataWorker
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.scenario_files import artifact_directory
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
@@ -64,8 +64,8 @@ from reef.core.errors import ReefError
 from reef.dispatcher.dispatcher import build_default_dispatcher
 
 
-def settings(tmp_path: Path) -> ServiceConfig:
-    return ServiceConfig(
+def settings(tmp_path: Path) -> ServiceSettings:
+    return ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_work_dir=str(tmp_path / "work"),
@@ -352,11 +352,11 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(ini
     assert changes.training_requests == ["math"]
 
     # A job that a worker takes changes nothing to commit; its checkpoint and its end each wake control.
-    queue.add(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))
+    queue.append(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))
     job = queue.take(JOBS_QUEUE, "training-1", ["job:stub"])
     watcher.run_once()
     assert changes.jobs == []
-    queue.add_progress(JOBS_QUEUE, job.id, "training-1", {"step": 0}, number=0)
+    queue.append_progress(JOBS_QUEUE, job.id, "training-1", {"step": 0}, number=0)
     watcher.run_once()
     assert changes.jobs == ["math"]
     queue.finish(JOBS_QUEUE, job.id, "training-1", {"state": "finished", "metrics": {}})

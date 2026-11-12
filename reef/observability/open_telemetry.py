@@ -35,7 +35,7 @@ from opentelemetry.util.types import AttributeValue
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import exchange_messages
 from reef.core.version import __version__
-from reef.observability.tracing import TracingConfig
+from reef.observability.tracing import TracingSettings
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import RecordObserver
 
@@ -86,7 +86,7 @@ class PlannedIdGenerator(IdGenerator):
 class OpenTelemetryRecordObserver(RecordObserver):
     """Export accepted records and committed steps as OpenTelemetry spans over OTLP/HTTP."""
 
-    def __init__(self, config: TracingConfig, *, span_exporter: SpanExporter | None = None) -> None:
+    def __init__(self, config: TracingSettings, *, span_exporter: SpanExporter | None = None) -> None:
         self.config = config
         if span_exporter is None:
             span_exporter = OTLPSpanExporter(endpoint=config.endpoint, headers=config.request_headers())

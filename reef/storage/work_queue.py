@@ -70,7 +70,7 @@ class WorkItem:
     - ``result`` is set exactly when ``state`` is ``finished``; ``error`` is a non-empty string set exactly when
       ``state`` is ``failed``, or the last retryable error of a ``queued`` item.
     - ``metadata`` is a JSON object of facts about the item that are not inputs of the work, so no worker reads it.
-      A reader of the item records one after the item exists (``WorkQueue.set_metadata``), such as the experiment
+      A reader of the item records one after the item exists (``WorkQueue.write_metadata``), such as the experiment
       run that records a training job. A store can record one when it adds the item, such as the automatic retry
       count of a serving request (``ServedModelsWriter.request``).
     - ``created_sequence`` and ``changed_sequence`` are positive integers; ``changed_sequence`` increases at each
@@ -187,11 +187,11 @@ class WorkLogLine:
 
 @dataclass(frozen=True)
 class NewWork:
-    """The inputs of ``WorkQueue.add``: an item that is not in a queue yet.
+    """The inputs of ``WorkQueue.append``: an item that is not in a queue yet.
 
     Values: as the same fields of ``WorkItem``; ``available_at`` None means at once.
 
-    Purpose: producers make it; ``add`` turns it into a queued ``WorkItem``.
+    Purpose: producers make it; ``append`` turns it into a queued ``WorkItem``.
     """
 
     queue: str
@@ -222,9 +222,9 @@ class WorkQueue(ABC):
     ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int. An attempt
     that its worker gave back (``give_back``) is not one of these times.
 
-    Purpose: control and the services add work (``add``, ``request``); workers take, extend, progress, finish,
-    fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``)
-    and record facts about it (``set_metadata``); a producer queues a final item again (``retry``); control deletes
+    Purpose: control and the services add work (``append``, ``request``); workers take, extend, progress, finish,
+    fail and give it back; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``read``)
+    and record facts about it (``write_metadata``); a producer queues a final item again (``retry``); control deletes
     old final items (``delete_final``).
     """
 
@@ -255,7 +255,7 @@ class WorkQueue(ABC):
         return item.attempt_count - item.stopped_attempt_count < self.attempts_allowed(item.queue)
 
     @abstractmethod
-    def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
+    def append(self, work: NewWork, *, now: float | None = None) -> WorkItem:
         """Add ``work`` as a queued item and return it. When an item with the same queue and ID exists, return it
         unchanged if its payload equals ``work.payload``, else raise ``WorkConflict``."""
 
@@ -311,7 +311,7 @@ class WorkQueue(ABC):
         it. A running item stays running."""
 
     @abstractmethod
-    def add_progress(
+    def append_progress(
         self,
         queue: str,
         item_id: str,
@@ -371,7 +371,7 @@ class WorkQueue(ABC):
         """
 
     @abstractmethod
-    def set_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
+    def write_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
         """Set ``metadata[name]`` of the item to ``value``, whatever the item's state, and return the item; None
         when it does not exist.
 
@@ -400,7 +400,7 @@ class WorkQueue(ABC):
         has no attempts left; return the changed items."""
 
     @abstractmethod
-    def get(self, queue: str, item_id: str) -> WorkItem | None:
+    def read(self, queue: str, item_id: str) -> WorkItem | None:
         """The item, or None."""
 
     @abstractmethod

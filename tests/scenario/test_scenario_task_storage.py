@@ -6,8 +6,8 @@ from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tests.support._threshold_processor import threshold_pipeline
 from tests.support.samples import data_storage, sample_store
+from tests.support.threshold_processor import threshold_pipeline
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.components import ScenarioComponents

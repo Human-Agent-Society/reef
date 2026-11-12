@@ -4,7 +4,7 @@ from concurrent.futures import Future
 
 import pytest
 
-from reef.execution.executor import Executor, ExecutorConfig, ExecutorFailedError, ExecutorFailure, WorkerSpec
+from reef.execution.executor import Executor, ExecutorFailedError, ExecutorFailure, ExecutorLaunch, WorkerSpec
 from reef.execution.executor.failure import ExecutorFailureListener, FailureState
 
 
@@ -88,7 +88,7 @@ def test_local_failure_unblocks_pending_and_rejects_queued_work():
             started.set()
             release.wait(5)
 
-    executor = Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Worker),)))
+    executor = Executor.create(ExecutorLaunch(backend="uni", workers=(WorkerSpec(Worker),)))
     listener = Listener()
     executor.register_failure_listener(listener)
     try:

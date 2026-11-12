@@ -17,7 +17,7 @@ from reef.train.slime_backend.reef_adapters.training_job import storage as check
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     CheckpointStorage,
     CheckpointStorageError,
-    RetentionConfig,
+    RetentionSettings,
     critic_checkpoint_due,
 )
 
@@ -52,7 +52,7 @@ def _storage(
     _write_bytes(source_megatron / "iter_0000000", 90)
     (source_megatron / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
     return CheckpointStorage(
-        RetentionConfig(policy=policy, max_storage_bytes=cap, min_free_space_bytes=min_free),
+        RetentionSettings(policy=policy, max_storage_bytes=cap, min_free_space_bytes=min_free),
         hf_template=str(root / "hf" / "{rollout_id}"),
         megatron_root=root / "megatron",
         source_hf=source_hf,
@@ -68,7 +68,7 @@ def _storage(
 def enter_storage_lock(root: Path, attempting: Event, entered: Event) -> None:
     """Open the parent's checkpoint paths in a fresh process and signal lock acquisition."""
     storage = CheckpointStorage(
-        RetentionConfig(), hf_template=str(root / "hf" / "{rollout_id}"), megatron_root=root / "megatron"
+        RetentionSettings(), hf_template=str(root / "hf" / "{rollout_id}"), megatron_root=root / "megatron"
     )
     attempting.set()
     with storage._locked():
@@ -129,12 +129,12 @@ def test_critic_checkpoint_cadence_counts_from_the_first_commit(tmp_path: Path) 
 
 @pytest.mark.unit
 class TestCheckpointStorage:
-    def test_retention_config_validates_fraction_budget(self) -> None:
-        assert RetentionConfig().capacity_bytes(1000) == 800
-        assert RetentionConfig().free_floor_bytes(1000) == 100
-        assert RetentionConfig(max_storage_bytes=950).capacity_bytes(1000) == 900
+    def test_retention_settings_validates_fraction_budget(self) -> None:
+        assert RetentionSettings().capacity_bytes(1000) == 800
+        assert RetentionSettings().free_floor_bytes(1000) == 100
+        assert RetentionSettings(max_storage_bytes=950).capacity_bytes(1000) == 900
         with pytest.raises(ValueError, match="must not exceed"):
-            RetentionConfig(max_storage_fraction=0.9, min_free_space_fraction=0.2)
+            RetentionSettings(max_storage_fraction=0.9, min_free_space_fraction=0.2)
 
     def test_admission_blocks_when_one_estimated_pair_cannot_fit(self, tmp_path: Path) -> None:
         assert _storage(tmp_path, cap=99).validate_capacity()["blocked"]
@@ -166,7 +166,7 @@ class TestCheckpointStorage:
         root, source_hf = tmp_path / "checkpoints", tmp_path / "source-hf"
         _write_bytes(source_hf, 10)
         storage = CheckpointStorage(
-            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            RetentionSettings(max_storage_bytes=1000, min_free_space_bytes=0),
             hf_template=str(root / "hf" / "{rollout_id}"),
             megatron_root=root / "megatron",
             source_hf=source_hf,
@@ -186,7 +186,7 @@ class TestCheckpointStorage:
         root, source_hf = tmp_path / "checkpoints", tmp_path / "source-hf"
         _write_bytes(source_hf, 10)
         storage = CheckpointStorage(
-            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            RetentionSettings(max_storage_bytes=1000, min_free_space_bytes=0),
             hf_template=str(root / "hf" / "{rollout_id}"),
             megatron_root=root / "megatron",
             source_hf=source_hf,
@@ -202,7 +202,7 @@ class TestCheckpointStorage:
         _write_bytes(source_megatron / "iter_0000000", 90)
         (source_megatron / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
         storage = CheckpointStorage(
-            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            RetentionSettings(max_storage_bytes=1000, min_free_space_bytes=0),
             hf_template=str(root / "hf" / "{rollout_id}"),
             megatron_root=root / "megatron",
             source_hf=None,
@@ -216,7 +216,7 @@ class TestCheckpointStorage:
     def test_capacity_refuses_only_when_no_source_can_size_a_pair(self, tmp_path: Path) -> None:
         root = tmp_path / "checkpoints"
         storage = CheckpointStorage(
-            RetentionConfig(max_storage_bytes=1000, min_free_space_bytes=0),
+            RetentionSettings(max_storage_bytes=1000, min_free_space_bytes=0),
             hf_template=str(root / "hf" / "{rollout_id}"),
             megatron_root=root / "megatron",
             source_hf=None,
@@ -328,7 +328,7 @@ class TestCheckpointStorage:
         (root / "hf").symlink_to(outside, target_is_directory=True)
         with pytest.raises(ValueError, match="under one checkpoint root"):
             CheckpointStorage(
-                RetentionConfig(),
+                RetentionSettings(),
                 hf_template=str(root / "hf" / "{rollout_id}"),
                 megatron_root=root / "megatron",
             )
@@ -503,9 +503,9 @@ def test_preflight_checks_free_space_and_pins_actor_and_critic_paths(
     )
     if free_bytes == 0:
         with pytest.raises(RuntimeError, match="filesystem free-space floor"):
-            prepare_checkpoint_storage(args, RetentionConfig())
+            prepare_checkpoint_storage(args, RetentionSettings())
         return
-    storage = prepare_checkpoint_storage(args, RetentionConfig())
+    storage = prepare_checkpoint_storage(args, RetentionSettings())
     assert args.save == str(storage.megatron_root) == str(tmp_path / "checkpoints" / "megatron")
     assert args.save_hf == storage.hf_template
     # A critic without --critic-save keeps its weights beside the policy's, so a restart resumes them.
@@ -520,4 +520,4 @@ def test_preflight_refuses_a_storage_that_cannot_hold_the_next_checkpoint(tmp_pa
     _write_bytes(unknown, 20)
     args = slime_args(tmp_path, save_hf=storage.hf_template, save=str(storage.megatron_root))
     with pytest.raises(RuntimeError, match=r"checkpoint storage preflight blocked Slime's start: .*operator-copy"):
-        prepare_checkpoint_storage(args, RetentionConfig())
+        prepare_checkpoint_storage(args, RetentionSettings())

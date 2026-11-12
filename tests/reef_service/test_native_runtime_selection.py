@@ -9,7 +9,7 @@ from reef.core.errors import RuntimeConfigError
 from reef.inference.null import NullInferenceRuntime
 from reef.inference.registry import BUILTIN_FACTORIES, RuntimeFactory
 from reef.service.assembly import connect_training_component
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 
 # The Slime component module imports Ray; the base installation has none.
 slime_component = pytest.importorskip("reef.train.slime_backend.component", exc_type=ImportError)
@@ -44,7 +44,7 @@ def created(monkeypatch):
     return calls
 
 
-def training_settings(**changes) -> ServiceConfig:
+def training_settings(**changes) -> ServiceSettings:
     values = {
         "recipe": "recipes.sao.recipe:SAORecipe",
         "training_backend": "slime",
@@ -56,7 +56,7 @@ def training_settings(**changes) -> ServiceConfig:
         "training_backend_options": {"global-batch-size": 8},
         "execution_config": {"execution": {"training": {"backend": "ray", "options": {"queue": "gpu"}}}},
     }
-    return ServiceConfig(**{**values, **changes})
+    return ServiceSettings(**{**values, **changes})
 
 
 def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):

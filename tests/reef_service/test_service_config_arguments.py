@@ -14,7 +14,7 @@ from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
 from reef.service.deploy.config_utils import interpolate_environment, load_config
 from reef.service.deploy.service_config import (
-    ServiceConfig,
+    ServiceSettings,
     normalize_service_config,
     parse_service_arguments,
     service_config_arguments,
@@ -55,8 +55,8 @@ def test_parser_defaults_come_from_settings():
     for argument in service_config_arguments():
         if argument.name in {"token", "recipe", "routing_deployment"}:
             continue
-        field = next(field for field in fields(ServiceConfig) if field.name == argument.name)
-        assert defaults[argument.name] == getattr(ServiceConfig(recipe="recipe"), field.name)
+        field = next(field for field in fields(ServiceSettings) if field.name == argument.name)
+        assert defaults[argument.name] == getattr(ServiceSettings(recipe="recipe"), field.name)
 
 
 def test_recipe_setting_has_one_flag():
@@ -301,7 +301,7 @@ def test_invalid_scenario_admission_settings_are_refused(values, message):
 
 def test_a_routing_manifest_is_none_or_a_non_empty_path() -> None:
     with pytest.raises(ValueError, match="routing_manifest must be a non-empty path"):
-        ServiceConfig(recipe="recipe", routing_manifest="")
+        ServiceSettings(recipe="recipe", routing_manifest="")
     # The public reader takes a blank value, such as an unset environment reference, as not supplied.
     assert (
         service_config_from_mapping({"reef": {"recipe": "recipe", "routing_manifest": " "}}).routing_manifest is None

@@ -11,9 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import policy_trajectory
 from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
+from tests.support.trajectories import policy_trajectory
 
 from reef.train.component import JobStatus, TrainingJob
 from reef.train.slime_backend.component import SlimeJobRunner
@@ -664,7 +664,7 @@ def _write_bytes(path: Path, size: int) -> None:
 def _critic_storage(tmp_path: Path, *, critic: bool = True, cap: int = 1000, free: int = 1000):
     from collections import namedtuple
 
-    from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
+    from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionSettings
 
     usage = namedtuple("Usage", "total used free")
     root = tmp_path / "checkpoints"
@@ -673,7 +673,7 @@ def _critic_storage(tmp_path: Path, *, critic: bool = True, cap: int = 1000, fre
     _write_bytes(source_megatron / "iter_0000000", 90)
     (source_megatron / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
     return CheckpointStorage(
-        RetentionConfig(max_storage_bytes=cap),
+        RetentionSettings(max_storage_bytes=cap),
         hf_template=str(root / "hf" / "{rollout_id}"),
         megatron_root=root / "megatron",
         critic_root=(root / "megatron-critic") if critic else None,

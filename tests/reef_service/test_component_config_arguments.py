@@ -270,7 +270,7 @@ def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
 
 def test_training_recipe_resolves_fields_once_before_connecting(extension, monkeypatch):
     from reef.service import assembly
-    from reef.service.deploy.service_config import ServiceConfig
+    from reef.service.deploy.service_config import ServiceSettings
 
     resolved = []
     original = assembly.resolve_config_field_values
@@ -287,7 +287,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
 
     monkeypatch.setattr(assembly, "resolve_config_field_values", resolve)
     monkeypatch.setattr(assembly, "connect_training_component", connect)
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="reef_config_extension:Training",
         model_path="model",
         ray_address="local",

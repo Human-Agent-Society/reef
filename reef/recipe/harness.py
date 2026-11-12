@@ -82,7 +82,7 @@ from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, Harness
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
 from reef.train.jobs import JobLoop
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.trainer import Trainer
 
 #: The directory of the harness training component's jobs and starts under ``evolution.state_dir``.
@@ -355,7 +355,7 @@ class HarnessEvolutionRecipe(Recipe):
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2sample=TraceSamples, sample2job=TraceJobData)
 
-    def stages(self) -> PipelineConfig:
+    def stages(self) -> PipelineSettings:
         """The pipeline's stages, whose harness stage names the eval split in each job when the steps evaluate on the
         imported tasks (``evolution.evaluation.imported_tasks``)."""
         stages = super().stages()

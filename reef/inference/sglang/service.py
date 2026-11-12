@@ -7,18 +7,14 @@ from typing import Any, Self
 
 from reef.inference.engine_control import EngineInferenceService, engine_executor_class
 from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.executor import SGLangExecutor
 from reef.inference.sglang.launch import engine_environment
 
-# Keep the existing wire identifier while removing its implementation dependency.
-INFERENCE_PROTOCOL = "slime-sglang-control-v2"
 
-
-class SGLangInferenceService(EngineInferenceService[SGLangConfig]):
+class SGLangInferenceService(EngineInferenceService[SGLangSettings]):
     """Own SGLang engines and the control actor; borrow the deployment allocation."""
 
-    connection_protocol = INFERENCE_PROTOCOL
     engine_name = "SGLang"
     control_worker_cls = "reef.inference.sglang.control:SGLangControl"
     backend_type = SGLangInferenceBackend
@@ -28,7 +24,7 @@ class SGLangInferenceService(EngineInferenceService[SGLangConfig]):
         """Validate native settings before allocation and return an unstarted service."""
         values = dict(config)
         values["executor"] = engine_executor_class(values.get("executor", "auto"), SGLangExecutor, "SGLang")
-        return cls(SGLangConfig(**values))
+        return cls(SGLangSettings(**values))
 
     def engine_environment(self) -> dict[str, str]:
         return engine_environment(self.config)

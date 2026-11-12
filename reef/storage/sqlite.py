@@ -137,7 +137,7 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
             self._connection.exec_driver_sql("BEGIN IMMEDIATE" if write else "BEGIN")
             yield self._connection
 
-    def _insert_if_absent(
+    def _write_if_absent(
         self,
         connection: Connection,
         table: Table,
@@ -281,7 +281,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
     def archive(self, scenario: str) -> tuple[str, ...]:
         with self._lock:
             self._ensure_open()
-            self.data.remove_scenario(self.read_settings(scenario).owner or scenario, scenario)
+            self.data.delete_scenario(self.read_settings(scenario).owner or scenario, scenario)
             paths = self.state_paths(scenario)
             archived_files = self.task_files.archive(scenario)
             if self._directory is None:

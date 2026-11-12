@@ -7,7 +7,7 @@ import pytest
 from reef.core.errors import DeployConfigError
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.deploy.serving import ENGINES, NONE, TRAINER, serving_mode, serving_runtime_config
 from reef.train.slime_backend.launch import SlimeDeployment
 from reef.train.tinker_backend.launch import TinkerDeployment
@@ -16,14 +16,14 @@ RECIPE = "recipes.sao.recipe:SAORecipe"
 ADAPTER = ArtifactFormat("adapter", 16, ("all",))
 
 
-def tinker(**changes) -> ServiceConfig:
-    return ServiceConfig(
+def tinker(**changes) -> ServiceSettings:
+    return ServiceSettings(
         recipe=RECIPE, training_backend="tinker", training_backend_options={"state-dir": "state"}, **changes
     )
 
 
-def slime(**changes) -> ServiceConfig:
-    return ServiceConfig(recipe=RECIPE, training_backend="slime", **changes)
+def slime(**changes) -> ServiceSettings:
+    return ServiceSettings(recipe=RECIPE, training_backend="slime", **changes)
 
 
 def test_without_settings_each_backend_serves_in_its_default_mode():

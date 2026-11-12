@@ -92,7 +92,7 @@ class SQLTrainingState(TrainingState):
         ]
         if rows:
             with self.database._transaction(write=True) as connection:
-                self.database._insert_if_absent(connection, self.consumed.table, rows)
+                self.database._write_if_absent(connection, self.consumed.table, rows)
 
 
 __all__ = ["SQLTrainingState", "stage_record_table"]

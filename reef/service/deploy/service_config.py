@@ -1,7 +1,7 @@
 """Typed HTTP, storage and shared runtime settings derived from component fields.
 
 CLI and YAML values use the shared parser in ``reef.core.config``. This module
-converts effective deployment configuration into ``ServiceConfig`` for app assembly.
+converts effective deployment configuration into ``ServiceSettings`` for app assembly.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from reef.train.manager import TrainingManager
 
 
 @dataclass(frozen=True)
-class ServiceConfig:
+class ServiceSettings:
     """The HTTP service's settings, translated from a deployment config.
 
     Recipe-specific config fields (batch sizes, group counts)
@@ -449,11 +449,11 @@ class ServiceConfig:
             raise ValueError("reef.routing_manifest must be a non-empty path")
         RecordRetention(max_bytes=self.agent_record_retention_max_bytes)
         if not isinstance(self.execution_config, Mapping):
-            raise TypeError("ServiceConfig.execution_config must be a mapping")
+            raise ValueError("ServiceSettings.execution_config must be a mapping")
         unknown_execution_keys = set(self.execution_config) - {"execution", "executors"}
         if unknown_execution_keys:
             raise ValueError(
-                "ServiceConfig.execution_config holds only the execution and executors sections, got "
+                "ServiceSettings.execution_config holds only the execution and executors sections, got "
                 + ", ".join(sorted(map(str, unknown_execution_keys)))
             )
         if self.scenario_idle_unload_s is not None and self.scenario_idle_unload_s <= 0:
@@ -560,7 +560,7 @@ def _reef_section(config: Mapping[str, Any]) -> dict[str, Any]:
 
 
 #: ``reef.*`` keys the service consumes under a different field name. The
-#: service's vocabulary is ``ServiceConfig``' fields plus these, so the
+#: service's vocabulary is ``ServiceSettings``' fields plus these, so the
 #: recipe-owned remainder of the section never includes them.
 SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 
@@ -577,16 +577,16 @@ def service_owned_keys() -> frozenset[str]:
     }
     return frozenset(
         settings_field.name
-        for settings_field in dataclasses.fields(ServiceConfig)
+        for settings_field in dataclasses.fields(ServiceSettings)
         if settings_field.name not in non_reef_fields
     ) | frozenset(SERVICE_CONFIG_ALIASES)
 
 
 @lru_cache(maxsize=1)
 def service_config_arguments() -> tuple[ConfigArgument, ...]:
-    """Public settings derive their types and defaults from ServiceConfig."""
+    """Public settings derive their types and defaults from ServiceSettings."""
     return (
-        *config_arguments(ServiceConfig),
+        *config_arguments(ServiceSettings),
         ConfigArgument(
             "routing_deployment",
             ("reef", "routing_deployment"),
@@ -673,7 +673,7 @@ def normalize_service_config(config: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
+def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceSettings:
     """Read HTTP service settings from a resolved deployment's ``reef`` section."""
     values = parse_service_arguments(config)
     if not isinstance(values["recipe"], str) or not values["recipe"]:
@@ -688,6 +688,6 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
     execution = {key: config[key] for key in ("execution", "executors") if key in config}
-    return ServiceConfig(
+    return ServiceSettings(
         **values, recipe_settings=_reef_section(config), preset_config=preset, execution_config=execution
     )

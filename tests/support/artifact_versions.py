@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import time
 
-from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support import records
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.core import AgentRecord, RequestType
+from reef.core import AgentRecord
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.storage.sql_coordination import memory_coordination
@@ -83,28 +84,12 @@ class RecordingExperimentTracker(ExperimentTracker):
 
 def inference(index: int, artifact_id: str) -> AgentRecord:
     """The inference record of job ``index``, answered by the artifact ``artifact_id``."""
-    payload: dict[str, object] = {
-        "tokens": [1, 2],
-        "loss_mask": [0, 1],
-        "rollout_log_probs": [-0.2],
-        "artifact_id": artifact_id,
-    }
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload=payload,
-        agent_record_id=f"i{index}",
-    )
+    return records.token_inference(f"i{index}", artifact_id=artifact_id)
 
 
 def report(index: int) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.REPORT,
-        payload={"score": 1.0, "references": [f"i{index}"]},
-        agent_record_id=f"r{index}",
-        references=(f"i{index}",),
-    )
+    """The report record of job ``index``, on the inference record of that job."""
+    return records.report(f"r{index}", f"i{index}")
 
 
 def dispatcher(tmp_path, *, experiment_tracker=None):

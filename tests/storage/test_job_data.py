@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.core.job_data import JobData, TaskSample
 from reef.storage.job_data import JOB_FILE, job_data_key, read_job_data, write_job_data

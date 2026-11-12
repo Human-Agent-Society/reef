@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from reef.execution.executor import ExecutorConfig, WorkerSpec
+from reef.execution.executor import ExecutorLaunch, WorkerSpec
 from reef.execution.executor.delegating import DelegatingExecutor
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.control import SGLangControl
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
@@ -81,20 +81,20 @@ def test_a_borrowed_control_connection_reaches_the_engines_and_leaves_them_to_th
     borrower = None
     try:
         owner = RayExecutor(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend=RayExecutor,
                 options={"num_cpus": 1, "num_gpus": 0},
                 workers=(
                     WorkerSpec(
                         SGLangControl,
-                        args=(SGLangConfig("model", 1, 1, 1, executor=CpuServingExecutor), None),
+                        args=(SGLangSettings("model", 1, 1, 1, executor=CpuServingExecutor), None),
                     ),
                 ),
             )
         )
         borrowed = RayExecutor.from_workers(owner.workers)
         borrower = RayExecutor(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend=RayExecutor,
                 options={"num_cpus": 1, "num_gpus": 0},
                 workers=(WorkerSpec(BorrowingControl, args=(borrowed,)),),

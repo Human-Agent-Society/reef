@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.support._training_deployment import LocalDeployment
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.training_deployment import LocalDeployment
 
 from reef.core import plugins
 from reef.core.errors import RuntimeConfigError
@@ -24,9 +24,9 @@ from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 
-BACKEND = "tests.support._training_deployment:LocalDeployment"
+BACKEND = "tests.support.training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
 
 
@@ -108,7 +108,7 @@ def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, p
 
 
 def test_a_component_factory_that_builds_no_training_component_is_refused(monkeypatch):
-    from tests.support._training_deployment import component_factory
+    from tests.support.training_deployment import component_factory
 
     from reef.inference.http import InferenceProxyRuntime
 
@@ -116,7 +116,7 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
     monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="must build a TrainingComponent"):
         connect_training_component(
-            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
+            ServiceSettings(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
         )
 
 

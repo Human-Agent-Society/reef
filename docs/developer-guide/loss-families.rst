@@ -236,7 +236,7 @@ and each such recipe's family is a thin subclass of it:
   ``importance-sampling-level``, ``skip-response-tokens``, ``jsd-beta``) and
   the settings they stamp on ``args`` under ``distill_*`` names, which the
   worker hooks read whatever the prefix was. A family names itself, sets
-  its defaults in a ``DistillSettings`` subclass, and its ``objective.py``
+  its defaults in a ``DistillAlgorithmSettings`` subclass, and its ``objective.py``
   forwards ``<name>_loss`` and ``<name>_actor_pre_train`` to
   ``distill.objective``.
 - The teacher is ``self`` (the student's own weights reading the privileged

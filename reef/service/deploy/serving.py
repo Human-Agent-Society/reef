@@ -22,7 +22,7 @@ from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arg
 from reef.execution.executor.config import role_executor_settings
 from reef.inference.deployment import BUILTIN_ENGINES, INFERENCE_BACKEND_GROUP
 from reef.inference.interfaces import InferenceHandler
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeployment
 
 #: Reef's engines on an inference component serve the snapshots.
@@ -65,7 +65,7 @@ def inference_handler_factory_for(reference: str | None) -> type[InferenceHandle
     return InferenceHandler.resolve_class(reference, setting="inference.handler-factory")
 
 
-def configured_engine_settings(settings: ServiceConfig) -> list[str]:
+def configured_engine_settings(settings: ServiceSettings) -> list[str]:
     """The public names of the engine settings that ``settings`` sets."""
     values = asdict(settings)
     configured = [name for key, name in ENGINE_SETTINGS if values[key] not in (None, {}, False)]
@@ -74,7 +74,7 @@ def configured_engine_settings(settings: ServiceConfig) -> list[str]:
     return configured
 
 
-def serving_mode(settings: ServiceConfig, backend: TrainingDeployment) -> str:
+def serving_mode(settings: ServiceSettings, backend: TrainingDeployment) -> str:
     """The serving of a weight-training deployment: ``engines``, ``trainer``, ``none`` or a ``module:Factory``.
 
     ``inference.serving`` names it. Without it, ``inference.backend: none``
@@ -105,7 +105,7 @@ def serving_mode(settings: ServiceConfig, backend: TrainingDeployment) -> str:
     return selected
 
 
-def prepare_engine_serving(config: dict[str, Any], settings: ServiceConfig) -> None:
+def prepare_engine_serving(config: dict[str, Any], settings: ServiceSettings) -> None:
     """Check the engine settings and record their resolved values in ``config["reef"]``.
 
     The engines are tensor-parallel engines of ``inference.tensor-parallel-size``
@@ -149,9 +149,9 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceConfig) -> N
 
 
 def serving_runtime_config(
-    settings: ServiceConfig, backend: TrainingDeployment, artifact_format: ArtifactFormat | None
+    settings: ServiceSettings, backend: TrainingDeployment, artifact_format: ArtifactFormat | None
 ) -> dict[str, Any]:
-    """The runtime config of the deployment's serving, for releases of ``artifact_format``.
+    """The runtime config of the deployment's serving, for snapshots of ``artifact_format``.
 
     ``engines`` gives a ``remote_serving`` config over the resolved engine
     settings, the inference component of ``inference.remote`` and the
@@ -159,7 +159,7 @@ def serving_runtime_config(
     and ``none`` the null runtime. A ``module:Factory`` gets
     ``inference.serving-config`` and the artifact format as ``artifact_format``
     (``None`` when the snapshots hold no weight files). Raise
-    ``DeployConfigError`` when Reef's engines would serve releases without
+    ``DeployConfigError`` when Reef's engines would serve snapshots without
     weight files.
     """
     mode = serving_mode(settings, backend)
@@ -183,7 +183,7 @@ def serving_runtime_config(
         engine_weights = backend.engine_weights(asdict(settings))
         if engine_weights is None:
             raise DeployConfigError(
-                "the training backend's releases hold no weight files that engines load, and it names no way to "
+                "the training backend's snapshots hold no weight files that engines load, and it names no way to "
                 "fetch them; set inference.serving: trainer"
             )
         artifact_format, weights = engine_weights.artifact_format, engine_weights.weights

@@ -22,7 +22,7 @@ from threading import Lock
 
 from reef.core.evaluation import RolloutScore
 from reef.evaluation.harness.scoring import FailureObservation, ScoredRun, TaskScorer
-from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec
 from reef.execution.executor.config import (
     ExecutorSelection,
     ExecutorSettings,
@@ -354,7 +354,7 @@ def evaluation_selection(
 
 def evaluation_executor_config(
     selection: ExecutorSelection, requirements: ExecutionRequirements, worker: WorkerSpec
-) -> ExecutorConfig:
+) -> ExecutorLaunch:
     """The executor configuration of the run pool: one copy of ``worker`` per worker slot."""
     backend = Executor.get_class(selection.settings.backend)
     options = dict(selection.settings.options)
@@ -376,7 +376,7 @@ def evaluation_executor_config(
             replace(worker, options={"cuda_visible_devices": ",".join(devices)})
             for devices in local_gpu_assignments(requirements)
         )
-    return ExecutorConfig(backend=backend, options=options, workers=workers)
+    return ExecutorLaunch(backend=backend, options=options, workers=workers)
 
 
 __all__ = [

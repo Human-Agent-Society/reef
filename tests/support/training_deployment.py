@@ -59,7 +59,7 @@ component_factory = LocalFactory()
 class LocalServingFactory(RuntimeFactory):
     """Build the deployment's own serving runtime (``inference.serving: trainer``)."""
 
-    kind = "tests.support._training_deployment:LocalServingFactory"
+    kind = "tests.support.training_deployment:LocalServingFactory"
 
     def __call__(self, config, model_path, recipe_config, environ):
         return StubInferenceRuntime(model_path=model_path)
@@ -68,7 +68,7 @@ class LocalServingFactory(RuntimeFactory):
 class LocalDeployment(InProcessTrainingDeployment):
     """A training backend that serves its own snapshots by default, as Tinker does."""
 
-    component_type = "tests.support._training_deployment:component_factory"
+    component_type = "tests.support.training_deployment:component_factory"
     default_serving = "trainer"
 
     def trainer_serving_config(self, settings):

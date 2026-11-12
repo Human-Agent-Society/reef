@@ -473,7 +473,7 @@ A weight-training stack trains and serves on separate processes and GPUs. The
 training backend runs a training component inside the HTTP service. Reef
 submits each job's ready data to that component as a bounded job, and the
 component saves checkpoints. Reef evaluates each saved checkpoint and
-publishes the selected ones as releases. The serving engines load only
+publishes the selected ones as snapshots. The serving engines load only
 published snapshots, from files. With the default Slime backend and an engine
 (``inference.backend: sglang`` or ``vllm``), ``reef serve`` starts these
 services:
@@ -585,7 +585,7 @@ The engine settings are ``inference.backend``, ``inference.num-gpus``,
 ``inference.handler-config``, ``inference.max-loaded-adapters`` and
 ``inference.prefix-sharing``. Another serving mode refuses them. The engines
 start with the artifact format: an adapter format enables SGLang's adapter
-table with the adapter's rank and target modules. Releases without weight
+table with the adapter's rank and target modules. Snapshots without weight
 files, such as Tinker's, are served by engines only when the training backend
 names how to fetch their weights (``TrainingDeployment.engine_weights``);
 Tinker's does. Otherwise the HTTP service refuses that pairing when it
@@ -1002,7 +1002,7 @@ The effective settings are handed to the child using a private temporary
 config, removed when the launcher exits. No user YAML file is created.
 
 Public service settings use the same argument parser for YAML and CLI values.
-Their types, defaults, and help are declared on ``ServiceConfig``. Explicit
+Their types, defaults, and help are declared on ``ServiceSettings``. Explicit
 CLI values override YAML values; omitted values use the setting's default.
 Run ``reef serve --help`` to see these options. A flag is the setting's YAML
 path, for example ``--inference.upstream-model``. The last occurrence of a
@@ -1213,7 +1213,7 @@ persistent.
 .. container:: config
 
    ``storage.artifact-backend`` : git_lfs
-       where releases are stored: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin reference
+       where snapshots are stored: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin reference
 
    ``storage.artifact-repository`` : .reef/artifacts.git
        the Git LFS repository of the snapshot chain; only for ``git_lfs``. A Hugging Face repository needs the factory's ``refs`` and ``token_env`` options (`Choose the artifact backend <../user-guide/operate.rst#choose-the-artifact-backend>`__)
@@ -1486,7 +1486,7 @@ recipes whose runtime can be built from the preset or the deployment's
 upstream proxy. There, ``recipe.config`` holds the training mode and the
 recipe's own sections, and ``pipeline`` holds the stage config.
 
-A composite recipe serves and evolves several release components in one
+A composite recipe serves and evolves several snapshot components in one
 scenario, one recipe per recipe component. Its ``components`` object maps
 each recipe component name to a section with the shape of the top-level
 ``recipe`` section. In that section, ``implementation`` names the recipe

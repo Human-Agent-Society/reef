@@ -13,9 +13,9 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_methods import QueueChat
 from tests.support.harness_steps import MODEL, PI_SEED, step_services
+from tests.support.trajectories import recorded_trajectory
 
 from recipes.reasoning_bank import ReasoningBank
 from recipes.reasoning_bank.method import FOCUS
