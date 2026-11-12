@@ -51,7 +51,7 @@ from reef.execution.sandbox.process import (
     ProgramExecutor,
     ProgramLaunchError,
     SandboxProgram,
-    SandboxUnavailable,
+    SandboxUnavailableError,
 )
 
 logger = logging.getLogger(__name__)
@@ -195,12 +195,12 @@ def probe_command(binary: str) -> str:
 
 
 def parse_forward_ports(section: Mapping[str, object]) -> tuple[int, ...]:
-    """``sandbox.forward_ports``: distinct TCP ports, in order; ``SandboxUnavailable`` for another value."""
+    """``sandbox.forward_ports``: distinct TCP ports, in order; ``SandboxUnavailableError`` for another value."""
     ports = section.get("forward_ports", [])
     if not isinstance(ports, (list, tuple)) or any(
         isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535 for port in ports
     ):
-        raise SandboxUnavailable("sandbox.forward_ports must list TCP ports between 1 and 65535")
+        raise SandboxUnavailableError("sandbox.forward_ports must list TCP ports between 1 and 65535")
     return tuple(dict.fromkeys(ports))
 
 
@@ -210,11 +210,11 @@ def parse_env_from(section: Mapping[str, object], environ: Mapping[str, str]) ->
     if not isinstance(names, (list, tuple)) or not all(
         isinstance(name, str) and name.isidentifier() for name in names
     ):
-        raise SandboxUnavailable("sandbox.env_from must list environment variable names")
+        raise SandboxUnavailableError("sandbox.env_from must list environment variable names")
     env = {}
     for name in names:
         if not environ.get(name):
-            raise SandboxUnavailable(f"sandbox.env_from requires environment variable {name!r}")
+            raise SandboxUnavailableError(f"sandbox.env_from requires environment variable {name!r}")
         env[name] = environ[name]
     return env
 
@@ -223,9 +223,9 @@ def check_options(provider: str, section: Mapping[str, object], provider_options
     """Refuse an option no remote sandbox takes, and the local sandbox's ``egress_hosts`` and ``limits``."""
     unknown = set(section) - provider_options - {"forward_ports", "env_from", "egress_hosts", "limits"}
     if unknown:
-        raise SandboxUnavailable(f"unknown {provider} sandbox options: {', '.join(sorted(unknown))}")
+        raise SandboxUnavailableError(f"unknown {provider} sandbox options: {', '.join(sorted(unknown))}")
     if section.get("egress_hosts") or section.get("limits"):
-        raise SandboxUnavailable(
+        raise SandboxUnavailableError(
             f"{provider} does not implement sandbox.egress_hosts or sandbox.limits; "
             "it uses the image's resources and permits outbound internet"
         )
@@ -286,7 +286,7 @@ class RemoteExecutor(ProgramExecutor):
     def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
         """Resolve the program in the sandbox's image, without installing it on the Reef host."""
         if program.self_isolating:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 f"{program.name!r} manages its own containers on the Reef host and cannot run in a "
                 f"{self.provider} sandbox"
             )
@@ -295,7 +295,7 @@ class RemoteExecutor(ProgramExecutor):
             bound = self if remote_binary == self.binary else replace(self, binary=remote_binary)
             return bound, remote_binary
         if not program.npm_package:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 f"running {program.name!r} in {self.provider} requires an explicit {self.image_option} containing "
                 "its binary, bubblewrap and python3"
             )

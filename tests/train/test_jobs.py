@@ -17,7 +17,7 @@ from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import Artifact, DefaultStart
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import CommitPending, TrainingStartRefused
+from reef.core.errors import CommitPendingError, TrainingStartRefusedError
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
@@ -411,13 +411,13 @@ def test_an_import_is_refused_without_a_change_when_the_trainer_cannot_start(com
         raise ValueError("these weights cannot train")
 
     monkeypatch.setattr(component, "import_start", refuse)
-    with pytest.raises(TrainingStartRefused, match="these weights cannot train"):
+    with pytest.raises(TrainingStartRefusedError, match="these weights cannot train"):
         trainer.start_from(trainer.import_start(Artifact.local(Path("/releases/old"))))
     assert component.cancelled == []
     assert JobLoopState.from_dict(trainer.state) == running
     # A trainer that trains nothing has no start to set.
     observer = Trainer.build("math", memory_records("math"), pipeline_factory=threshold_pipeline)
-    with pytest.raises(TrainingStartRefused, match="trains nothing"):
+    with pytest.raises(TrainingStartRefusedError, match="trains nothing"):
         observer.import_start(Artifact.local(Path("/releases/old")))
 
 
@@ -429,7 +429,7 @@ def test_start_from_is_refused_while_a_commit_is_pending(component):
     assert not pending.has_pending_commit
     assert pending.advance_job() is not None
     assert pending.has_pending_commit
-    with pytest.raises(CommitPending, match="waits for its commit"):
+    with pytest.raises(CommitPendingError, match="waits for its commit"):
         pending.start_from("fake:old")
     assert component.cancelled == [] and JobLoopState.from_dict(pending.state) == running
 

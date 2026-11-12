@@ -54,7 +54,7 @@ class TaskImport:
         The train tasks come first, then the eval tasks, each in name order.
         Raises ``TaskSplitError`` if the manifest cannot be read,
         ``TaskImportError`` if a task directory is missing or is not a Harbor
-        task, and ``ItemConflict`` if ``owner`` stores a task of the same name
+        task, and ``ItemConflictError`` if ``owner`` stores a task of the same name
         with other files.
         """
         manifest = read_split_manifest(self.manifest)

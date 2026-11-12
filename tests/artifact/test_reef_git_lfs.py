@@ -13,8 +13,8 @@ import pytest
 
 from reef.artifact import (
     Artifact,
-    ArtifactConflict,
-    ArtifactNotFound,
+    ArtifactConflictError,
+    ArtifactNotFoundError,
     ArtifactSourceError,
     DefaultStart,
     GitLFSRepositoryBackend,
@@ -146,7 +146,7 @@ def test_artifact_id_binding_is_immutable_and_scoped_to_its_scenario(
     assert resolved.artifact_id == candidate.artifact_id
     assert resolved.local_path is not None
     assert (resolved.local_path / "rules.md").read_text() == "updated"
-    with pytest.raises(ArtifactNotFound):
+    with pytest.raises(ArtifactNotFoundError):
         other.resolve_artifact(candidate.artifact_id)
     changed = root_tree(tmp_path / "changed", {"rules.md": "different"})
     conflicting = Artifact(
@@ -156,7 +156,7 @@ def test_artifact_id_binding_is_immutable_and_scoped_to_its_scenario(
         metadata=candidate.metadata,
         artifact_id=candidate.artifact_id,
     )
-    with pytest.raises(ArtifactConflict, match="already names different"):
+    with pytest.raises(ArtifactConflictError, match="already names different"):
         backend.publish(conflicting, expected_parent=repeated)
     assert backend.current() == repeated
     assert (backend.resolve_artifact(candidate.artifact_id).local_path / "rules.md").read_text() == "updated"
@@ -423,7 +423,7 @@ def test_git_lfs_repository_registers_publishes_and_materializes(
         copies = tuple(executor.map(fresh.materialize, (published,) * 8))
     assert all(copy.local_path.joinpath("adapter.safetensors").read_text() == "trained" for copy in copies)
 
-    with pytest.raises(ArtifactConflict):
+    with pytest.raises(ArtifactConflictError):
         backend.publish(Artifact.local(candidate), expected_parent=math)
 
 

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import InferenceUnavailable, UpstreamStatusError
+from reef.core.errors import InferenceUnavailableError, UpstreamStatusError
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
@@ -53,7 +53,7 @@ class ArtifactEndpoint:
         """The status and the body that answer the call ``payload`` to ``path``."""
         try:
             admission = await self.runtime.acquire_inference()
-        except InferenceUnavailable as exc:
+        except InferenceUnavailableError as exc:
             return 503, {"error": {"message": str(exc)}}
         try:
             if self.served is None:

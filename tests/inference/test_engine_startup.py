@@ -381,11 +381,11 @@ def test_router_failure_stops_the_launch(monkeypatch, router_port, held_ports, f
     assert len(routers.options) == len(failures) and cluster.routers == []
 
 
-class AccessDenied(Exception):
+class AccessDenied(Exception):  # noqa: N818 - the name that psutil gives
     pass
 
 
-class NoSuchProcess(Exception):
+class NoSuchProcess(Exception):  # noqa: N818 - the name that psutil gives
     pass
 
 

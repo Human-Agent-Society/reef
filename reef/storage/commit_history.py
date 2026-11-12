@@ -20,7 +20,7 @@ from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord, 
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainingState
-from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
+from reef.storage.scenario import ScenarioStore, ScenarioStoreConflictError
 from reef.storage.tasks import TaskStorage
 
 
@@ -207,18 +207,22 @@ class CommitHistoryScenarioStore(ScenarioStore):
             if not isinstance(expected_step, int) or isinstance(expected_step, bool) or expected_step < 0:
                 raise ValueError("expected_step must be a non-negative integer")
             if commit.scenario != self._scenario:
-                raise ScenarioStoreConflict(f"commit belongs to scenario {commit.scenario!r}, not {self._scenario!r}")
+                raise ScenarioStoreConflictError(
+                    f"commit belongs to scenario {commit.scenario!r}, not {self._scenario!r}"
+                )
             if commit.step != expected_step + 1:
-                raise ScenarioStoreConflict(f"commit step must be {expected_step + 1}, got {commit.step}")
+                raise ScenarioStoreConflictError(f"commit step must be {expected_step + 1}, got {commit.step}")
             history = self._history()
             existing = self._commits_by_step.get(commit.step)
             if existing is not None:
                 if not same_commit(existing, commit):
-                    raise ScenarioStoreConflict(f"commit step {commit.step} conflicts with its existing record")
+                    raise ScenarioStoreConflictError(f"commit step {commit.step} conflicts with its existing record")
                 return existing
             current_step = history[-1].step if history else self._initial_step
             if expected_step != current_step:
-                raise ScenarioStoreConflict(f"expected scenario step {expected_step}, current step is {current_step}")
+                raise ScenarioStoreConflictError(
+                    f"expected scenario step {expected_step}, current step is {current_step}"
+                )
             self._commit_history.append(commit)
             return commit
 

@@ -18,14 +18,14 @@ from reef.artifact.repository import Repository, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
-from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
+from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.inference.interfaces import InferenceRuntime
 from reef.inference.startup import (
     PROGRESS_KEY,
     STARTUP_FAILED_PREFIX,
-    StartupFailed,
+    StartupFailedError,
     StartupReporter,
-    StartupStopped,
+    StartupStoppedError,
     redeploying,
     reporting_startup,
     serving_work,
@@ -41,7 +41,7 @@ from reef.storage.served_models import (
     SERVING_QUEUE,
     STOP_SERVING_KIND,
 )
-from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
 
 logger = logging.getLogger(__name__)
 #: The error of serving work that a newer request replaced; the queue gives queued work the same error.
@@ -163,7 +163,7 @@ class ServingWorker(QueueWorker):
                     self.owner.runtime.shutdown()
             finally:
                 self.owner.stop()
-            with contextlib.suppress(WorkLeaseLost):
+            with contextlib.suppress(WorkLeaseLostError):
                 self.queue.finish(INFERENCE_OWNER_QUEUE, self.owner.item.id, self.worker_id, {})
             logger.info("inference worker %s released runtime ownership", self.worker_id)
             self.owner = None
@@ -224,7 +224,7 @@ class ServingWorker(QueueWorker):
         """Open the owner's runtime and return the routes of ``previous`` whose engines it took over. A runtime that
         does not open takes over none: the routes go, and the first serving opens it again."""
         if self.owner is None:
-            raise WorkLeaseLost("the serving worker has no runtime ownership")
+            raise WorkLeaseLostError("the serving worker has no runtime ownership")
         runtime = self.owner.runtime
         try:
             self.open_runtime(runtime)
@@ -235,17 +235,17 @@ class ServingWorker(QueueWorker):
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         if self.stopped.is_set():
-            raise WorkerStopped
+            raise WorkerStoppedError
         runtime = self.recipe.runtime
         if runtime is None:
             raise ValueError("the recipe has no inference runtime")
         if self.owner is None or self.owner.lease_lost.is_set():
-            raise WorkLeaseLost("the serving worker lost runtime ownership")
+            raise WorkLeaseLostError("the serving worker lost runtime ownership")
         with self.open_lock:
             if not self.opened:
                 self.open_runtime(runtime)
         if lease_lost.is_set() or self.owner.lease_lost.is_set():
-            raise WorkLeaseLost("the serving worker lost its lease")
+            raise WorkLeaseLostError("the serving worker lost its lease")
         if item.kind == STOP_SERVING_KIND:
             served = ServedArtifact.from_json(item.payload["served"])
             due = any(
@@ -280,11 +280,11 @@ class ServingWorker(QueueWorker):
         try:
             with serving_work(stop, redeploy=REDEPLOY in item.payload):
                 return self.start_request(item, runtime, lambda: self.check_stop(stop, lease_lost))
-        except StartupStopped as error:
+        except StartupStoppedError as error:
             self.check_stop(stop, lease_lost)
-            raise ItemFailed(REPLACED) from error
-        except StartupFailed as error:
-            raise ItemFailed(f"{STARTUP_FAILED_PREFIX}{error}") from error
+            raise ItemFailedError(REPLACED) from error
+        except StartupFailedError as error:
+            raise ItemFailedError(f"{STARTUP_FAILED_PREFIX}{error}") from error
         finally:
             done.set()
 
@@ -308,12 +308,12 @@ class ServingWorker(QueueWorker):
                 return
 
     def check_stop(self, stop: threading.Event, lease_lost: threading.Event) -> None:
-        """``WorkLeaseLost`` when the worker lost the item or its runtime ownership, else ``ItemFailed`` when ``stop``
-        is set: a newer request replaced the item."""
+        """``WorkLeaseLostError`` when the worker lost the item or its runtime ownership, else ``ItemFailedError`` when
+        ``stop`` is set: a newer request replaced the item."""
         if lease_lost.is_set() or self.owner is None or self.owner.lease_lost.is_set():
-            raise WorkLeaseLost("the serving worker lost its lease")
+            raise WorkLeaseLostError("the serving worker lost its lease")
         if stop.is_set():
-            raise ItemFailed(REPLACED)
+            raise ItemFailedError(REPLACED)
 
     def start_request(
         self, item: WorkItem, runtime: InferenceRuntime, check_stop: Callable[[], None]
@@ -417,7 +417,7 @@ class ServingWorker(QueueWorker):
 
     def finish_item(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
         if self.owner is None or self.owner.lease_lost.is_set():
-            raise WorkLeaseLost("the serving worker lost runtime ownership")
+            raise WorkLeaseLostError("the serving worker lost runtime ownership")
         if item.kind == SERVE_ARTIFACT_KIND:
             super().finish_item(item, result)
             return

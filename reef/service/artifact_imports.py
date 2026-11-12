@@ -20,13 +20,13 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.sources import ArtifactSources
-from reef.core.errors import UnknownScenario
+from reef.core.errors import ScenarioNotFoundError
 from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.scenario.factory import ItemStart
 from reef.scenario.scenario import Scenario
 from reef.service.data import DataAccess
-from reef.storage.data import ItemNotFound, StoredItem
+from reef.storage.data import ItemNotFoundError, StoredItem
 
 
 @dataclass(frozen=True)
@@ -58,8 +58,8 @@ class ArtifactImports:
         Return ``{scenario, component, artifact_id}``. The import's ``source`` is ``{uri,
         version}``, and also ``item`` when the URI came from the artifact item ``item``, whose artifact ID and serving
         profile the new artifact takes (``ScenarioCommitter.import_artifact``). Before any file is
-        read, raise ``UnknownScenario`` for an unknown scenario and ``ValueError`` for a component that cannot take
-        the import (``Dispatcher.import_target``). The layout check then runs on the source, before anything is
+        read, raise ``ScenarioNotFoundError`` for an unknown scenario and ``ValueError`` for a component that cannot
+        take the import (``Dispatcher.import_target``). The layout check then runs on the source, before anything is
         copied; otherwise raise as ``ArtifactSources.open`` and ``Dispatcher.import_artifact`` do.
         """
         component = dispatcher.import_target(scenario, component)
@@ -89,12 +89,12 @@ class ArtifactImports:
         """Import the artifact item ``item_id`` of the owner of ``scenario`` into ``component``: the files that its
         ``source_uri`` names, as ``import_source`` imports them, with the item's identity (``item_identity``).
 
-        Raise ``UnknownScenario`` for an unknown scenario; otherwise raise as ``item_source`` and
+        Raise ``ScenarioNotFoundError`` for an unknown scenario; otherwise raise as ``item_source`` and
         ``import_source``.
         """
         owner = dispatcher.scenario_owner(scenario)
         if owner is None:
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         item = artifact_item_of(dispatcher, owner, item_id)
         return self.import_source(
             dispatcher, scenario, component, source_uri_of(item), item=item_identity(dispatcher, item)
@@ -126,12 +126,12 @@ def item_source(dispatcher: Dispatcher, owner: str, item_id: str) -> str:
 def artifact_item_of(dispatcher: Dispatcher, owner: str, item_id: str) -> StoredItem:
     """The artifact item ``item_id`` of ``owner``.
 
-    Raise ``NoDataStore`` without a data store, ``ItemNotFound`` for an item that the owner does not store, and
-    ``ValueError`` for an item that is not an artifact.
+    Raise ``DataStoreUnavailableError`` without a data store, ``ItemNotFoundError`` for an item that the owner does not
+    store, and ``ValueError`` for an item that is not an artifact.
     """
     item = DataAccess.of(dispatcher).require_store().read(owner, item_id)
     if item is None:
-        raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+        raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
     if item.kind != "artifact" or item.content is None:
         raise ValueError(f"item {item_id!r} is a {item.kind}, not an artifact")
     return item

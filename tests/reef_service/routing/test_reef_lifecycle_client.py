@@ -20,7 +20,7 @@ from reef.service.deploy.routing.reef_lifecycle_client import (
     LifecycleStatus,
     ReefLifecycleClient,
     RoutingControlError,
-    RoutingControlTimeout,
+    RoutingControlTimeoutError,
     UnixHTTPConnection,
     lifecycle_status,
 )
@@ -189,7 +189,7 @@ def test_only_a_timeout_is_requested_again(reply: dict[str, bool | bytes], failu
     child = SlowChild([], **reply)
     with serving(child) as path, pytest.raises(RoutingControlError, match=failure) as error:
         client_for(path).request("close")
-    assert not isinstance(error.value, RoutingControlTimeout)
+    assert not isinstance(error.value, RoutingControlTimeoutError)
     assert error.value.retryable is retryable
     assert len(child.bodies) == 1
 
@@ -211,7 +211,7 @@ def test_a_reply_that_is_not_a_lifecycle_status_is_refused_once_and_not_retryabl
     child = SlowChild([], reply_body=json.dumps(reply).encode())
     with serving(child) as path, pytest.raises(RoutingControlError, match="not a lifecycle status") as error:
         client_for(path).request("close")
-    assert not isinstance(error.value, RoutingControlTimeout) and error.value.retryable is False
+    assert not isinstance(error.value, RoutingControlTimeoutError) and error.value.retryable is False
     assert len(child.bodies) == 1
 
 
@@ -223,7 +223,7 @@ def test_each_attempt_whose_body_times_out_closes_its_reply_and_the_retries_end_
     child = SlowChild([3.0, 3.0, 3.0], protocol=protocol, headers_first=True)
     with serving(child) as path:
         started = time.monotonic()
-        with pytest.raises(RoutingControlTimeout) as error:
+        with pytest.raises(RoutingControlTimeoutError) as error:
             client_for(path).request("close", deadline=started + 0.5)
         elapsed = time.monotonic() - started
         # The error held here keeps the client's frames alive; no reply socket may stay open with it.
@@ -356,7 +356,7 @@ def test_a_candidate_check_confirmed_after_its_deadline_rejects_the_update(
         if late_step == "on_time":
             check()
         else:
-            with pytest.raises(RoutingControlTimeout, match="after its deadline") as error:
+            with pytest.raises(RoutingControlTimeoutError, match="after its deadline") as error:
                 check()
             assert error.value.retryable is False
     # One attempt, which neither the client nor the child counts as a command.

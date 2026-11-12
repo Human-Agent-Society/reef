@@ -35,7 +35,7 @@ from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, Evaluati
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
 from reef.core.values import JsonValue
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflict, NewItem, StoredItem, record_source
+from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, NewItem, StoredItem, record_source
 from reef.storage.item_kinds import (
     copied_record,
     evaluation_call_id,
@@ -43,7 +43,7 @@ from reef.storage.item_kinds import (
     evaluation_trajectory_id,
     record_digest,
 )
-from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
+from reef.storage.records import AppendResult, RecordConflictError, RecordStore, StoredRecord
 
 #: The most record items that one ``used_records`` call reads.
 RECORD_PAGE_SIZE = 256
@@ -303,13 +303,13 @@ class ItemRecordStore(RecordStore):
         for item in items:
             earlier = first.setdefault(item.agent_record_id, item)
             if record_digest(record_content(earlier)) != record_digest(record_content(item)):
-                raise RecordConflict(f"record {item.agent_record_id!r} is given twice with other content")
+                raise RecordConflictError(f"record {item.agent_record_id!r} is given twice with other content")
         try:
             created = self.data.create(
                 self.owner, [record_item(item) for item in first.values()], generation=self.generation
             )
-        except ItemConflict as error:
-            raise RecordConflict(str(error)) from error
+        except ItemConflictError as error:
+            raise RecordConflictError(str(error)) from error
         stored = dict(zip(first, created, strict=True))
         retried = {
             item.item_id: self.record(item)
@@ -330,7 +330,7 @@ class ItemRecordStore(RecordStore):
         if stored is None:
             return None
         if stored.digest != record_digest(record_content(item)):
-            raise RecordConflict(f"record {item.agent_record_id!r} is stored with other content")
+            raise RecordConflictError(f"record {item.agent_record_id!r} is stored with other content")
         return self.record(stored)
 
     def read(self, scenario: str, agent_record_id: str) -> AgentRecord | None:

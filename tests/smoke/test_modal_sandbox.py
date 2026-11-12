@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from reef.execution.sandbox.modal import ModalExecutor, ModalSession
-from reef.execution.sandbox.process import ProgramTimeout, SandboxProgram
+from reef.execution.sandbox.process import ProgramTimeoutError, SandboxProgram
 from reef.execution.sandbox.remote import deployment_owner
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_MODAL") != "1", reason="opt-in paid Modal test")
@@ -85,7 +85,7 @@ def test_a_process_runs_jailed_in_a_modal_sandbox_and_reaches_the_host_through_t
         assert "hi" in (workspace / "answer.txt").read_text()
         assert (workspace / "fetched.txt").read_text().strip() == ANSWER
         assert (workspace / "jail.txt").read_text().strip() == "read-only"
-        with pytest.raises(ProgramTimeout):
+        with pytest.raises(ProgramTimeoutError):
             session.launch(["sleep", "60"], root=root, workspace=workspace, env={}, timeout=3)
     finally:
         session.close()

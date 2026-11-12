@@ -161,7 +161,7 @@ environment. This local example returns ``hello`` and exit code zero::
 environment variables and a timeout in seconds. It returns Harbor's
 ``ExecResult`` with ``stdout``, ``stderr`` and ``return_code``. A nonzero command
 exit is a result. Launch failures raise ``ProgramLaunchError``; timeouts raise
-``ProgramTimeout``. Commands run as the executor's configured user; selecting
+``ProgramTimeoutError``. Commands run as the executor's configured user; selecting
 another ``user`` is unsupported.
 
 

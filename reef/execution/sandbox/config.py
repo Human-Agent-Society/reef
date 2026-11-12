@@ -16,7 +16,7 @@ from reef.execution.sandbox.process import (
     ProgramExecutor,
     SandboxExecutor,
     SandboxLimits,
-    SandboxUnavailable,
+    SandboxUnavailableError,
 )
 from reef.execution.sandbox.remote import RemoteExecutor, deployment_owner
 
@@ -40,8 +40,8 @@ def remote_executor(
     ``section`` may hold other settings of its caller: only ``kind``'s own options
     (``RemoteExecutor.provider_options``) and the shared ``forward_ports`` and ``env_from`` are read. ``timeout_s``
     sets how long one run may take; ``owner_anchor``, a deployment's state directory, names the deployment on its
-    sandboxes so a restart stops the ones a previous run left. Raise ``SandboxUnavailable`` for an unknown ``kind``
-    or a malformed option; the caller preflights the result.
+    sandboxes so a restart stops the ones a previous run left. Raise ``SandboxUnavailableError`` for an unknown
+    ``kind`` or a malformed option; the caller preflights the result.
     """
     try:
         executor_class = resolve_plugin_class(
@@ -51,7 +51,7 @@ def remote_executor(
             setting="cloud sandbox",
         )
     except PluginConfigError as exc:
-        raise SandboxUnavailable(str(exc)) from exc
+        raise SandboxUnavailableError(str(exc)) from exc
     shared = executor_class.provider_options | {"forward_ports", "env_from"}
     executor = executor_class.from_config({key: value for key, value in section.items() if key in shared}, environ)
     if timeout_s is not None:

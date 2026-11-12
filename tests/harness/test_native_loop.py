@@ -43,7 +43,7 @@ from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.runners.native import LoadError, load_loop, run_loop, serve
 from reef.harness.runners.native.artifact_client import ArtifactClient
-from reef.harness.runners.native.enforce import ToolFailed
+from reef.harness.runners.native.enforce import ToolFailedError
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.selftools import SelfTools, ServeState
@@ -354,7 +354,7 @@ def test_harness_try_refuses_any_patch_that_touches_a_loop_file(tmp_path: Path) 
         {**native_tool("whisper", "def run(args, workdir):\n    return 'quiet'\n"), **LOOP_FILE},
         {"native/loops/main.py": None},
     ):
-        with pytest.raises(ToolFailed, match=r"native/loops/.*is reviewed code: a person activates it"):
+        with pytest.raises(ToolFailedError, match=r"native/loops/.*is reviewed code: a person activates it"):
             SelfTools(trial, "try").try_({"patch": patch}, str(tmp_path))
     assert trial.tried == []
     result = SelfTools(trial, "try").try_({"patch": {"skills/s/SKILL.md": "# s"}}, str(tmp_path))

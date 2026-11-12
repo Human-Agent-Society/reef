@@ -2178,7 +2178,7 @@ or its failure, does not change it.
   retries are part of this state.
 * ``ready``: startup succeeded and inference published the route.
 * ``failed``: startup ended with an error. ``error`` gives a safe message:
-  the message of a runtime's ``StartupFailed`` (RFC #1299), such as an engine
+  the message of a runtime's ``StartupFailedError`` (RFC #1299), such as an engine
   argument that the model refuses, else a fixed text. The service logs hold the
   diagnostic details. Control retries a failed startup by itself: 60 seconds
   after the failure, and then after a wait that doubles at each failed retry,

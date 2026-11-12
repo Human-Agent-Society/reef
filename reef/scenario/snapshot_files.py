@@ -8,7 +8,7 @@ factory hands it to the recipe when it builds the trainers.
 
 from __future__ import annotations
 
-from reef.artifact.artifact import Artifact, ArtifactNotFound, SnapshotRef
+from reef.artifact.artifact import Artifact, ArtifactNotFoundError, SnapshotRef
 from reef.artifact.components import ScenarioComponents, TextFileTree
 from reef.artifact.repository import Repository
 from reef.storage.commits import CommitRecord
@@ -51,7 +51,9 @@ class ScenarioArtifactFiles(CommittedArtifacts):
             selected = self.components.component_artifact(artifact, component)
             if selected.artifact_id == artifact_id:
                 return ArtifactTextFiles(artifact_id, dict(TextFileTree().read_files(selected) or {}))
-        raise ArtifactNotFound(f"scenario {self.name!r} has no artifact {artifact_id!r} of component {component!r}")
+        raise ArtifactNotFoundError(
+            f"scenario {self.name!r} has no artifact {artifact_id!r} of component {component!r}"
+        )
 
     def files(self, ref: SnapshotRef, component: str) -> ArtifactTextFiles:
         """Return the selected component's ID and text files from a stored snapshot."""
