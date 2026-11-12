@@ -8,10 +8,7 @@ from typing import Any
 from reef.inference.engine_control import engine_executor_class
 from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig, SGLangModelConfig
 from reef.inference.sglang.executor import SGLangExecutor
-from reef.inference.sglang.lora_schema import (
-    require_lora_distributed_request_schema,
-    require_lora_tensor_request_schema,
-)
+from reef.inference.sglang.lora_schema import require_lora_tensor_request_schema
 from reef.inference.sglang.service import SGLangInferenceService
 
 
@@ -27,7 +24,6 @@ def create_inference(config: Mapping[str, Any]) -> SGLangInferenceService:
     native = SGLangConfig(**values)
     if native.options.get("enable_lora", False):
         require_lora_tensor_request_schema()
-        require_lora_distributed_request_schema()
     return SGLangInferenceService(native)
 
 

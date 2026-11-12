@@ -179,10 +179,11 @@ def test_lora_schema_preflight_rejects_incomplete_colocated_receiver(
 @pytest.mark.unit
 def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_sglang_engine_module(monkeypatch)
+    monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: None)
     calls: list[tuple[str, dict[str, object]]] = []
     engine = object.__new__(module.ReefSGLangEngine)
 
-    def request(route, payload=None, **_kwargs):
+    def request(route, payload=None):
         calls.append((route, payload or {}))
         return {"success": True}
 
@@ -239,6 +240,26 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
         ),
         ("unload_lora_adapter", {"lora_name": "adapter"}),
     ]
+
+
+@pytest.mark.unit
+def test_distributed_lora_load_checks_schema_before_sending_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_sglang_engine_module(monkeypatch)
+    engine = object.__new__(module.ReefSGLangEngine)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def incompatible_schema() -> None:
+        raise RuntimeError("distributed schema unsupported")
+
+    def request(route: str, payload: dict[str, object] | None = None, **_kwargs: object) -> None:
+        calls.append((route, payload or {}))
+
+    monkeypatch.setattr(module, "require_lora_distributed_request_schema", incompatible_schema)
+    engine._make_request = request
+
+    with pytest.raises(RuntimeError, match="distributed schema unsupported"):
+        engine.load_lora_adapter_from_distributed("adapter", {}, [], [], [], "reef-lora")
+    assert calls == []
 
 
 @pytest.mark.unit
@@ -333,7 +354,6 @@ def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch):
 
     checked = []
     monkeypatch.setattr(module, "require_lora_tensor_request_schema", lambda: checked.append(True))
-    monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: checked.append(True))
     values = serving_engine_config(
         "sglang",
         model_path="model",
@@ -349,7 +369,7 @@ def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch):
     )
     config = pickle.loads(pickle.dumps(SGLangConfig(**values)))
     engine = module.ReefSGLangEngine(config, 0, sglang_overrides={"mem_fraction_static": 0.5})
-    assert checked == [True, True]
+    assert checked == [True]
     assert engine.config.options["enable_lora"] is True
     assert engine.config.options["lora_target_modules"] == ["q_proj"]
     assert engine.config.options["max_lora_rank"] == 8
@@ -395,7 +415,6 @@ def test_server_options_keep_only_the_fields_of_either_server_args_kind(monkeypa
 def test_reef_engine_rejects_conflicting_lora_override(monkeypatch):
     module = _load_sglang_engine_module(monkeypatch)
     monkeypatch.setattr(module, "require_lora_tensor_request_schema", lambda: None)
-    monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: None)
     with pytest.raises(ValueError, match="conflict"):
         module.ReefSGLangEngine(
             SGLangConfig("model", 1, 1, 1, options={"enable_lora": True}), 0, sglang_overrides={"enable-lora": False}

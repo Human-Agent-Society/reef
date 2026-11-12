@@ -35,7 +35,37 @@ LORA_SERVING_OPTIONS = (
 
 
 class ReefSGLangEngine(InferenceEngine):
-    """Own one native SGLang process, or borrow an existing HTTP engine."""
+    """Configure and control one SGLang engine for a Reef inference actor.
+
+    Attributes:
+        config: Shared SGLang configuration.
+        rank: This actor's integer rank in the engine group.
+        worker_type: SGLang role, such as ``regular``, ``prefill``, ``decode``,
+            ``encoder``, or ``placeholder``.
+        base_gpu_id: First GPU index assigned to this actor.
+        sglang_overrides: Per-engine options with hyphens normalized to
+            underscores. With LoRA enabled, these cannot conflict with Reef's
+            LoRA serving options.
+        num_gpus_per_engine: GPU count for this engine, defaulting to
+            ``config.gpus_per_engine``.
+        external_url: ``None`` when this object owns a process, or the URL of
+            an existing engine that it borrows.
+        process: The locally launched process, or ``None`` before launch and
+            whenever the engine is borrowed.
+        node_rank: This actor's rank among nodes, derived from ``rank`` and the
+            per-node GPU count.
+        router_ip, router_port: Optional router address supplied at ``init``.
+        server_host, server_port: The serving address; initially ``""`` and
+            ``0``, then assigned by ``init``.
+
+    With LoRA enabled, construction requires SGLang's tensor request schema but
+    does not require its optional distributed request schema. Disk and tensor
+    adapter loads use their corresponding SGLang operations. A distributed
+    adapter load checks for the distributed schema before sending its request,
+    and raises if SGLang does not provide that schema. ``init`` assigns the
+    serving and router addresses, starts the owned process or verifies the
+    borrowed server, and registers the engine with the router.
+    """
 
     _get_current_node_ip_and_free_port = staticmethod(node_address_and_port)
     ports_in_use = staticmethod(ports_in_use)
@@ -57,7 +87,6 @@ class ReefSGLangEngine(InferenceEngine):
         self.sglang_overrides = {key.replace("-", "_"): value for key, value in (sglang_overrides or {}).items()}
         if config.options.get("enable_lora"):
             require_lora_tensor_request_schema()
-            require_lora_distributed_request_schema()
             self._check_lora_overrides()
         self.num_gpus_per_engine = num_gpus_per_engine or config.gpus_per_engine
         self.external_url = external_url
@@ -408,6 +437,7 @@ class ReefSGLangEngine(InferenceEngine):
         pinned: bool = False,
         upsert: bool = True,
     ):
+        require_lora_distributed_request_schema()
         return self._make_request(
             "load_lora_adapter_from_distributed",
             {
