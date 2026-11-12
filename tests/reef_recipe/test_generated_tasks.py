@@ -19,7 +19,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.job_data import JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import HarborTask, write_harbor_task
+from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.training_request import TrainingRequest
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.inference.http import InferenceProxyRuntime
@@ -30,6 +30,7 @@ from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecip
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
+    GeneratorState,
     HeldOutTask,
     RejectedTask,
     RolledOutTask,
@@ -42,6 +43,7 @@ from reef.recipe.generated_tasks.processor import (
     GeneratedTaskSettings,
     GenerationJob,
     GenerationOutcome,
+    StoredGeneratorState,
     train_task_names,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
@@ -215,8 +217,10 @@ class ScriptedGenerator(TaskGenerator):
         self.result_generations: list[int] = []
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
-        cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ)})
+    def from_config(
+        cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
+    ) -> Self:
+        cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ), "state": state})
         return cls()
 
     async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
@@ -1005,11 +1009,39 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     built = recipe.build_pipeline(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
     assert isinstance(built.record2sample, GeneratedTaskSamples)
     assert isinstance(built.record2sample.task_generator, ScriptedGenerator)
-    assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
-    assert built.record2sample.task_store is not None
+    [generator_arguments] = ScriptedGenerator.built
+    state = generator_arguments.pop("state")
+    assert generator_arguments == {"config": {"count": 3}, "scenario": "one", "environ": environ}
+    store = built.record2sample.task_store
+    assert store is not None
     batches = built.sample2job
     assert isinstance(batches, GeneratedTaskJobData) and batches.buffer_size == 2
+
+    # The generator's state is in the stage's task store, apart from the stage's own documents.
+    assert isinstance(state, StoredGeneratorState)
+    store.write_document(key="delivered/0", document="the stage's document")
+    state.write("cursor", "1")
+    state.write("cursor", "2")
+    state.write("open/00000", "open")
+    assert (state.read("cursor"), state.read("delivered/0")) == ("2", None)
+    assert state.keys() == ("cursor", "open/00000") and state.keys("open/") == ("open/00000",)
+    state.remove("open/00000")
+    state.remove("open/00000")
+    assert store.state_document_keys() == ("cursor",) and store.documents() == {"delivered/0": "the stage's document"}
+    directory = write_harbor_task(task_for("t-parent", "r", 1), tmp_path / "written")
+    assert read_harbor_task(state.files(state.save_files(directory))) == read_harbor_task(directory)
+    assert store.generations() == (), "the generator's saved files are no candidates"
     built.close()
+
+
+def test_a_generator_without_the_task_storage_of_a_scenario_session_is_refused() -> None:
+    generator = {"module": f"{MODULE}:ScriptedGenerator"}
+    record2sample = {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {"generator": generator}}
+    recipe = generated_pipeline_recipe({}, {"record2sample": record2sample})
+    ScriptedGenerator.built.clear()
+    with pytest.raises(RecipeConfigError, match="generator needs the task storage of a scenario session"):
+        recipe.build_pipeline(PipelineContext("one"))
+    assert ScriptedGenerator.built == []
 
 
 @pytest.mark.parametrize(

@@ -307,8 +307,8 @@ The extension points those packages expose are in `Python API
   ``generator`` section. ``reef/service/deploy/generator.py`` assembles that
   child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which generates tasks
   through that service and trains on them, is in
-  ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract
-  (``generator.py``). The request, ``TaskGenerationRequest``, is in
+  ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract and
+  the generator's durable state, ``GeneratorState`` (``generator.py``). The request, ``TaskGenerationRequest``, is in
   ``reef/record2sample/generator/inputs.py``, because the generator service
   reads it too. ``reef/core/tasks/`` keeps the Harbor task values and the
   split manifests. What a method asks the designer for, and what it does
