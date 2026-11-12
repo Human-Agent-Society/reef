@@ -12,8 +12,7 @@ train the same and keep the same rows.
 
 from __future__ import annotations
 
-from collections.abc import Hashable
-from dataclasses import dataclass
+from collections.abc import Hashable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -46,6 +45,7 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.train import ComponentTrainer, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
+from reef.train.trainer_builder import TrainerBuilder
 from reef.train.types import JobData, Sample
 
 
@@ -147,12 +147,17 @@ def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
     )
 
 
-@dataclass(frozen=True)
-class _Recipe(_TwoTrainerRecipe):
-    pipelines: tuple[tuple[str, Any], ...] = ()
+class _PipelineTrainers(TrainerBuilder):
+    """Builds one trainer for each of ``backends``, whose jobs run on the trainer's own thread, over the component's
+    pipeline of ``pipelines``."""
+
+    def __init__(self, backends: Mapping[str, ComponentJobs], pipelines: Mapping[str, Any]) -> None:
+        self.backends = backends
+        self.pipelines = pipelines
 
     def build_trainers(
         self,
+        specs,
         scenario,
         records,
         *,
@@ -164,7 +169,7 @@ class _Recipe(_TwoTrainerRecipe):
         samples=None,
         root=None,
     ):
-        pipelines = dict(self.pipelines)
+        pipelines = self.pipelines
         # Each trainer reads the stored samples of its component, so a rebuilt trainer finds the samples made live.
         return tuple(
             ComponentTrainer(
@@ -193,7 +198,7 @@ def composite_dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatche
     backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     storage = data_storage(tmp_path / "records")
     return Dispatcher(
-        _Recipe(backends=backends, pipelines=tuple(pipelines.items())),
+        _TwoTrainerRecipe(backends=backends),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage,
@@ -202,6 +207,7 @@ def composite_dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatche
         # Loading a scenario wakes its workers: held, they leave every step to the test.
         hold_local_cycles=True,
         coordination=memory_coordination(),
+        trainer_builder=_PipelineTrainers(backends, pipelines),
     )
 
 

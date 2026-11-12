@@ -345,7 +345,7 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
     assert SFTRecipe.default_parameters() == {"trajectory": {"objective": "sft"}}
     assert resolve_objective("sft").loss_family == "sft"
     assert SftObjective.rollout_unit == "sample"
-    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
+    pipeline = recipe.stages().build(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SFTSamples)
     assert (pipeline.record2sample.target, pipeline.record2sample.max_tokens) == ("response", 8)
     assert isinstance(pipeline.sample2job, DistillJobData)
@@ -360,10 +360,10 @@ def test_sft_recipe_builds_without_stage_config_and_rejects_removed_keys_and_obj
         return recipe
 
     context = PipelineContext("science", TeacherContextReport)
-    assert sft_recipe({}).build_pipeline(context).record2sample.target == "demonstration"
+    assert sft_recipe({}).stages().build(context).record2sample.target == "demonstration"
     removed = {"pipeline": {"record2sample": {"config": {"tokenizer_path": "/models/served"}}}}
-    with pytest.raises(RecipeConfigError, match="unknown config fields: tokenizer_path"):
-        sft_recipe(removed).build_pipeline(context)
+    with pytest.raises(PluginConfigError, match="unknown config fields: tokenizer_path"):
+        sft_recipe(removed).stages().build(context)
     with pytest.raises(RecipeConfigError, match=r"training\.options"):
         sft_recipe({"optimization": {"label_smoothing": 0.1}})
 

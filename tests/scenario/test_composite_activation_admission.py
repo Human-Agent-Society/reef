@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
-from tests.support.component_trainers import HARNESS, WEIGHTS, ComponentJobs, WeightsJobComponent
+from tests.support.component_trainers import HARNESS, WEIGHTS, ComponentJobs, TwoTrainerBuilder, WeightsJobComponent
 from tests.support.component_trainers import _dispatcher as two_trainer_dispatcher
 from tests.support.component_trainers import _records
 from tests.support.component_trainers import _scenario as two_trainer_scenario
@@ -51,12 +51,14 @@ class RefusingImports(WeightsJobComponent):
 def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> Dispatcher:
     backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     records = tmp_path / "records"
+    built = recipe(backends=backends)
     return Dispatcher(
-        recipe(backends=backends),
+        built,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(records),
         coordination=memory_coordination(),
+        trainer_builder=TwoTrainerBuilder(built),
         # No samples worker: the test makes the samples and commits each step itself, so no worker that the store
         # watcher wakes commits the same result.
         components=frozenset(SERVICE_COMPONENTS) - {"samples"},

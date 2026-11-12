@@ -15,6 +15,7 @@ import pytest
 import yaml
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.trainers import recipe_trainer
 from tests.support.training_deployment import LocalDeployment
 
 from reef.core import plugins
@@ -129,7 +130,7 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     records = memory_records("scenario")
     try:
-        trainer = recipe.build("scenario", records, root=STUB_ROOT)
+        trainer = recipe_trainer(recipe, "scenario", records, root=STUB_ROOT)
         assert trainer.job_loop.component is recipe.training_component
         assert type(recipe.training_component).__name__ == "LocalRuntime"
         # The deployment's pipeline section sets the job size.

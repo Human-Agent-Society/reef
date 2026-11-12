@@ -219,6 +219,22 @@ class ScenarioRoot:
             raise TypeError("a scenario root is an Artifact and a RootSource")
 
 
+def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
+    """``component``'s view of the composite's root ``root``: the component's directory of the root snapshot, and,
+    for a default start, the inputs of that component's own default start (the composite's default start names
+    them ``<component>.<input>``)."""
+    source = root.source
+    if source.kind == "default":
+        prefix = f"{component}."
+        source = RootSource(
+            "default",
+            inputs={
+                name.removeprefix(prefix): value for name, value in source.inputs.items() if name.startswith(prefix)
+            },
+        )
+    return ScenarioRoot(root.artifact.component(component), source)
+
+
 class TrainingComponent(ABC):
     """A training backend that runs whole jobs with its framework's own training loop.
 

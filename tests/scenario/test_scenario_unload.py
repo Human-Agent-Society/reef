@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from threading import Event, Thread
@@ -14,6 +13,7 @@ import pytest
 from tests.support.polling import wait_until
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.threshold_processor import threshold_pipeline
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -51,21 +51,24 @@ class StepJobs(StubTrainingComponent):
         return (SavedCheckpoint(0, str(path), str(path)),)
 
 
-@dataclass(frozen=True)
-class StepRecipe(Recipe):
-    backend: StepJobs | None = None
+class StepTrainers(OneTrainerBuilder):
+    """Builds a trainer whose jobs run on ``backend``, on the trainer's own thread; None builds one that trains nothing."""
 
-    def build(
+    def __init__(self, backend: StepJobs | None) -> None:
+        self.backend = backend
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
         return Trainer.build(
             scenario,
@@ -91,13 +94,14 @@ def make_dispatcher(
     initial.mkdir(exist_ok=True)
     (initial / "model.txt").write_text("initial", encoding="utf-8")
     return Dispatcher(
-        StepRecipe(backend=backend),
+        Recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=admission,
         scenario_idle_unload_seconds=idle_unload_seconds,
         coordination=memory_coordination(),
+        trainer_builder=StepTrainers(backend),
     )
 
 

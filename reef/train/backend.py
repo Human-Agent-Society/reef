@@ -102,8 +102,8 @@ class ComponentArtifacts:
 
     Values: ``artifacts`` is the scenario's reader, and ``component`` names a
     component of the scenario, non-empty.
-    Purpose: ``Recipe.build_trainers`` makes one per component and hands it
-    to ``Recipe.build``; a harness trainer reads its head through it.
+    Purpose: the scenario factory's trainer builder makes one per component
+    for that component's trainer; a harness trainer reads its head through it.
     """
 
     artifacts: CommittedArtifacts

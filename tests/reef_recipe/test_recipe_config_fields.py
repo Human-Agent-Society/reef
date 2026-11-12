@@ -14,8 +14,10 @@ import yaml
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.trainers import recipe_trainer
 
 from reef.core.config import config_arguments
+from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import AlwaysActivate
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe
@@ -221,8 +223,8 @@ def test_a_stage_setting_in_the_recipe_config_is_refused_with_its_pipeline_key()
         config={"pipeline": {"sample2job": {"config": {"buffer_size": -1}}}},
         **runtime_bindings(),
     )
-    with pytest.raises(RecipeConfigError, match="buffer_size must be None or a positive int"):
-        recipe.build_pipeline(PipelineContext("math"))
+    with pytest.raises(PluginConfigError, match="buffer_size must be None or a positive int"):
+        recipe.stages().build(PipelineContext("math"))
 
 
 @pytest.mark.unit
@@ -242,7 +244,7 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
         {"sample2job": {"config": {"job_samples": 2, "buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
     recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=stages)
-    trainer = recipe.build("scenario", memory_records("scenario"), root=STUB_ROOT)
+    trainer = recipe_trainer(recipe, "scenario", memory_records("scenario"), root=STUB_ROOT)
 
     assert isinstance(trainer.pipeline.record2sample, ThresholdSamples)
     assert isinstance(trainer.pipeline.sample2job, ThresholdJobData)
@@ -273,8 +275,8 @@ def test_the_default_recipe_sends_the_configured_job_parameters_with_every_job()
 
 @pytest.mark.unit
 def test_a_weight_recipe_without_job_samples_fails_its_build() -> None:
-    with pytest.raises(RecipeConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
-        StagedRecipe(**runtime_bindings()).build("scenario", memory_records("scenario"), root=STUB_ROOT)
+    with pytest.raises(PluginConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
+        recipe_trainer(StagedRecipe(**runtime_bindings()), "scenario", memory_records("scenario"), root=STUB_ROOT)
 
 
 @pytest.mark.unit
@@ -286,8 +288,10 @@ def test_default_build_requires_a_sample2job_stage() -> None:
         def default_parameters(cls):
             return {kind: {"objective": "sft"} for kind in ("trajectory", "task")}
 
-    with pytest.raises(TypeError, match=r"declares no sample2job.*pipeline_spec\(\).*override build"):
-        NoSample2JobRecipe(**runtime_bindings()).build("scenario", memory_records("scenario"), root=STUB_ROOT)
+    with pytest.raises(TypeError, match=r"declares no sample2job.*pipeline_spec\(\)$"):
+        recipe_trainer(
+            NoSample2JobRecipe(**runtime_bindings()), "scenario", memory_records("scenario"), root=STUB_ROOT
+        )
 
 
 @pytest.mark.unit

@@ -112,7 +112,7 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
     assert recipe.report_type is TeacherContextReport
     assert recipe.default_parameters()["trajectory"] == {"objective": "opd"}
     assert OpdObjective.loss_family == "opd"
-    pipeline = recipe.build_pipeline(PipelineContext("math", TeacherContextReport))
+    pipeline = recipe.stages().build(PipelineContext("math", TeacherContextReport))
     assert isinstance(pipeline.record2sample, OPDSamples)
     assert pipeline.record2sample.exclusive_sources, "each report owns its inference records"
     assert isinstance(pipeline.sample2job, DistillJobData)

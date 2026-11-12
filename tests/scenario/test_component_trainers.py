@@ -77,6 +77,7 @@ from reef.train.component import JobStatus, TrainingJob
 from reef.train.job_queue import JOBS_QUEUE
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
+from reef.train.trainer_builder import TrainerBuilder
 from reef.train.types import JobData, Sample
 
 
@@ -641,7 +642,6 @@ class _NamedComponentsRecipe(Recipe):
     """A recipe serving the named components, each evolved by its own local backend."""
 
     names: tuple[str, ...] = ()
-    artifact_dir: Path = Path(".")
 
     def default_start(self) -> DefaultStart:
         return seeded_start(self.names)
@@ -654,8 +654,17 @@ class _NamedComponentsRecipe(Recipe):
             }
         )
 
+
+class _NamedComponentTrainers(TrainerBuilder):
+    """Builds one trainer for each of ``names``, whose jobs run on a ``ComponentJobs`` on the trainer's own thread."""
+
+    def __init__(self, names: tuple[str, ...], artifact_dir: Path) -> None:
+        self.names = names
+        self.artifact_dir = artifact_dir
+
     def build_trainers(
         self,
+        specs,
         scenario,
         records,
         *,
@@ -692,12 +701,15 @@ def test_a_recipe_serving_fewer_components_than_registered_is_refused(
     names = ("weights", "harness", "config")
     factory = _repository(tmp_path)
     first, _ = dispatchers.open(
-        recipe=_NamedComponentsRecipe(names=names, artifact_dir=tmp_path / "candidates"), backend_factory=factory
+        recipe=_NamedComponentsRecipe(names=names),
+        trainer_builder=_NamedComponentTrainers(names, tmp_path / "candidates"),
+        backend_factory=factory,
     )
     assert first.get_or_create_scenario("agent") is not None
     first.close()
     second, _ = dispatchers.open(
-        recipe=_NamedComponentsRecipe(names=("weights", "harness"), artifact_dir=tmp_path / "candidates"),
+        recipe=_NamedComponentsRecipe(names=("weights", "harness")),
+        trainer_builder=_NamedComponentTrainers(("weights", "harness"), tmp_path / "candidates"),
         backend_factory=factory,
     )
     with pytest.raises(ReefError, match=r"does not serve \['config'\]"):

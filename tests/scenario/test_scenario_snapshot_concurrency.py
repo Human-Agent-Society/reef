@@ -12,6 +12,7 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
 from tests.support.threshold_processor import threshold_pipeline
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import Artifact, ArtifactPublicationError, DefaultStart, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -51,22 +52,28 @@ class _LocalJobs(StubTrainingComponent):
 
 @dataclass(frozen=True)
 class _LocalRecipe(Recipe):
-    backend: _LocalJobs
-
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={"model.txt": "initial"})
 
-    def build(
+
+class _LocalTrainers(OneTrainerBuilder):
+    """Builds a trainer whose jobs run on ``backend``, on the trainer's own thread."""
+
+    def __init__(self, backend: _LocalJobs) -> None:
+        self.backend = backend
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
         return Trainer.build(
             scenario,
@@ -83,11 +90,12 @@ class _LocalRecipe(Recipe):
 def local_scenario(tmp_path):
     backend = _LocalJobs(tmp_path / "candidates")
     dispatcher = Dispatcher(
-        _LocalRecipe(backend=backend),
+        _LocalRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
+        trainer_builder=_LocalTrainers(backend),
         # The test makes the samples and commits each step itself. No samples worker makes them, and control's local
         # training workers run no cycle: a woken worker would prepare and commit the same result as the test.
         components=frozenset(SERVICE_COMPONENTS) - {"samples"},

@@ -603,3 +603,27 @@ def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
                 assert any(
                     target == prefix or target.startswith(prefix + ".") for prefix in allowed
                 ), f"{path.relative_to(REPO_ROOT)} imports {target}"
+
+
+#: The methods that built a trainer or a pipeline on a recipe before RFC #1390 moved that work to the scenario
+#: factory (``reef.scenario.factory.read_trainer_specs``) and ``reef.train.trainer_builder``.
+TRAINER_CONSTRUCTION_METHODS = frozenset({"build", "build_trainers", "build_pipeline", "_build_trainer"})
+
+#: ``(file, class, method)`` of each such method that a later step of RFC #1390 still has to remove; none is left.
+KEPT_TRAINER_CONSTRUCTION_METHODS: frozenset[tuple[str, str, str]] = frozenset()
+
+
+def test_a_recipe_builds_no_trainer_and_no_pipeline() -> None:
+    # A recipe is configuration (RFC #1390): the scenario factory reads its values and builds the trainers.
+    found: set[tuple[str, str, str]] = set()
+    paths = [*(REPO_ROOT / "reef" / "recipe").rglob("*.py"), *(REPO_ROOT / "recipes").rglob("*.py")]
+    for path in sorted(paths):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ClassDef):
+                found.update(
+                    (str(path.relative_to(REPO_ROOT)), node.name, item.name)
+                    for item in node.body
+                    if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+                    and item.name in TRAINER_CONSTRUCTION_METHODS
+                )
+    assert found == KEPT_TRAINER_CONSTRUCTION_METHODS

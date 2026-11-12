@@ -12,14 +12,21 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support import trainers
 from tests.support.harness_jobs import COMPONENT, UNCHANGED, TreeArtifacts, changed_rules, harness_recipe
 from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
 from tests.support.polling import became_true
 from tests.support.records import item_records, memory_records
-from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import (
+    STUB_ROOT,
+    RecordingComponent,
+    StubInferenceRuntime,
+    StubTrainingComponent,
+    job_sized_stages,
+)
 from tests.support.samples_service import make_samples as produce_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import threshold_pipeline
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 
 from reef.artifact.artifact import ArtifactNotFoundError
@@ -46,7 +53,7 @@ from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.manager import MANAGER_REQUEST_PREFIX, MANAGER_SESSION, Train, TrainFrom, TrainingManager
-from reef.train.pipeline import TrainingPipeline
+from reef.train.pipeline import PipelineSpec, TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.training_requests import ScenarioTrainingRequests
 from reef.train.types import JobData, Sample
@@ -204,8 +211,12 @@ def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
 
 def recipe_trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
     """The recipe's trainer over an in-memory commit history whose base is the recipe's seed."""
-    return recipe.build(
-        "s", records, artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT), root=seed_root(recipe)
+    return trainers.recipe_trainer(
+        recipe,
+        "s",
+        records,
+        artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT),
+        root=seed_root(recipe),
     )
 
 
@@ -934,30 +945,14 @@ class SubmitRaisesForRequestOne(StubTrainingComponent):
 class _RequestJobRecipe(WeightTrainingRecipe):
     """A weight recipe whose pipeline takes requests, so each request is one training job."""
 
-    def build(
-        self,
-        scenario,
-        records,
-        *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
-    ):
-        component = self.training_component
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=partial(threshold_pipeline, job_samples=1),
-            job_loop=JobLoop(component, scenario=scenario),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            samples=samples,
-            training_mode=self.training_mode,
-            root=root,
-        )
+    def __post_init__(self) -> None:
+        if self.pipeline_stages is None:
+            object.__setattr__(self, "pipeline_stages", job_sized_stages(self.pipeline_spec()))
+        super().__post_init__()
+
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(ThresholdSamples, ThresholdJobData)
 
 
 def job_events(dispatcher):

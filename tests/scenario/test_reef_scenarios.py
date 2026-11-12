@@ -13,12 +13,15 @@ from tests.support.serving import wait_for_serving
 from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepositoryBackend
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginReference
 from reef.core.snapshot import ItemIdentity, RootSource
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
-from reef.recipe import CompositeRecipe, Recipe
+from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError
 from reef.recipe.harness import HarnessLayout
+from reef.record2sample import NoSamples
+from reef.sample2job import NoJobData
 from reef.scenario.factory import ItemStart
 from reef.scenario.registry import InstanceState
 from reef.storage.commits import SCENARIO_METADATA_KEY
@@ -26,6 +29,7 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.jobs import JobLoopState
+from reef.train.pipeline import PipelineSettings
 
 
 def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> None:
@@ -650,3 +654,24 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
         assert not pinned.has_scenario("refused")
     finally:
         pinned.close()
+
+
+@pytest.mark.unit
+def test_a_stage_that_refuses_its_config_fails_the_scenario_with_a_recipe_config_error(tmp_path: Path) -> None:
+    """The scenario factory builds the trainers from the recipe's stages, and reports a stage's refusal as an error
+    of the recipe's config."""
+    stages = PipelineSettings(
+        record2sample=PluginReference(NoSamples, {"typo": 1}), sample2job=PluginReference(NoJobData, {})
+    )
+    dispatcher = Dispatcher(
+        Recipe(pipeline_stages=stages),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
+    )
+    try:
+        with pytest.raises(RecipeConfigError, match="typo"):
+            dispatcher.get_or_create_scenario("math")
+        assert dispatcher.registry.get_optional("math") is None
+    finally:
+        dispatcher.close()

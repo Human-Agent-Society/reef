@@ -38,6 +38,7 @@ from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer
+from reef.train.trainer_builder import TrainerBuilder, build_trainer
 from reef.train.types import TrainingCommit
 
 WEIGHTS = "weights"
@@ -201,8 +202,13 @@ class _TwoComponentRecipe(Recipe):
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={f"{WEIGHTS}/adapter_config.json": "{}", f"{HARNESS}/AGENTS.md": "seed"})
 
+
+class HarnessTrainer(TrainerBuilder):
+    """Builds one trainer that only reads records, bound to the harness component."""
+
     def build_trainers(
         self,
+        specs,
         scenario,
         records,
         *,
@@ -218,7 +224,8 @@ class _TwoComponentRecipe(Recipe):
         return (
             ComponentTrainer(
                 HARNESS,
-                self.build(
+                build_trainer(
+                    specs,
                     scenario,
                     records,
                     algorithm_state=algorithm_states.get(HARNESS),
@@ -239,6 +246,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
+        trainer_builder=HarnessTrainer(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -384,6 +392,7 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
+            trainer_builder=HarnessTrainer(),
         )
         with closing(factory.load_or_create("agent")) as scenario:
             initial = {name: state["active"] for name, state in scenario.artifact_status().items()}
@@ -463,6 +472,7 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
                 repositories,
                 scenario_storage=empty_storage,
                 experiment_tracker=NullExperimentTracker(),
+                trainer_builder=HarnessTrainer(),
             )
             with closing(checkpoint_factory.load_or_create("agent")) as recovered:
                 assert recovered.current_snapshot() == active
@@ -549,6 +559,7 @@ def test_restoring_a_selection_does_not_readmit_unchanged_component_artifacts(tm
             InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
+            trainer_builder=HarnessTrainer(),
         )
         with closing(factory.load_or_create("agent")) as scenario:
             for step in (1, 2):
@@ -574,6 +585,7 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
             repositories,
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
+            trainer_builder=HarnessTrainer(),
         )
         with closing(factory.load_or_create("agent")) as scenario:
             scenario.commit(
@@ -615,6 +627,7 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
+        trainer_builder=HarnessTrainer(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -649,6 +662,7 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
+        trainer_builder=HarnessTrainer(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -686,6 +700,7 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
         local_artifact_dir=staged_root,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
+        trainer_builder=HarnessTrainer(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")

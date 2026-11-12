@@ -17,14 +17,14 @@ from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
 from dataclasses import replace
-from typing import Any
+from typing import Any, Self
 
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.sample2job import Sample2Job
+from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.schedule import next_steps
@@ -74,6 +74,10 @@ class ComparisonSetSamples(ReportSamples):
         super().__init__(context, ComparisonSetGrouping())
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        return cls(context, SampleAssemblySettings.parse(config, plugin_class=cls))
+
     def make_sample(self, context: ReportContext) -> TrajectorySample:
         set_id = comparison_set_id(context.report)
         if set_id is None:
@@ -82,6 +86,18 @@ class ComparisonSetSamples(ReportSamples):
 
 
 class GroupedPolicyJobData(Sample2Job):
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2sample: Record2Sample,
+        environ: Mapping[str, str],
+    ) -> Self:
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
+        return cls(context, settings.buffer_size, settings.job_samples)
+
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 

@@ -23,24 +23,20 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 from tests.support.samples import made_task
 from tests.support.threshold_processor import ThresholdJobData
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.job_data import JobOutcome
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
-from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import NoSamples
 from reef.storage.job_data import read_job_data
-from reef.storage.records import RecordStore
-from reef.storage.samples import TrainerSamples, stage_item_id
+from reef.storage.samples import stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import TaskStorage
-from reef.train.backend import ComponentArtifacts
-from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -357,23 +353,31 @@ class BackgroundStepRecipe(TestPolicyRecipe):
             sample2job=ThresholdJobData(context, None, 1),
         )
 
-    def build(
+
+class BackgroundStepTrainers(OneTrainerBuilder):
+    """Builds the weight trainer of ``recipe``, which trains the task of a ``BackgroundStep``."""
+
+    def __init__(self, recipe: BackgroundStepRecipe) -> None:
+        self.recipe = recipe
+
+    def build_trainer(
         self,
-        scenario: str,
-        records: RecordStore,
+        spec,
+        scenario,
+        records,
         *,
-        algorithm_state: Mapping[str, object] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
+    ):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: self.background_pipeline(context),
-            job_loop=JobLoop(self.training_component, scenario=scenario),
+            pipeline_factory=self.recipe.background_pipeline,
+            job_loop=JobLoop(spec.job_component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             root=root,
@@ -392,6 +396,7 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
+        trainer_builder=BackgroundStepTrainers(recipe),
     )
     return dispatcher, recipe, component
 
