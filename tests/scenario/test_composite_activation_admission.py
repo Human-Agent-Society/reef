@@ -44,7 +44,7 @@ class _LoadedRecipe(_TwoTrainerRecipe):
 class RefusingImports(WeightsJobComponent):
     """A training component that cannot start a job from the weights of a published snapshot."""
 
-    def import_start(self, release: Path) -> str | None:
+    def check_import_start(self, artifact_dir: Path) -> None:
         raise ValueError("cannot train from these weights")
 
 

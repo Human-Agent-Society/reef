@@ -296,7 +296,7 @@ def test_recipe_factory_refuses_a_stage_setting_in_the_recipe_config() -> None:
 
 
 def test_training_recipe_requires_its_training_component() -> None:
-    with pytest.raises(RecipeConfigError, match="requires a training component"):
+    with pytest.raises(RecipeConfigError, match="requires the facts of its training backend"):
         check_recipe_objects(build_recipe("recipes.tttd.recipe:TTTDRecipe", {}), LiveObjects())
 
 
@@ -350,7 +350,7 @@ inference:
   model-path: Qwen/Qwen3.5-27B
 """
     )
-    with pytest.raises(RecipeConfigError, match="requires a training component"):
+    with pytest.raises(RecipeConfigError, match="requires the facts of its training backend"):
         load_named_recipe("sao-qwen", config_directory=tmp_path)
 
 

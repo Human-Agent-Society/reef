@@ -410,13 +410,33 @@ on its command line. A process keeps its working copy of the artifact
 repository there, and two processes in one working copy break each other's
 fetches.
 
-**Training dependencies.** The inference service builds no training component
-for the ``slime``, ``tinker`` and ``spindle_full`` backends. It reads what it
-needs about the backend from the config. With ``slime``, its environment needs
-no Slime, Megatron, Ray, PyTorch or Transformers. A training backend plugin
-states these facts too (`Facts without a component
-<../developer-guide/executors.rst#facts-without-a-component>`__), so the
-inference service builds no component for it either.
+**Training dependencies.** Only the training service builds a training
+component. Every other service, control too, reads what it needs about the
+backend from the config (`Facts without a component
+<../developer-guide/executors.rst#facts-without-a-component>`__). With
+``slime``, only the training service's environment needs Slime, Megatron, Ray,
+PyTorch and Transformers. With ``tinker`` or ``spindle_full``, only the
+training service needs the backend's API key and its ``state-dir``. A training
+backend plugin follows the same rule.
+
+Control asks the training service through the shared store when it needs the
+component:
+
+* Before a training job enters the queue, the training service checks it. A
+  job waits, with no sample consumed, while the training service is down.
+  ``/reef/status`` shows no running job for it until the check is answered.
+* A new trainer and a ``train-from`` name the snapshot that the next job
+  starts from. The training service reads that snapshot from the artifact
+  backend when it takes the job. Give the training service the same
+  ``storage.artifact-backend`` access as control, and its own
+  ``storage.artifact-cache-dir``.
+* An artifact import for ``tinker`` or ``spindle_full`` looks the checkpoint up
+  on the backend's service. The training service does that, so such an import
+  needs a running training service. It answers ``503`` when the training
+  service gives no answer within 60 seconds.
+
+Control still publishes each checkpoint from the path that the training service
+reports, so both must reach the checkpoint directories.
 
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
@@ -424,7 +444,8 @@ coding agent and the evaluation runs. Install the adapter's binary and the
 sandbox where the training service runs. The training service writes the step
 records and the running step's progress under ``evolution.state_dir``. Control
 reads them for the snapshot and request pages, so both must reach that
-directory, as they reach the artifact backend.
+directory, as they reach the artifact backend. Control builds no harness
+training component: it needs neither the adapter's binary nor the sandbox.
 
 .. _Harness clients:
 

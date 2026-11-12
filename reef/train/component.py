@@ -13,6 +13,10 @@ A ``TrainingComponentFactory`` builds a component from the component config
 of a training deployment (``build_training_component``). The same factory states the backend's
 ``TrainingBackendFacts`` from that config, without a component (``training_backend_facts``): a service that does not
 run the component reads them, and a new scenario's root snapshot holds the default start that they write.
+
+Only the training service builds the component. Control holds the facts and the jobs queue
+(``reef.train.job_queue``): it names the snapshot that a job starts from (``SnapshotStart``), and the training
+service makes the component's start of it when it takes the job.
 """
 
 from __future__ import annotations
@@ -33,13 +37,62 @@ from reef.artifact.components import ArtifactLayout
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.config import ConfiguredFactory
-from reef.core.errors import InternalError, RuntimeConfigError
+from reef.core.errors import InternalError, ReefError, RuntimeConfigError
 from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
+from reef.core.values import JsonValue
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.storage.job_data import JobDataKind, JobDataRef
 
 JobState = Literal["running", "finished", "failed"]
+#: The first characters of a start that names a snapshot (``SnapshotStart.to_text``). No component's own start
+#: begins with them.
+SNAPSHOT_START_PREFIX = "snapshot:"
+
+
+class JobCheckPendingError(ReefError):
+    """``TrainingComponent.submit`` recorded nothing, because the training service has not answered the check of
+    the job yet. A later ``submit`` of a job with the same ID reads the answer."""
+
+
+@dataclass(frozen=True)
+class SnapshotStart:
+    """A job's start that names a snapshot of the job's scenario, for the training service to resolve.
+
+    Values: ``revision`` is the non-empty revision of the snapshot. ``root`` is the ``RootSource`` of the job's
+    component when the snapshot is the scenario's root and the job is the first of a new trainer; else None, for a
+    snapshot that a ``train-from`` or a request's ``train_from`` names.
+
+    ``to_text()`` is ``SNAPSHOT_START_PREFIX`` and the value as JSON; ``from_text`` of it is an equal value.
+    ``from_text(text)`` is None for a text without the prefix, which is a component's own start, and raises
+    ``ValueError`` for a text with the prefix that ``to_text`` did not write.
+
+    Purpose: control's ``reef.train.job_queue.JobQueueComponent`` makes the text as the start of a job. The
+    training service reads it when it takes the job (``reef.train.job_queue.resolved_job``): it gives the job's
+    component of the snapshot to ``TrainingComponent.root_start`` (with ``root``) or ``import_start``.
+    """
+
+    revision: str
+    root: RootSource | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.revision, str) or not self.revision:
+            raise ValueError("SnapshotStart.revision must be a non-empty string")
+        if self.root is not None and not isinstance(self.root, RootSource):
+            raise TypeError("SnapshotStart.root must be a RootSource or None")
+
+    def to_text(self) -> str:
+        value = {"revision": self.revision, "root": None if self.root is None else self.root.to_dict()}
+        return SNAPSHOT_START_PREFIX + json.dumps(value, separators=(",", ":"), sort_keys=True)
+
+    @classmethod
+    def from_text(cls, text: str) -> SnapshotStart | None:
+        if not text.startswith(SNAPSHOT_START_PREFIX):
+            return None
+        value = json.loads(text.removeprefix(SNAPSHOT_START_PREFIX))
+        if not isinstance(value, dict) or set(value) != {"revision", "root"}:
+            raise ValueError(f"a snapshot start holds revision and root, not {text!r}")
+        return cls(value["revision"], None if value["root"] is None else RootSource.from_dict(value["root"]))
 
 
 @dataclass(frozen=True)
@@ -47,7 +100,9 @@ class TrainingJob:
     """One bounded training job: its data directory, the weights it starts from, and the backend's parameters.
 
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
-    (the non-empty start that the component reads, ``TrainingComponent.root_start`` for a scenario's root snapshot),
+    (the non-empty start: one that the component made, such as ``SavedCheckpoint.path``, or in a job that control
+    queued the name of a snapshot, ``SnapshotStart.to_text``, which the training service replaces by the component's
+    start of that snapshot before the component reads the job),
     ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
     with ``job.read_data()`` and cuts it into optimizer batches by its own batch size),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
@@ -149,13 +204,16 @@ class SavedCheckpoint:
     (for example ``path`` itself, or its Hugging Face export).
     ``metrics`` is the backend's telemetry for the training that led to this
     checkpoint, a mapping that encodes as JSON, which Reef records without
-    reading. A component makes the value; ``JobLoop`` reads it.
+    reading. ``changed_parts`` is a frozenset of non-empty strings: empty in the value that a component makes, and
+    ``TrainingComponent.changed_parts`` of the checkpoint in the value that the training service writes into the
+    jobs queue. A component makes the value; ``JobLoop`` reads it.
     """
 
     step: int
     path: str
     artifact_path: str
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    changed_parts: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 0:
@@ -166,6 +224,10 @@ class SavedCheckpoint:
             raise ValueError("SavedCheckpoint.artifact_path must be a non-empty string")
         if not isinstance(self.metrics, Mapping):
             raise TypeError("SavedCheckpoint.metrics must be a mapping")
+        if not isinstance(self.changed_parts, frozenset) or not all(
+            isinstance(part, str) and part for part in self.changed_parts
+        ):
+            raise TypeError("SavedCheckpoint.changed_parts must be a frozenset of non-empty strings")
         json.dumps(dict(self.metrics), allow_nan=False)
 
 
@@ -261,22 +323,23 @@ class TrainingBackendFacts(ABC):
     Relation to the component: let ``component`` be the backend's ``TrainingComponent`` of the same settings. Then
     ``name``, ``artifact_format``, ``shares_scenarios`` and ``concurrent_jobs`` equal the component's,
     ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``default_start_inputs`` equals
-    ``component.default_start_inputs``, and ``check_root_start(root)`` raises exactly when
-    ``component.root_start(root)`` raises, with the same message. The component holds a value and answers these
-    members from it, so the two cannot differ. ``default_start().inputs`` equals ``default_start_inputs``, and
-    ``component.root_start`` accepts a root that holds ``default_start()``: the component starts training from the
-    files that the facts write.
+    ``component.default_start_inputs``, ``check_root_start(root)`` raises exactly when
+    ``component.root_start(root)`` raises, and ``check_import_start(artifact_dir)`` exactly when
+    ``component.import_start(artifact_dir)`` raises, each with the same message. The component holds a value and
+    answers these members from it, so the two cannot differ. ``default_start().inputs`` equals
+    ``default_start_inputs``, and ``component.root_start`` accepts a root that holds ``default_start()``: the
+    component starts training from the files that the facts write.
 
     A member reads at most the settings, the files that a caller hands it (``check_root_start`` reads the root
-    snapshot's files), and local paths that the settings name. No member calls the training service or a running
-    component. What needs one stays on ``TrainingComponent``: the start of a job (``root_start``,
-    ``import_start``), ``check_artifact``, ``check_task_jobs``, ``check_job``, ``changed_parts`` and the jobs
-    themselves.
+    snapshot's files), and local paths that the settings name. No member writes a file, calls the backend's service
+    or needs a running component. What needs one stays on ``TrainingComponent`` and runs in the training service:
+    the start of a job (``root_start``, ``import_start``), ``check_remote_artifact``, ``check_task_jobs``,
+    ``check_job``, ``changed_parts`` and the jobs themselves.
 
-    Purpose: the scenario factory writes the root snapshot of a new scenario from ``default_start`` and checks an
-    item root with ``check_root_start`` (``reef.scenario.live_objects``), so no training component makes a root.
-    A service that does not run the backend's component, such as inference in a split deployment, reads the other
-    members instead of building the component.
+    Purpose: control builds no training component. The scenario factory writes the root snapshot of a new scenario
+    from ``default_start`` and checks an item root with ``check_root_start`` (``reef.scenario.live_objects``).
+    Control's view of the jobs queue (``reef.train.job_queue.JobQueueComponent``) answers a trainer from the facts
+    and asks the training service for the rest. The inference service reads ``artifact_format``.
     """
 
     @property
@@ -332,6 +395,73 @@ class TrainingBackendFacts(ABC):
         component makes the start itself when the first job needs it.
         """
 
+    @abstractmethod
+    def check_import_start(self, artifact_dir: Path) -> None:
+        """Raise ``ValueError`` unless a job of the backend can start from the published snapshot in ``artifact_dir``.
+
+        It refuses exactly the directories that ``TrainingComponent.import_start`` refuses, and writes nothing.
+        Control calls it when a trainer starts training from an artifact (``train-from``, a request's
+        ``train_from``), so the refusal reaches the caller at once.
+        """
+
+    def check_artifact(self, files: ArtifactFiles) -> Mapping[str, JsonValue] | None:
+        """Check ``files`` as a snapshot in the layout of the backend's snapshots, as far as the files and the
+        settings decide; return what remains to check on the backend's service.
+
+        Raise ``ValueError`` naming what does not hold. Return None when the check is complete. Otherwise return a
+        JSON object that names what must resolve on the backend's service; the training service gives it to
+        ``TrainingComponent.check_remote_artifact``, and the artifact is admitted only after that returns.
+
+        An artifact import calls it (RFC #980) on the directory it copied or on the revision it keeps by reference
+        (RFC #995). The default is complete without a service. It first accepts a base root of the backend's default
+        start (``is_own_base_root``). Otherwise it reads ``artifact_format``: ``"full"`` needs ``config.json`` and
+        weight files at the root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank is at most
+        ``adapter_rank`` and whose target modules are within ``adapter_target_modules``. It reads only file names
+        and ``adapter/adapter_config.json``, so a revision is checked without downloading its weights. ``None``
+        refuses every snapshot.
+        """
+        artifact_format = self.artifact_format
+        if artifact_format is None:
+            raise ValueError(f"the {self.name} training component takes no imported snapshots")
+        if self.is_own_base_root(files):
+            return None
+        paths = set(files.paths())
+        if artifact_format.layout == "full":
+            if "config.json" not in paths or not any(
+                "/" not in path and path.endswith((".safetensors", ".bin")) for path in paths
+            ):
+                raise ValueError("a full-weight artifact holds config.json and weight files at its root")
+            return None
+        if not paths & {f"{ADAPTER_DIR}/adapter_model.safetensors", f"{ADAPTER_DIR}/adapter_model.bin"}:
+            raise ValueError(f"an adapter artifact holds a PEFT adapter in {ADAPTER_DIR}/")
+        try:
+            config = json.loads(files.read_bytes(f"{ADAPTER_DIR}/adapter_config.json"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{ADAPTER_DIR}/adapter_config.json is no readable JSON object: {exc}") from exc
+        rank = config.get("r") if isinstance(config, dict) else None
+        # ArtifactFormat's invariant: an adapter format has a rank.
+        max_rank = cast(int, artifact_format.adapter_rank)
+        if isinstance(rank, bool) or not isinstance(rank, int) or not 0 < rank <= max_rank:
+            raise ValueError(f"the adapter's rank must be a positive int at most {max_rank}")
+        targets = artifact_format.adapter_target_modules
+        modules = config.get("target_modules")
+        if targets != ("all",) and (not isinstance(modules, list) or not set(modules) <= set(targets)):
+            raise ValueError(f"the adapter's target modules must be a list within {list(targets)}, got {modules!r}")
+        return None
+
+    def is_own_base_root(self, files: ArtifactFiles) -> bool:
+        """Whether ``files`` are a base root (``reef.artifact.base_root``) of the backend's default start.
+
+        False for files that are no base root. Raise ``ValueError`` for a base root that is not readable, that
+        holds other files, or whose inputs differ from ``default_start_inputs``: it stands for another base model
+        or another adapter configuration than this deployment's.
+        """
+        base = base_root_of(files)
+        if base is None:
+            return False
+        base.check_inputs(self.default_start_inputs)
+        return True
+
 
 class TrainingComponent(ABC):
     """A training backend that runs whole jobs with its framework's own training loop.
@@ -364,8 +494,7 @@ class TrainingComponent(ABC):
         """The ``inputs`` of the backend's default start: the model and the settings that decide its content.
 
         They equal ``TrainingBackendFacts.default_start_inputs`` of the same settings. The component writes no
-        default start: the backend's facts do (``TrainingBackendFacts.default_start``). ``is_own_base_root``
-        compares a base root's inputs with these.
+        default start: the backend's facts do (``TrainingBackendFacts.default_start``).
         """
 
     def root_start(self, root: ScenarioRoot) -> str:
@@ -378,6 +507,14 @@ class TrainingComponent(ABC):
         model, from which the component starts the job at the base model.
         """
         return self.import_start(root.local_directory())
+
+    def snapshot_start(self, artifact: Artifact) -> str:
+        """The start of a job that trains from ``artifact``, the trainer's component of a published snapshot,
+        materialized. The default is ``import_start`` of its directory. Raise ``ValueError`` when the component
+        cannot start from it, or when the artifact has no local files."""
+        if artifact.local_path is None:
+            raise ValueError(f"artifact {artifact.ref.revision!r} has no local files to train from")
+        return self.import_start(artifact.local_path)
 
     @property
     def shares_scenarios(self) -> bool:
@@ -405,8 +542,9 @@ class TrainingComponent(ABC):
     def check_job(self, job: TrainingJob) -> None:
         """Raise ``ValueError`` for a job this component cannot train. The default accepts every job.
 
-        A queue-backed component calls it before it adds the job to the jobs queue, so a refused job never waits
-        in the queue.
+        The training service calls it for control before control adds the job to the jobs queue
+        (``reef.train.job_queue.TrainingCheckWorker``), so a refused job never waits in the queue and consumes no
+        sample. ``submit`` checks the job again.
         """
         return
 
@@ -422,64 +560,21 @@ class TrainingComponent(ABC):
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
 
-        A recipe whose jobs train tasks calls it when it is built, so a deployment that cannot run them fails before
+        The training service calls it at its start for a recipe whose jobs train tasks
+        (``reef.scenario.live_objects.check_recipe_objects``), so a deployment that cannot run them fails before
         any job. ``parameters`` are the recipe's parameters of a task job. The default refuses: the
         component trains trajectories only. ``check_job`` still checks each job.
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")
 
-    def check_artifact(self, files: ArtifactFiles) -> None:
-        """Raise ``ValueError`` unless ``files`` are a snapshot in the layout of this component's snapshots.
+    def check_remote_artifact(self, names: Mapping[str, JsonValue]) -> None:
+        """Raise ``ValueError`` unless everything that ``names`` names resolves on the component's service.
 
-        An artifact import calls it (RFC #980) on the directory it copied or on the revision it keeps by reference
-        (RFC #995). The default first accepts a base root of this component's default start
-        (``is_own_base_root``). Otherwise it reads ``artifact_format``: ``"full"`` needs ``config.json`` and weight files at the
-        root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank is at most ``adapter_rank`` and whose
-        target modules are within ``adapter_target_modules``. It reads only file names and
-        ``adapter/adapter_config.json``, so a revision is checked without downloading its weights. ``None``
-        refuses every snapshot. A component whose snapshots name weights on a service overrides it and also checks
-        that each path resolves there.
+        ``names`` is what the backend's ``TrainingBackendFacts.check_artifact`` returned for the files of an
+        import. The training service calls it; the import is refused with the error's message. A backend whose
+        facts return None for every artifact is never asked, so the default raises ``InternalError``.
         """
-        artifact_format = self.artifact_format
-        if artifact_format is None:
-            raise ValueError(f"the {self.name} training component takes no imported snapshots")
-        if self.is_own_base_root(files):
-            return
-        paths = set(files.paths())
-        if artifact_format.layout == "full":
-            if "config.json" not in paths or not any(
-                "/" not in path and path.endswith((".safetensors", ".bin")) for path in paths
-            ):
-                raise ValueError("a full-weight artifact holds config.json and weight files at its root")
-            return
-        if not paths & {f"{ADAPTER_DIR}/adapter_model.safetensors", f"{ADAPTER_DIR}/adapter_model.bin"}:
-            raise ValueError(f"an adapter artifact holds a PEFT adapter in {ADAPTER_DIR}/")
-        try:
-            config = json.loads(files.read_bytes(f"{ADAPTER_DIR}/adapter_config.json"))
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"{ADAPTER_DIR}/adapter_config.json is no readable JSON object: {exc}") from exc
-        rank = config.get("r") if isinstance(config, dict) else None
-        # ArtifactFormat's invariant: an adapter format has a rank.
-        max_rank = cast(int, artifact_format.adapter_rank)
-        if isinstance(rank, bool) or not isinstance(rank, int) or not 0 < rank <= max_rank:
-            raise ValueError(f"the adapter's rank must be a positive int at most {max_rank}")
-        targets = artifact_format.adapter_target_modules
-        modules = config.get("target_modules")
-        if targets != ("all",) and (not isinstance(modules, list) or not set(modules) <= set(targets)):
-            raise ValueError(f"the adapter's target modules must be a list within {list(targets)}, got {modules!r}")
-
-    def is_own_base_root(self, files: ArtifactFiles) -> bool:
-        """Whether ``files`` are a base root (``reef.artifact.base_root``) of this component's default start.
-
-        False for files that are no base root. Raise ``ValueError`` for a base root that is not readable, that
-        holds other files, or whose inputs differ from ``default_start_inputs``: it stands for another base model
-        or another adapter configuration than this deployment's.
-        """
-        base = base_root_of(files)
-        if base is None:
-            return False
-        base.check_inputs(self.default_start_inputs)
-        return True
+        raise InternalError(f"the {self.name} training component checks no artifact on a service")
 
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         """The parts of the scenario component that ``checkpoint`` changed from ``start``, which the scenario's
@@ -503,7 +598,9 @@ class TrainingComponent(ABC):
 
         Raise ``ValueError`` for a job the component refuses (for example a
         start it cannot continue from, or parameters it does not accept), and
-        ``RuntimeError`` after ``close``; nothing is recorded then.
+        ``RuntimeError`` after ``close``; nothing is recorded then. A component that asks another process to check
+        the job raises ``JobCheckPendingError`` while the answer is not there; nothing is recorded then either, and
+        the trainer submits the same job again later.
         """
 
     @abstractmethod
@@ -518,8 +615,8 @@ class TrainingComponent(ABC):
         """Start running jobs in this process: take the component's job state and resume the jobs that have not ended.
 
         Only the process that runs the jobs calls it: the training service's ``TrainingJobWorker``, which a
-        one-process deployment runs too. Another process, such as control, uses the component to describe jobs and
-        to import starts, and never runs a job. A component whose jobs run elsewhere does nothing, the default.
+        one-process deployment runs too. No other process builds the component. A component whose jobs run
+        elsewhere does nothing, the default.
         """
         return
 
@@ -530,52 +627,42 @@ class TrainingComponent(ABC):
 
 @dataclass(frozen=True)
 class TrainingArtifactLayout(ArtifactLayout):
-    """The layout of the snapshots of ``component``: an import of the component it trains must meet it.
+    """The layout of the snapshots of the training backend of ``facts``: an import of the component it trains must
+    meet it.
 
-    ``check`` is ``component.check_artifact``. The snapshots resolve a reference when they hold weight files
-    (``artifact_format``), which the serving runtimes read through ``ArtifactWeightFiles``.
-    ``reef.scenario.live_objects.scenario_components`` binds it on the weight component of a weight recipe.
-    """
+    Values: ``facts`` is the ``TrainingBackendFacts`` of the deployment's training backend. ``remote`` is the
+    component that answers what the facts leave to the backend's service, or None in a process that has none.
 
-    component: TrainingComponent
+    ``check(files)`` runs ``facts.check_artifact(files)``. When that returns names, it gives them to
+    ``remote.check_remote_artifact``; without ``remote`` it raises ``InternalError``, which is no ``ValueError``, so
+    no caller reads it as a refusal of the files. ``resolves_references`` is true exactly when
+    ``facts.artifact_format`` is not None: the snapshots then hold weight files, which the serving runtimes read
+    through ``ArtifactWeightFiles``.
 
-    def check(self, files: ArtifactFiles) -> None:
-        self.component.check_artifact(files)
-
-    @property
-    def resolves_references(self) -> bool:
-        return self.component.artifact_format is not None
-
-
-@dataclass(frozen=True)
-class TrainingFactsLayout(ArtifactLayout):
-    """The layout of the snapshots of the backend of ``facts``, in a process that built no training component.
-
-    Values: ``facts`` is the ``TrainingBackendFacts`` of the deployment's training backend.
-
-    Let ``component`` be the backend's ``TrainingComponent`` of the same settings. ``resolves_references`` equals
-    ``TrainingArtifactLayout(component).resolves_references``: it is true exactly when ``facts.artifact_format`` is
-    not None. The check of an artifact is not among the facts (``TrainingComponent.check_artifact`` asks the
-    backend's service for some backends), so this type answers no check: ``check(files)`` raises ``InternalError``
-    for every ``files``, and so does ``stored``. The error is no ``ValueError``, so no caller reads it as a refusal
-    of the files.
-
-    Purpose: ``reef.scenario.live_objects.scenario_components`` binds it on the weight component in a process that
-    holds the facts and no component. That is the inference service, which loads artifacts that control admitted
-    and stores no import.
+    Purpose: ``reef.scenario.live_objects.scenario_components`` binds it on the weight component of a weight
+    recipe. In control ``remote`` is the jobs queue's view, which asks the training service. The inference service
+    binds it without ``remote``: it loads artifacts that control admitted and stores no import.
     """
 
     facts: TrainingBackendFacts
+    remote: TrainingComponent | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.facts, TrainingBackendFacts):
             raise TypeError(f"facts must be TrainingBackendFacts, got {type(self.facts).__name__}")
+        if self.remote is not None and not isinstance(self.remote, TrainingComponent):
+            raise TypeError(f"remote must be a TrainingComponent or None, got {type(self.remote).__name__}")
 
     def check(self, files: ArtifactFiles) -> None:
-        raise InternalError(
-            f"this process built no {self.facts.name} training component, so it checks no imported artifact; "
-            "the control service checks an import"
-        )
+        names = self.facts.check_artifact(files)
+        if names is None:
+            return
+        if self.remote is None:
+            raise InternalError(
+                f"this process has no way to the {self.facts.name} training service, so it checks no imported "
+                "artifact; the control service checks an import"
+            )
+        self.remote.check_remote_artifact(names)
 
     @property
     def resolves_references(self) -> bool:
@@ -606,8 +693,8 @@ class TrainingComponentFactory(ConfiguredFactory):
     def facts(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingBackendFacts:
         """The facts of the component that ``__call__`` builds from the same arguments, without building it.
 
-        It starts nothing and imports no training framework. Control writes a new scenario's root from them, and
-        the inference service reads them in place of a component.
+        It starts nothing and imports no training framework. Every process but the training service reads them
+        in place of a component, and control writes a new scenario's root from them.
         """
 
 

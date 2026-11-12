@@ -34,12 +34,12 @@ from __future__ import annotations
 import json
 import shutil
 import threading
+import uuid
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Self
 
-from reef.artifact.files import ArtifactFiles
 from reef.core.errors import ConfigError, InternalError, ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.core.training_request import request_from_parameters
@@ -273,9 +273,6 @@ class HarnessTrainingComponent(LocalJobComponent):
         """Accept: an offline job runs the head tree on its train tasks."""
         return
 
-    def check_artifact(self, files: ArtifactFiles) -> None:
-        self.check_tree(HarnessTree({path: files.read_bytes(path).decode("utf-8") for path in files.paths()}))
-
     def check_job(self, job: TrainingJob) -> None:
         job_component(job)
         tasks = job.parameters.get("evaluation_tasks")
@@ -299,10 +296,15 @@ class HarnessTrainingComponent(LocalJobComponent):
         tree = self.facts.tree_in(artifact_dir)
         directory = self.starts_root / tree.checksum()
         if not directory.is_dir():
-            staging = self.starts_root / f".{tree.checksum()}.partial"
-            shutil.rmtree(staging, ignore_errors=True)
+            # Two workers can import one tree at the same time: each writes its own directory, and one rename wins.
+            staging = self.starts_root / f".{tree.checksum()}.{uuid.uuid4().hex}.partial"
             tree.write(staging)
-            staging.replace(directory)
+            try:
+                staging.rename(directory)
+            except OSError:
+                shutil.rmtree(staging, ignore_errors=True)
+                if not directory.is_dir():
+                    raise
         return str(directory)
 
     def status(self, job_id: str) -> JobStatus:

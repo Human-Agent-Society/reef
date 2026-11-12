@@ -120,7 +120,7 @@ def from_config(
     component, as the service builds them."""
     recipe = load_recipe(HarnessEvolutionRecipe, settings, {})
     assert isinstance(recipe, HarnessEvolutionRecipe)
-    return recipe, with_harness_components(recipe, LiveObjects(runtime=runtime), {})
+    return recipe, with_harness_components(recipe, LiveObjects(runtime=runtime), {}, runs_training=True)
 
 
 def flat(scores: list[dict[str, object]]) -> list[object]:

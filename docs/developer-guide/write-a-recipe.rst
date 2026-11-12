@@ -411,7 +411,8 @@ one job at a time in a worker thread, and it resumes unfinished jobs after a
 restart. A subclass implements these methods:
 
 * ``check_job(job)`` raises ``ValueError`` for a job the component cannot
-  train. ``submit`` then records nothing.
+  train. ``submit`` then records nothing. The training service also calls it
+  before control adds the job to the queue.
 * ``run(job, directory)`` trains the job to its end, records each checkpoint
   with ``save_checkpoint``, and returns the job's metrics. A resumed job finds
   its earlier checkpoints with ``saved(directory)``. An exception ends the job

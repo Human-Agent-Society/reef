@@ -102,7 +102,13 @@ class StubTrainingComponent(TrainingComponent):
         """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
         return self.base_start
 
+    def check_import_start(self, artifact_dir: Path) -> None:
+        """Raise ``ValueError`` for a snapshot that the stub cannot start from; the stub's facts ask it too. A stub
+        starts from every snapshot."""
+        return
+
     def import_start(self, artifact_dir: Path) -> str:
+        self.check_import_start(artifact_dir)
         self.imported.append(artifact_dir)
         return str(artifact_dir)
 
@@ -232,9 +238,10 @@ class StubInferenceRuntime(InferenceProxyRuntime):
 class StubFacts(TrainingBackendFacts):
     """The facts of the test component ``component``: each member answers from the component itself.
 
-    ``default_start`` is ``component.stub_default_start()``, and ``check_root_start`` raises exactly when
-    ``component.root_start`` raises. A test gives the value to ``LiveObjects.training_facts`` beside the component,
-    as a deployment's assembly gives the facts of the backend's configuration.
+    ``default_start`` is ``component.stub_default_start()``, ``check_root_start`` raises exactly when
+    ``component.root_start`` raises, and ``check_import_start`` exactly when ``component.import_start`` raises.
+    A test gives the value to ``LiveObjects.training_facts`` beside the component, as a deployment's assembly
+    gives the facts of the backend's configuration.
     """
 
     def __init__(self, component: StubTrainingComponent) -> None:
@@ -270,6 +277,9 @@ class StubFacts(TrainingBackendFacts):
 
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.component.root_start(root)
+
+    def check_import_start(self, artifact_dir: Path) -> None:
+        self.component.check_import_start(artifact_dir)
 
 
 def live_objects(

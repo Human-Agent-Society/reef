@@ -33,7 +33,7 @@ from reef.storage.record_items import used_record, used_records
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples, memory_samples
 from reef.storage.tasks import TaskStorage
-from reef.train.component import ScenarioRoot
+from reef.train.component import JobCheckPendingError, ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, PreparedCommit, TrainingCommit
@@ -267,6 +267,9 @@ class Trainer:
             restored = JobLoopState.from_dict(self._state)
             self.job_ends_read = restored.finished_jobs - (not restored.jobs and restored.last_job is not None)
         self.pending_commit: JobDataReservation | PendingTrainingResult | None = None
+        #: Whether the last job that the trainer tried to submit waits for the training component's check
+        #: (``JobCheckPendingError``): the worker then polls, and the next poll submits the job again.
+        self.job_check_waits = False
         # The result of the last pending commit that went on record: committing it again is a second commit.
         self.recorded_result: TrainingCommit | None = None
         self._lock = Lock()
@@ -398,11 +401,14 @@ class Trainer:
             )
 
     def needs_polling(self) -> bool:
-        """Whether the trainer's worker polls at a fixed interval: a job runs, or the pipeline's own work runs.
+        """Whether the trainer's worker polls at a fixed interval: a job runs, a job waits for its check, or the
+        pipeline's own work runs.
 
         Otherwise the worker sleeps until the next accepted record.
         """
         with self._lock:
+            if self.job_check_waits:
+                return True
             if self._job_loop is not None and JobLoopState.from_dict(self._state).jobs:
                 return True
             return self._pipeline.background_jobs_running()
@@ -673,8 +679,12 @@ class Trainer:
 
     def submit_job(
         self, data: JobData, *, start: str | None = None, train_from_artifact_id: str | None = None
-    ) -> TrainingCommit:
-        """Submit the job of ``data``, which ``reserve_job`` gave, and return its commit.
+    ) -> TrainingCommit | None:
+        """Submit the job of ``data``, which ``reserve_job`` gave, and return its commit. Return None while the
+        training component waits for the check of the job (``JobCheckPendingError``): nothing is submitted, and the
+        reservation is released without consuming a sample or a request, so the scenario's other operations and the
+        commits of running jobs go on. The worker polls (``needs_polling``), and the next poll reserves the data
+        and submits again: the same data names the same job, whose check then has its answer.
 
         The job of a request that names ``train_from`` starts from ``start``, what ``import_start`` gave for that
         artifact. Any other job gives no ``start`` and continues the training start; ``train_from_artifact_id`` is
@@ -691,19 +701,33 @@ class Trainer:
                 # Committed without a job: the failed request is consumed alone and the catalog row names why.
                 result = self.skip_failed_request(data, data.request, failure)
             else:
-                result = (
-                    self.job_loop_required()
-                    .submit(
-                        JobLoopState.from_dict(observed_state),
-                        data,
-                        self._pipeline.sample2job.job_parameters(data),
-                        start=start,
-                        train_from=None if start is None or data.request is None else data.request.train_from,
-                        train_from_artifact_id=train_from_artifact_id,
+                try:
+                    result = (
+                        self.job_loop_required()
+                        .submit(
+                            JobLoopState.from_dict(observed_state),
+                            data,
+                            self._pipeline.sample2job.job_parameters(data),
+                            start=start,
+                            train_from=None if start is None or data.request is None else data.request.train_from,
+                            train_from_artifact_id=train_from_artifact_id,
+                        )
+                        .result
                     )
-                    .result
-                )
+                except JobCheckPendingError:
+                    with self._lock:
+                        reservation = self.pending_commit
+                        if isinstance(reservation, JobDataReservation) and reservation.data_id == data.data_id:
+                            self._pipeline.release_job_data(data.data_id)
+                            self.pending_commit = None
+                        self.job_check_waits = True
+                    return None
+                except BaseException:
+                    with self._lock:
+                        self.job_check_waits = False
+                    raise
         with self._lock:
+            self.job_check_waits = False
             reservation = self.pending_commit
             if not isinstance(reservation, JobDataReservation) or reservation.data_id != data.data_id:
                 raise RuntimeError("trainer reservation changed while its step was being prepared")
@@ -749,6 +773,8 @@ class Trainer:
         # Without a sample count the pipeline starts no automatic job (``TrainingPipeline.holds_job_data``).
         sample_count = self.job_samples if automatic_jobs else None
         if not (self.trains and self._pipeline.ready(sample_count)):
+            # The data of a job that waited for its check is gone, such as after its request was cancelled.
+            self.job_check_waits = False
             return None
         data = self._pipeline.build_job_data(sample_count)
         self.pending_commit = JobDataReservation(data)
@@ -842,16 +868,16 @@ class Trainer:
         self._job_loop.cancel(state)
 
     def import_start(self, artifact: Artifact) -> str:
-        """The start of a job that trains from ``artifact``, the trainer's component of a snapshot, materialized:
-        what its training component imports of it (``TrainingComponent.import_start``), which can copy weights for
-        minutes. Raise ``TrainingStartRefusedError`` when this trainer cannot start from ``artifact``."""
-        tree = artifact.local_path
-        if tree is None:
+        """The start of a job that trains from ``artifact``, the trainer's component of a snapshot, materialized
+        (``TrainingComponent.snapshot_start``): control's component checks the artifact and names its snapshot, and
+        the training service imports it when it takes the job. Raise ``TrainingStartRefusedError`` when this
+        trainer cannot start from ``artifact``."""
+        if artifact.local_path is None:
             raise TrainingStartRefusedError(f"artifact {artifact.ref.revision!r} has no local files to train from")
         if self._job_loop is None:
             raise TrainingStartRefusedError(f"the trainer of scenario {self.scenario!r} trains nothing to start")
         try:
-            return self._job_loop.component.import_start(tree)
+            return self._job_loop.component.snapshot_start(artifact)
         except ValueError as exc:
             raise TrainingStartRefusedError(
                 f"scenario {self.scenario!r} cannot train from this artifact: {exc}"

@@ -114,7 +114,9 @@ def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
     }
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [process["name"] for process in validate_services(config, "test")] == ["reef"]
-    _, live = _load_deployment(raw["recipe"]["implementation"], service_config_from_mapping(config), {})
+    _, live = _load_deployment(
+        raw["recipe"]["implementation"], service_config_from_mapping(config), {}, runs_training=True
+    )
     assert live.runtime.base_url == "http://localhost:8000"
 
 

@@ -27,7 +27,7 @@ from reef.scenario.registry import InstanceState
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.component import ScenarioRoot, TrainingComponent
+from reef.train.component import ScenarioRoot, SnapshotStart, TrainingComponent
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import PipelineSettings
 
@@ -491,14 +491,17 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
         wait_for_serving(second, "old")
         assert second.live.runtime.served == "old-model"
         assert old.served_artifact_id() == old.repository.resolve(old_root).artifact_id
-        old_start = Path(JobLoopState.from_dict(old.trainer.state).start)
-        assert (old_start / "model.txt").read_text() == "old-model"
+        # The trainer's start names the scenario's own root, with the inputs that the root was made from.
+        old_start = SnapshotStart.from_text(JobLoopState.from_dict(old.trainer.state).start)
+        assert old_start == SnapshotStart(old_root.revision, RootSource("default", inputs={"model": "old-model"}))
+        assert (old.repository.materialize(old_root).local_path / "model.txt").read_text() == "old-model"
         assert old.artifacts()[0]["source"] == {"kind": "default", "inputs": {"model": "old-model"}}
 
         new = second.get_or_create_scenario("new")
         new_root = new.repository.materialize(new.repository.start_artifact)
         assert (new_root.local_path / "model.txt").read_text() == "new-model"
-        assert (Path(JobLoopState.from_dict(new.trainer.state).start) / "model.txt").read_text() == "new-model"
+        new_start = SnapshotStart.from_text(JobLoopState.from_dict(new.trainer.state).start)
+        assert new_start is not None and new_start.revision == new.repository.start_artifact.revision
     finally:
         second.close()
 

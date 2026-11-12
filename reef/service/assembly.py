@@ -74,8 +74,9 @@ from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
-from reef.train.component import TrainingComponent, build_training_component, training_backend_facts
+from reef.train.component import build_training_component, training_backend_facts
 from reef.train.harness_backend.component import HarnessTrainingComponent
+from reef.train.harness_backend.facts import HarnessFacts
 from reef.train.manager import TrainingManager
 
 
@@ -112,74 +113,35 @@ def _require_non_empty(value: str | None, setting: str) -> str:
     return value.strip()
 
 
-def connect_training_component(
-    settings: ServiceSettings, *, model_path: str, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
-) -> tuple[TrainingComponent, InferenceRuntime]:
-    """Build the selected training component for the recipe's ``default_parameters``, then its snapshots' serving.
-
-    The training backend builds only the component. The serving runtime comes
-    from the deployment's ``inference`` settings and the component's
-    ``artifact_format`` (``reef.service.deploy.serving``).
-
-    The dispatcher puts the component behind the jobs queue (``Dispatcher``); the training service runs it.
-    """
-    backend = training_deployment_for(settings.training_backend)
-    component = build_training_component(
-        backend.component_config(asdict(settings), default_parameters=default_parameters), model_path=model_path
-    )
-    try:
-        serving = RuntimeRegistry().build(
-            serving_runtime_config(settings, backend, component.artifact_format), model_path=model_path
-        )
-    except BaseException:
-        component.close()
-        raise
-    return component, serving
-
-
-def connect_serving(
-    settings: ServiceSettings, *, model_path: str, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
-) -> LiveObjects:
-    """The live objects of a process that serves the snapshots of the selected training backend and runs no job.
-
-    The result holds the serving runtime and the backend's facts from the component config
-    (``training_backend_facts``), and no training component is built: the runtime config reads the facts'
-    ``artifact_format``, which equals the component's.
-    """
-    backend = training_deployment_for(settings.training_backend)
-    facts = training_backend_facts(
-        backend.component_config(asdict(settings), default_parameters=default_parameters), model_path=model_path
-    )
-    serving = RuntimeRegistry().build(
-        serving_runtime_config(settings, backend, facts.artifact_format), model_path=model_path
-    )
-    return LiveObjects(runtime=serving, training_facts=facts)
-
-
 def connect_weight_objects(
     settings: ServiceSettings,
     *,
     model_path: str,
     default_parameters: Mapping[JobDataKind, Mapping[str, Any]],
-    serving_only: bool,
+    runs_training: bool,
 ) -> LiveObjects:
-    """The runtime and the training objects of a weight-training deployment in one process: those of
-    ``connect_serving`` when ``serving_only``, else the component and the runtime of ``connect_training_component``
-    with the backend's facts (``training_backend_facts``).
+    """The runtime and the training objects of a weight-training deployment in one process.
 
-    The facts come from the component config alone. A process that creates scenarios writes a new scenario's root
-    from them (``reef.scenario.live_objects.default_start``), so it asks no training component for a root.
+    The result holds the facts of the selected training backend, which come from the component config alone
+    (``training_backend_facts``), and the serving runtime, which comes from the deployment's ``inference``
+    settings and the facts' ``artifact_format`` (``reef.service.deploy.serving``). With ``runs_training``, the
+    process is a training service, and the result also holds the training component, built for the recipe's
+    ``default_parameters``. No other process builds it: control reads the facts and asks the training service
+    through the jobs queue (``reef.train.job_queue``).
     """
-    if serving_only:
-        return connect_serving(settings, model_path=model_path, default_parameters=default_parameters)
     backend = training_deployment_for(settings.training_backend)
-    facts = training_backend_facts(
-        backend.component_config(asdict(settings), default_parameters=default_parameters), model_path=model_path
-    )
-    training_component, runtime = connect_training_component(
-        settings, model_path=model_path, default_parameters=default_parameters
-    )
-    return LiveObjects(runtime=runtime, training_component=training_component, training_facts=facts)
+    config = backend.component_config(asdict(settings), default_parameters=default_parameters)
+    facts = training_backend_facts(config, model_path=model_path)
+    component = build_training_component(config, model_path=model_path) if runs_training else None
+    try:
+        runtime = RuntimeRegistry().build(
+            serving_runtime_config(settings, backend, facts.artifact_format), model_path=model_path
+        )
+    except BaseException:
+        if component is not None:
+            component.close()
+        raise
+    return LiveObjects(runtime=runtime, training_component=component, training_facts=facts)
 
 
 def _upstream_runtime(settings: ServiceSettings) -> InferenceRuntime | None:
@@ -202,12 +164,10 @@ def _training_recipe(
     settings: ServiceSettings,
     env: Mapping[str, str],
     *,
-    serving_only: bool = False,
+    runs_training: bool,
 ) -> tuple[Recipe, LiveObjects]:
-    """Load a weight-training recipe, and connect the selected training component and its serving runtime.
-
-    With ``serving_only``, the process runs no training job: it connects the objects of ``connect_serving``.
-    """
+    """Load a weight-training recipe, and connect its serving runtime and the objects of the selected training
+    backend (``connect_weight_objects``): the training component only with ``runs_training``."""
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     # Resolve the recipe fields once before connecting its runtime.
     # Construction consumes those same resolved values.
@@ -221,7 +181,7 @@ def _training_recipe(
         settings,
         model_path=model_path,
         default_parameters=recipe_type.configured_parameters(resolved_recipe_data.get("job_parameters")),
-        serving_only=serving_only,
+        runs_training=runs_training,
     )
     try:
         recipe = load_recipe(recipe_type, recipe_config, env, field_values=resolved_recipe_data)
@@ -245,14 +205,14 @@ def composed_training_recipe(
     settings: ServiceSettings,
     env: Mapping[str, str],
     *,
-    serving_only: bool = False,
+    runs_training: bool,
 ) -> tuple[Recipe, LiveObjects]:
-    """Load a recipe that trains weights through one of its components, and connect the selected training
-    component and its serving runtime.
+    """Load a recipe that trains weights through one of its components, and connect its serving runtime and the
+    objects of the selected training backend (``connect_weight_objects``): the training component only with
+    ``runs_training``.
 
     The deployment's model path is every component's model, and a top level evaluation section
-    belongs to the component that trains. With ``serving_only``, the process runs no training job: it connects the
-    objects of ``connect_serving``.
+    belongs to the component that trains.
     """
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     if config.get("runtime"):
@@ -269,7 +229,7 @@ def composed_training_recipe(
         settings,
         model_path=model_path,
         default_parameters=weight_type.configured_parameters(weight_config.get("job_parameters")),
-        serving_only=serving_only,
+        runs_training=runs_training,
     )
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
     if settings.pipeline_settings is not None:
@@ -294,13 +254,17 @@ def composed_training_recipe(
         raise
 
 
-def with_harness_components(recipe: Recipe, live: LiveObjects, environ: Mapping[str, str]) -> LiveObjects:
-    """``live`` with the harness training component of the harness recipe in ``recipe``.
+def with_harness_components(
+    recipe: Recipe, live: LiveObjects, environ: Mapping[str, str], *, runs_training: bool
+) -> LiveObjects:
+    """``live`` with the harness objects of the harness recipe in ``recipe``.
 
-    For a ``HarnessEvolutionRecipe``, alone or as a component of a ``CompositeRecipe``, the result holds a new
-    ``HarnessTrainingComponent``, built from the recipe's settings and the models of ``live``
-    (``HarnessTrainingComponent.from_settings``, ``reef.scenario.live_objects.harness_models``); ``environ`` holds
-    the variables that its sandbox and its agent's isolation read. For any other recipe, the result is ``live``.
+    For a ``HarnessEvolutionRecipe``, alone or as a component of a ``CompositeRecipe``, the result holds the
+    ``HarnessFacts`` of the recipe's settings. With ``runs_training``, the process is a training service, and the
+    result also holds a new ``HarnessTrainingComponent``, built from the recipe's settings and the models of
+    ``live`` (``HarnessTrainingComponent.from_settings``, ``reef.scenario.live_objects.harness_models``);
+    ``environ`` holds the variables that its sandbox and its agent's isolation read. No other process builds the
+    component. For any other recipe, the result is ``live``.
     The served endpoint must be in ``live`` before the call, because the component reads the models once.
 
     Raise ``ConfigError`` for an ``evolution`` section that names no usable method, scorer, collector, executor or
@@ -310,14 +274,15 @@ def with_harness_components(recipe: Recipe, live: LiveObjects, environ: Mapping[
     if harness is None:
         return live
     component, child = harness
-    return replace(
-        live,
-        harness_component=HarnessTrainingComponent.from_settings(
-            child.harness_settings(),
-            harness_models(child, live, component=component),
-            environ=environ,
-        ),
+    settings = child.harness_settings()
+    built = (
+        HarnessTrainingComponent.from_settings(
+            settings, harness_models(child, live, component=component), environ=environ
+        )
+        if runs_training
+        else None
     )
+    return replace(live, harness_component=built, harness_facts=HarnessFacts.from_settings(settings))
 
 
 def load_named_recipe(
@@ -367,32 +332,25 @@ def load_named_recipe(
         raise
 
 
-def load_deployment(settings: ServiceSettings, env: Mapping[str, str]) -> tuple[Recipe, LiveObjects]:
-    """The deployment's recipe, and the runtime and the training component that a process of the deployment builds
-    for it; the inference service builds its own (``load_serving_deployment``). The runtime is the same in each
-    process, and only the inference service opens it (``InferenceRuntime.open``). The result has no harness
-    component, data store or served endpoint yet: the caller adds what its process needs
+def load_deployment(
+    settings: ServiceSettings, env: Mapping[str, str], *, runs_training: bool
+) -> tuple[Recipe, LiveObjects]:
+    """The deployment's recipe, and the objects that a process of the deployment builds for it: the runtime, the
+    facts of the training backend, and, with ``runs_training``, the training component (``connect_weight_objects``).
+
+    The runtime is the same in each process, and only the inference service opens it (``InferenceRuntime.open``).
+    The result has no harness objects, data store or served endpoint yet: the caller adds what its process needs
     (``with_harness_components``)."""
-    return _load_deployment(_require_non_empty(settings.recipe, "reef.recipe"), settings, env)
-
-
-def load_serving_deployment(settings: ServiceSettings, env: Mapping[str, str]) -> tuple[Recipe, LiveObjects]:
-    """The deployment's recipe and the objects of a process that serves and runs no training job: the inference
-    service.
-
-    The result equals that of ``load_deployment``, except for a deployment that trains weights: then no training
-    component is built, and the result holds the backend's facts alone in ``training_facts``
-    (``connect_serving``). The runtime has the same config either way.
-    """
-    return _load_deployment(_require_non_empty(settings.recipe, "reef.recipe"), settings, env, serving_only=True)
+    return _load_deployment(
+        _require_non_empty(settings.recipe, "reef.recipe"), settings, env, runs_training=runs_training
+    )
 
 
 def _load_deployment(
-    selected: str, settings: ServiceSettings, env: Mapping[str, str], *, serving_only: bool = False
+    selected: str, settings: ServiceSettings, env: Mapping[str, str], *, runs_training: bool
 ) -> tuple[Recipe, LiveObjects]:
-    """Load the one recipe ``reef.recipe`` names, and build its runtime and training component.
-
-    With ``serving_only``, a deployment that trains weights gets the objects of ``connect_serving``.
+    """Load the one recipe ``reef.recipe`` names, and build its runtime and the objects of its training backend:
+    the training component only with ``runs_training`` (``connect_weight_objects``).
 
     The spellings differ only in where config and runtime come from: a dotted
     weight-training class reads the flat ``reef.*`` section and connects the
@@ -404,7 +362,7 @@ def _load_deployment(
     """
     training_recipe_type = _training_recipe_type(selected)
     if training_recipe_type is not None:
-        return _training_recipe(training_recipe_type, settings, env, serving_only=serving_only)
+        return _training_recipe(training_recipe_type, settings, env, runs_training=runs_training)
     if ":" in selected:
         config = _recipe_owned_settings(settings)
         if settings.preset_config is not None:
@@ -419,7 +377,7 @@ def _load_deployment(
         weight_training = None if recipe_type is None else weight_training_selection(recipe_type, config)
         if weight_training is not None and recipe_type is not None:
             return composed_training_recipe(
-                selected, recipe_type, config, *weight_training, settings, env, serving_only=serving_only
+                selected, recipe_type, config, *weight_training, settings, env, runs_training=runs_training
             )
         if settings.pipeline_settings is not None:
             config["pipeline"] = dict(settings.pipeline_settings)
@@ -628,7 +586,9 @@ def build_dispatcher(
     env = os.environ if environ is None else environ
     coordination = open_service_coordination(settings)
     try:
-        recipe, live = _load_deployment(selected_recipe, settings, env)
+        # Only a process that runs the training service builds a training component.
+        runs_training = ServiceSet.of(components).runs_training
+        recipe, live = _load_deployment(selected_recipe, settings, env, runs_training=runs_training)
     except BaseException:
         coordination.close()
         raise
@@ -643,7 +603,7 @@ def build_dispatcher(
     dispatcher: Dispatcher | None = None
     try:
         # The harness training component reads the served endpoint, so it is built after ``live`` has it.
-        live = with_harness_components(recipe, live, env)
+        live = with_harness_components(recipe, live, env, runs_training=runs_training)
         scenario_storage, data_store = open_scenario_storage(settings)
         live = replace(live, data_store=data_store)
         task_import = (

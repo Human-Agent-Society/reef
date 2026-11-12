@@ -9,12 +9,14 @@ from typing import Any
 
 import pytest
 from tests.support.job_data import job_data_ref
-from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.training_deployment import LocalFacts
 from tests.support.trajectories import policy_trajectory
 
+from reef.artifact import Artifact, ArtifactError, InMemoryRepositoryBackend
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.errors import InternalError
 from reef.core.job_data import JobData, TaskSample
-from reef.core.snapshot import SnapshotRef
+from reef.core.snapshot import RootSource, SnapshotRef
 from reef.core.training_request import TrainingRequest
 from reef.core.weight_layout import ArtifactFormat
 from reef.observability.base import (
@@ -27,12 +29,23 @@ from reef.storage.data import MemoryDataStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import NewWork
-from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingJob
+from reef.train.component import (
+    JobCheckPendingError,
+    JobStatus,
+    SavedCheckpoint,
+    ScenarioRoot,
+    SnapshotStart,
+    TrainingJob,
+)
 from reef.train.job_queue import (
+    CHECKS_QUEUE,
     JOB_CANCELLED_ERROR,
     JOBS_QUEUE,
+    UNASKED_CHECK_ERROR,
+    UNASKED_CHECK_SECONDS,
     JobExperimentRecorder,
     JobQueueComponent,
+    TrainingCheckWorker,
     TrainingJobWorker,
     cancel_request_jobs,
     checkpoint_json,
@@ -40,8 +53,10 @@ from reef.train.job_queue import (
     job_json,
     job_kind,
     job_payload,
+    resolved_job,
     scenario_jobs,
 )
+from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.training_requests import REQUEST_CANCELLED_ERROR, ScenarioTrainingRequests
 
@@ -55,6 +70,7 @@ class StepComponent(LocalJobComponent):
     def __init__(self, jobs_root: Path) -> None:
         super().__init__(jobs_root)
         self.closed_count = 0
+        self.checked: list[str] = []
         self.start_jobs()
 
     @property
@@ -76,8 +92,18 @@ class StepComponent(LocalJobComponent):
         return str(release)
 
     def check_job(self, job: TrainingJob) -> None:
+        self.checked.append(job.job_id)
         if job.parameters.get("invalid"):
             raise ValueError("this component cannot train the job")
+        if job.parameters.get("unreachable"):
+            raise ConnectionError("the artifact store did not answer")
+
+    def check_remote_artifact(self, names: Mapping[str, Any]) -> None:
+        if names != {"path": "known"}:
+            raise ValueError(f"the service holds no {names['path']}")
+
+    def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
+        return frozenset({f"step-{checkpoint.step}"})
 
     def status(self, job_id: str) -> JobStatus:
         status = super().status(job_id)
@@ -102,6 +128,30 @@ def job(job_id: str, **parameters: Any) -> TrainingJob:
     return TrainingJob(job_id, "steps", "steps:base", job_data_ref(data), parameters, scenario="s")
 
 
+class StepFacts(LocalFacts):
+    """The facts of ``StepComponent``; ``check_import_start`` refuses a directory named ``refused``."""
+
+    @property
+    def name(self) -> str:
+        return "steps"
+
+    def check_import_start(self, artifact_dir: Path) -> None:
+        if artifact_dir.name == "refused":
+            raise ValueError("the steps component cannot start from this snapshot")
+
+
+def submit(view: JobQueueComponent, submitted: TrainingJob) -> None:
+    """Submit ``submitted`` as a trainer does: again while the training service has not answered its check."""
+    deadline = time.monotonic() + WAIT_SECONDS
+    while True:
+        try:
+            view.submit(submitted)
+            return
+        except JobCheckPendingError:
+            assert time.monotonic() < deadline, "the training service never answered the job check"
+            time.sleep(0.02)
+
+
 def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
     deadline = time.monotonic() + WAIT_SECONDS
     while time.monotonic() < deadline:
@@ -116,15 +166,13 @@ def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
 def worked(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
-    worker = TrainingJobWorker(
-        component,
-        queue,
-        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
-        worker_id="training-1",
-        poll_seconds=0.02,
-    )
+    data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
+    worker = TrainingJobWorker(component, queue, data_store, None, worker_id="training-1", poll_seconds=0.02)
+    checks = TrainingCheckWorker(component, queue, data_store, None, worker_id="checks-1", poll_seconds=0.02)
     worker.start()
+    checks.start()
     yield queue, component, worker
+    checks.stop()
     worker.stop()
 
 
@@ -148,15 +196,11 @@ def test_a_queued_job_keeps_its_component_and_previous_job():
 
 @pytest.mark.unit
 def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the_queue(worked):
-    queue, component, _worker = worked
-    view = JobQueueComponent(component, queue)
-    assert (view.name, view.root_start(STUB_ROOT), view.artifact_format) == (
-        "steps",
-        "steps:base",
-        ArtifactFormat("full"),
-    )
+    queue, _component, _worker = worked
+    view = JobQueueComponent(StepFacts(), queue)
+    assert (view.name, view.artifact_format) == ("steps", ArtifactFormat("full"))
 
-    view.submit(job("j1"))
+    submit(view, job("j1"))
     view.submit(job("j1"))  # a second submit of one ID does nothing
     item = queue.read(JOBS_QUEUE, "j1")
     # The item has no serial key: a free worker takes it beside another job of its scenario.
@@ -165,30 +209,187 @@ def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the
     status = wait_for(lambda: view.status("j1"), "finished")
     assert [checkpoint.step for checkpoint in status.checkpoints] == [1, 2]
     assert status.checkpoints[0].metrics == {"loss": 1.0}
+    # The worker recorded the parts that each checkpoint changed, so control reads them without the component.
+    assert view.changed_parts("steps:base", status.checkpoints[1]) == {"step-2"}
+    assert job_json(item := queue.read(JOBS_QUEUE, "j1"))["checkpoints"][0]["changed_parts"] == ["step-1"]
     with pytest.raises(KeyError):
         view.status("unknown")
 
 
 @pytest.mark.unit
-def test_a_refused_job_never_enters_the_queue_and_a_failed_job_reports_its_error_and_metrics(worked):
-    queue, component, _worker = worked
-    view = JobQueueComponent(component, queue)
-    with pytest.raises(ValueError, match="cannot train"):
+def test_the_training_service_checks_a_job_before_it_enters_the_queue(worked, tmp_path):
+    queue, _component, _worker = worked
+    view = JobQueueComponent(StepFacts(), queue)
+    # The first submit only asks: nothing is queued while the answer is not there.
+    with pytest.raises(JobCheckPendingError):
         view.submit(job("bad", invalid=True))
     assert queue.read(JOBS_QUEUE, "bad") is None
+    # The component's refusal comes back with its message, and the job never enters the queue.
+    with pytest.raises(ValueError, match=r"^this component cannot train the job$"):
+        submit(view, job("bad", invalid=True))
+    assert queue.read(JOBS_QUEUE, "bad") is None
+    # A submit after a refusal asks again: the job's one check item is queued once more.
+    with pytest.raises(JobCheckPendingError):
+        view.submit(job("bad", invalid=True))
+    with pytest.raises(ValueError, match=r"^this component cannot train the job$"):
+        submit(view, job("bad", invalid=True))
+    assert [item.id for item in queue.items(CHECKS_QUEUE)] == ["job:bad"]
 
-    view.submit(job("boom", fail=True))
+    submit(view, job("boom", fail=True))
     failed = wait_for(lambda: view.status("boom"), "failed")
     # A failed item has no result, so the metrics that the component reported cross the queue in its metadata.
     assert "boom" in failed.error and failed.metrics == {"reached": "start"}
 
 
 @pytest.mark.unit
+def test_a_check_that_could_not_run_is_no_refusal_and_the_next_submit_asks_again(worked):
+    queue, component, _worker = worked
+    view = JobQueueComponent(StepFacts(), queue)
+    # The check fails for a reason that is not the job's: it uses up its attempts and ends.
+    with pytest.raises(RuntimeError) as failed:
+        submit(view, job("unlucky", unreachable=True))
+    assert not isinstance(failed.value, ValueError)
+    assert "could not check job unlucky, so nothing was decided about it" in str(failed.value)
+    assert "the artifact store did not answer" in str(failed.value)
+    assert queue.read(JOBS_QUEUE, "unlucky") is None
+    attempts = len(component.checked)
+    assert attempts > 1
+    # The failure is read once. The same job, submitted again, gets a new check.
+    with pytest.raises(JobCheckPendingError):
+        view.submit(job("unlucky", unreachable=True))
+    with pytest.raises(RuntimeError):
+        submit(view, job("unlucky", unreachable=True))
+    assert len(component.checked) > attempts
+
+
+@pytest.mark.unit
+def test_the_check_worker_drops_a_check_that_control_stopped_asking_for(tmp_path):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    component = StepComponent(tmp_path / "jobs")
+    view = JobQueueComponent(StepFacts(), queue)
+    worker = TrainingCheckWorker(
+        component, queue, MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")), None, worker_id="checks-1"
+    )
+    abandoned = job("abandoned")
+    payload = {"check": "job", "job_id": "abandoned", "job": job_payload(abandoned)}
+    old = time.time() - UNASKED_CHECK_SECONDS - 1
+    queue.append(NewWork(CHECKS_QUEUE, "job:abandoned", "s", "training_check:steps", payload), now=old)
+    assert worker.run_once()
+    # Nobody waits for the answer, so the component was not asked and imported nothing.
+    dropped = queue.read(CHECKS_QUEUE, "job:abandoned")
+    assert (dropped.state, dropped.error, component.checked) == ("failed", UNASKED_CHECK_ERROR, [])
+    # A trainer that comes back for the job asks again, and the check runs.
+    with pytest.raises(JobCheckPendingError):
+        view.submit(abandoned)
+    assert worker.run_once()
+    view.submit(abandoned)
+    assert component.checked == ["abandoned"] and queue.read(JOBS_QUEUE, "abandoned") is not None
+    component.close()
+
+
+@pytest.mark.unit
+def test_a_job_item_of_another_release_is_one_failed_job_and_the_next_job_runs(worked):
+    queue, _component, _worker = worked
+    view = JobQueueComponent(StepFacts(), queue)
+    loop = JobLoop(view, scenario="s")
+    # A worker of an older release reported a checkpoint without its changed parts, and still holds the job.
+    queue.append(NewWork(JOBS_QUEUE, "old", "s", job_kind("old-release"), job_payload(job("old"))))
+    queue.take(JOBS_QUEUE, "training-0", [job_kind("old-release")])
+    entry = {"step": 1, "path": "/old/step-1", "artifact_path": "/old/step-1", "metrics": {}}
+    queue.append_progress(JOBS_QUEUE, "old", "training-0", entry, number=0)
+
+    state = JobLoopState("steps:base", (RunningJob("old", "steps:base"),))
+    ended = JobLoopState.from_dict(loop.poll(state).result.state)
+    assert ended.jobs == () and ended.finished_jobs == 1
+    assert ended.last_job.event == "failed"
+    assert "another release of Reef may have written it" in ended.last_job.error
+    assert "changed_parts" in ended.last_job.error
+    # The item is ended, so no worker runs it further, and a cancel and the job listing still read it.
+    assert queue.read(JOBS_QUEUE, "old").state == "failed"
+    assert view.status("old").state == "failed"
+    view.cancel("old")
+    assert [listed["id"] for listed in scenario_jobs(queue, "s")] == ["old"]
+
+    # The trainer goes on: its next job is checked and runs.
+    submit(view, job("next"))
+    assert wait_for(lambda: view.status("next"), "finished").checkpoints
+
+
+@pytest.mark.unit
+def test_a_job_waits_unsubmitted_while_no_training_service_answers(tmp_path):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    view = JobQueueComponent(StepFacts(), queue)
+    for _ in range(3):
+        with pytest.raises(JobCheckPendingError):
+            view.submit(job("waiting"))
+    # One check item waits, and no job.
+    assert len(queue.items(CHECKS_QUEUE)) == 1 and not queue.items(JOBS_QUEUE)
+
+
+@pytest.mark.unit
+def test_control_names_the_snapshot_of_a_start_and_the_training_service_resolves_it(tmp_path):
+    view = JobQueueComponent(StepFacts(), memory_coordination().work_queue)
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    backend = backends("s")
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "model.txt").write_text("w1")
+    published = backend.register(Artifact.local(tree), metadata={})
+    source = RootSource("default", inputs={"model": "stub"})
+    root = ScenarioRoot(Artifact(published, backend), source)
+
+    named = view.root_start(root)
+    assert SnapshotStart.from_text(named) == SnapshotStart(published.revision, source)
+    assert SnapshotStart.from_text("steps:base") is None
+    imported = view.snapshot_start(root.artifact.materialize())
+    assert SnapshotStart.from_text(imported) == SnapshotStart(published.revision)
+    # The facts refuse at once what the component would refuse, and control imports nothing itself.
+    refused = tmp_path / "refused"
+    refused.mkdir()
+    with pytest.raises(ValueError, match="cannot start from this snapshot"):
+        view.snapshot_start(Artifact.local(refused))
+    with pytest.raises(InternalError):
+        view.import_start(tree)
+
+    component = StepComponent(tmp_path / "jobs")
+    first = TrainingJob("j1", "steps", named, job_data_ref(JobData("d1")), {}, scenario="s")
+    assert resolved_job(component, first, backends, tmp_path / "staged").start == "steps:base"
+    later = TrainingJob("j2", "steps", imported, job_data_ref(JobData("d2")), {}, scenario="s")
+    start = resolved_job(component, later, backends, tmp_path / "staged").start
+    assert (Path(start) / "model.txt").read_text() == "w1"
+    # A component's own start stays as it is, and a worker without an artifact store refuses a named snapshot.
+    own = TrainingJob("j3", "steps", "steps:base", job_data_ref(JobData("d3")), {}, scenario="s")
+    assert resolved_job(component, own, None, None) is own
+    with pytest.raises(ValueError, match="opens no artifact store"):
+        resolved_job(component, first, None, None)
+    component.close()
+
+
+@pytest.mark.unit
+def test_the_training_service_answers_the_remote_check_of_an_artifact(worked):
+    queue, _component, _worker = worked
+    view = JobQueueComponent(StepFacts(), queue, answer_seconds=WAIT_SECONDS)
+    view.check_remote_artifact({"path": "known"})
+    with pytest.raises(ValueError, match=r"^the service holds no lost$"):
+        view.check_remote_artifact({"path": "lost"})
+
+
+@pytest.mark.unit
+def test_a_remote_check_without_a_training_service_ends_as_an_artifact_error():
+    queue = memory_coordination(lease_seconds=30).work_queue
+    view = JobQueueComponent(StepFacts(), queue, answer_seconds=0.1)
+    with pytest.raises(ArtifactError, match="did not check the artifact"):
+        view.check_remote_artifact({"path": "known"})
+    # The check that nobody answered is cancelled, so a training service that starts later does not run it.
+    assert [item.state for item in queue.items(CHECKS_QUEUE)] == ["failed"]
+
+
+@pytest.mark.unit
 def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
-    view = JobQueueComponent(component, queue)
-    view.submit(job("waiting"))
+    view = JobQueueComponent(StepFacts(), queue)
+    queue.append(NewWork(JOBS_QUEUE, "waiting", "s", job_kind("steps"), job_payload(job("waiting"))))
     view.cancel("waiting")
     assert view.status("waiting").state == "failed" and view.status("waiting").error == "cancelled"
 
@@ -196,21 +397,12 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
         component,
         queue,
         MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        None,
         worker_id="training-1",
         poll_seconds=0.02,
     )
     assert worker.run_once() is False  # the cancelled job is final, so nothing is left to take
     worker.stop()
-    assert component.closed_count == 1
-
-
-@pytest.mark.unit
-def test_a_control_only_component_closes_what_it_owns(tmp_path):
-    queue = memory_coordination().work_queue
-    component = StepComponent(tmp_path / "jobs")
-    JobQueueComponent(component, queue).close()
-    assert component.closed_count == 0
-    JobQueueComponent(component, queue, owns_component=True).close()
     assert component.closed_count == 1
 
 
@@ -229,6 +421,7 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
         StepComponent(tmp_path / "jobs"),
         queue,
         MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        None,
         worker_id="training-1",
         poll_seconds=0.02,
     )
@@ -240,14 +433,14 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
 
 
 @pytest.mark.unit
-def test_a_queue_component_serves_the_parameters_schema_of_its_component(tmp_path):
-    class Declaring(StepComponent):
+def test_a_queue_component_serves_the_parameters_schema_of_its_facts(tmp_path):
+    class Declaring(StepFacts):
         def parameters_schema(self, kind):
             return {"title": kind}
 
     queue = memory_coordination().work_queue
-    assert JobQueueComponent(Declaring(tmp_path / "a"), queue).parameters_schema("task") == {"title": "task"}
-    assert JobQueueComponent(StepComponent(tmp_path / "b"), queue).parameters_schema("task") is None
+    assert JobQueueComponent(Declaring(), queue).parameters_schema("task") == {"title": "task"}
+    assert JobQueueComponent(StepFacts(), queue).parameters_schema("task") is None
 
 
 @pytest.mark.unit
@@ -356,10 +549,12 @@ def test_a_job_has_no_experiment_when_the_tracker_has_no_run():
 
 
 @pytest.mark.unit
-def test_the_job_of_a_request_that_was_cancelled_meanwhile_is_cancelled_when_it_is_queued(tmp_path):
-    queue = memory_coordination(lease_seconds=30).work_queue
+def test_the_job_of_a_request_that_was_cancelled_meanwhile_is_cancelled_when_it_is_queued(worked):
+    queue, _component, worker = worked
+    # The jobs stay queued: only the checks are answered.
+    worker.stop()
     requests = ScenarioTrainingRequests(queue, "s")
-    view = JobQueueComponent(StepComponent(tmp_path / "jobs"), queue)
+    view = JobQueueComponent(StepFacts(), queue)
     sample = policy_trajectory("s-j", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
 
     def request_job(job_id: str, request_id: str) -> TrainingJob:
@@ -371,12 +566,12 @@ def test_the_job_of_a_request_that_was_cancelled_meanwhile_is_cancelled_when_it_
     # The client cancelled the request while control built the data of its job.
     late = request_job("late", "r1")
     assert requests.cancel("r1") is not None and requests.failures() == {"r1": REQUEST_CANCELLED_ERROR}
-    view.submit(late)
+    submit(view, late)
     assert (view.status("late").state, view.status("late").error) == ("failed", JOB_CANCELLED_ERROR)
 
     # A cancel of the jobs of a request leaves the jobs of other requests and the jobs without a request.
-    view.submit(request_job("kept", "r2"))
-    view.submit(job("automatic"))
+    submit(view, request_job("kept", "r2"))
+    submit(view, job("automatic"))
     assert cancel_request_jobs(queue, "s", "missing") is None
     assert cancel_request_jobs(queue, "s", "r1")["id"] == "late"
     assert [view.status(job_id).state for job_id in ("kept", "automatic")] == ["running", "running"]

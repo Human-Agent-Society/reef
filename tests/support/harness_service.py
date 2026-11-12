@@ -39,15 +39,22 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.train.component import ScenarioRoot
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
-from reef.train.job_queue import JobQueueComponent
 from reef.train.manager import TrainingManager
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainingCommit
 
 
+#: The repository of each test directory, so that a dispatcher that a test opens again finds its snapshots, as a
+#: restarted service finds its artifact store.
+REPOSITORIES: dict[Path, CachedRepositoryBackendFactory] = {}
+
+
 def harness_repository(tmp_path: Path) -> CachedRepositoryBackendFactory:
-    """An in-memory repository under ``tmp_path``; a new scenario's root snapshot holds the recipe's seed tree."""
-    return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    """The in-memory repository under ``tmp_path``, the same one at each call; a new scenario's root snapshot holds
+    the recipe's seed tree."""
+    if tmp_path not in REPOSITORIES:
+        REPOSITORIES[tmp_path] = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    return REPOSITORIES[tmp_path]
 
 
 def seed_root(recipe: HarnessEvolutionRecipe) -> ScenarioRoot:
@@ -143,6 +150,10 @@ def checkpoint_result(scenario: Scenario, *, seconds: float = 30.0) -> TrainingC
     ``AssertionError`` when the job submits nothing, ends without a checkpoint, or saves none within ``seconds``.
     """
     submitted = scenario.next_commit()
+    # The first calls only ask the training service to check the job.
+    while submitted is None and scenario.trainer.job_check_waits:
+        time.sleep(0.02)
+        submitted = scenario.next_commit()
     if submitted is None or submitted.metrics["training_job"]["event"] != "submitted":
         raise AssertionError(f"scenario {scenario.name!r} submitted no job")
     scenario.commit(submitted)
@@ -187,12 +198,14 @@ def drive_trainer_job(trainer: Trainer, *, seconds: float = 30.0) -> TrainingCom
     raise AssertionError(f"the job of trainer {trainer.scenario!r} did not end in {seconds}s")
 
 
-def job_backend(trainer: Trainer, component: str = "harness") -> HarnessBackend:
-    """The backend that ``trainer``'s harness component runs the steps of ``component`` on."""
-    harness = trainer.job_loop_required().component
-    if isinstance(harness, JobQueueComponent):
-        # The dispatcher's trainer submits through the jobs queue; its training worker runs the component itself.
-        harness = harness.component
+def job_backend(
+    trainer: Trainer, component: str = "harness", *, dispatcher: Dispatcher | None = None
+) -> HarnessBackend:
+    """The backend that ``trainer``'s harness component runs the steps of ``component`` on. A trainer of
+    ``dispatcher`` submits through the jobs queue, and the dispatcher's training worker runs the component."""
+    harness: object = trainer.job_loop_required().component
+    if dispatcher is not None:
+        harness = next(built for built in dispatcher.job_components if isinstance(built, HarnessTrainingComponent))
     if not isinstance(harness, HarnessTrainingComponent):
         raise TypeError(f"trainer {trainer.scenario!r} submits no harness jobs")
     return harness.backend_for(trainer.scenario, component)

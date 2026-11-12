@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
+from reef.core.errors import InternalError
 from reef.core.job_data import TaskSample
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor import resolve
@@ -225,10 +226,9 @@ class SlimeJobs(LocalJobComponent):
         return self.base_start
 
     def import_start(self, artifact_dir: Path) -> str:
-        raise ValueError(
-            "Slime continues training from its own latest checkpoint; it cannot load a published snapshot "
-            "into its workers"
-        )
+        """Always ``ValueError``, the facts' refusal: the workers cannot load a published snapshot."""
+        self.facts.check_import_start(artifact_dir)
+        raise InternalError("SlimeFacts.check_import_start refuses every snapshot")
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
         return self.facts.parameters_schema(kind)

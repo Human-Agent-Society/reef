@@ -33,7 +33,7 @@ from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.component import SavedCheckpoint
+from reef.train.component import SavedCheckpoint, SnapshotStart
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 
@@ -166,7 +166,8 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     assert start.artifact_id == target["artifact_id"]
     assert scenario.current_snapshot() == served
     assert runtime.activated[served_before:] == []
-    assert runtime.restore_order == ["training"]
+    # Control imports nothing: it names the snapshot, and the training service imports it for the next job.
+    assert runtime.restore_order == []
     record = scenario.store.history()[-1]
     assert (record.operation, record.selection.components, record.component) == (
         "train_from",
@@ -176,11 +177,12 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     assert [row["artifact_id"] for row in value.list_artifacts("math") if row["active"]] == [
         scenario.repository.resolve(served).artifact_id
     ]
-    imported = str(runtime.imported[-1])
-    assert JobLoopState.from_dict(scenario.trainer.state).start == imported
-    # The next job starts from the imported snapshot.
+    named = SnapshotStart.from_text(JobLoopState.from_dict(scenario.trainer.state).start)
+    assert named is not None and named.root is None
+    # The next job starts from the snapshot, which the training service imports when it takes the job.
     train(value, 3)
-    assert runtime.submitted[-1].start == imported
+    assert runtime.restore_order[0] == "training"
+    assert runtime.submitted[-1].start == str(runtime.imported[-1])
     assert value.list_artifacts("math")[0]["parent_artifact_id"] == target["artifact_id"]
     value.close()
 
@@ -249,7 +251,7 @@ def test_activation_and_training_start_survive_a_restart(tmp_path) -> None:
     assert component.activated == ["w1"]
     assert [row["artifact_id"] for row in recovered.artifacts() if row["active"]] == [first["artifact_id"]]
     # The training start is taken again: the trainer's own commits do not record it yet.
-    assert JobLoopState.from_dict(recovered.trainer.state).start == str(component.imported[-1])
+    assert SnapshotStart.from_text(JobLoopState.from_dict(recovered.trainer.state).start) is not None
     train(restarted, 3)
     assert component.submitted[-1].start == str(component.imported[-1])
     restarted.close()
@@ -421,7 +423,7 @@ def test_served_and_train_from_http_api(tmp_path, monkeypatch) -> None:
             def refuse(release):
                 raise ValueError("these weights cannot train")
 
-            monkeypatch.setattr(runtime, "import_start", refuse)
+            monkeypatch.setattr(runtime, "check_import_start", refuse)
             refused = await client.post("/reef/scenarios/math/train-from", json={"artifact_id": target["artifact_id"]})
             assert refused.status == 400
             assert "cannot train" in await refused.text()
@@ -453,7 +455,7 @@ def test_a_failed_start_preserves_training_and_reports_inference_failure(tmp_pat
         raise RuntimeError("restore failed")
 
     if component == "training":
-        monkeypatch.setattr(training, "import_start", fail_restore)
+        monkeypatch.setattr(training, "check_import_start", fail_restore)
         operation = value.train_from
     else:
         monkeypatch.setattr(training.inference, "activate_checkpoint", fail_restore)

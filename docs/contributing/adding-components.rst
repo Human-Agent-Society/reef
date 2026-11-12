@@ -132,8 +132,11 @@ Implementation
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
 - Implement ``import_start`` to load a published snapshot as the start of the
-  next job. Raise ``ValueError`` when the framework cannot do this; Reef then
-  refuses a ``train-from`` for the scenario with HTTP 400.
+  next job. The training service calls it when it takes a job whose start
+  names a snapshot, so the same snapshot must give the same start again.
+  Raise ``ValueError`` when the framework cannot do this, and refuse the same
+  snapshots in ``facts.check_import_start``; Reef then refuses a
+  ``train-from`` for the scenario with HTTP 400.
 - Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
@@ -155,9 +158,29 @@ Implementation
   its own settings, and let the component answer the same members from a value
   of it, so the two cannot differ. Share no facts code with another backend.
   ``facts`` is abstract: every factory defines it.
-  With the facts, ``reef serve --component inference`` builds the serving
-  runtime from ``facts.artifact_format`` and never builds the component, so
-  its environment does not need the framework.
+  Only ``reef serve --component training`` builds the component. Every other
+  service reads the facts, so its environment needs neither the framework nor
+  the backend's credentials. Control reaches the component through the work
+  queue; see `Control and the training service
+  <../developer-guide/executors.rst#control-and-the-training-service>`__. The
+  facts type defines these members beside the properties:
+
+  - ``default_start()`` and ``default_start_inputs``: the root of a new
+    scenario (next item).
+  - ``parameters_schema(kind)``: the JSON Schema of a job's parameters.
+  - ``check_root_start(root)`` and ``check_import_start(artifact_dir)``: raise
+    ``ValueError`` exactly when the component's ``root_start`` and
+    ``import_start`` raise, with the same message. They write nothing.
+  - ``check_artifact(files)``: check an import's files. The default checks
+    ``artifact_format`` and returns ``None``. Override it when the snapshots
+    have another layout. Return a JSON object when something must also
+    resolve on the backend's service, and implement
+    ``TrainingComponent.check_remote_artifact(names)`` for it.
+
+  The component implements ``check_job``, which the training service runs
+  before a job enters the queue, and ``changed_parts`` when its checkpoints
+  change named parts. Return no start that begins with ``snapshot:``; Reef
+  names snapshots with that prefix.
 - State the default start in the facts, and nowhere else.
   ``facts.default_start()`` returns the ``DefaultStart`` that a new scenario's
   root holds: a few small text files and ``default_start_inputs``. Write no

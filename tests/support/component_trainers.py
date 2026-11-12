@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -36,6 +37,7 @@ from reef.train.trainer_builder import TrainerBuilder
 WEIGHTS = "weights"
 HARNESS = "harness"
 from reef.execution.workers import SERVICE_COMPONENTS
+from reef.train.types import TrainingCommit
 
 
 class ComponentJobs(StubTrainingComponent):
@@ -93,6 +95,20 @@ class ComponentJobs(StubTrainingComponent):
         status = self.step(job)
         self.submitted.append(job)
         self.statuses[job.job_id] = status
+
+
+def checked_commit(
+    scenario: Scenario, component: str | None = None, *, seconds: float = 10.0
+) -> TrainingCommit | None:
+    """``scenario.next_commit(component)``, called again while the trainer's reserved job waits for the check of the
+    training service, as the trainer's worker polls. ``AssertionError`` when no answer comes within ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while True:
+        result = scenario.next_commit(component)
+        if result is not None or not scenario.trainer_for(component).job_check_waits:
+            return result
+        assert time.monotonic() < deadline, "the training service did not check the job"
+        time.sleep(0.01)
 
 
 def finish_job(scenario: Scenario, component: str, checkpoint_metrics: Mapping[str, Any] | None = None) -> None:
