@@ -125,6 +125,15 @@ def test_a_restarted_generator_continues_with_the_next_session_and_generation(tm
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 4}
 
 
+def test_a_generator_without_state_numbers_from_the_recipe_generation_and_never_goes_back(tmp_path: Path) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), source_count=3, count=1)
+    tasks = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=5)))
+    assert [task.name for task in tasks] == ["harbor-00005-000-autoenvscaling"]
+    tasks = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=2)))
+    assert [task.name for task in tasks] == ["harbor-00006-000-autoenvscaling"]
+    assert cursor(tmp_path)["next_generation"] == 7
+
+
 class BlockingAuthor(TaskAuthor):
     """An author whose run lasts until it is stopped."""
 

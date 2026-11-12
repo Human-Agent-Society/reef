@@ -985,7 +985,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
         The sources file says what the tasks are, so the request's description goes unused. A request that
         carries source records is refused: this generator chooses its own sessions.
         """
-        self.generation = self.cursor.next_generation
+        # The recipe keeps its generation numbers when an upgrade drops this generator's state: never number below
+        # them, so a new task never takes the name of a task that is already published.
+        self.generation = max(self.cursor.next_generation, request.generation)
         # A generation number is used once, so no attempt meets the task names of an attempt a reload cancelled.
         self.save_cursor(replace(self.cursor, next_generation=self.generation + 1))
         if request.source_records:
