@@ -46,11 +46,11 @@ from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.train import PipelineContext, Trainer, TrainingPipeline
-from reef.train.algos.schedule import StepScheduling
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.trainer import PendingTrainingResult
 from reef.train.types import JobData, PreparedCommit, TrainingCommit
 

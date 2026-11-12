@@ -12,11 +12,11 @@ from reef.core.errors import RuntimeConfigError
 from reef.recipe.dataset import DatasetRecipe
 from reef.recipe.generated_tasks import GeneratedTaskRecipe
 from reef.recipe.sft import SFTRecipe
-from reef.train.algos.schedule import StepScheduling
 from reef.train.learning_rate import LearningRateSchedule
 from reef.train.slime_backend.dataset import DatasetSettings
 from reef.train.slime_backend.launch import SlimeComponentFactory, SlimeDeployment
 from reef.train.slime_backend.parameters import SlimeJobParameters, slime_parameters_schema
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.task_rollouts import HarborSettings
 
 SCHEDULE = {"name": "warmup", "peak_learning_rate": 1e-5, "warmup_steps": 2}

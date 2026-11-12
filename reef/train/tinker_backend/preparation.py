@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.job_data import JobData, trajectories
-from reef.train.algos.schedule import StepScheduling, schedule_job_data
 from reef.train.tinker_backend.config import ScoreCentering
-from reef.train.tinker_backend.losses import ScoreCenteredLoss, TinkerLoss, TokenRow, resolve_tinker_loss
-from reef.train.tinker_backend.objectives import resolve_tinker_objective
+from reef.train.tinker_backend.loss_families import resolve_loss_family
+from reef.train.tinker_backend.losses import ScoreCenteredLoss, TinkerLoss, TokenRow
+from reef.train.tinker_backend.objectives import resolve_objective
+from reef.train.tinker_backend.schedule import StepScheduling, schedule_job_data
 
 
 @dataclass(frozen=True)
@@ -56,11 +57,11 @@ def prepare_tinker_job(
     centering meets another policy loss, the objective gives no advantage for each trajectory of a policy loss,
     or a row is not trainable.
     """
-    objective = resolve_tinker_objective(objective_reference)
+    objective = resolve_objective(objective_reference)
     signal = objective.prepare(data, state)
     if signal.action == "skip":
         return TinkerSteps(None, (), signal.next_algorithm_state, signal.metrics)
-    loss = resolve_tinker_loss(objective.loss_family)
+    loss = resolve_loss_family(objective.loss_family)
     if score_centering is not None and loss.uses_advantages:
         if objective.loss_family != "importance_sampling":
             raise ValueError(
@@ -83,19 +84,10 @@ def prepare_tinker_job(
         for item, advantage in zip(items, advantages, strict=True)
     ]
     schedule = schedule_job_data(data, objective.rollout_unit, scheduling, step_size=batch_size)
-    steps: list[tuple[TokenRow, ...]] = []
-    cursor = 0
-    next_rollout = 0
-    for size in schedule.step_sizes:
-        next_rollout += size
-        indices = []
-        while cursor < len(schedule.row_indices) and schedule.rollout_ids[cursor] < next_rollout:
-            indices.append(schedule.row_indices[cursor])
-            cursor += 1
-        steps.append(tuple(rows[index] for index in indices))
+    steps = tuple(tuple(rows[index] for index in step) for step in schedule.steps)
     return TinkerSteps(
         loss,
-        tuple(steps),
+        steps,
         signal.next_algorithm_state,
         {**signal.metrics, "optimizer_steps": len(steps), "dropped_rollouts": schedule.dropped_rollouts},
     )

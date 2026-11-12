@@ -23,9 +23,9 @@ from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSetting
 from recipes.openclawrl.turns import TurnJob
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.trajectories import source_record_id
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData, TrajectorySample
 
 pytestmark = pytest.mark.unit
@@ -186,7 +186,7 @@ def test_actor_init_on_resume_needs_the_base_checkpoint(tmp_path, topk_objective
 
 
 def test_topk_preserves_external_advantages_through_slime_hook(topk_objective) -> None:
-    from reef.train.slime_backend.algorithm import resolve_objective_paths
+    from reef.train.slime_backend.loss_families import resolve_objective_paths
 
     args = SimpleNamespace(loss_family="openclawrl")
     resolve_objective_paths(args)

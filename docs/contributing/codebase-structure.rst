@@ -382,7 +382,9 @@ The extension points those packages expose are in `Python API
 - Does it decide which records train, in which groups, or how a record set
   becomes samples? Put the shared contract in ``reef/record2sample/``. Does it
   shape samples into job data? Put it in ``reef/sample2job/``. Does it turn job
-  data into a step signal? Put it in ``reef/train/algos/``.
+  data into a step signal? Put it in the training backend that trains it
+  (``reef/train/slime_backend/`` or ``reef/train/tinker_backend/``); the
+  backends share no code.
   ``reef/train/pipeline.py`` drives the two stages. A recipe selects and binds
   that machinery; it should
   not reimplement it.

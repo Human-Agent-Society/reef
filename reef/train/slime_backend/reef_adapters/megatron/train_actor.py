@@ -48,7 +48,7 @@ from reef.train.slime_backend.reef_adapters.worker_hooks import (
 
 
 def _loss_family_hook(args: Any, arg_name: str) -> Any:
-    """Load a worker hook the active loss family registered via ``@objective``.
+    """Load a worker hook the active loss family registered via ``@worker_hook``.
 
     ``resolve_objective_paths`` projects each family's registered dotted paths
     onto ``args`` during Megatron init, so families extend the actor without

@@ -1609,14 +1609,14 @@ A job names it in its ``objective`` parameter, usually from the recipe's
 ``default_parameters()``: a registered name, or a dotted
 ``my_method.slime:MyObjective`` reference.
 The dotted reference names a class with a zero-argument
-constructor or an existing instance; its module must be importable in both the
+constructor; its module must be importable in both the
 service and training processes.
 
 .. code:: python
 
-   from reef.train.algos.helpers import next_steps
-   from reef.train.algos.signals import TrainingSignal
    from reef.train.slime_backend.objectives import SlimeObjective
+   from reef.train.slime_backend.schedule import next_steps
+   from reef.train.slime_backend.signals import TrainingSignal
    from reef.train.types import JobData, trajectories
    from reef.core.trajectories import trajectory_reward
 
@@ -1634,11 +1634,16 @@ service and training processes.
                metrics={"steps": steps},
            )
 
-For a shared short name, decorate the class with ``@register_slime_objective``
-(or ``@register_tinker_objective``). The same function accepts an explicit
-instance. So that the name resolves where the module is not yet imported, a method
-package's public half calls ``register_objective_ref(name, "my_method.slime:MyObjective")``
-from ``reef.train.algos.registry``. Core never imports method packages. A built-in
+For a short name, a method package's public half calls
+``register_objective(name, "my_method.slime:MyObjective")`` from
+``reef.train.slime_backend.objectives`` (or from
+``reef.train.tinker_backend.objectives`` for a ``TinkerObjective``). The call
+records the reference and imports nothing; the backend imports the module when
+a job first names the objective. The same function accepts an instance in
+place of the reference. Each backend has its own ``register_objective``,
+``resolve_objective``, ``TrainingSignal``, ``next_steps`` and
+``StepScheduling``; the examples here show Slime's. Core never imports method
+packages. A built-in
 ``sft`` objective exists on each backend, and ``slime_dataset`` on Slime.
 
 The training component cuts each job's data into optimizer steps. The
@@ -1655,7 +1660,7 @@ objective set what the component may do with the job's data:
   computed once, which a clipped ratio tolerates.
 
 A job's optional ``scheduling`` parameter is a ``StepScheduling``
-(``reef.train.algos.schedule``) as an object:
+(``reef.train.slime_backend.schedule`` or ``reef.train.tinker_backend.schedule``) as an object:
 
 .. container:: config
 
@@ -1682,7 +1687,7 @@ accept a job and again when they run it.
 ``TrainingComponent.parameters_schema(kind)`` returns the JSON Schema of those
 parameters for a sample kind, or None; the scenario contract serves it.
 
-``reef.train.algos.schedule.pack_rollouts(token_counts, packing_length)`` is
+``pack_rollouts(token_counts, packing_length)`` of each backend's ``schedule`` module is
 the packing: best-fit decreasing, which puts each rollout, longest first, into
 the pack whose free tokens it fills most closely. The packs decide only which
 rollouts share a step. The loss and the micro-batches stay the component's.
@@ -2323,9 +2328,9 @@ defaults to true; hosted integrations set it to false to preserve remote
 model identifiers during deployment resolution.
 
 Methods implement ``TinkerLoss`` from ``reef.train.tinker_backend.losses``
-and register it with ``register_loss_family_ref(name, "package.module:CLASS",
-backend="tinker")`` from ``reef.train.algos.registry``, the same table that
-holds their Slime reference. ``loss_fn`` names the Tinker built-in loss the
+with a ``loss_family`` name, and decorate the class with ``@register_loss_family``
+from ``reef.train.tinker_backend.loss_families``, in the module that defines
+their ``TinkerObjective``. ``loss_fn`` names the Tinker built-in loss the
 family trains with; ``inputs(rows, base_logprobs, kl_coef=...)`` returns that
 function's token-aligned ``loss_fn_inputs``, one dictionary per row; and
 ``needs_base_logprobs`` requests frozen-base scores for a nonzero KL
