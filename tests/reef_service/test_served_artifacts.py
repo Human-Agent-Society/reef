@@ -128,7 +128,7 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
             assert handler.artifact_ids == [newest["artifact_id"], older["artifact_id"], newest["artifact_id"]]
             # The record names the snapshot that answered.
             record_id = beside.headers["x-reef-agent-record-id"]
-            record = value.get_or_create_scenario("math").records.get("math", record_id)
+            record = value.get_or_create_scenario("math").records.read("math", record_id)
             assert record.artifact_id == older["artifact_id"]
 
             missing = await client.post("/reef/scenarios/math/artifacts/missing/v1/chat/completions", json=CHAT)

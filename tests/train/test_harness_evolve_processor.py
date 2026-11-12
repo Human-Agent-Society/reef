@@ -365,7 +365,7 @@ def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_com
     first.acknowledge(lost.data_id)
     first.close()
 
-    (trained,) = samples.get(("task-a",))
+    (trained,) = samples.read(("task-a",))
     assert task_names(durable) == ["task-a"] and trained.train_count("") == 1
     restarted = offline_pipeline(samples, job_samples=1)
     rest = []

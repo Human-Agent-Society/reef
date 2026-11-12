@@ -52,7 +52,7 @@ def test_a_storage_keeps_the_records_in_its_own_data_store_across_a_restart(tmp_
     with closing(SQLiteScenarioStorage(tmp_path)) as storage, closing(storage.open("math")) as session:
         session.records.append(first)
     with closing(SQLiteScenarioStorage(tmp_path)) as storage, closing(storage.open("math")) as session:
-        assert session.records.get("math", "r1") == first
+        assert session.records.read("math", "r1") == first
         assert storage.data.read("math", "math/r1") is not None
 
 

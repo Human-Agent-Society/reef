@@ -172,7 +172,7 @@ class NewNode:
     """The node of one record to add: its sequence, scenario and record ID, and its payload with that payload's key,
     shape and ``call_json`` (``node_call_json``).
 
-    Purpose: a store gives these to ``TrajectoryNodes.add_many`` when it writes records. All but the sequence
+    Purpose: a store gives these to ``TrajectoryNodes.append_many`` when it writes records. All but the sequence
     depend on the record alone, so a store can make them before it takes a lock.
     """
 
@@ -218,16 +218,16 @@ class TrajectoryNodes:
     ``entries_json`` is NULL keeps its ``entries_json``, ``shape_json`` and ``call_json`` in a segment line
     (``node_line``).
 
-    Purpose: a SQL store makes it for its scope. The store adds a node when it writes a record (``add``), reads the
+    Purpose: a SQL store makes it for its scope. The store adds a node when it writes a record (``append``), reads the
     ATIF calls of records back (``contents``) and releases the nodes of records that it deletes (``release``), in
-    the same transaction. Writers of one scope must be serialized: ``add`` reads the candidate parents before it
+    the same transaction. Writers of one scope must be serialized: ``append`` reads the candidate parents before it
     inserts.
     """
 
     nodes: ScopedTable
     segments: SegmentPartition | None = None
 
-    def add(
+    def append(
         self,
         connection: Connection,
         node_sequence: int,
@@ -246,15 +246,15 @@ class TrajectoryNodes:
         shape = call_shape(payload)
         if shape is None:
             raise ValueError(f"record {agent_record_id!r} has no message list, so it has no trajectory node")
-        self.add_many(
+        self.append_many(
             connection,
             [NewNode(node_sequence, scenario, agent_record_id, payload, key, shape, node_call_json(payload, shape))],
         )
 
-    def add_many(self, connection: Connection, new_nodes: Sequence[NewNode]) -> None:
+    def append_many(self, connection: Connection, new_nodes: Sequence[NewNode]) -> None:
         """Add ``new_nodes``, in sequence order, with a number of statements that does not grow with their count.
 
-        The parent of each is as ``add`` gives, also among the earlier ones of ``new_nodes``.
+        The parent of each is as ``append`` gives, also among the earlier ones of ``new_nodes``.
         """
         if not new_nodes:
             return
@@ -490,7 +490,7 @@ class SQLScenarioDatabase(Closeable):
 
     Values: ``settings`` is the settings table, and ``scope`` maps its namespace columns to their values (empty in a
     database of one scenario, ``storage_id`` in the PostgreSQL record database). A subclass gives ``_transaction``
-    and ``_insert_if_absent``.
+    and ``_write_if_absent``.
 
     Purpose: the task, sample, evaluation and commit stores of a session run their SQL in its transactions.
     """
@@ -505,7 +505,7 @@ class SQLScenarioDatabase(Closeable):
         that transaction's owner."""
 
     @abstractmethod
-    def _insert_if_absent(
+    def _write_if_absent(
         self,
         connection: Connection,
         table: Table,

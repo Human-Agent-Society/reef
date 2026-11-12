@@ -75,8 +75,8 @@ class SegmentStore(Plugin, ABC):
 
     Operations:
 
-    * ``put(partition, segment_id, data)`` stores ``data``. The segment is durable when the method returns. The data
-      store gives each segment a new ID, so it never puts one ID twice.
+    * ``write(partition, segment_id, data)`` stores ``data``. The segment is durable when the method returns. The data
+      store gives each segment a new ID, so it never writes one ID twice.
     * ``read(partition, lines)`` returns the bytes of each ``SegmentLine`` of ``lines``, in order, without the
       newline. A missing segment or a line past its end is a ``SegmentNotFound``.
     * ``delete(partition, segment_id)`` removes the segment. A missing segment is not an error.
@@ -84,9 +84,9 @@ class SegmentStore(Plugin, ABC):
     The store also keeps directories of files, such as the data directories of training jobs
     (``reef.storage.job_data``). A key names each directory; it is ``/``-separated words, with no ``.`` or ``..``:
 
-    * ``find_directory(key)`` is the URI of the directory ``key``, or None when the store does not hold all of it.
-    * ``put_directory(key, source)`` keeps a copy of the files under ``source`` as the directory ``key`` and returns
-      its URI. A put of a key that the store holds keeps the first copy.
+    * ``read_directory_uri(key)`` is the URI of the directory ``key``, or None when the store does not hold all of it.
+    * ``write_directory(key, source)`` keeps a copy of the files under ``source`` as the directory ``key`` and returns
+      its URI. A write of a key that the store holds keeps the first copy.
     * ``open_directory(uri)`` returns a local directory with the files of the directory at ``uri``. A remote store
       copies them into its local cache.
     * ``delete_directory(key)`` removes the directory. A missing directory is not an error.
@@ -105,7 +105,7 @@ class SegmentStore(Plugin, ABC):
         """
 
     @abstractmethod
-    def put(self, partition: str, segment_id: str, data: bytes) -> None: ...
+    def write(self, partition: str, segment_id: str, data: bytes) -> None: ...
 
     @abstractmethod
     def read(self, partition: str, lines: Sequence[SegmentLine]) -> tuple[bytes, ...]: ...
@@ -114,10 +114,10 @@ class SegmentStore(Plugin, ABC):
     def delete(self, partition: str, segment_id: str) -> None: ...
 
     @abstractmethod
-    def find_directory(self, key: str) -> str | None: ...
+    def read_directory_uri(self, key: str) -> str | None: ...
 
     @abstractmethod
-    def put_directory(self, key: str, source: Path) -> str: ...
+    def write_directory(self, key: str, source: Path) -> str: ...
 
     @abstractmethod
     def open_directory(self, uri: str) -> Path: ...
@@ -180,7 +180,7 @@ class LocalSegmentStore(SegmentStore):
             raise ValueError("a segment's partition and ID are non-empty, and the ID is a plain file name")
         return self.directory / hashlib.sha256(partition.encode("utf-8")).hexdigest() / f"{segment_id}.jsonl"
 
-    def put(self, partition: str, segment_id: str, data: bytes) -> None:
+    def write(self, partition: str, segment_id: str, data: bytes) -> None:
         target = self.path(partition, segment_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = target.with_name(f".{segment_id}.partial")
@@ -210,11 +210,11 @@ class LocalSegmentStore(SegmentStore):
     def directory_path(self, key: str) -> Path:
         return (self.directory / "directories" / directory_key(key)).resolve()
 
-    def find_directory(self, key: str) -> str | None:
+    def read_directory_uri(self, key: str) -> str | None:
         path = self.directory_path(key)
         return path.as_uri() if path.is_dir() else None
 
-    def put_directory(self, key: str, source: Path) -> str:
+    def write_directory(self, key: str, source: Path) -> str:
         target = self.directory_path(key)
         if not target.is_dir():
             target.parent.mkdir(parents=True, exist_ok=True)
