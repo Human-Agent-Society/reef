@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
 # Exercise auto-selected student rollouts and teacher controls against an existing native OPD service.
 set -euo pipefail
-usage="Usage: SR_IMAGE=repository@sha256:... REEF_TOKEN=... $0 /path/to/deepmath.jsonl"
+usage="Usage: [SR_IMAGE=repository@sha256:...|sha256:...] REEF_TOKEN=... $0 /path/to/deepmath.jsonl"
 if [[ ${1:-} == --help ]]; then echo "$usage"; exit 0; fi
 [[ $# == 1 && -s $1 && -f $1 ]] || { echo "$usage" >&2; exit 2; }
-: "${SR_IMAGE:?Set SR_IMAGE to the digest of your local pinned Semantic Router image}"
 : "${REEF_TOKEN:?Set REEF_TOKEN to the token of your native OPD service}"
-[[ $SR_IMAGE =~ ^[a-z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || { echo "SR_IMAGE requires a repository digest." >&2; exit 2; }
+# Optional: without SR_IMAGE, reef serve builds the pinned router image on its first start and reuses it afterwards.
+sr_image=${SR_IMAGE:-}
+if [[ -n $sr_image ]]; then
+    [[ $sr_image =~ ^([a-z0-9./:_-]+@)?sha256:[a-f0-9]{64}$ ]] ||
+        { echo "SR_IMAGE requires a repository digest or a local image ID." >&2; exit 2; }
+fi
 
 example=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$example/../../.." && pwd)
 export PYTHONPATH="$repo${PYTHONPATH:+:$PYTHONPATH}"
 python=$("${REEF_PYTHON:-python3}" -c 'import sys; print(sys.executable)')
 export REEF_PYTHON="$python"
-revision=$("$python" -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
-installed=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$SR_IMAGE")
-[[ $installed == "$revision" ]] || { echo "SR_IMAGE must have revision $revision." >&2; exit 1; }
+deployment_section="{}"
+if [[ -n $sr_image ]]; then
+    revision=$("$python" -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
+    installed=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$sr_image")
+    [[ $installed == "$revision" ]] || { echo "SR_IMAGE must have revision $revision." >&2; exit 1; }
+    deployment_section="{semantic_router_image: '$sr_image'}"
+fi
 docker compose version >/dev/null
 
 umask 077
@@ -47,7 +55,7 @@ export OPD_ROUTING_RUN_DIR="$run_dir"
 cat > "$run_dir/manifest.yaml" <<YAML
 schema_version: 2
 automatic_model: auto
-deployment: {semantic_router_image: '$SR_IMAGE'}
+deployment: $deployment_section
 targets:
   student: {provider_model: student, revision: native-opd-service, url: 'http://127.0.0.1:$STUDENT_BRIDGE_PORT', role: student}
   teacher: {provider_model: teacher, revision: frozen-opd-service, url: 'http://127.0.0.1:$TEACHER_BRIDGE_PORT', role: teacher}
@@ -112,6 +120,15 @@ until curl --silent --fail --max-time 3 "http://127.0.0.1:$STUDENT_BRIDGE_PORT/v
 done
 "${outer_env[@]}" "$python" -u -m reef.cli serve -c "$run_dir/reef.yaml" >"$run_dir/reef.log" 2>&1 &
 reef_pid=$!
+# The first start without SR_IMAGE builds the router image, for up to image_build_timeout_seconds (3600).
+deadline=$((SECONDS + 3700))
+until grep -q '^\[reef-routing\].*"state": "prepared"' "$run_dir/reef.log"; do
+    if ! kill -0 "$bridge_pid" 2>/dev/null || ! kill -0 "$reef_pid" 2>/dev/null || (( SECONDS >= deadline )); then
+        echo "Routing preparation failed. See $run_dir/reef.log and its image build log." >&2
+        exit 1
+    fi
+    sleep 1
+done
 deadline=$((SECONDS + 180))
 until grep -q '^\[reef-routing\].*"state": "ready"' "$run_dir/reef.log"; do
     if ! kill -0 "$bridge_pid" 2>/dev/null || ! kill -0 "$reef_pid" 2>/dev/null || (( SECONDS >= deadline )); then

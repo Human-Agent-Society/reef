@@ -1031,6 +1031,8 @@ def test_the_tutorial_domain_smoke_writes_manifests_that_differ_only_in_a_reload
     initial = RoutingSnapshot.load(tmp_path / "manifests" / "manifest.yaml")
     updated = RoutingSnapshot.load(tmp_path / "manifests" / "manifest.updated.yaml")
     check_policy_change(initial, updated)
+    # The tutorial's default leaves the router image to Reef, which builds it at the first start.
+    assert initial.semantic_router_image is None and updated.semantic_router_image is None
     assert initial.domain_classifier is not None and initial.domain_classifier == updated.domain_classifier
     assert initial.domain_classifier.files == domain_smoke.VELA_DOMAIN_FILES
     assert initial.domain_classifier.model_directory == str(tmp_path / "vela-domain")
