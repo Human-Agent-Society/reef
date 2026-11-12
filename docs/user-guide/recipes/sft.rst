@@ -67,6 +67,13 @@ The training component renders each sample with the model's chat template
 a sample that cannot render or that is longer than ``max_tokens``, and counts
 it in the job metric ``unrenderable_samples``.
 
+Training renders text only, so Reef refuses a recorded call, an imported
+record or a new data item with an image (see `Recipe
+<../../reference/python-api.rst#recipe>`__). An older record or upload can
+still hold an image. A sample with an image cannot render, also when only its
+captured records keep the image, such as the screenshot of a Responses
+``computer_call_output``.
+
 The ``sft`` objective, built in on Slime and on Tinker, sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
 ``sft_loss``. On Tinker, the built-in ``sft`` family trains Tinker's
@@ -154,7 +161,12 @@ train:
 - ``is_copied_context`` is not a boolean;
 - a step's ``observation`` is not empty and is not an object; a content part
   of a message or an observation result is not an object, a text part has a
-  ``text`` that is not a string, or an image part has no ``source.path``.
+  ``text`` that is not a string, or an image part has no ``source.path``;
+- it holds an image. Training renders text only, and Reef does not train on
+  the text without the image.
+
+A trajectory that Reef stored before this check, or that holds another part
+that is not text, is skipped with a warning when the trainer reads it.
 
 The training component leaves a trajectory out of its job when:
 

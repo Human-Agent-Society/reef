@@ -453,8 +453,10 @@ The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
 not mean a training step has finished. Identical retries return the existing
 receipt, including after capacity eviction; reusing the ID with different content
 returns HTTP 409. Authentication failures return 401 and invalid envelopes,
-report schemas or references return 400. Scenario selection comes only from
-headers; envelope fields other than the three shown above are rejected.
+report schemas or references return 400. An inference record with an image also
+returns 400 when the recipe refuses images (see `Recipe
+<python-api.rst#recipe>`__). Scenario selection comes only from headers; envelope
+fields other than the three shown above are rejected.
 
 ``request_type`` may be ``inference`` or ``report``. Inference payloads follow
 the selected recipe's recorded-input contract: native provider request fields
@@ -632,6 +634,10 @@ returns 409. A line that is not an ATIF document returns 400 and names the
 line. ``POST /reef/namespaces/{owner}/data`` refuses a trajectory; it creates
 record items only.
 
+When the deployment's recipe refuses images (see `Recipe
+<python-api.rst#recipe>`__), Reef first refuses a trajectory or a record item
+with an image, also one that names no scenario.
+
 Before Reef stores the items, it checks each scenario that they name. The
 scenario must have the owner, and its recipe must train on the items:
 
@@ -641,7 +647,8 @@ scenario must have the owner, and its recipe must train on the items:
   warning. The SFT recipe trains every agent turn, except the steps marked
   ``is_copied_context: true`` (`SFT
   <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__). It skips
-  a trajectory without such a turn. The training component renders the
+  a trajectory without such a turn, or with an image or another part that is
+  not text. The training component renders the
   trajectory with the model's chat template when a job trains it, and leaves
   out one that cannot render.
 - A task in the ``train`` split needs a recipe that trains imported tasks
@@ -652,8 +659,8 @@ scenario must have the owner, and its recipe must train on the items:
   The ``eval`` split takes tasks for any recipe,
   because an `artifact evaluation <#evaluate-an-artifact>`__ runs them.
 
-A refusal returns 400, names the item, and stores nothing. Reef checks a
-scenario that does not exist yet when the scenario opens.
+A refusal returns 400, names the item, and stores nothing. Reef runs the other
+checks for a scenario that does not exist yet when the scenario opens.
 
 Create task items
 ~~~~~~~~~~~~~~~~~
@@ -2265,6 +2272,10 @@ On a weight-serving deployment, the engine handler adds its bookkeeping keys:
 ``lora_path`` to address the served adapter and ``return_meta_info`` so the
 record shows which weights answered. It replaces a ``lora_path`` that the body
 names. Set ``"stream": true`` and read the SSE response for streaming.
+
+A recorded call with an image gets HTTP 400 when the recipe refuses images (see
+`Recipe <python-api.rst#recipe>`__). Reef does not call the model and stores
+nothing. An evaluation call is not checked.
 
 The receipt identifies the stored record:
 

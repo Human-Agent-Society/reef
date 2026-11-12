@@ -40,6 +40,7 @@ from reef.inference.interfaces import InferenceHandler
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.config import recipe_config_from_file_layout
+from reef.recipe.deployment import refuses_images
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import weight_training_selection
 from reef.scenario.factory import read_trainer_specs, scenario_report_type, with_record2sample_configs
@@ -373,6 +374,17 @@ _WEIGHTS_AND_HARNESS = {
     "harness": {"implementation": TREE},
 }
 _LOCAL_TRAINING = "tests.support.training_deployment:LocalDeployment"
+
+
+@pytest.mark.unit
+def test_a_composite_refuses_images_when_a_component_does() -> None:
+    class TextOnlyRecipe(_ConfigRecipe):
+        @property
+        def refuses_images(self) -> bool:
+            return True
+
+    assert not refuses_images(CompositeRecipe(components={"a": _ConfigRecipe(), "b": _TreeRecipe()}))
+    assert refuses_images(CompositeRecipe(components={"a": TextOnlyRecipe(), "b": _TreeRecipe()}))
 
 
 @pytest.mark.unit

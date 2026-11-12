@@ -21,6 +21,8 @@ Routes:
 
 Rules:
 
+- A recorded call with an image, when the deployment refuses images (``reef.recipe.deployment.refuses_images``):
+  400, and no engine sees it. An unrecorded call, such as an evaluation rollout's, stays open.
 - A body that the engine's handler refuses (``request_payload``): 400.
 - No row: 503 while its artifact starts or after startup fails; 404 for an unknown model.
   A replica that cannot read ``served_models`` and has no recent cached read answers 503.
@@ -54,6 +56,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
+from reef.core.trajectories import has_image_content
 from reef.core.values import JsonValue
 from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler, StartupSteps
 from reef.inference.provider_protocol import SSEFrameDecoder
@@ -359,7 +362,8 @@ class InferenceReplica:
 
     Values: ``cache`` reads ``served_models``; ``storage`` holds each scenario's records and commit history;
     ``engines`` gives the handler of each row's engine; ``timeout_seconds`` is the positive time that the replica
-    waits for an engine; ``for_codex`` is whether streams are rewritten for a Codex client.
+    waits for an engine; ``for_codex`` is whether streams are rewritten for a Codex client; ``refuses_images`` is
+    whether the deployment refuses image content (``reef.recipe.deployment.refuses_images``).
 
     Purpose: ``add_inference_routes`` routes model requests to ``answer`` and status reads to ``startup_status``.
     """
@@ -369,6 +373,7 @@ class InferenceReplica:
     engines: EngineClients
     timeout_seconds: float = 300.0
     for_codex: bool = False
+    refuses_images: bool = False
 
     def __post_init__(self) -> None:
         if not self.timeout_seconds > 0:
@@ -589,6 +594,11 @@ class InferenceReplica:
         except HeaderError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         payload = await read_object(request)
+        if record and self.refuses_images and has_image_content(payload):
+            raise web.HTTPBadRequest(
+                text="the request holds an image, "
+                f"and the recipe of scenario {parsed.scenario!r} does not support images"
+            )
         served, traffic = await self.resolve(
             parsed.scenario,
             payload,
@@ -801,6 +811,7 @@ def build_inference_app(
     max_cache_age_seconds: float = 300.0,
     timeout_seconds: float = 300.0,
     for_codex: bool = False,
+    refuses_images: bool = False,
 ) -> web.Application:
     """The inference HTTP app: model routes, startup status, and ``/healthz`` behind the service tokens."""
     replica = InferenceReplica(
@@ -809,6 +820,7 @@ def build_inference_app(
         engines,
         timeout_seconds,
         for_codex,
+        refuses_images,
     )
     app = service_application(tokens, evaluation_tokens=evaluation_tokens)
     add_inference_routes(app, replica)

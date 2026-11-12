@@ -42,6 +42,7 @@ from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.composite import CompositeRecipe, component_recipes
+from reef.recipe.deployment import refuses_images
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.sample2job import NoJobData
@@ -661,6 +662,7 @@ class ScenarioFactory:
                     # The deployment's contract, not the first trainer's: the components of a composite
                     # agree one, whatever order they are listed in.
                     report_type=scenario_report_type(self._recipe),
+                    refuses_images=refuses_images(self._recipe),
                 ),
                 repository=repository,
                 root_source=root_source,

@@ -4,7 +4,9 @@ A client creates, reads, queries, updates and deletes the data items of one owne
 to a scenario, or removes one, follows the same order:
 
 1. Check the scenarios that the items are to use: each existing one must have the owner, and must be able to train
-   on its new items (``Dispatcher.check_use``). A scenario that does not exist yet is checked when it opens.
+   on its new items (``Dispatcher.check_use``). A scenario that does not exist yet is checked when it opens. When
+   the deployment's recipe refuses images, a new trajectory or record item with an image is refused here, also one
+   that names no scenario.
 2. Write the data store.
 3. Ask control to sync each scenario that the write touched (``request_data_sync``), and wait up to
    ``SYNC_WAIT_SECONDS`` for the syncs to end. The response says whether they ended (``synced``); a sync that did
@@ -27,7 +29,9 @@ from harbor.models.task.task import Task as HarborTaskLoader
 
 from reef.core.errors import ReefError
 from reef.core.job_data import TrajectorySample
+from reef.core.trajectories import has_image_content
 from reef.dispatcher import Dispatcher
+from reef.recipe.deployment import refuses_images
 from reef.service.tasks import unpack_task_archive
 from reef.storage.data import (
     ITEM_KINDS,
@@ -66,7 +70,8 @@ class DataAccess:
     """What the data writes and reads use of a process.
 
     Values: ``store`` is the deployment's data store, or None for a deployment without one; ``queue`` is the work
-    queue that carries the data syncs and transfers; ``scenarios`` checks the scenarios that the items name.
+    queue that carries the data syncs and transfers; ``scenarios`` checks the scenarios that the items name;
+    ``refuses_images`` is whether the deployment refuses image content (``reef.recipe.deployment.refuses_images``).
 
     Purpose: the data routes and the data service make one from their dispatcher (``of``); the functions of this
     module and of ``reef.service.data_transfer`` read it, and no other part of the dispatcher.
@@ -75,10 +80,11 @@ class DataAccess:
     store: DataStore | None
     queue: WorkQueue
     scenarios: ScenarioUses
+    refuses_images: bool = False
 
     @classmethod
     def of(cls, dispatcher: Dispatcher) -> DataAccess:
-        return cls(dispatcher.data_store, dispatcher.queue, dispatcher)
+        return cls(dispatcher.data_store, dispatcher.queue, dispatcher, refuses_images(dispatcher.recipe))
 
     def require_store(self) -> DataStore:
         """The data store; ``DataStoreUnavailableError`` for a deployment without one."""
@@ -223,18 +229,28 @@ def create_trajectory_items(
     return store_items(data, owner, items, wait=wait)
 
 
+def holds_image(kind: str, content: object) -> bool:
+    """Whether a trajectory item's ATIF document, or the ``payload`` of a record item, holds an image
+    (``has_image_content``). The store checks the shape of the content later."""
+    source = content.get("payload") if kind == "record" and isinstance(content, Mapping) else content
+    return kind in ("trajectory", "record") and isinstance(source, Mapping) and has_image_content(source)
+
+
 def store_items(data: DataAccess, owner: str, items: Sequence[NewItem], *, wait: bool = True) -> dict[str, Any]:
     """Check and store 1 to ``MAX_ITEMS_PER_CREATE`` trajectory, record and artifact items of ``owner`` in one
     transaction, then sync the scenarios that they name; return ``{owner, items, synced}``, without content.
 
     Each item's metadata passes ``created_metadata``, and its content follows the rules of its kind
-    (``reef.storage.item_kinds``), which the store checks. ``wait`` is as in ``sync_touched``.
+    (``reef.storage.item_kinds``), which the store checks. When the deployment's recipe refuses images, a trajectory
+    or record item with an image raises ``ValueError`` (``holds_image``). ``wait`` is as in ``sync_touched``.
     """
     if not 1 <= len(items) <= MAX_ITEMS_PER_CREATE:
         raise ValueError(f"a create call holds 1 to {MAX_ITEMS_PER_CREATE} items")
     uses: dict[str, list[Use]] = {}
     for item in items:
         checked = created_metadata(owner, item.metadata)
+        if data.refuses_images and holds_image(checked["kind"], item.content):
+            raise ValueError(f"item {item.item_id!r} holds an image, and the recipe does not support images")
         for scenario, split in checked["scenarios"].items():
             uses.setdefault(scenario, []).append(new_use(checked["kind"], split))
     check_uses(data, owner, uses)

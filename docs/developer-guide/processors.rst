@@ -389,12 +389,12 @@ scenario with no trainer that accepts uploaded trajectories.
 The record-to-sample stage turns each upload into its training sample with
 ``Record2Sample.uploaded_sample(trajectory)``. The default returns the trajectory
 as uploaded. A stage can override it to check the structure or add
-metadata: ``SFTSamples`` refuses a trajectory with no agent turn to train and
-adds its ``max_tokens``. The method must be pure. The pipeline calls it when it
-reads the upload. A trajectory that it refuses with ``ValueError`` is skipped
-with a warning and stays unconsumed. A data write does not call it: to add
-items to a scenario, Reef checks only that a trainer accepts uploads, and it
-does not read the trajectories. The training component renders
+metadata: ``SFTSamples`` refuses a trajectory with no agent turn to train or
+with a part that is not text, and adds its ``max_tokens``. The method must be
+pure. The pipeline calls it when it reads the upload. A trajectory that it
+refuses with ``ValueError`` is skipped with a warning and stays unconsumed. A
+data write does not call it: to add items to a scenario, Reef checks only that
+a trainer accepts uploads, and it does not read the trajectories. The training component renders
 the trajectory when a job trains it; a trajectory that cannot render, or that
 is longer than its ``max_tokens``, is left out of the job.
 

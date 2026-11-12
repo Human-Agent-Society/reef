@@ -15,7 +15,7 @@ from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.recipe import Recipe
-from reef.recipe.deployment import harness_adapter
+from reef.recipe.deployment import harness_adapter, refuses_images
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import normalize_tokens
@@ -340,6 +340,7 @@ def create_app(
             ),
             timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
             for_codex=harness_adapter(dispatcher.recipe) == "codex",
+            refuses_images=refuses_images(dispatcher.recipe),
         )
         register_routes(
             app,

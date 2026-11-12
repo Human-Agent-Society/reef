@@ -208,6 +208,70 @@ def test_a_deployment_without_a_data_store_serves_no_data_route(tmp_path: Path) 
     served(dispatcher, check)
 
 
+class TextOnlyRecipe(UploadRecipe):
+    @property
+    def refuses_images(self) -> bool:
+        return True
+
+
+IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+
+def record_item_body(record_id: str, content: object, scenarios: dict[str, str]) -> dict[str, object]:
+    payload = {"messages": [{"role": "user", "content": content}], "response": {"content": "a"}}
+    return {
+        "items": [
+            {
+                "id": f"old/{record_id}",
+                "content": {
+                    "agent_record_id": record_id,
+                    "request_type": "inference",
+                    "payload": payload,
+                    "created_at": 1.0,
+                    "references": [],
+                    "artifact_id": None,
+                },
+                "metadata": {
+                    "kind": "record",
+                    "scenarios": scenarios,
+                    "origin": {"scenario": "old", "artifact_id": None},
+                },
+            }
+        ]
+    }
+
+
+def test_a_recipe_that_refuses_images_refuses_each_item_that_holds_one(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, TextOnlyRecipe())
+    data = "/reef/namespaces/s/data"
+    image_step = {"step_id": 1, "source": "user", "message": [{"type": "image", "source": {"path": "a.png"}}]}
+    trajectory = {
+        "schema_version": "ATIF-v1.4",
+        "session_id": "t",
+        "agent": {"name": "a"},
+        "steps": [image_step, {"step_id": 2, "source": "agent", "message": "a"}],
+    }
+
+    async def check(client: TestClient) -> None:
+        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status in (200, 201)
+        refused = await client.post(data, headers=AUTH, json=record_item_body("r1", [IMAGE_PART], {"s": "train"}))
+        assert refused.status == 400
+        assert "item 'old/r1' holds an image" in await refused.text()
+        lines = (json.dumps(trajectory) + "\n").encode()
+        refused = await upload_trajectories(client, AUTH, lines=lines, base=data)
+        assert refused.status == 400
+        assert "item 't' holds an image" in await refused.text()
+        # An item that names no scenario, or a scenario that does not exist yet, is refused too.
+        for record_id, scenarios in [("r2", {}), ("r4", {"later": "train"})]:
+            refused = await client.post(data, headers=AUTH, json=record_item_body(record_id, [IMAGE_PART], scenarios))
+            assert refused.status == 400
+            assert f"item 'old/{record_id}' holds an image" in await refused.text()
+        assert dispatcher.data_store.query("s") == ()
+        assert (await client.post(data, headers=AUTH, json=record_item_body("r3", "q", {"s": "train"}))).status == 201
+
+    served(dispatcher, check)
+
+
 def test_a_client_record_item_needs_the_content_and_id_of_a_record(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
     content = {

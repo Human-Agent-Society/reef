@@ -51,6 +51,13 @@ def harness_state_dir(recipe: Recipe, scenario: str, component: str) -> Path | N
     return harness[1].evolution.component_state_dir(scenario, component)
 
 
+def refuses_images(recipe: Recipe) -> bool:
+    """Whether the deployment whose recipe is ``recipe`` refuses image content: whether any of its recipes does
+    (``Recipe.refuses_images``). Each recipe of a composite reads every record, so this holds for a harness client too.
+    """
+    return any(child.refuses_images for _, child in component_recipes(recipe))
+
+
 def scenario_state_dirs(recipe: Recipe, scenario: str) -> tuple[Path, ...]:
     """The directories that belong to ``scenario`` alone, which the dispatcher archives when the scenario is
     deleted: those of each recipe of the deployment, in the order of ``component_recipes``.
@@ -68,4 +75,4 @@ def scenario_state_dirs(recipe: Recipe, scenario: str) -> tuple[Path, ...]:
     return tuple(directories)
 
 
-__all__ = ["harness_adapter", "harness_recipe", "harness_state_dir", "scenario_state_dirs"]
+__all__ = ["harness_adapter", "harness_recipe", "harness_state_dir", "refuses_images", "scenario_state_dirs"]

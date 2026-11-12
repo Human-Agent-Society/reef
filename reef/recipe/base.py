@@ -125,6 +125,27 @@ class Recipe:
         """
         return None
 
+    @property
+    def supports_images(self) -> bool:
+        """Whether this recipe trains on image content. The default is ``False``; no built-in recipe returns ``True``.
+
+        A recipe returns ``True`` only when its training path renders images: ``reef.core.chat_rendering.trained_turns``
+        refuses every part that is not text. A ``CompositeRecipe`` keeps the default and says nothing about its
+        children. This is a runtime capability, not a dataclass field or recipe configuration.
+        """
+        return False
+
+    @property
+    def refuses_images(self) -> bool:
+        """Whether this recipe refuses image content. The default is ``False``: a recipe that trains no weights keeps
+        image content in its records.
+
+        A ``CompositeRecipe`` keeps the default: a deployment refuses images when any of its recipes refuses them
+        (``reef.recipe.deployment.refuses_images``). The inference service, the record import and the data items ask
+        that function, and they find an image with ``reef.core.trajectories.has_image_content``.
+        """
+        return False
+
     def build_components(self, scenario: str) -> ScenarioComponents:
         """The components that every snapshot of the named scenario binds, as the recipe's configuration declares
         them.
@@ -189,6 +210,12 @@ class WeightTrainingRecipe(Recipe):
     trains_task_jobs: ClassVar[bool] = False
     """Whether every job of the recipe is a task job. The deployment's training component must then take the
     recipe's task parameters (``reef.scenario.live_objects.check_recipe_objects``)."""
+
+    @property
+    def refuses_images(self) -> bool:
+        """Refuse image content unless the recipe supports images, so that it does not store an image that it will not
+        train on, and does not train on the text that remains without the image."""
+        return not self.supports_images
 
     @classmethod
     def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:

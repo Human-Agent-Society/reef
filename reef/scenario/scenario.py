@@ -178,6 +178,11 @@ class Scenario:
         return self._binding.report_type
 
     @property
+    def refuses_images(self) -> bool:
+        """Whether the deployment refuses image content (``reef.recipe.deployment.refuses_images``)."""
+        return self._binding.refuses_images
+
+    @property
     def repository(self) -> Repository:
         """The snapshot chain's scenario-scoped artifact repository.
 
