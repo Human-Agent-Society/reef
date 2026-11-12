@@ -496,6 +496,21 @@ def test_a_refused_run_whose_task_holds_the_token_ends_as_a_held_token(tmp_path:
     assert not files_holding(tmp_path / "run", TOKEN)
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("stdout", "exit_code"),
+    [(result_json(api_error_status=429, result="API Error: 429 rate_limit_error"), 0), ("not json", 1)],
+    ids=("rate-limit", "no-result"),
+)
+def test_an_outage_whose_task_holds_the_token_ends_as_a_held_token(
+    tmp_path: Path, reef_url: str, stdout: str, exit_code: int
+) -> None:
+    session = ScriptedClaudeSession(stdout=stdout, exit_code=exit_code, task_leak=TOKEN)
+    with pytest.raises(CredentialHeld, match="held the run's Claude Code token"):
+        designed_in(tmp_path, reef_url, session)
+    assert not files_holding(tmp_path / "run", TOKEN)
+
+
 class VariantFailingSession(ScriptedClaudeSession):
     """A sandbox whose Claude Code prints ``variant_stdout`` for a variant's run, and writes a session's task."""
 

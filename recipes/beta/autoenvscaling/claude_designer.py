@@ -237,13 +237,13 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         variant of a seeded parent, written from the parent alone. ``tags`` go unused, since Reef records none of its
         model calls.
 
-        Raises :class:`CredentialHeld` when the task holds the token, also after a refused run: the task is not
-        admitted.
+        Raises :class:`CredentialHeld` when the task holds the token, also after a refused run or an outage: the task
+        is not admitted.
         """
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
         write_inputs(self.reef, source, work_dir, variant)
-        refusal: ModelRefused | None = None
+        failure: ModelRefused | DesignerOutage | None = None
         transcript = ""
         try:
             if source is not None:
@@ -261,17 +261,18 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
                     prompt=agent_prompt(variant, source is None),
                     is_seeded=source is None,
                 )
-            except ModelRefused as exc:
-                # A held token ends the generation and a refusal does not, so the token check comes first.
-                refusal = exc
+            except (ModelRefused, DesignerOutage) as exc:
+                # A held token ends the generation as a held token, which a refusal or an outage would not report, so
+                # the token check comes first.
+                failure = exc
             finally:
                 gateway.stop()
         finally:
             is_held = clean_run(work_dir, self.claude_token)
         if is_held:
             raise CredentialHeld("the agent's task held the run's Claude Code token, so it is not admitted")
-        if refusal is not None:
-            raise refusal
+        if failure is not None:
+            raise failure
         # The transcript's path names the file as renamed.
         transcript = scrubbed(transcript, self.claude_token)
         return DesignedTask(reply=workspace_reply(task_dir), record_ids=(), transcript=transcript)
