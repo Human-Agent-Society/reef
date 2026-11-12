@@ -15,7 +15,9 @@ by runtimes and training; ``weight_layout`` holds the values that
 and reads their release-chain records.
 ``training_request`` validates TRAIN bodies at admission and holds the queued
 request carried by a job's data. ``reasoning`` splits a sampled reply into its
-reasoning and its answer for ``reef.inference.chat`` and ``reef.tinker.sampling``.
+reasoning and its answer for ``reef.inference.chat`` and ``reef.tinker.sampling``;
+``reef.inference`` imports ``reef.tinker``, but the split is here because training
+imports ``reef.tinker`` and never ``reef.inference``.
 Anything with one consumer stays in that consumer — the ``x-reef-*`` header
 parsing and the HTTP report envelope live in ``service/wire.py`` — while the
 typed report *body* is ``reports/`` here because four packages parse it.

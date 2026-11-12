@@ -23,14 +23,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.reasoning import (
-    PROMPT_TAIL_TOKEN_COUNT,
-    THINK_END,
-    THINK_START,
-    TOOL_CALL_START,
-    is_reasoning_pre_opened,
-    split_reasoning,
-)
+from reef.core.reasoning import PROMPT_TAIL_TOKEN_COUNT, is_reasoning_pre_opened, split_reasoning
 from reef.core.values import JsonValue
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
@@ -137,82 +130,6 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
     payload = frame_data(decoder.finish())
     if payload and payload != SSE_DONE:
         yield decode_event(payload)
-
-
-class ReasoningStreamSplitter:
-    """Split sampled thinking tags without waiting for the full completion.
-
-    Follows SGLang's Qwen3 reasoning parser: the first ``<think>`` starts
-    reasoning and is dropped, the first ``</think>`` or ``<tool_call>`` ends
-    it, and a stream that ends inside it is reasoning. A slice that may be
-    the start of one of these tags is held until the next delta.
-    """
-
-    def __init__(self, *, enabled: bool, force_reasoning: bool) -> None:
-        self._enabled = enabled
-        self._in_reasoning = enabled and force_reasoning
-        self._stripped_think_start = False
-        self._buffer = ""
-
-    @staticmethod
-    def _held_suffix(value: str, delimiter: str) -> int:
-        for size in range(min(len(value), len(delimiter) - 1), 0, -1):
-            if delimiter.startswith(value[-size:]):
-                return size
-        return 0
-
-    def feed(self, delta: str) -> list[tuple[str, str]]:
-        if not delta:
-            return []
-        if not self._enabled:
-            return [("text", delta)]
-        self._buffer += delta
-        if any(
-            tag.startswith(self._buffer) and tag != self._buffer for tag in (THINK_START, THINK_END, TOOL_CALL_START)
-        ):
-            return []
-        if not self._stripped_think_start and THINK_START in self._buffer:
-            self._buffer = self._buffer.replace(THINK_START, "", 1)
-            self._stripped_think_start = True
-            self._in_reasoning = True
-        if not self._in_reasoning:
-            value, self._buffer = self._buffer, ""
-            return [("text", value)]
-
-        before, separator, after = self._buffer.partition(THINK_END)
-        if separator:
-            self._buffer = ""
-            self._in_reasoning = False
-            parts = [("thinking", before)] if before else []
-            visible = after.lstrip("\n")
-            if visible:
-                parts.append(("text", visible))
-            return parts
-        tool_start = self._buffer.find(TOOL_CALL_START)
-        if tool_start != -1:
-            before, after = self._buffer[:tool_start], self._buffer[tool_start:]
-            self._buffer = ""
-            self._in_reasoning = False
-            return [("thinking", before), ("text", after)] if before else [("text", after)]
-        held_tags = (
-            [THINK_END, TOOL_CALL_START] if self._stripped_think_start else [THINK_START, THINK_END, TOOL_CALL_START]
-        )
-        held = max(self._held_suffix(self._buffer, tag) for tag in held_tags)
-        if held:
-            value = self._buffer[:-held]
-            self._buffer = self._buffer[-held:]
-        else:
-            value, self._buffer = self._buffer, ""
-        return [("thinking", value)] if value else []
-
-    def finish(self) -> list[tuple[str, str]]:
-        if not self._buffer:
-            return []
-        value, self._buffer = self._buffer, ""
-        if self._in_reasoning:
-            value = value.removeprefix(THINK_START)
-            return [("thinking", value)] if value else []
-        return [("text", value)]
 
 
 def _sse_data(event: Mapping[str, Any]) -> bytes:
@@ -1014,7 +931,6 @@ __all__ = [
     "ChatCall",
     "ChatStreamRelay",
     "NativeGenerateClient",
-    "ReasoningStreamSplitter",
     "TokenNativeChatHandler",
     "finite_log_prob",
     "integer_tokens",

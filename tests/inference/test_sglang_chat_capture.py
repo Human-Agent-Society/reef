@@ -11,7 +11,6 @@ from aiohttp.test_utils import TestServer
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
-from reef.inference.chat import ReasoningStreamSplitter
 from reef.inference.interfaces import InferenceArtifact
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.service.streaming import stream_record
@@ -99,23 +98,6 @@ def test_reasoning_split_follows_sglang_qwen3_parser(text, force_reasoning, mess
     """A leading <think> starts reasoning; the first </think> or <tool_call> ends it."""
     split, _ = SGLangInferenceHandler._assistant_message(text, None, force_reasoning=force_reasoning)
     assert split == message
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("deltas", "force_reasoning", "parts"),
-    [
-        (["<thi", "nk>a", "</th", "ink>\n\nb"], False, [("thinking", "a"), ("text", "b")]),
-        (["<think>a</think>b"], True, [("thinking", "a"), ("text", "b")]),
-        (["a", "<tool_", "call>x"], True, [("thinking", "a"), ("text", "<tool_call>x")]),
-        (["still thin", "king"], True, [("thinking", "still thin"), ("thinking", "king")]),
-        (["plain ", "text"], False, [("text", "plain "), ("text", "text")]),
-    ],
-)
-def test_reasoning_stream_split_follows_sglang_qwen3_parser(deltas, force_reasoning, parts) -> None:
-    splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=force_reasoning)
-    streamed = [part for delta in deltas for part in splitter.feed(delta)]
-    assert [*streamed, *splitter.finish()] == parts
 
 
 @pytest.mark.unit
