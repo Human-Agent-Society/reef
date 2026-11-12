@@ -246,7 +246,11 @@ over a token-native generate route: it renders the prompt, builds the provider
 response from a ``CapturedGeneration`` and streams protocol frames. The
 response carries no training tensors. Each engine
 supplies a ``NativeGenerateClient`` that shapes its request, parses its response
-and builds its tool-call parser. ``inference/engine_control.py`` holds the
+and builds its tool-call parser. The facade and Tinker's sampler in
+``tinker/sampling.py`` split a reply into its reasoning and its answer with
+``core/reasoning.py``, whole or while it streams. The split is in ``reef/core/``
+because ``tinker/`` also serves training, and training never imports
+``inference/``. ``inference/engine_control.py`` holds the
 control classes that SGLang and vLLM share: the inference backend, the
 inference service, the control actor and its default serving executor.
 ``inference/sglang/`` owns SGLang engine launch, response parsing and control
