@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import importlib
 from dataclasses import asdict, replace
-from importlib.metadata import entry_points
 from typing import Any
 
+from reef.core.plugins import PluginConfigError, resolve_plugin_class
 from reef.inference.remote.config import RemoteInferenceSettings
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.registry import recipe_class_for
@@ -16,8 +15,8 @@ from reef.service.deploy.service_config import ServiceConfig, service_config_fro
 from reef.service.deploy.serving import ENGINES, NONE, prepare_engine_serving, serving_mode
 from reef.train.deployment import TrainingDeployment
 
-# Built-ins are references, so discovery does not import execution dependencies.
-_BUILTINS = {
+#: The bundled training backends, as references so that reading the table imports no training dependency.
+BUILTIN_DEPLOYMENTS = {
     "slime": "reef.train.slime_backend.launch:SlimeDeployment",
     "tinker": "reef.train.tinker_backend.launch:TinkerDeployment",
     "spindle_full": "reef.train.tinker_backend.launch:SpindleFullDeployment",
@@ -25,25 +24,23 @@ _BUILTINS = {
 
 
 def training_deployment_for(name: str | None) -> TrainingDeployment:
-    """Load one built-in, installed entry point, or module:class deployment definition."""
-    selected = name or "slime"
-    reference = _BUILTINS.get(selected, selected)
-    if ":" not in reference:
-        matches = tuple(entry_points(group="reef.training_backends", name=selected))
-        if len(matches) != 1:
-            reason = "unknown" if not matches else "ambiguous"
-            raise DeployConfigError(
-                f"{reason} training backend {selected!r}; install its integration or use module:class"
-            )
-        reference = matches[0].value
-    module, _, attribute = reference.partition(":")
+    """The deployment definition of the ``training.backend`` value ``name`` (default ``slime``).
+
+    ``name`` is a bundled backend, an installed ``reef.training_backends`` entry point, or a
+    ``package.module:ClassName`` reference; each names a ``TrainingDeployment`` class, made with no arguments.
+    Raise ``DeployConfigError`` for another name.
+    """
     try:
-        definition = getattr(importlib.import_module(module), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise DeployConfigError(f"cannot load training backend {selected!r}: {exc}") from exc
-    if not isinstance(definition, type) or not issubclass(definition, TrainingDeployment):
-        raise DeployConfigError("training backend must name a TrainingDeployment class")
-    return definition()
+        deployment_class = resolve_plugin_class(
+            name or "slime",
+            builtins=BUILTIN_DEPLOYMENTS,
+            entry_point_group="reef.training_backends",
+            base=TrainingDeployment,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+            setting="training backend",
+        )
+    except PluginConfigError as exc:
+        raise DeployConfigError(str(exc)) from exc
+    return deployment_class()
 
 
 def local_model_required(config: dict[str, Any]) -> bool:

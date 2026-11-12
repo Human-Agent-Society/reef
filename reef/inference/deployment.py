@@ -7,14 +7,13 @@ setting names.
 
 from __future__ import annotations
 
-import importlib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
-from importlib.metadata import entry_points
-from typing import Any
+from typing import Any, Self
 
 from reef.core.errors import DeployConfigError
+from reef.core.plugins import Plugin, PluginConfigError
 from reef.execution.executor import Executor
 from reef.execution.executor.placement import DeploymentResources
 from reef.inference.interfaces import InferenceBackend
@@ -43,8 +42,16 @@ class InferenceConnection:
     control: Executor | None
 
 
-class InferenceService(ABC):
+class InferenceService(Plugin, ABC):
     """An inference component that owns its engines but borrows reservations."""
+
+    @classmethod
+    @abstractmethod
+    def from_config(cls, config: Mapping[str, Any]) -> Self:
+        """Build the unstarted service from its input ``config``, without allocating anything.
+
+        Raise ``ValueError`` for an input that the service cannot run.
+        """
 
     @property
     @abstractmethod
@@ -75,32 +82,47 @@ class InferenceService(ABC):
         """Release owned engines, including partial starts, idempotently."""
 
 
-_BUILTINS = {
-    "sglang": "reef.inference.sglang.deployment:create_inference",
-    "vllm": "reef.inference.vllm.deployment:create_inference",
+@dataclass(frozen=True)
+class BuiltinEngine:
+    """The classes of one bundled engine, as ``package.module:ClassName`` references.
+
+    ``service`` names the ``InferenceService`` that runs the engine on an inference component. ``handler`` names
+    the ``InferenceHandler`` that speaks the engine's request dialect. They are references so that reading
+    ``BUILTIN_ENGINES`` imports no engine integration.
+    """
+
+    service: str
+    handler: str
+
+
+#: The bundled engines, by the name that ``inference.backend`` gives them.
+BUILTIN_ENGINES: Mapping[str, BuiltinEngine] = {
+    "sglang": BuiltinEngine(
+        "reef.inference.sglang.service:SGLangInferenceService", "reef.inference.sglang.chat:SGLangInferenceHandler"
+    ),
+    "vllm": BuiltinEngine(
+        "reef.inference.vllm.service:VLLMInferenceService", "reef.inference.vllm.chat:VLLMInferenceHandler"
+    ),
 }
+
+#: The entry point group whose entries name other ``InferenceService`` classes.
+INFERENCE_BACKEND_GROUP = "reef.inference_backends"
 
 
 def inference_service_for(name: str | None, config: Mapping[str, Any]) -> InferenceService:
-    """Construct an unallocated receiver from a built-in, entry point or reference."""
-    selected = name or "sglang"
-    reference = _BUILTINS.get(selected, selected)
-    if ":" not in reference:
-        matches = tuple(entry_points(group="reef.inference_backends", name=selected))
-        if len(matches) != 1:
-            reason = "unknown" if not matches else "ambiguous"
-            raise DeployConfigError(
-                f"{reason} inference backend {selected!r}; install its integration or use module:factory"
-            )
-        reference = matches[0].value
-    module, _, attribute = reference.partition(":")
+    """The unstarted service of the ``inference.backend`` value ``name`` (default ``sglang``), built from ``config``.
+
+    ``name`` is a bundled engine, an installed ``reef.inference_backends`` entry point, or a
+    ``package.module:ClassName`` reference; each names an ``InferenceService`` class, built with its
+    ``from_config``. Raise ``DeployConfigError`` for another name.
+    """
     try:
-        factory = getattr(importlib.import_module(module), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise DeployConfigError(f"cannot load inference backend {selected!r}: {exc}") from exc
-    if not callable(factory):
-        raise DeployConfigError("inference backend must name an inference service factory")
-    service = factory(config)
-    if not isinstance(service, InferenceService):
-        raise DeployConfigError("inference backend factory must return an InferenceService")
-    return service
+        service_class = InferenceService.resolve_class(
+            name or "sglang",
+            builtins={engine: classes.service for engine, classes in BUILTIN_ENGINES.items()},
+            entry_point_group=INFERENCE_BACKEND_GROUP,
+            setting="inference backend",
+        )
+    except PluginConfigError as exc:
+        raise DeployConfigError(str(exc)) from exc
+    return service_class.from_config(config)

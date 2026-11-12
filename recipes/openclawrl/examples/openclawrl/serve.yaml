@@ -45,7 +45,7 @@ inference:
   model-path: /root/models/Qwen3-4B-Thinking-2507
   timeout-s: 7200
   handler-factory: >-
-    reef.inference.sglang.chat.SGLangInferenceHandler
+    reef.inference.sglang.chat:SGLangInferenceHandler
   handler-config:
     tool_call_parser: qwen25
     # The native /generate path has engine sampling defaults (T=1.0), not

@@ -19,20 +19,13 @@ from typing import Any
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import RuntimeConfigError
 from reef.core.weight_layout import ArtifactFormat, ArtifactWeights
+from reef.inference.deployment import BUILTIN_ENGINES
 from reef.inference.http import ProviderRequestHeaders
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory
 from reef.inference.remote.config import RemoteInferenceSettings
 from reef.inference.remote.service import RemoteInferenceService
 from reef.inference.serving import AdapterServingRuntime, FullWeightServingRuntime, OpenedEngines, ServingEngines
-from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.inference.vllm.chat import VLLMInferenceHandler
-
-#: The request dialect of each built-in engine the component can run.
-ENGINE_HANDLERS: dict[str, type[InferenceHandler]] = {
-    "sglang": SGLangInferenceHandler,
-    "vllm": VLLMInferenceHandler,
-}
 
 
 def serving_engine_config(
@@ -61,7 +54,7 @@ def serving_engine_config(
     in flight at each load, which lets the engines keep their prefix cache
     where that is safe (SGLang decides; see ``SGLangConfig``). ``vllm`` serves full
     weights only, with one engine. Any other engine, such as a
-    ``module:factory``, gets SGLang's input. Raise ``ValueError`` for an
+    ``module:ClassName``, gets SGLang's input. Raise ``ValueError`` for an
     input the engine cannot serve.
     """
     values = {key.replace("-", "_"): value for key, value in options.items()}
@@ -208,7 +201,7 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
     """Start the component's engines and serve published snapshots on them, in the layout of their snapshot format.
 
     The engine's own request handler speaks to the component, with the
-    inference token as a bearer header; a ``module:factory`` engine needs an
+    inference token as a bearer header; a ``module:ClassName`` engine needs an
     explicit ``inference_handler_factory``. The engines outlive the runtime
     (``ComponentEngines``).
     """
@@ -232,9 +225,13 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
     ) -> InferenceRuntime:
         remote = RemoteInferenceSettings.from_mapping(config["remote"])
         engine = config["engine"]
-        handler_factory = config.get("inference_handler_factory") or ENGINE_HANDLERS.get(engine)
+        handler_factory = config.get("inference_handler_factory")
         if handler_factory is None:
-            raise RuntimeConfigError(f"remote engine {engine!r} needs an explicit inference handler factory")
+            if engine not in BUILTIN_ENGINES:
+                raise RuntimeConfigError(f"remote engine {engine!r} needs an explicit inference handler factory")
+            handler_factory = InferenceHandler.resolve_class(
+                BUILTIN_ENGINES[engine].handler, setting="inference handler"
+            )
         try:
             control_token = remote.token(remote.control_token_env, environ)
             inference_token = remote.token(remote.inference_token_env, environ)

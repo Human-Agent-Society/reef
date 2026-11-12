@@ -348,8 +348,8 @@ Built-in executors
    Existing multi-worker Ray placement context or explicit cluster/Ray actor
    options select ``ray``.
 
-A Python class or ``package.module:ExecutorSubclass`` / ``package.module.Class``
-selects a custom executor. CPU-only execution does not import Ray, Slime,
+A Python class or the reference ``package.module:ExecutorSubclass``
+selects a custom executor. The dot form ``package.module.Class`` is not accepted. CPU-only execution does not import Ray, Slime,
 Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
 
 .. code:: python
@@ -614,7 +614,7 @@ controller is not a model rank. Slime's specialized Ray requirement and
 service resource reservations stay specific to each component; they do not
 implement vLLM's TP/PP launcher.
 
-Each selector accepts a built-in name, import path, inline ``backend/options``
+Each selector accepts a built-in name, a ``package.module:ClassName`` reference, an inline ``backend/options``
 object, or a named profile under ``executors``. Explicit Slime command-line
 flags override the corresponding role selection; they also accept profile
 names. Profiles for training and rollout carry domain-launcher options, not

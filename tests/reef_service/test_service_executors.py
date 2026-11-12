@@ -102,7 +102,7 @@ def test_startup_failure_rolls_back_healthy_dependencies(tmp_path):
     [
         ({"name": "../escape"}, "invalid service name"),
         ({"depends_on": ["missing"]}, "unknown dependency"),
-        ({"executor": "missing"}, "invalid class import path"),
+        ({"executor": "missing"}, "unknown executor backend 'missing'"),
         ({"executor": "ray", "cuda": "0"}, "num_gpus"),
         ({"executor": "ray", "env": {"CUDA_VISIBLE_DEVICES": "0"}}, "num_gpus"),
         ({"executor": "uni", "resources": {"num_gpus": 1}}, "reservations require"),

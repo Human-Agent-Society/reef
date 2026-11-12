@@ -27,6 +27,7 @@ from typing import Any, Literal
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
+from reef.core.plugins import Plugin
 from reef.core.served_models import ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import WeightFiles
@@ -260,7 +261,7 @@ class StartupSteps:
         return {"steps": [step.to_json() for step in self.steps], "estimate_seconds": self.estimate_seconds}
 
 
-class InferenceHandler(ABC):
+class InferenceHandler(Plugin, ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
     @classmethod

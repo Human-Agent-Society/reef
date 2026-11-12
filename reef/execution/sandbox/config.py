@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from reef.core.errors import ReefError
+from reef.core.plugins import PluginConfigError, resolve_plugin_class
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.modal import ModalExecutor
 from reef.execution.sandbox.process import (
@@ -33,15 +34,24 @@ def remote_executor(
 ) -> RemoteExecutor:
     """The cloud sandbox executor of provider ``kind``, from the provider's options in ``section``.
 
+    ``kind`` is a key of ``REMOTE_EXECUTORS``, or the ``package.module:ClassName`` reference of another
+    ``RemoteExecutor`` subclass.
+
     ``section`` may hold other settings of its caller: only ``kind``'s own options
     (``RemoteExecutor.provider_options``) and the shared ``forward_ports`` and ``env_from`` are read. ``timeout_s``
     sets how long one run may take; ``owner_anchor``, a deployment's state directory, names the deployment on its
     sandboxes so a restart stops the ones a previous run left. Raise ``SandboxUnavailable`` for an unknown ``kind``
     or a malformed option; the caller preflights the result.
     """
-    executor_class = REMOTE_EXECUTORS.get(kind)
-    if executor_class is None:
-        raise SandboxUnavailable(f"unknown cloud sandbox {kind!r}; use one of {', '.join(sorted(REMOTE_EXECUTORS))}")
+    try:
+        executor_class = resolve_plugin_class(
+            kind,
+            builtins=REMOTE_EXECUTORS,
+            base=RemoteExecutor,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+            setting="cloud sandbox",
+        )
+    except PluginConfigError as exc:
+        raise SandboxUnavailable(str(exc)) from exc
     shared = executor_class.provider_options | {"forward_ports", "env_from"}
     executor = executor_class.from_config({key: value for key, value in section.items() if key in shared}, environ)
     if timeout_s is not None:

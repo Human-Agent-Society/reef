@@ -216,7 +216,9 @@ class ServiceConfig:
         help="A TrainingManager plugin reference: it decides what the scenarios in auto mode train.",
     )
     inference_handler_factory: str | None = config_option(
-        None, public_path=("inference", "handler_factory"), help="Dotted InferenceHandler subclass with from_config()."
+        None,
+        public_path=("inference", "handler_factory"),
+        help="InferenceHandler subclass as package.module:ClassName.",
     )
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict,

@@ -845,16 +845,17 @@ rest to Slime's native parser.
 
 ``inference.handler-config`` has a different owner: it configures Reef's
 selected ``inference.handler-factory`` adapter, for example its tool parser.
-The factory path must name an ``InferenceHandler`` subclass with a
-``from_config`` class method; handler functions are not supported.
+The setting names an ``InferenceHandler`` subclass with a ``from_config``
+class method, as ``package.module:ClassName``; handler functions are not
+supported.
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
 Two token-native handlers render the prompt with the model's chat template
 and call the engine's native generate route.
-``reef.inference.sglang.chat.SGLangInferenceHandler`` calls SGLang
+``reef.inference.sglang.chat:SGLangInferenceHandler`` calls SGLang
 ``/generate`` and relays its incremental stream.
-``reef.inference.vllm.chat.VLLMInferenceHandler`` calls vLLM
+``reef.inference.vllm.chat:VLLMInferenceHandler`` calls vLLM
 ``/inference/v1/generate``; it serves buffered responses and answers a
 streaming request with the completed turn as one burst of protocol frames.
 The answer is the provider response without training tensors. The handler
@@ -1085,12 +1086,13 @@ role; it does not modify the shared profile. Backend ``options`` objects
 remain owned by the selected backend. Slime's native model/optimizer flags
 continue through Slime's own parser; Reef does not duplicate that schema.
 
-A non-weight dotted recipe can supply ``recipe.runtime`` to select a registered
-or dotted runtime factory. Its declared fields use names such as
+A non-weight dotted recipe can supply ``recipe.runtime`` to select a runtime
+factory: a bundled kind, or the ``package.module:ClassName`` reference of a
+``RuntimeFactory`` subclass. Its declared fields use names such as
 ``--recipe.runtime.timeout-s``. The inference proxy declares its connection
 settings. Custom ``RuntimeFactory``
-implementations can opt in with ``config_type()``; legacy callable factories
-keep receiving their existing mapping. Unknown fields in a declared component
+implementations can opt in with ``config_type()``; a factory without one
+receives the section as a mapping. Unknown fields in a declared component
 schema fail validation. Recipe-specific sections and opaque adapter option
 objects continue to be validated by their owning component.
 
@@ -1561,7 +1563,7 @@ Reef chooses native process placement in backend implementation code;
 ``execution.services`` is rejected. ``execution.training`` selects the
 executor of Slime's training workers (default ``auto``, resolving to ``ray``).
 The serving engines' executor belongs to the inference component.
-``execution.rollout`` selects it, for every training backend. All selectors accept a backend name/import path or a profile under
+``execution.rollout`` selects it, for every training backend. All selectors accept a built-in backend name, a ``package.module:ClassName`` reference or a profile under
 ``executors``. Inline objects/profiles accept ``backend`` (default ``auto``),
 ``options``, ``workers``, and ``resources`` containing ``cpus_per_worker`` and
 ``gpus_per_worker``. Counts must be positive integers; resource quantities must
@@ -1824,7 +1826,7 @@ Read by the weight-training stack. See `Evolve your model
 .. container:: config
 
    ``training.backend`` : slime
-       built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
+       built-in (slime, tinker or spindle_full), installed ``reef.training_backends`` entry-point name, or ``package.module:ClassName`` of a TrainingDeployment class
 
    ``training.colocate`` : false
        must stay false: Reef's serving never shares GPUs with training, and Slime and Tinker refuse ``true``; Slime's own rollout engines share the training GPUs with ``training.options.colocate``

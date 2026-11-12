@@ -40,8 +40,10 @@ GENERATED_TASK_RECIPE = "reef.recipe.generated_tasks:GeneratedTaskRecipe"
 def test_configured_handler_rejects_a_function() -> None:
     from reef.service.deploy.serving import inference_handler_factory_for
 
-    with pytest.raises(ValueError, match="must inherit InferenceHandler"):
-        inference_handler_factory_for("reef.inference.http.provider_request_headers")
+    with pytest.raises(ValueError, match="must name a class that inherits InferenceHandler"):
+        inference_handler_factory_for("reef.inference.http:provider_request_headers")
+    with pytest.raises(ValueError, match=r"must be 'package\.module:ClassName'"):
+        inference_handler_factory_for("reef.inference.sglang.chat.SGLangInferenceHandler")
 
 
 class _Process:
@@ -145,7 +147,7 @@ def test_service_config_preserves_inference_handler_config() -> None:
         {
             "reef": {
                 "recipe": OPENCLAWRL_RECIPE,
-                "inference_handler_factory": "example.factory",
+                "inference_handler_factory": "example:Factory",
                 "inference_handler_config": {"tool_call_parser": "qwen25"},
             }
         }
@@ -430,7 +432,7 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
         inference_num_gpus=1,
         tensor_parallel_size=1,
         inference_remote={"url": "http://inference:8000"},
-        inference_handler_factory="reef.inference.sglang.chat.SGLangInferenceHandler",
+        inference_handler_factory="reef.inference.sglang.chat:SGLangInferenceHandler",
         inference_handler_config={"tool_call_parser": "qwen25"},
     )
     backend = training_deployment_for("slime")

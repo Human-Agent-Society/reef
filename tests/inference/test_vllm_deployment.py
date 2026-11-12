@@ -8,7 +8,6 @@ import sys
 import pytest
 
 from reef.inference import deployment as registry
-from reef.inference.vllm import deployment
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.control import VLLMExecutor
 from reef.inference.vllm.service import INFERENCE_PROTOCOL, VLLMInferenceService
@@ -40,7 +39,7 @@ def test_factory_accepts_plain_input_without_starting_workers(monkeypatch, execu
 @pytest.mark.parametrize("executor", ["mp", "uni"])
 def test_factory_rejects_non_native_executor_aliases(executor):
     with pytest.raises(ValueError, match="vLLM inference requires ray"):
-        deployment.create_inference(base_values(executor=executor))
+        VLLMInferenceService.from_config(base_values(executor=executor))
 
 
 def test_config_derives_reef_serving_options():
@@ -88,8 +87,8 @@ def test_factory_imports_and_builds_with_training_stack_and_vllm_blocked():
             """
 import sys
 sys.modules.update(dict.fromkeys(('slime', 'megatron', 'torch', 'vllm', 'reef.train.slime_backend')))
-from reef.inference.vllm.deployment import create_inference
-service = create_inference(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
+from reef.inference.vllm.service import VLLMInferenceService
+service = VLLMInferenceService.from_config(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
 assert service.config.options['logprobs_mode'] == 'processed_logprobs'
 from reef.inference.vllm import backend, control, engine, launch, service as service_module, worker
 from reef.inference.interfaces import InferenceEngine

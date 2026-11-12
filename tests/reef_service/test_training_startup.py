@@ -128,7 +128,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         (
             {
                 "inference.backend": "none",
-                "inference.handler-factory": "reef.inference.sglang.chat.SGLangInferenceHandler",
+                "inference.handler-factory": "reef.inference.sglang.chat:SGLangInferenceHandler",
             },
             "remove inference.handler-factory",
         ),
