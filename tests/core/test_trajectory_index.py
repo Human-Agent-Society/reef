@@ -6,12 +6,20 @@ from contextlib import closing
 from dataclasses import replace
 
 import pytest
-from tests.support.conversations import conversation, turn
+from tests.support.conversations import conversation, routed_call, turn
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
-from reef.core.trajectory_index import CallKey, TrajectoryIndex, call_key, conversations, sha256_text, trajectory_calls
-from reef.storage.record_items import record_item
+from reef.core.trajectory_index import (
+    CallKey,
+    TrajectoryIndex,
+    call_key,
+    conversations,
+    sha256_text,
+    shadow_request_id,
+    trajectory_calls,
+)
+from reef.storage.record_items import ItemRecordStore, record_item
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore
 
@@ -142,6 +150,56 @@ def test_the_index_links_the_calls_as_the_data_store_does(tmp_path) -> None:
     assert index.trajectory("missing") == ()
     assert index.continued("call-2") and index.continued("retry")
     assert not index.continued("call-3") and not index.continued("first")
+
+
+@pytest.mark.parametrize("shadow_first", [False, True])
+def test_a_shadow_call_with_the_primarys_messages_has_a_trajectory_of_its_own(tmp_path, shadow_first: bool) -> None:
+    primary = routed_call(conversation("primary", 1), "serve", "primary-request")
+    shadow = routed_call(conversation("shadow", 1), "shadow", "shadow-request", reply=9)
+    following = routed_call(conversation("next", 3), "serve", "next-request")
+    # ATIF normalizes the re-sent text parts, including cache metadata, without removing the shadow boundary.
+    for record in (shadow, following):
+        record.payload["messages"] = [
+            {
+                **message,
+                "content": [{"type": "text", "text": message["content"], "cache_control": {"type": "ephemeral"}}],
+            }
+            for message in record.payload["messages"]
+        ]
+    primary_key, shadow_key = call_key(primary.payload), call_key(shadow.payload)
+    assert primary_key is not None and shadow_key is not None
+    # Primary calls retain the upstream key, while a shadow gets a separate namespace.
+    assert primary_key == call_key(conversation("plain", 1).payload)
+    assert shadow_key.request == primary_key.request
+    assert shadow_request_id(shadow.payload) == "shadow-request" and shadow_request_id(primary.payload) is None
+    assert set(shadow_key.prefix_sha256).isdisjoint(primary_key.prefix_sha256)
+    index = TrajectoryIndex()
+    expected = {"primary": ("primary",), "shadow": ("shadow",), "next": ("primary", "next")}
+    with closing(LocalTaskFileStore(tmp_path / "task-files")) as task_files:
+        with closing(SQLiteDataStore(tmp_path / "data", task_files)) as data:
+            records = ItemRecordStore(data, "acme", "math", data.scenario_generation("acme", "math"))
+            for record in (shadow, primary) if shadow_first else (primary, shadow):
+                index.add(record)
+                records.append(record)
+            # Neither call retries the other, whichever finished first.
+            assert index.is_end("primary") and index.is_end("shadow")
+            index.add(following)
+            records.append(following)
+            for record_id, trajectory in expected.items():
+                assert index.trajectory(record_id) == records.trajectory("math", record_id) == trajectory
+            assert index.is_end("shadow") and not index.is_end("primary")
+            stored = records.replay("math")
+        # Reopening uses the actual item-backed record store and its persisted trajectory links.
+        with closing(SQLiteDataStore(tmp_path / "data", task_files)) as reopened:
+            records = ItemRecordStore(reopened, "acme", "math", reopened.scenario_generation("acme", "math"))
+            assert records.replay("math") == stored
+            for record_id, trajectory in expected.items():
+                assert records.trajectory("math", record_id) == trajectory
+    assert {record.agent_record_id: record.payload for record in stored}["shadow"] == shadow.payload
+    rebuilt = TrajectoryIndex()
+    for record in stored:
+        rebuilt.add(record)
+    assert {record_id: rebuilt.trajectory(record_id) for record_id in expected} == expected
 
 
 def test_forgetting_a_call_keeps_it_while_a_later_call_links_to_it() -> None:

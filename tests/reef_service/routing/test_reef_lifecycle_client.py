@@ -409,6 +409,10 @@ def test_invalid_control_json_is_a_typed_error(body: bytes) -> None:
         {"forced_requests": None},
         {"pending_selections": 1, "active_requests": 0},
         {"pending_selections": True},
+        {"pending_shadows": -1},
+        {"pending_shadows": 1.0},
+        {"pending_shadows": True},
+        {"pending_shadows": None},
         {"policy_closed": True, "accepting": True},
         {"policy_closed": True, "stopping": True},
     ],
@@ -427,6 +431,12 @@ def test_a_lifecycle_status_keeps_the_initial_and_published_values_of_a_child() 
     )
     assert published.accepting and not published.idle
     assert LifecycleStatus.from_json(json.loads(json.dumps(published.to_json()))) == published
+    # A running shadow call is outstanding work too, though no admitted request.
+    assert not LifecycleStatus.from_json(status_json(pending_shadows=1)).idle
+    without_shadows = status_json()
+    without_shadows.pop("pending_shadows")
+    with pytest.raises(ValueError):
+        LifecycleStatus.from_json(without_shadows)
 
 
 def test_a_missing_selection_count_is_not_an_empty_selection_set() -> None:

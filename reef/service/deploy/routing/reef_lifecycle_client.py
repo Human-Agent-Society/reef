@@ -64,9 +64,12 @@ class LifecycleStatus:
     ints ≥ 0, and ``drain_pending_writes ≤ pending_writes``: the drain counts a subset of the pending writes.
     ``pending_selections`` counts active requests still choosing a routing target. ``policy_closed`` is
     true only while admission is closed for a normal policy update; a stopping child cannot be in that mode.
+    ``pending_shadows`` (an int ≥ 0) counts the shadow calls the child runs, each until its record is written;
+    they are not admitted requests. The constructor defaults it to 0; the wire form always carries it.
     Purpose: ``RequestAcceptance.status`` makes it, and ``to_json`` gives its wire form. ``from_json`` reads that
     form for ``ReefLifecycleClient.request``, whose deployment controller checks the identity and waits for
-    ``idle``: no admitted request, including an upload in progress, and no pending write the drain waits for.
+    ``idle``: no admitted request, including an upload in progress, no pending write the drain waits for, and
+    no running shadow call.
     """
 
     deployment_id: str
@@ -83,6 +86,7 @@ class LifecycleStatus:
     forced_requests: int
     pending_selections: int
     policy_closed: bool
+    pending_shadows: int = 0
 
     def __post_init__(self) -> None:
         if any(not isinstance(text, str) or not text for text in (self.deployment_id, self.generation)):
@@ -106,6 +110,7 @@ class LifecycleStatus:
             self.failed_writes,
             self.forced_requests,
             self.pending_selections,
+            self.pending_shadows,
         )
         if any(type(count) is not int or count < 0 for count in counts):
             raise ValueError("lifecycle status counts must be nonnegative integers")
@@ -116,7 +121,7 @@ class LifecycleStatus:
 
     @property
     def idle(self) -> bool:
-        return self.active_requests == 0 and self.drain_pending_writes == 0
+        return self.active_requests == 0 and self.drain_pending_writes == 0 and self.pending_shadows == 0
 
     def to_json(self) -> dict[str, object]:
         return dataclasses.asdict(self)

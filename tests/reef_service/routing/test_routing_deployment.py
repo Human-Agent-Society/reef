@@ -7,15 +7,21 @@ import json
 import os
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
+from aiohttp import web
 from tests.reef_service.routing.routing_fakes import DOMAIN_LABELS, write_domain_classifier
 
-from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
+from reef.service import assembly
+from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate, render_external
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
 from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
+from reef.service.lifecycle import LifecycleSettings
+from reef.service.routed_shadow import ShadowLimits
 from reef.service.routing import RoutingSnapshot
+from reef.storage.sql_coordination import memory_coordination
 
 pytestmark = pytest.mark.unit
 LABELS = {
@@ -217,9 +223,111 @@ def test_snapshot_tracks_router_settings_but_not_the_output_directory(
     moved = render(deployment_manifest, tmp_path / "moved")
     wider = render(deployment_manifest, tmp_path / "wider", preview_max_concurrency=64)
     slower = render(deployment_manifest, tmp_path / "slower", selection_timeout_seconds=20)
+    shadow_limits = {"shadow_max_concurrency": 8, "shadow_timeout_seconds": 60.0, "shadow_max_response_bytes": 1024}
+    shadows = [render(deployment_manifest, tmp_path / name, **{name: value}) for name, value in shadow_limits.items()]
     assert first.version == moved.version
-    # Preview worker limits are part of the frozen configuration; changing one needs a restart.
-    assert len({first.version, wider.version, slower.version}) == 3
+    # Preview worker and shadow call limits are part of the frozen configuration; changing one needs a restart.
+    assert len({first.version, wider.version, slower.version, *(shadow.version for shadow in shadows)}) == 6
+    # The router document does not hold the shadow limits: only the REEF child reads them.
+    for name in shadow_limits:
+        assert (tmp_path / name / "router.yaml").read_bytes() == (tmp_path / "first" / "router.yaml").read_bytes()
+
+
+def test_a_shadow_target_never_reaches_the_router_configuration(deployment_manifest: Path, tmp_path: Path) -> None:
+    base = render(deployment_manifest, tmp_path / "base")
+    manifest = json.loads(deployment_manifest.read_text())
+    manifest["scenarios"]["code-opd"]["shadow_target"] = "math-student"
+    shadowed_manifest = tmp_path / "shadowed.json"
+    shadowed_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    shadowed = render(shadowed_manifest, tmp_path / "shadowed")
+    # Reef alone calls the shadow target: the router document, and so its runtime, stay the same.
+    assert (tmp_path / "shadowed" / "router.yaml").read_bytes() == (tmp_path / "base" / "router.yaml").read_bytes()
+    assert shadowed.version != base.version
+    assert shadowed.scenarios["code-opd"].shadow_target == "math-student"
+
+
+def test_external_router_keeps_shadow_settings_in_reef(deployment_manifest: Path, tmp_path: Path) -> None:
+    manifest = json.loads(deployment_manifest.read_text())
+    manifest["scenarios"]["code-opd"]["shadow_target"] = "math-student"
+    deployment_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+    config = normalize_service_config(
+        {
+            "reef": {
+                "recipe": "recipe",
+                "routing_manifest": str(deployment_manifest),
+                "routing_deployment": {
+                    "lifecycle": "external",
+                    "sr-management-port": 50100,
+                    "shadow-max-concurrency": 2,
+                    "shadow-timeout-seconds": 30,
+                    "shadow-max-response-bytes": 4096,
+                },
+            }
+        }
+    )
+    settings = service_config_from_mapping(config).routing_deployment
+    assert settings.shadow_limits() == ShadowLimits(2, 30, 4096)
+    output = tmp_path / "external-router.yaml"
+    snapshot = render_external(deployment_manifest, output, settings)
+    assert snapshot.scenarios["code-opd"].shadow_target == "math-student"
+    router = yaml.safe_load(output.read_text())
+    management = router["global"]["services"]["management_api"]
+    assert (management["bind_address"], management["port"], management["remote_exposure"]) == (
+        "127.0.0.1",
+        50100,
+        False,
+    )
+    default_output = tmp_path / "external-default-limits.yaml"
+    render_external(
+        deployment_manifest, default_output, RoutingDeploymentSettings(lifecycle="external", sr_management_port=50100)
+    )
+    assert output.read_bytes() == default_output.read_bytes()
+    assert "shadow" not in output.read_text()
+
+
+def test_nondefault_shadow_limits_reach_the_routed_child_that_production_assembly_builds(
+    deployment_manifest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert RoutingDeploymentSettings().shadow_limits() == ShadowLimits()
+    for invalid in ({"shadow_max_concurrency": 0}, {"shadow_timeout_seconds": 0}, {"shadow_max_response_bytes": 0}):
+        with pytest.raises(ValueError):
+            routing_deployment_settings(invalid)
+    # The child reads the normalized deployment config, as reef serve writes it, then builds its app.
+    config = normalize_service_config(
+        {
+            "reef": {
+                "recipe": "recipe",
+                "tokens": ["service-token"],
+                "agent_record_dir": str(tmp_path / "records"),
+                "routing_manifest": str(deployment_manifest),
+                "routing_deployment": {
+                    "deployment_id": "test-routing",
+                    "shadow-max-concurrency": 2,
+                    "shadow_timeout_seconds": 30,
+                    "shadow_max_response_bytes": 4096,
+                },
+            }
+        }
+    )
+    settings = service_config_from_mapping(config)
+    assert settings.routing_deployment.shadow_limits() == ShadowLimits(2, 30, 4096)
+    built: dict[str, object] = {}
+
+    def create_app(dispatcher: object, **arguments: object) -> web.Application:
+        built.update(arguments)
+        return web.Application()
+
+    monkeypatch.setattr(
+        assembly,
+        "build_dispatcher",
+        lambda settings, **kwargs: SimpleNamespace(queue=memory_coordination().work_queue),
+    )
+    monkeypatch.setattr(assembly, "create_app", create_app)
+    lifecycle = LifecycleSettings(
+        "deployment", "generation", "control", "s", selection_token="selection", control_socket="/tmp/reef.sock"
+    )
+    assembly.build_app(settings, environ={}, lifecycle=lifecycle)
+    assert built["shadow_limits"] == ShadowLimits(max_concurrency=2, timeout_seconds=30, max_response_bytes=4096)
 
 
 def test_renderer_does_not_follow_output_symlinks(deployment_manifest: Path, tmp_path: Path) -> None:

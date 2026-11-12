@@ -37,8 +37,10 @@ What this covers, and what it does not:
 - Routing uses a default target, keyword rules, optional rules on a
   pretrained domain classifier's prediction, and explicit pins. Every rule
   names one target (SR's static selection). Other SR policies, such as
-  learned model selectors, confidence escalation, fallback or shadow
-  requests, are not used.
+  learned model selectors, confidence escalation, fallback or SR's own shadow
+  requests, are not used. A Scenario's optional `shadow_target` is Reef's:
+  Reef also calls that fixed target and records its answer, and the client
+  gets only the primary answer.
 - The service records inference and feedback. It does not train models.
 - Any holder of a Reef service token may name any configured Scenario. Binding
   callers to Scenarios belongs to a gateway in front of Reef.
@@ -131,7 +133,10 @@ edit it:
   keyword instead of any one, and `case_sensitive: true` stops ignoring case.
   A rule may instead name `domains`; see
   [Route by a pretrained domain classifier](#route-by-a-pretrained-domain-classifier).
-  Scenarios may share a target.
+  Scenarios may share a target. Optional `shadow_target` names one more
+  enabled target that Reef also calls, once per request whose primary target
+  is another one, without making the client wait; see
+  [Shadow targets](../../docs/reference/configuration.rst#shadow-targets).
 - `deployment.semantic_router_image` is the `repository@sha256:...` reference
   from step 1. Image tags without a digest are rejected.
 

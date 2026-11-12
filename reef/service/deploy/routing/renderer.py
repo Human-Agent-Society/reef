@@ -385,6 +385,10 @@ def generate(manifest_path: Path, output: Path, managed: ManagedRoutingRender) -
         "sr_cpus": settings.sr_cpus,
         "sr_memory_bytes": settings.sr_memory_bytes,
         "ready_timeout_seconds": settings.ready_timeout_seconds,
+        # The REEF child reads these at startup: a change needs a restart, like the preview settings.
+        "shadow_max_concurrency": settings.shadow_max_concurrency,
+        "shadow_timeout_seconds": settings.shadow_timeout_seconds,
+        "shadow_max_response_bytes": settings.shadow_max_response_bytes,
     }
     encoded_configuration = json.dumps(configuration, sort_keys=True, separators=(",", ":")).encode()
     manifest["deployment"]["configuration_digest"] = "sha256:" + hashlib.sha256(encoded_configuration).hexdigest()

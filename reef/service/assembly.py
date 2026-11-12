@@ -617,6 +617,7 @@ def build_app(
     routing = None
     preview = None
     retry_policy = None
+    shadow_limits = None
     if settings.routing_manifest is not None:
         if lifecycle is None or not lifecycle.selection_token or not lifecycle.control_socket:
             raise ValueError(
@@ -642,6 +643,7 @@ def build_app(
             max_s=settings.inference_retry_max_s,
             timeout_s=settings.inference_retry_timeout_s,
         )
+        shadow_limits = policy.shadow_limits()
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     # A composite's model calls come back to this service, which answers only once the app listens: its local
     # cycles wait for that, so a harness job started by the preload never fails its calls into a skip.
@@ -682,6 +684,7 @@ def build_app(
                 Path(settings.artifact_cache_dir) / "imports",
             ),
             harness_inference_url=settings.harness_inference_url,
+            shadow_limits=shadow_limits,
         )
     except BaseException:
         with suppress(Exception):

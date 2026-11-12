@@ -52,6 +52,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusError, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
+from reef.core.trajectory_index import SHADOW_PURPOSE
 from reef.core.values import JsonValue
 from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler, StartupSteps
 from reef.inference.provider_protocol import SSEFrameDecoder
@@ -81,6 +82,20 @@ ARTIFACT_HEADER = "x-reef-artifact-id"
 # Kept for clients deployed before artifact identity became the public contract.
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
+
+
+def claims_shadow_call(payload: Mapping[str, Any]) -> bool:
+    """Whether a client body's ``metadata.routing`` holds a mark that only Reef's routed shadow calls set.
+
+    The marks are ``purpose: "shadow"``, whatever request ID comes with it, and a ``primary_request_id`` key. A
+    body whose ``metadata`` or ``metadata.routing`` is not an object holds no mark. Other routing metadata keeps
+    the native contract and is recorded as sent.
+    """
+    metadata = payload.get("metadata")
+    routing = metadata.get("routing") if isinstance(metadata, Mapping) else None
+    return isinstance(routing, Mapping) and (
+        routing.get("purpose") == SHADOW_PURPOSE or "primary_request_id" in routing
+    )
 
 
 def startup_error(error: str | None) -> str:
@@ -587,6 +602,11 @@ class InferenceReplica:
         except HeaderError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         payload = await read_object(request)
+        if claims_shadow_call(payload):
+            # Only a routed deployment marks its own shadow calls; the mark gives a call a trajectory of its own.
+            raise web.HTTPBadRequest(
+                text="metadata.routing purpose 'shadow' and primary_request_id are set only by Reef's shadow calls"
+            )
         served, traffic = await self.resolve(
             parsed.scenario,
             payload,
@@ -595,6 +615,7 @@ class InferenceReplica:
             use_split=not rollout,
             session_key=request.headers.get(SESSION_KEY_HEADER),
         )
+
         if payload.get("stream") is True:
             if rollout:
                 raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")

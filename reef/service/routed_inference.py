@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import time
 import uuid
@@ -15,18 +16,25 @@ from aiohttp import ClientError
 
 from reef.core.errors import ReefError, UnknownScenario, UpstreamStatusError, inference_aborted
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.trajectory_index import SHADOW_PURPOSE
 from reef.core.values import JsonValue
-from reef.dispatcher import Dispatcher
+
+from reef.dispatcher import Dispatcher, ingest
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceStream
 from reef.inference.provider_protocol import stream_events
 from reef.observability.operations import OperationMeasurement, OperationMetrics
-from reef.service.lifecycle import PendingWrites
+from reef.scenario.registry import InstanceState
+from reef.scenario.scenario import Scenario
+from reef.service.lifecycle import INFERENCE_FINALIZATION, PendingWrites
+from reef.service.routed_shadow import ShadowTasks
+
 from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingScenario
 from reef.service.routing_preview import RoutingPreviewClient
 from reef.service.wire import RequestHeaders, parse_request_headers, with_request_tags
 
 WriteResult = TypeVar("WriteResult")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,10 @@ class RoutedAttempt:
 
     The record and decision name the same Scenario. The nonempty request ID and the earlier attempt IDs
     link retries. The start time is monotonic. A stream keeps its measurement until its record is stored.
+    ``primary_request_id`` is None for an attempt that serves the client (purpose ``serve``). For a shadow
+    attempt (purpose ``shadow``) it is the request ID of the primary attempts of the same client request: then
+    the decision's reason is ``shadow_target``, there is no earlier attempt, and ``result`` refuses a client
+    visible or delivered outcome. Each purpose has its own request ID.
     """
 
     item: AgentRecord
@@ -60,6 +72,7 @@ class RoutedAttempt:
     prior_attempt_ids: tuple[str, ...]
     started: float
     measurement: OperationMeasurement
+    primary_request_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.decision, RoutingDecision) or self.decision.scenario != self.item.scenario:
@@ -68,6 +81,16 @@ class RoutedAttempt:
             raise ValueError("a routed attempt needs a request ID")
         if type(self.started) not in (float, int) or not math.isfinite(self.started):
             raise ValueError("a routed attempt's start must be a finite monotonic reading")
+        shadow = self.primary_request_id is not None
+        if shadow != (self.decision.reason == "shadow_target"):
+            raise ValueError("exactly a shadow decision's attempt names its primary request")
+        if shadow and (
+            not isinstance(self.primary_request_id, str)
+            or not self.primary_request_id
+            or self.primary_request_id == self.request_id
+            or self.prior_attempt_ids
+        ):
+            raise ValueError("a shadow attempt is the only attempt of its own request ID")
 
     def result(
         self,
@@ -77,9 +100,17 @@ class RoutedAttempt:
         delivery: str,
         client_visible: bool,
     ) -> AgentRecord:
-        """Capture the provider response and authoritative routing metadata in this attempt's record."""
+        """Capture the provider response and authoritative routing metadata in this attempt's record.
+
+        The record's ``metadata.routing`` is Reef's alone: it replaces whatever the client sent there, shadow
+        marks included. A shadow record keeps no training data, whatever its outcome, and adds
+        ``primary_request_id``.
+        """
+        shadow = self.primary_request_id is not None
+        if shadow and (client_visible or delivery != "not_started"):
+            raise ValueError("a shadow attempt is never delivered to the client")
         payload = dict(self.item.payload)
-        if execution != "completed":
+        if execution != "completed" or shadow:
             payload.pop("training", None)
         payload["response"] = {key: value for key, value in response.items() if key != "training"}
         raw = payload.get("metadata")
@@ -89,11 +120,12 @@ class RoutedAttempt:
             "request_id": self.request_id,
             "attempt_index": len(self.prior_attempt_ids) + 1,
             "prior_attempt_ids": list(self.prior_attempt_ids),
-            "purpose": "serve",
+            "purpose": SHADOW_PURPOSE if shadow else "serve",
             "execution_outcome": execution,
             "delivery_outcome": delivery,
             "elapsed_seconds": max(0.0, time.monotonic() - self.started),
             "client_visible": client_visible,
+            **({"primary_request_id": self.primary_request_id} if shadow else {}),
         }
         return replace(self.item, payload={**payload, "metadata": metadata})
 
@@ -110,16 +142,71 @@ class RoutedScenario:
     serving_config: Mapping[str, JsonValue]
 
 
+class ShadowRecordWriter(ABC):
+    """A writer bound to the Scenario instance or storage generation that a shadow opened.
+
+    ``accept_record`` stores only in that binding, or raises if it no longer exists. It never resolves a name
+    again. ``close`` releases the binding's owned resources and is idempotent. ``finish`` writes and closes in
+    one worker task, so cancellation cannot close a store while its write is still running.
+    """
+
+    @abstractmethod
+    def accept_record(self, item: AgentRecord) -> AgentRecord:
+        """Store the bound Scenario's ``item`` and return it; raise for another Scenario or a stale binding."""
+
+    @abstractmethod
+    def close(self) -> None:
+        """Release owned resources after the last operation. Repeated calls have no effect."""
+
+    def finish(self, item: AgentRecord) -> AgentRecord:
+        """Store ``item`` and close this writer even if storage fails."""
+        try:
+            return self.accept_record(item)
+        finally:
+            self.close()
+
+
+class DispatcherShadowWriter(ShadowRecordWriter):
+    """A shadow's write through ``dispatcher`` to its captured, loaded ``scenario`` only.
+
+    The registry lock serializes the instance check and ingestion with deletion, unload and replacement.
+    Ingestion keeps the dispatcher's record validation, observer notifications and processing hooks.
+    The dispatcher owns the Scenario; this writer owns no resource that needs closing.
+    """
+
+    def __init__(self, dispatcher: Dispatcher, scenario: Scenario) -> None:
+        self.dispatcher = dispatcher
+        self.scenario = scenario
+
+    def accept_record(self, item: AgentRecord) -> AgentRecord:
+        if item.scenario != self.scenario.name:
+            raise ValueError("a shadow record must name its bound Scenario")
+        with self.dispatcher.registry.lock_instance(self.scenario) as state:
+            if state is not InstanceState.CURRENT:
+                raise UnknownScenario(f"shadow Scenario {item.scenario!r} is no longer the loaded instance")
+            stored, inserted = ingest.append_record(self.scenario, item)
+            if inserted:
+                self.dispatcher.process_accepted_records(self.scenario)
+            return stored
+
+    def close(self) -> None:
+        pass
+
+
 class RoutedRecords(ABC):
     """Where routed requests read their Scenario and store their records.
 
     ``DispatcherRecords`` serves a process that runs control. ``ReplicaRecords`` serves the inference service, which
-    has no dispatcher. Both operations can block, so ``RoutedInference`` calls them on a worker thread.
+    has no dispatcher. These operations can block, so ``RoutedInference`` calls them on a worker thread.
     """
 
     @abstractmethod
     def open_scenario(self, name: str) -> RoutedScenario:
         """The Scenario ``name``. Raise ``UnknownScenario`` when the deployment cannot serve it."""
+
+    @abstractmethod
+    def open_shadow_scenario(self, name: str) -> tuple[RoutedScenario, ShadowRecordWriter]:
+        """Bind a shadow to ``name`` before provider I/O. The caller must close the returned writer."""
 
     @abstractmethod
     def accept_record(self, item: AgentRecord) -> AgentRecord:
@@ -138,6 +225,16 @@ class DispatcherRecords(RoutedRecords):
             raise UnknownScenario(f"unknown scenario {name!r}")
         return RoutedScenario(scenario.operations, scenario.served_serving_config())
 
+    def open_shadow_scenario(self, name: str) -> tuple[RoutedScenario, ShadowRecordWriter]:
+        with self.dispatcher.registry.lock_for(name):
+            scenario = self.dispatcher.get_or_create_scenario(name)
+            if scenario is None:
+                raise UnknownScenario(f"unknown scenario {name!r}")
+            return (
+                RoutedScenario(scenario.operations, scenario.served_serving_config()),
+                DispatcherShadowWriter(self.dispatcher, scenario),
+            )
+
     def accept_record(self, item: AgentRecord) -> AgentRecord:
         return self.dispatcher.accept_record(item)
 
@@ -146,8 +243,9 @@ class RoutedInference:
     """Routed calls of a record-only deployment.
 
     ``records`` owns Scenario records. Pins resolve locally; automatic requests use the preview client.
-    ``writes`` tracks submitted writes across cancellation when it is given. The retry policy bounds aborted
-    buffered calls.
+    ``writes`` tracks submitted writes across cancellation when given. The retry policy bounds aborted buffered
+    calls. ``shadows`` owns background shadow calls through their record finalization.
+
     """
 
     def __init__(
@@ -156,11 +254,13 @@ class RoutedInference:
         preview: RoutingPreviewClient | None,
         retry: InferenceRetryPolicy,
         writes: PendingWrites | None,
+        shadows: ShadowTasks,
     ) -> None:
         self.records = records
         self.preview = preview
         self.retry = retry
         self.writes = writes
+        self.shadows = shadows
 
     async def persist(self, write: Awaitable[WriteResult]) -> WriteResult:
         """Retain submitted writes through request cancellation and drain."""
@@ -196,6 +296,7 @@ class RoutedInference:
         request_id: str,
         prior_attempt_ids: tuple[str, ...],
         measurement: OperationMeasurement,
+        primary_request_id: str | None = None,
     ) -> RoutedAttempt:
         # Storage also reads artifact_id from legacy payloads. A routed external model has no Reef artifact.
         recorded_payload = {key: value for key, value in provider_payload.items() if key != "artifact_id"}
@@ -204,19 +305,26 @@ class RoutedInference:
             request_type=RequestType.INFERENCE,
             payload=with_request_tags(recorded_payload, parsed),
         )
-        return RoutedAttempt(item, decision, request_id, prior_attempt_ids, time.monotonic(), measurement)
+        return RoutedAttempt(
+            item, decision, request_id, prior_attempt_ids, time.monotonic(), measurement, primary_request_id
+        )
 
-    async def failed(self, attempt: RoutedAttempt, exc: BaseException) -> None:
-        """Persist a failure before any provider output reached the client. Translate transport errors after the write."""
+    @staticmethod
+    def failure(attempt: RoutedAttempt, exc: BaseException) -> AgentRecord:
+        """The record of an attempt that ``exc`` ended before any provider output reached the client."""
         execution = "error"
         if isinstance(exc, asyncio.CancelledError):
             execution = "cancelled"
         elif isinstance(exc, TimeoutError):
             execution = "timeout"
-        item = attempt.result(
+        return attempt.result(
             {"error_type": type(exc).__name__}, execution=execution, delivery="not_started", client_visible=False
         )
-        await self.persist(asyncio.to_thread(self.records.accept_record, item))
+
+    async def failed(self, attempt: RoutedAttempt, exc: BaseException) -> None:
+        """Persist a failure before provider output reaches the client, then translate transport errors."""
+        await self.persist(asyncio.to_thread(self.records.accept_record, self.failure(attempt, exc)))
+
         # ServerTimeoutError is both a TimeoutError and a ClientError. Its timeout takes precedence.
         if isinstance(exc, TimeoutError):
             raise InferenceRetryTimeout("routed inference timed out") from exc
@@ -230,14 +338,19 @@ class RoutedInference:
         path: str,
         decision: RoutingDecision,
         handler: HttpInferenceHandler,
+        *,
+        request_id: str | None = None,
     ) -> tuple[dict[str, Any], AgentRecord]:
-        """Serve a buffered call. Only a provider abort retries; each retry records its preceding attempts."""
+        """Serve a buffered call. Only a provider abort retries; each retry records its preceding attempts.
+
+        Every attempt records ``request_id``, or a new one when it is None.
+        """
         parsed, scenario = await self.scenario(headers, decision)
         measurement = scenario.operations.start("serve/request")
         succeeded = False
         deadline = time.monotonic() + self.retry.timeout_s
         delay = self.retry.initial_s
-        request_id = uuid.uuid4().hex
+        request_id = request_id or uuid.uuid4().hex
         prior_ids: tuple[str, ...] = ()
         try:
             while True:
@@ -277,13 +390,18 @@ class RoutedInference:
         handler: HttpInferenceHandler,
         *,
         decision: RoutingDecision,
+        request_id: str | None = None,
     ) -> tuple[InferenceStream, RoutedAttempt]:
-        """Open one SSE stream and transfer its lifetime and request measurement to the relay."""
+        """Open one SSE stream and transfer its lifetime and request measurement to the relay.
+
+        The attempt records ``request_id``, or a new one when it is None.
+        """
         parsed, scenario = await self.scenario(headers, decision)
         measurement = scenario.operations.start("serve/request")
         try:
             sent = handler.request_payload(payload, serving_config=scenario.serving_config)
-            attempt = self.attempt(parsed, sent, decision, uuid.uuid4().hex, (), measurement)
+            attempt = self.attempt(parsed, sent, decision, request_id or uuid.uuid4().hex, (), measurement)
+
             stream = None
             try:
                 stream = await handler.post_stream(path, sent)
@@ -323,3 +441,102 @@ class RoutedInference:
             return stored
         finally:
             pending.measurement.finish(succeeded=succeeded)
+
+    def start_shadow(
+        self,
+        headers: Mapping[str, str],
+        client_payload: Mapping[str, Any],
+        path: str,
+        decision: RoutingDecision,
+        handler: HttpInferenceHandler,
+        primary_request_id: str,
+    ) -> None:
+        """Start the shadow call of a routed request without waiting for it, or skip it and log why.
+
+        The request's primary call never awaits the shadow task, and no failure of it reaches the client.
+        """
+        started = self.shadows.start(self.shadow(headers, client_payload, path, decision, handler, primary_request_id))
+        if started != "started":
+            logger.warning(
+                "routed shadow call to target %r of Scenario %r skipped: %s",
+                decision.target.target_id,
+                decision.scenario,
+                started,
+            )
+
+    async def shadow(
+        self,
+        headers: Mapping[str, str],
+        client_payload: Mapping[str, Any],
+        path: str,
+        decision: RoutingDecision,
+        handler: HttpInferenceHandler,
+        primary_request_id: str,
+    ) -> None:
+        """Make one shadow call and store its one record, under a request ID of its own.
+
+        The provider gets ``client_payload`` with the shadow target's provider model and, when the client
+        streams, ``stream`` false and no ``stream_options``. The call is buffered, never retried, and bounded
+        by the limits of ``shadows``. Its record keeps the outcome: ``completed`` or ``aborted`` with the
+        response, or ``error``, ``timeout`` or ``cancelled`` with the error type.
+
+        Raises:
+            asyncio.CancelledError: The task was cancelled. Cancellation during provider I/O writes a ``cancelled``
+                record before re-raising, unless storage fails.
+            Exception: The Scenario or the record could not be stored.
+        """
+        # Its writes belong to inference finalization, also when this task outlives the request that started it.
+        INFERENCE_FINALIZATION.set(True)
+        limits = self.shadows.limits
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
+        if parsed.scenario != decision.scenario:
+            raise ValueError("a shadow's headers must name its routing decision's Scenario")
+        opening = asyncio.create_task(asyncio.to_thread(self.records.open_shadow_scenario, parsed.scenario))
+        try:
+            scenario, writer = await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            # A cancelled to_thread await does not stop acquisition. Keep its eventual close tracked by drain.
+            async def close_opened() -> None:
+                _, acquired = await opening
+                await asyncio.to_thread(acquired.close)
+
+            await self.persist(close_opened())
+            raise
+        measurement = scenario.operations.start("shadow/request")
+        finalizing = False
+        succeeded = False
+        try:
+            body = {key: value for key, value in client_payload.items() if key != "stream_options"}
+            body["model"] = decision.target.provider_model
+            if "stream" in body:
+                body["stream"] = False
+            sent = handler.request_payload(body, serving_config=scenario.serving_config)
+            attempt = self.attempt(
+                parsed, sent, decision, uuid.uuid4().hex, (), measurement, primary_request_id=primary_request_id
+            )
+            try:
+                response = await asyncio.wait_for(
+                    handler.post_json(path, sent, max_response_bytes=limits.max_response_bytes),
+                    timeout=limits.timeout_seconds,
+                )
+            except BaseException as exc:
+                scenario.operations.increment("shadow/failures_total")
+                finalizing = True
+                await self.persist(asyncio.to_thread(writer.finish, self.failure(attempt, exc)))
+                if isinstance(exc, Exception):
+                    return
+                raise
+            aborted = inference_aborted(response)
+            item = attempt.result(
+                response,
+                execution="aborted" if aborted else "completed",
+                delivery="not_started",
+                client_visible=False,
+            )
+            finalizing = True
+            await self.persist(asyncio.to_thread(writer.finish, item))
+            succeeded = not aborted
+        finally:
+            measurement.finish(succeeded=succeeded)
+            if not finalizing:
+                await self.persist(asyncio.to_thread(writer.close))

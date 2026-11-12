@@ -410,6 +410,7 @@ def test_reload_waits_for_selection_but_publishes_with_active_requests_and_write
 ) -> None:
     write_source(case.source, keyword="escalate")
     case.control.active_requests, case.control.pending_selections, case.control.pending_writes = 2, 1, 1
+    case.control.pending_shadows = 1
     original = case.controller.status_before
     selections = []
 
@@ -425,7 +426,9 @@ def test_reload_waits_for_selection_but_publishes_with_active_requests_and_write
     reload(case)
     assert selections == [1] and len(case.router.puts) == 1
     assert case.control.accepting and case.control.snapshot_version != case.startup_version
+    # A policy close neither waits for nor cancels admitted requests, their writes or running shadow calls.
     assert (case.control.active_requests, case.control.pending_writes, case.control.forced_requests) == (2, 1, 0)
+    assert case.control.pending_shadows == 1
 
 
 @pytest.mark.parametrize("changed_runtime", [False, True])
@@ -563,6 +566,10 @@ def edit_source(path: Path, change: str) -> None:
         targets["student"]["provider_model"] = "student-v2"
     elif change == "endpoint":
         targets["student"]["url"] = "http://127.0.0.1:12"
+    elif change == "shadow_endpoint":
+        # Only Reef reads a shadow target and an endpoint; the catalog keeps its targets and models.
+        coding["shadow_target"] = "teacher"
+        targets["teacher"]["url"] = "http://127.0.0.1:13"
     elif change == "remove_referenced":
         del targets["teacher"]
     path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -592,13 +599,15 @@ def test_catalog_changes_apply_in_place_after_the_child_checks_the_candidate(cas
     assert (case.control.open_timeout_seconds != first_allowance) == (change in ("add", "remove", "disable"))
 
 
+@pytest.mark.parametrize("change", ["endpoint", "shadow_endpoint"])
 @pytest.mark.parametrize("mode", ["ok", "lost"])
 def test_an_endpoint_change_republishes_the_child_although_the_router_runs_the_same_document(
-    case: PolicyCase, mode: str
+    case: PolicyCase, mode: str, change: str
 ) -> None:
-    """The router never sees endpoints: it keeps its document and runtime; Reef still publishes the new manifest."""
+    """The router never sees endpoints or shadow targets: it keeps its document and runtime; Reef still publishes
+    the new manifest."""
     document, runtime_hash = case.router.document, case.router.active
-    edit_source(case.source, "endpoint")
+    edit_source(case.source, change)
     case.router.mode = mode
     reload(case)
     assert case.router.document == document and case.router.active == runtime_hash
@@ -608,7 +617,12 @@ def test_an_endpoint_change_republishes_the_child_although_the_router_runs_the_s
     assert publication["router_config_hash"] == runtime_hash
     committed = case.controller.committed_policy()
     assert publication["snapshot_version"] == committed.snapshot_version != case.startup_version
-    assert RoutingSnapshot.load(committed.manifest).targets["student"].url == "http://127.0.0.1:12"
+    snapshot = RoutingSnapshot.load(committed.manifest)
+    if change == "endpoint":
+        assert snapshot.targets["student"].url == "http://127.0.0.1:12"
+    else:
+        assert snapshot.scenarios["coding"].shadow_target == "teacher"
+        assert snapshot.targets["teacher"].url == "http://127.0.0.1:13"
     assert case.events()[-2:] == ["policy_committed", "ready"]
 
 

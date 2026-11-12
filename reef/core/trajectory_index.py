@@ -14,6 +14,11 @@ canonical(shape)``, where the shape holds the provider, the field names and ``P[
 if and only if they have the same API format and the same tools. ``prefix_sha256(P)[i]`` chains the first ``i + 1``
 request values onto it, so two calls of one trajectory have a common prefix of ``i + 1`` request values if and only
 if their ``i``-th prefix hashes are equal.
+
+A routed shadow call (``shadow_request_id``) sends the same messages as its request's primary call. Its shape also
+holds its own request ID, so it shares no trajectory with any call outside its own shadow request: it neither
+retries nor continues the primary call, and the primary call's next turn still continues the primary call. Every
+other payload has the shape above.
 """
 
 from __future__ import annotations
@@ -35,6 +40,23 @@ from reef.core.atif_payloads import (
     step,
 )
 from reef.core.records_types import AgentRecord, RequestType
+
+#: The ``payload.metadata.routing.purpose`` of a routed shadow call's record; Reef sets it, a client may not.
+SHADOW_PURPOSE = "shadow"
+
+
+def shadow_request_id(payload: Mapping[str, Any]) -> str | None:
+    """The request ID of a routed shadow call's payload, or None for any other payload.
+
+    It is ``payload["metadata"]["routing"]["request_id"]`` when that routing metadata is an object whose
+    ``purpose`` is ``SHADOW_PURPOSE`` and whose ``request_id`` is a non-empty string.
+    """
+    metadata = payload.get("metadata")
+    routing = metadata.get("routing") if isinstance(metadata, Mapping) else None
+    if not isinstance(routing, Mapping) or routing.get("purpose") != SHADOW_PURPOSE:
+        return None
+    request_id = routing.get("request_id")
+    return request_id if isinstance(request_id, str) and request_id else None
 
 
 def sha256_text(text: str) -> str:
@@ -129,6 +151,9 @@ def call_key(payload: Mapping[str, Any]) -> CallKey | None:
     shape: dict[str, Any] = {"provider": provider, "message_field": message_field, "system_field": system_field}
     if "tools" in payload:
         shape["tools"] = payload["tools"]
+    shadow = shadow_request_id(payload)
+    if shadow is not None:
+        shape["shadow_request_id"] = shadow
     try:
         trajectory = sha256_text("trajectory:" + canonical_json(shape))
         prefixes: list[str] = []
@@ -318,6 +343,7 @@ def conversations(records: Sequence[AgentRecord]) -> list[list[AgentRecord]]:
 
 
 __all__ = [
+    "SHADOW_PURPOSE",
     "CallKey",
     "ParentCandidate",
     "TrajectoryIndex",
@@ -327,5 +353,6 @@ __all__ = [
     "conversations",
     "reply_sha256",
     "sha256_text",
+    "shadow_request_id",
     "trajectory_calls",
 ]
