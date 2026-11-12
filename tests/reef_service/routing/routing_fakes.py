@@ -14,7 +14,7 @@ import json
 import os
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -100,7 +100,10 @@ def write_domain_classifier(
     return {"model_directory": os.path.realpath(directory), "threshold": 0.5, "files": files}
 
 
-def routing_manifest(upstream_url: str, *, teacher_url: str | None = None) -> dict[str, object]:
+def routing_manifest(
+    upstream_url: str, *, teacher_url: str | None = None, image: str | None = "semantic-router@sha256:" + "a" * 64
+) -> dict[str, object]:
+    """A two-target manifest; ``image`` None omits ``deployment.semantic_router_image``."""
     return {
         "schema_version": 2,
         "automatic_model": "auto",
@@ -125,9 +128,7 @@ def routing_manifest(upstream_url: str, *, teacher_url: str | None = None) -> di
                 "url": upstream_url if teacher_url is None else teacher_url,
             },
         },
-        "deployment": {
-            "semantic_router_image": "semantic-router@sha256:" + "a" * 64,
-        },
+        "deployment": {} if image is None else {"semantic_router_image": image},
     }
 
 
@@ -355,9 +356,11 @@ class FakeRuntime(ContainerRuntime):
     ``inventory`` is what ``inspect`` returns; tests may replace it with an empty, stopped or unhealthy one.
     Each ``start`` raises ``start_error`` if set, else makes container ``router-<n>`` with the next ``n``,
     healthy unless ``healthy_after_start`` is false; ``remove`` empties the inventory. ``ensure_available``,
-    ``start``, ``inspect``, ``remove`` and ``events`` append ``available``, ``start``, ``inspect``,
-    ``remove`` and ``subscribe`` to the shared ``actions`` log before they act. Each ``events`` stream is a
-    new ``FakeEvents`` kept in ``streams``, already holding a disconnect when ``new_stream_disconnected``.
+    ``resolve_image``, ``start``, ``inspect``, ``remove`` and ``events`` append ``available``, ``resolve``,
+    ``start``, ``inspect``, ``remove`` and ``subscribe`` to the shared ``actions`` log before they act. Each
+    ``events`` stream is a new ``FakeEvents`` kept in ``streams``, already holding a disconnect when
+    ``new_stream_disconnected``. ``resolve_image`` keeps its log path, timeout and the Compose environment at
+    the call in ``resolutions``, then raises ``resolve_error`` if set, else returns ``resolved_image``.
     """
 
     def __init__(self, actions: list[str]) -> None:
@@ -369,12 +372,22 @@ class FakeRuntime(ContainerRuntime):
         self.start_error: ContainerCommandError | None = None
         self.healthy_after_start = True
         self.new_stream_disconnected = False
+        self.resolved_image = "sha256:" + "c" * 64
+        self.resolve_error: ContainerCommandError | None = None
+        self.resolutions: list[tuple[Path, float, dict[str, str]]] = []
 
     def healthy_inventory(self, health: str = "healthy") -> ContainerInventory:
         return ContainerInventory((ContainerState(f"router-{self.group_number}", "semantic-router", True, health),))
 
     def ensure_available(self) -> None:
         self.actions.append("available")
+
+    def resolve_image(self, build_log: Path, timeout_seconds: float, stop_requested: Callable[[], bool]) -> str:
+        self.actions.append("resolve")
+        self.resolutions.append((build_log, timeout_seconds, dict(self.compose_environment)))
+        if self.resolve_error is not None:
+            raise self.resolve_error
+        return self.resolved_image
 
     def start(self, compose_file: Path, ownership: DeploymentOwnership, timeout_seconds: float) -> None:
         self.actions.append("start")

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Serve both Qwen models on one GPU, run the routing example, then stop this run.
 set -euo pipefail
-: "${SR_IMAGE:?Set SR_IMAGE to the digest of your local pinned Semantic Router image}"
+# Optional: a pinned Semantic Router image (repository@sha256:... or a local sha256: ID). Without it, reef serve
+# builds the image on its first start and reuses it afterwards.
+sr_image=${SR_IMAGE:-}
 example=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo=$(cd "$example/../../.." && pwd)
 cd "$repo"
@@ -17,10 +19,15 @@ teacher_model=Qwen/Qwen2.5-1.5B-Instruct
 student_revision=7ae557604adf67be50417f59c2c2f167def9a775
 teacher_revision=989aa7980e4cf806f80c7fef2b1adb7bc71aa306
 
-[[ $SR_IMAGE =~ @sha256:[[:xdigit:]]{64}$ ]] || { echo "SR_IMAGE requires repository@sha256:<digest>" >&2; exit 1; }
-expected_revision=$("$python" -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
-image_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$SR_IMAGE")
-[[ $image_revision == "$expected_revision" ]] || { echo "SR_IMAGE must have revision $expected_revision" >&2; exit 1; }
+image_arguments=()
+if [[ -n $sr_image ]]; then
+    [[ $sr_image =~ ^([^[:space:]@]+@)?sha256:[[:xdigit:]]{64}$ ]] ||
+        { echo "SR_IMAGE requires repository@sha256:<digest> or sha256:<image ID>" >&2; exit 1; }
+    expected_revision=$("$python" -c 'from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; print(SEMANTIC_ROUTER_REVISION)')
+    image_revision=$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$sr_image")
+    [[ $image_revision == "$expected_revision" ]] || { echo "SR_IMAGE must have revision $expected_revision" >&2; exit 1; }
+    image_arguments=(--image "$sr_image")
+fi
 docker compose version >/dev/null
 if ! docker image inspect "$vllm_image" >/dev/null 2>&1; then
     if [[ ${HF_HUB_OFFLINE:-0} == 1 ]]; then
@@ -145,7 +152,7 @@ with socket.socket() as reef, socket.socket() as sr:
 PY
 )
 read -r reef_port sr_port <<<"$ports"
-"$python" "$example/check.py" manifests --output-directory "$run_dir" --image "$SR_IMAGE" \
+"$python" "$example/check.py" manifests --output-directory "$run_dir" ${image_arguments[@]+"${image_arguments[@]}"} \
     --student-revision "$student_revision" --teacher-revision "$teacher_revision" \
     --student-port "$student_port" --teacher-port "$teacher_port"
 
@@ -176,6 +183,15 @@ YAML
 "$python" -m reef.service.deploy.routing.cli validate --config "$run_dir/reef.yaml"
 "$python" -m reef.cli serve -c "$run_dir/reef.yaml" >"$run_dir/reef.log" 2>&1 &
 reef_pid=$!
+# The first start without SR_IMAGE builds the router image, for up to image_build_timeout_seconds (3600).
+deadline=$((SECONDS + 3700))
+until grep -q '^\[reef-routing\].*"state": "prepared"' "$run_dir/reef.log"; do
+    if ! kill -0 "$reef_pid" 2>/dev/null || ((SECONDS >= deadline)); then
+        echo "Reef did not finish preparing the router. See $run_dir/reef.log and its image build log." >&2
+        exit 1
+    fi
+    sleep 1
+done
 deadline=$((SECONDS + 150))
 until grep -q '^\[reef-routing\].*"state": "ready"' "$run_dir/reef.log"; do
     if ! kill -0 "$reef_pid" 2>/dev/null || ((SECONDS >= deadline)); then

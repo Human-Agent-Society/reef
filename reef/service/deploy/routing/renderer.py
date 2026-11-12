@@ -24,6 +24,7 @@ import yaml
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.routing import (
     DEFAULT_RULE,
+    SEMANTIC_ROUTER_IMAGE,
     DomainClassifier,
     RoutingScenario,
     RoutingSnapshot,
@@ -50,6 +51,11 @@ FALLBACK_DOMAIN = "other"
 LABEL_FILE_LIMIT_BYTES = 1024 * 1024
 #: The router finds the classifier at its local path; these keep any Hugging Face client in it offline.
 OFFLINE_ENVIRONMENT = ("HF_HUB_OFFLINE=1", "TRANSFORMERS_OFFLINE=1", "HF_DATASETS_OFFLINE=1")
+#: Why an external router's render and replica refuse a manifest that omits the router image.
+EXTERNAL_IMAGE_MESSAGE = (
+    "an external router's manifest must name its deployment.semantic_router_image; "
+    "Reef builds the image only for a managed deployment"
+)
 
 
 @dataclass(frozen=True)
@@ -58,7 +64,9 @@ class ManagedRoutingRender:
 
     Values: ``deployment_id`` equals ``settings.deployment_id``; ``owner_id`` and ``generation`` are non-empty
     strings, used only as container and network labels. They need not be registry identities: candidate
-    validation renders with the placeholder labels ``"validation"``.
+    validation renders with the placeholder labels ``"validation"``. ``semantic_router_image`` is None, or the
+    image (``SEMANTIC_ROUTER_IMAGE``) that the generation runs when its source manifest omits one: the image
+    that startup resolved, or that the generation's manifest already names.
     Purpose: the controller makes it for ``generate``, which writes the generation's files with these
     labels. It owns no container and holds no credential.
     """
@@ -67,12 +75,18 @@ class ManagedRoutingRender:
     deployment_id: str
     owner_id: str
     generation: str
+    semantic_router_image: str | None = None
 
     def __post_init__(self) -> None:
         if self.settings.deployment_id != self.deployment_id:
             raise ValueError("managed renderer identity must match its deployment settings")
         if any(not isinstance(label, str) or not label for label in (self.owner_id, self.generation)):
             raise ValueError("managed renderer owner and generation labels must be non-empty strings")
+        if self.semantic_router_image is not None and (
+            not isinstance(self.semantic_router_image, str)
+            or not SEMANTIC_ROUTER_IMAGE.fullmatch(self.semantic_router_image)
+        ):
+            raise ValueError("managed renderer image must be a digest reference or a local image ID")
 
 
 def write_private_document(path: Path, document: object) -> None:
@@ -350,11 +364,14 @@ def render_external(manifest_path: Path, output_file: Path, settings: RoutingDep
     """Write the configuration of an external router to ``output_file``, and check a domain classifier's files.
 
     The caller runs the router with this file, and checks that its image has the pinned revision. Raise ``ValueError``
-    for an invalid manifest, or for settings of another lifecycle.
+    for an invalid manifest, for one without ``deployment.semantic_router_image`` (Reef builds the image only
+    for a managed deployment), or for settings of another lifecycle.
     """
     if settings.lifecycle != "external":
         raise ValueError("render needs reef.routing_deployment.lifecycle: external")
     snapshot = RoutingSnapshot.load(manifest_path)
+    if snapshot.semantic_router_image is None:
+        raise ValueError(EXTERNAL_IMAGE_MESSAGE)
     check_domain_classifier(snapshot)
     write_private_document(output_file, router_configuration(snapshot, settings))
     return snapshot
@@ -364,7 +381,13 @@ def generate(manifest_path: Path, output: Path, managed: ManagedRoutingRender) -
     """Render one frozen generation into a new or empty private directory; containers stay with the caller.
 
     Token values never enter this renderer, its configuration digest or any generated file. A domain
-    classifier is checked (``check_domain_classifier``) before any file is written.
+    classifier is checked (``check_domain_classifier``) before any file is written. A source manifest that
+    omits ``deployment.semantic_router_image`` gets ``managed.semantic_router_image`` in the generated
+    manifest and Compose file, so the generated snapshot version names the image that runs.
+
+    Raises:
+        ValueError: The manifest or output directory is invalid, or the manifest omits the image and
+            ``managed`` has none.
     """
     settings = managed.settings
     if output.is_symlink():
@@ -376,7 +399,10 @@ def generate(manifest_path: Path, output: Path, managed: ManagedRoutingRender) -
     except yaml.YAMLError as exc:
         # A configuration error like any invalid manifest: a policy update rejects it and keeps serving.
         raise ValueError(f"invalid routing manifest YAML in {manifest_path}") from exc
-    RoutingSnapshot.from_mapping(manifest)
+    if RoutingSnapshot.from_mapping(manifest).semantic_router_image is None:
+        if managed.semantic_router_image is None:
+            raise ValueError("the manifest omits deployment.semantic_router_image and no image was resolved for it")
+        manifest["deployment"]["semantic_router_image"] = managed.semantic_router_image
     configuration = {
         "renderer": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "sr_management_port": settings.sr_management_port,

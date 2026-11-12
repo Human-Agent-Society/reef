@@ -45,54 +45,60 @@ What this covers, and what it does not:
 
 ## Requirements
 
-- Linux, with `docker`, `docker compose` (v2) and `docker buildx` usable by the
-  user who runs `reef serve`.
-- Reef installed from this checkout in a Python 3.12 environment, with the
-  `third_party/semantic-router` submodule checked out.
+- Linux, with `docker` and `docker compose` (v2) usable by the user who runs
+  `reef serve`, and `docker buildx` for the first start (step 1).
+- Reef installed from this checkout in a Python 3.12 environment.
 - Free loopback ports: 8900 (Reef), 50053 (SR's HTTP API) and one per model
   service (8101-8104 below).
 
 Run every command from the repository root.
 
-## 1. Build the Semantic Router image
+## 1. The Semantic Router image
 
-`third_party/semantic-router` pins the upstream source at commit
-`c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59`, unmodified.
+This Reef release supports upstream commit
+`c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59`, unmodified, and builds its image
+for you. When the manifest names no image, as the example does, the first
+`reef serve` builds it with Docker Buildx straight from that commit on GitHub,
+labels it, and tags it `reef-semantic-router:<commit prefix>-<recipe>`. Later
+starts reuse that image; no Git checkout is needed.
 
-The example manifest pins the local image used for the real-inference test:
-`reef-direct-sr@sha256:090b81606403497c9b3cd48eb576ad1f4406024ee0f242cb714ba8fe3962dfe1`.
-This is not a published image. On another host, build the pinned source below
-and replace the example reference with your image's repository digest.
+The first build has these requirements and limits:
 
-Build the pinned source into a local image and note its digest:
+- It needs network access to GitHub, Docker Hub and the package registries the
+  upstream Dockerfile uses (Debian, PyPI, crates.io, Go modules and Hugging
+  Face). It also needs plenty of free disk space.
+- It can take a long time.
+  `reef.routing_deployment.image_build_timeout_seconds` (default 3600) bounds
+  it.
+- Its progress goes to `semantic-router-build.log` in the deployment's state
+  directory, `${XDG_STATE_HOME:-~/.local/state}/reef/routing/<deployment_id>/`.
+  Only you can read the log. Treat it as private: Docker can report proxy or
+  registry details there.
+- Ctrl-C ends the build command and its process group. Docker may still keep or
+  finish build cache, which Reef does not remove.
+- The source commit is pinned, but the upstream build uses mutable base image
+  tags and resolves system and Python packages when it runs. Two cold builds
+  are therefore not bit-identical, and a later cold build can fail where an
+  earlier one passed.
 
-```bash
-PIN=c89d5d4c15117b0a7b1e09c87c6c863dd1efcb59
-git submodule update --init third_party/semantic-router
-test "$(git -C third_party/semantic-router rev-parse HEAD)" = "$PIN"
-test -z "$(git -C third_party/semantic-router status --porcelain)"
-docker buildx build --load \
-  -f third_party/semantic-router/src/vllm-sr/Dockerfile \
-  --label org.opencontainers.image.revision="$PIN" \
-  -t reef-semantic-router:"${PIN:0:12}" third_party/semantic-router
-docker image inspect --format '{{json .RepoDigests}}' reef-semantic-router:"${PIN:0:12}"
-```
+Reef refuses a cached image whose labels name another revision or recipe;
+remove it with `docker image rm` and start again. Reef removes no image itself.
+After an upgrade to a Reef release that pins another commit, remove the old
+`reef-semantic-router` image when no deployment uses it.
 
-The last command prints a list such as
-`["reef-semantic-router@sha256:<64 hex digits>"]`; use that entry as the image
-reference. The digest names the image you built. It is not published, so
-another host must build its own image, which can get a different digest, or
-pull it from a registry you control. An empty list (`[]`) means your Docker
-keeps no repository digest for local builds. Then push the image to a registry
-you control, for example a local `registry:2`, and use the digest that the push
-reports. `reef serve` never pulls or builds the image; it must already be
-present on the host.
+To run an image you built or pulled yourself, for example on a host without
+network access, name it in the manifest's `deployment.semantic_router_image`,
+either by repository digest (`repository@sha256:<64 hex digits>`) or by local
+image ID (`sha256:<64 hex digits>`, from `docker image inspect --format '{{.Id}}'`).
+Reef then skips the automatic cache lookup and build, but still inspects that
+image as described below.
 
-Before creating a container, including during recovery, Reef checks that the
-image's `org.opencontainers.image.revision` label exactly matches the pinned
-source commit above. A missing or different label prevents startup. Keep the
-label when building your image. This checks the image's declared source version;
-it does not prove that the binaries were built from that source.
+In both cases, before creating a container, including during recovery, Reef
+checks that the image's `org.opencontainers.image.revision` label exactly
+matches the pinned commit; a missing or different label prevents startup. The
+label is the image's declared source version; it does not prove that the
+binaries were built from that source. Recovery never builds: it restarts the
+image the deployment started with.
 
 ## 2. Start the model services
 
@@ -132,8 +138,9 @@ edit it:
   A rule may instead name `domains`; see
   [Route by a pretrained domain classifier](#route-by-a-pretrained-domain-classifier).
   Scenarios may share a target.
-- `deployment.semantic_router_image` is the `repository@sha256:...` reference
-  from step 1. Image tags without a digest are rejected.
+- `deployment` names no image, so Reef builds it (step 1). To use your own,
+  add `semantic_router_image` with a repository digest or local image ID;
+  image tags without a digest are rejected.
 
 ```bash
 mkdir -p ~/reef-routing && chmod 700 ~/reef-routing
@@ -171,13 +178,17 @@ export REEF_TOKEN="$(openssl rand -hex 32)"
 reef serve -c ~/reef-routing/reef.yaml
 ```
 
-`reef serve` renders the SR configuration, starts the SR container and the Reef
-service, waits until SR runs exactly that configuration, publishes SR's runtime
-hash to Reef, checks every model service and one preview per Scenario, and only
-then accepts requests. It is ready when its log shows a line like
-`[reef-routing] {..., "state": "ready"}`. Until then, and whenever it is not
-accepting requests, inference returns 503. `GET /healthz` reports only that the
-Reef process is alive.
+`reef serve` finds or builds the SR image (step 1), renders the SR
+configuration, starts the SR container and the Reef service, waits until SR
+runs exactly that configuration, publishes SR's runtime hash to Reef, checks
+every model service and one preview per Scenario, and only then accepts
+requests. Its `[reef-routing] {..., "state": "prepared"}` line names the image
+(`semantic_router_image`) and the generation's `snapshot_version`. It is ready
+when its log shows a line like
+`[reef-routing] {..., "state": "ready"}`. During image preparation, the Reef HTTP
+port is unavailable. Once the service starts listening, inference returns 503
+until ready and whenever admission is paused. `GET /healthz` reports only that
+the Reef process is alive.
 
 SR's HTTP API is published on `127.0.0.1:50053` only, with two credentials that
 `reef serve` generates at each start: one allows only previews, the other only
@@ -282,7 +293,6 @@ Add the classifier to `deployment` and domain rules to the Scenarios:
 
 ```yaml
 deployment:
-  semantic_router_image: reef-direct-sr@sha256:...
   domain_classifier:
     model_directory: /home/you/models/vela-domain   # absolute, no symlinks
     threshold: 0.5
@@ -347,9 +357,9 @@ python tutorials/semantic-router/domain_smoke.py check \
   --reef-pid <PID-of-this-reef-serve-process>
 ```
 
-Before starting Reef, set `semantic_router_image` in both generated manifests
-to the digest built in step 1. Use the PID of that Reef deployment for the check.
-The check sends math prompts as JSON and SSE to `code-opd`, as SSE to
+The generated manifests name no image, so the deployment runs the image of
+step 1, and the update keeps it. Use the PID of that Reef deployment for the
+check. The check sends math prompts as JSON and SSE to `code-opd`, as SSE to
 `math-opd`, and biology prompts as JSON to both Scenarios. It
 pins a target, checks that a pin to another Scenario's target is refused, and
 checks each receipt. It then replaces the manifest with the updated one, which sends
@@ -417,14 +427,20 @@ placeholder listener and backends needs one restart to adopt the new form,
 which keeps models without inference backends; after that, target changes
 apply in place.
 
-Changes to Scenario names, the automatic model, the image, the domain
-classifier or the preview settings need a restart. Check a candidate configuration first; this
+A manifest that names no image keeps the image the deployment started with: a
+`SIGHUP` never builds one. Naming that same image is no change. Changes to
+Scenario names, the automatic model, the image, the domain classifier or the
+preview settings need a restart. Check a candidate configuration first; this
 uses no Docker and changes no deployment, but cannot tell whether the image
 exists or will become ready:
 
 ```bash
 python -m reef.service.deploy.routing.cli validate --config /path/to/candidate-reef.yaml
 ```
+
+For a manifest that names no image it prints `"snapshot_version": null` and
+`"image_resolution_required": true`: the version names the image, which only
+`reef serve` resolves and reports in its `prepared` line.
 
 ## Stop, inspect and clean up
 
@@ -442,9 +458,12 @@ python -m reef.service.deploy.routing.cli cleanup --deployment-id opd-routing
 Both use the same per-user ownership registry as `reef serve`
 (`${XDG_STATE_HOME:-~/.local/state}/reef/routing/`). Cleanup refuses while an
 owner is running and never touches containers it does not own. If a Docker
-operation was interrupted, its result is unknown and the next start refuses to
-proceed; cleanup keeps the operation ID that `status` reports. Only after
-checking that Docker has finished that operation, acknowledge it:
+operation that creates or removes the SR container or network was interrupted,
+its result is unknown and the next start refuses to proceed; cleanup keeps the
+operation ID that `status` reports. An interrupted image build records no such
+operation: it can leave only build cache, and the next start builds or reuses
+the image as usual. Only after checking that Docker has finished a recorded
+operation, acknowledge it:
 
 ```bash
 python -m reef.service.deploy.routing.cli cleanup --deployment-id opd-routing \
