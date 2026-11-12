@@ -47,8 +47,7 @@ TOOL_CALL_START = "<tool_call>"
 class CapturedGeneration:
     """One request's exact engine output.
 
-    ``token_runtime_load_ids`` names the weight version that produced each
-    sampled token; a request paused for a weight update and resumed spans two.
+    ``output_ids`` and ``rollout_log_probs`` have one entry per sampled token.
     ``text`` is the engine's own decoding when it provides one; ``None`` makes
     the handler decode the ids with its tokenizer. ``public_meta`` is the
     engine metadata exposed to clients as ``choice["meta_info"]``; it must not
@@ -57,14 +56,13 @@ class CapturedGeneration:
 
     output_ids: list[int]
     rollout_log_probs: list[float]
-    token_runtime_load_ids: list[str]
     finish_reason: str
     text: str | None
     public_meta: dict[str, Any]
 
     def __post_init__(self) -> None:
         count = len(self.output_ids)
-        if len(self.rollout_log_probs) != count or len(self.token_runtime_load_ids) != count:
+        if len(self.rollout_log_probs) != count:
             raise ValueError("captured response tensors have inconsistent lengths")
         if not count and self.finish_reason != "abort":
             raise ValueError("captured response has no sampled tokens")
@@ -96,7 +94,7 @@ class NativeGenerateClient(ABC):
         """The native request body for ``prompt_ids``, asking for the sampled tokens' log-probs."""
 
     @abstractmethod
-    def parse(self, artifact: InferenceArtifact, response: Mapping[str, Any]) -> CapturedGeneration:
+    def parse(self, response: Mapping[str, Any]) -> CapturedGeneration:
         """Validate one buffered native response and read the exact sample out of it."""
 
     @abstractmethod
@@ -649,7 +647,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             self._client.generate_path,
             self._client.payload(call.request, call.prompt_ids, call.sampling_params, stream=False),
         )
-        captured = self._client.parse(artifact, native)
+        captured = self._client.parse(native)
         response = self._response_from_capture(call, captured, call.tool_parser)
         if not call.anthropic:
             return response, response

@@ -175,7 +175,7 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
 
 def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
     """The body that stores ``directory`` as the client's artifact item ``item_id``."""
-    content = {"source_uri": directory.as_uri(), "kind": "model", "component": None, "content_id": None}
+    content = {"source_uri": directory.as_uri(), "kind": "model", "component": None}
     return {"items": [{"id": item_id, "content": content, "metadata": {"kind": "artifact"}}]}
 
 
@@ -248,31 +248,6 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
     finally:
         for dispatcher in cells.values():
             dispatcher.close()
-
-
-@pytest.mark.integration
-def test_an_item_with_the_old_serving_profile_key_starts_a_scenario_and_can_drop_the_key(tmp_path: Path) -> None:
-    """RFC #1263: Reef ignores ``serving_profile``, an item key of RFC #1233, and a patch can remove it."""
-    dispatcher = cell(tmp_path, "cell-a")
-    body = upload_item("qwen-base", weights(tmp_path / "qwen-base", b"q"))
-    body["items"][0]["metadata"]["serving_profile"] = "qwen@1"
-
-    async def run() -> None:
-        async with client_of(dispatcher, tmp_path) as client:
-            assert (await client.post(DATA, json=body)).status == 201
-            created = await client.post(
-                "/reef/scenarios", json={"name": "math", "owner": "acme", "artifact_id": "qwen-base"}
-            )
-            assert created.status == 201, await created.text()
-            patched = await client.post(
-                f"{DATA}/metadata", json={"ids": ["qwen-base"], "patch": {"serving_profile": None}}
-            )
-            assert patched.status == 200, await patched.text()
-
-    try:
-        asyncio.run(run())
-    finally:
-        dispatcher.close()
 
 
 @pytest.mark.integration

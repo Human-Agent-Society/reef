@@ -375,18 +375,7 @@ class HarnessEvolutionRecipe(Recipe):
         if not isinstance(section, Mapping):
             raise RecipeConfigError("harness evolution requires an 'evolution' config section")
         try:
-            for retired in ("publish", "review_kinds"):
-                if retired in section:
-                    raise ValueError(
-                        f"evolution.{retired} is gone: the activation section decides whether a kept tree serves "
-                        "(activation: {module: always, config: {review_kinds: [...]}}, or module: never)"
-                    )
             evaluation_section = section.get("evaluation", {})
-            if isinstance(evaluation_section, Mapping) and "task_store" in evaluation_section:
-                raise ValueError(
-                    "evolution.evaluation.task_store is gone: imported tasks are task items that the scenario uses; "
-                    "set evolution.evaluation.imported_tasks: true"
-                )
             evolution = EvolutionSettings.from_config(
                 {key: value for key, value in section.items() if key != "evaluation"}, setting="evolution"
             )

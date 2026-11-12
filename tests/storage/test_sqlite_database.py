@@ -6,19 +6,15 @@ import hashlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
-from dataclasses import replace
 
 import pytest
-from sqlalchemy import inspect
 from sqlalchemy.exc import OperationalError
 
 from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.storage.commits import CommitRecord
-from reef.storage.record_items import record_item
-from reef.storage.scenario import ScenarioSettings
-from reef.storage.sqlite import OLD_RECORD_TABLES, SQLiteScenarioDatabase, SQLiteScenarioStorage
+from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 
 def report(record_id: str, scenario: str = "math") -> AgentRecord:
@@ -64,48 +60,12 @@ def scenario_file(directory, scenario: str = "math"):
     return directory / f"{hashlib.sha256(scenario.encode()).hexdigest()}.sqlite3"
 
 
-@pytest.mark.parametrize(
-    ("newest", "stored", "copied"),
-    [("old-2", "math", True), ("old-2", None, False), ("code/r9", "code", True)],
-    ids=["copied", "not-copied", "copy-of-another-scenario"],
-)
-def test_the_first_open_drops_the_old_record_tables_only_when_their_records_are_record_items(
-    tmp_path, newest, stored, copied
-):
-    with closing(SQLiteScenarioStorage(tmp_path)) as storage:
-        storage.write_settings("math", ScenarioSettings(owner="acme"))
-        if stored is not None:
-            stored_id = newest.split("/")[-1]
-            storage.data.create("acme", [record_item(replace(report(stored_id), scenario=stored))])
-    legacy_database(scenario_file(tmp_path))
-    with closing(sqlite3.connect(scenario_file(tmp_path))) as connection, connection:
-        connection.executemany(
-            "INSERT INTO agent_record (agent_record_id, scenario, request_type, payload_json, created_at, "
-            "references_json) VALUES (?, 'math', 'report', '{}', 1.0, '[]')",
-            [("old-1",), (newest,)],
-        )
-    with closing(SQLiteScenarioStorage(tmp_path)) as storage:
-        storage.open("math").close()
-        with (
-            closing(SQLiteScenarioDatabase(scenario_file(tmp_path))) as database,
-            database._transaction(write=False) as connection,
-        ):
-            kept = set(inspect(connection).get_table_names()) & set(OLD_RECORD_TABLES)
-        assert kept == (set() if copied else {"agent_record"})
-        assert storage.read_settings("math").owner == "acme"
-
-
-def legacy_database(path) -> None:
-    """A record database still in SQLite's rollback journal mode."""
+def rollback_mode_database(path) -> None:
+    """A database file still in SQLite's rollback journal mode."""
     with closing(sqlite3.connect(path)) as connection:
         connection.execute(
             """
-            CREATE TABLE agent_record (
-                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                agent_record_id TEXT NOT NULL UNIQUE, scenario TEXT NOT NULL,
-                request_type TEXT NOT NULL, payload_json TEXT NOT NULL,
-                created_at REAL NOT NULL, references_json TEXT NOT NULL, artifact_json TEXT
-            )
+            CREATE TABLE other_table (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)
             """
         )
         connection.commit()
@@ -174,7 +134,7 @@ def test_a_switch_that_never_lands_names_the_database_and_the_wait(tmp_path, mon
 
 @pytest.mark.unit
 def test_concurrent_openers_all_upgrade_a_rollback_mode_database(tmp_path) -> None:
-    """The race as it reaches CI: several stores opening one legacy database at
+    """The race as it reaches CI: several stores opening one rollback-mode database at
     once, each trying to convert it to WAL. Repeated because the loser of the
     race is timing-dependent; a single round misses the regression most times."""
 
@@ -183,7 +143,7 @@ def test_concurrent_openers_all_upgrade_a_rollback_mode_database(tmp_path) -> No
             pass
 
     for attempt in range(60):
-        database = tmp_path / f"legacy-{attempt}.sqlite3"
-        legacy_database(database)
+        database = tmp_path / f"rollback-{attempt}.sqlite3"
+        rollback_mode_database(database)
         with ThreadPoolExecutor(max_workers=12) as executor:
             tuple(executor.map(open_store, range(12)))  # raises if any opener saw "database is locked"

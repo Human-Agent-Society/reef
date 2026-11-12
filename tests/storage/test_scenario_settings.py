@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import sqlite3
 from contextlib import closing
 
 import pytest
@@ -109,20 +107,6 @@ def test_settings_reject_values_of_the_wrong_type(value):
         ScenarioSettings(artifact_evaluation=value)
     with pytest.raises(ValueError):
         ScenarioSettings(training_mode=value)
-
-
-def test_sqlite_upgrade_drops_a_stored_model_setting(tmp_path):
-    """A database of an older version keeps a ``model_config`` row; the next open deletes it and keeps the rest."""
-    SQLiteScenarioStorage(tmp_path).write_settings("math", ScenarioSettings(training_mode="manual"))
-    database = tmp_path / f"{hashlib.sha256(b'math').hexdigest()}.sqlite3"
-    with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute(
-            "INSERT INTO scenario_setting (name, value_json) VALUES ('model_config', ?)",
-            (json.dumps({"url": "http://model.example", "model": "served"}),),
-        )
-    assert SQLiteScenarioStorage(tmp_path).read_settings("math") == ScenarioSettings(training_mode="manual")
-    with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT name FROM scenario_setting").fetchall() == [("training_mode",)]
 
 
 def test_postgres_restart_on_an_empty_directory_finds_commits_and_settings(postgres_config, tmp_path):

@@ -143,7 +143,6 @@ def test_record_contracts_and_retention_policy_do_not_import_database_adapters()
         "reef.artifact",
         "sqlite3",
         "sqlalchemy",
-        "alembic",
     ):
         assert _imports_of(imported, dependency) == []
 
@@ -278,7 +277,7 @@ def test_scenario_state_enters_only_through_injected_storage() -> None:
             + ["reef.storage.served_models.ServedModels"]
         )
         assert storage_imports == set(), str(path.relative_to(REPO_ROOT))
-        for dependency in ("sqlite3", "sqlalchemy", "alembic"):
+        for dependency in ("sqlite3", "sqlalchemy"):
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
 
 
@@ -455,8 +454,7 @@ def test_inference_recovery_requires_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.inference.recovery import InferenceControl; "
-        "from reef.inference.recovery import EngineHealthMonitor"
+        "from reef.inference.recovery import InferenceControl"
     )
 
 

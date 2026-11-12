@@ -567,10 +567,9 @@ CLI overrides use the same parser, for example
 ``--inference.options.mem-fraction-static 0.7``. Native engine options use
 SGLang's names without a ``sglang-`` prefix. Reef builds the engines' input
 from the ``inference`` section and the artifact format; Slime starts no serving
-engine. ``router-port`` binds the first router's HTTP
+engine. ``router-port`` binds the router's HTTP
 port, and other supported router flags keep their native ``router-*`` names.
-``router-ip`` is refused, because the serving engines use no external
-router. The standalone engine launcher does not include a router.
+The standalone engine launcher does not include a router.
 
 For the SGLang engines of a training stack, each engine probes free ports on
 its host at startup. A probe reserves nothing, so another process, such as
@@ -579,22 +578,17 @@ engine then fails to start and another process holds one of its ports, Reef
 stops the engine and starts it again on new ports. Reef does the same when
 another process listens on the engine's HTTP port and answers the readiness
 check. Reef makes at most three startup attempts per engine. Other startup
-failures, and any failure of an encoder engine, stop the launch.
+failures stop the launch.
 
 When Reef starts a router, it probes a free metrics port on the host, from
 port 4000 up. It also probes a free HTTP port, unless the router uses
-``router-port``. Only the first model's router uses ``router-port``. The
-router serves both ports on the host's address. If the router then fails to
+``router-port``. The router serves both ports on the host's address. If the router then fails to
 start and another process holds one of these ports, Reef stops the router and
 starts it again on new ports. Reef does the same when another process listens
 on the router's HTTP port and answers the readiness check. Reef makes at most
 three attempts. A configured ``router-port`` does not change, so a conflict on
 it stops the launch. Another stack's metrics port can take a ``router-port``
 near 4000, so use a port outside that range.
-
-Encoder engines keep the weights they started with. Published weights load
-only into the other engines of the model. When a model with an encoder group
-trains, keep its vision encoder frozen.
 
 Slime's own engine and placement options in ``training.options``
 (``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*`` and the rest)
@@ -604,9 +598,9 @@ Slime`_), never the serving engines; before that session runs, a driver of any
 other job starts no rollout engines. Reef's serving
 never shares GPUs with training, so ``training.colocate`` is refused. Native
 options cannot override
-managed model, placement or parallelism settings. Pipeline/data parallel and
-prefill/decode-disaggregated inference topologies are not supported by this
-managed path yet. Reef binds ``training.options.hf-checkpoint`` to
+managed model, placement or parallelism settings. Each serving engine runs on
+one node. Pipeline/data parallel and prefill/decode-disaggregated inference
+topologies are not supported by this managed path. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. Slime also needs an
 explicit ``training.options.global-batch-size``, the samples in one optimizer
 step: Slime cuts each job's data into optimizer batches of that size.
@@ -636,8 +630,7 @@ handled by the inference component (see `Engine supervision
 
 ``inference.backend: vllm`` selects the vLLM engine integration. The
 inference component launches one vLLM server per engine on its GPUs with
-``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
-``--logprobs-mode processed_logprobs``. It loads each published snapshot
+``VLLM_SERVER_DEV_MODE=1`` and ``--logprobs-mode processed_logprobs``. It loads each published snapshot
 through vLLM's control routes: ``/pause?mode=keep`` (a retracting pause adds
 ``/reset_prefix_cache?reset_running_requests=true``),
 ``/update_weight_version``, ``/collective_rpc reload_weights`` and the
@@ -655,9 +648,8 @@ Engine options use vLLM's engine-argument names. Reef sets ``model``,
 ``host``, ``port`` and ``tensor_parallel_size`` itself and refuses
 ``enable_sleep_mode``. It defaults
 ``generation_config`` to ``vllm``, so the model's own generation defaults
-cannot add truncation or a temperature the trainer never sees. It rejects
-``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
-instead) and enables prefix caching only under a retracting pause.
+cannot add truncation or a temperature the trainer never sees. It enables
+prefix caching only under a retracting pause.
 
 vLLM engines serve full-weight artifacts only. The HTTP service refuses
 adapter artifacts, such as Slime's with ``training.options.megatron-lora-rank``
@@ -828,20 +820,6 @@ Anthropic messages requests.
 ``{enable_thinking: false}`` for a hybrid-thinking model served without
 reasoning; a request's own ``chat_template_kwargs`` win key by key.
 
-A vLLM engine serving a training stack also needs Reef's connector, which
-stamps every sampled token with the weight version that produced it::
-
-   --kv-transfer-config '{"kv_connector": "ReefConnector", "kv_connector_module_path": "reef.inference.vllm.connector", "kv_role": "kv_both"}'
-
-The connector moves no KV and composes with another connector under vLLM's
-``MultiConnector``. To combine it with vLLM's native CPU offloading, list
-``OffloadingConnector`` and ``ReefConnector`` as ``MultiConnector`` children
-in ``--kv-transfer-config``; the ``--kv-offloading-size`` flag replaces the
-configured connector, so it cannot be combined with this one. Without the
-connector the engine reports no runtime load ID: a scenario that trains rejects
-the response, and a scenario that does not train serves it under its release
-id.
-
 ``rollout_log_probs`` are the sampled tokens' log probabilities that a
 training component's own task rollouts record; serving records none. They
 must mean the same thing as the trainer's. Sampling runs through::
@@ -964,12 +942,9 @@ config, removed when the launcher exits. No user YAML file is created.
 Public service settings use the same argument parser for YAML and CLI values.
 Their types, defaults, and help are declared on ``ServiceConfig``. Explicit
 CLI values override YAML values; omitted values use the setting's default.
-Run ``reef serve --help`` to see these options. Use ``--inference.upstream-model``
-as the canonical spelling. Compatibility aliases include ``--upstream-model``,
-``--upstream_model`` and ``--reef.upstream_model``. The last
-explicit CLI spelling of a setting wins. ``--recipe.implementation`` overrides
-the deployment's recipe setting; a bare ``--recipe <name>`` is refused because
-built-in profiles were removed.
+Run ``reef serve --help`` to see these options. A flag is the setting's YAML
+path, for example ``--inference.upstream-model``. The last occurrence of a
+flag wins. ``--recipe.implementation`` overrides the deployment's recipe setting.
 
 String settings retain their text: ``--inference.upstream-model 00123`` remains ``00123``.
 Numeric and boolean settings are parsed according to their declared type;

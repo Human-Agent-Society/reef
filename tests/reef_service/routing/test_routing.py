@@ -226,7 +226,6 @@ def test_request_headers_name_one_configured_scenario(adapter: RoutingAdapter) -
         (client_headers("code-opd", ("x-reef-routing-version", "sha256:forged")), CHAT, "reserved_header", 400),
         (client_headers("code-opd", ("X-Selected-Model", "code-teacher")), CHAT, "reserved_header", 400),
         (client_headers("code-opd", ("x-reef-sr-decision", "default")), CHAT, "reserved_header", 400),
-        (client_headers("code-opd", ("x-reef-release-id", "reef-release")), CHAT, "release_pin", 400),
         (client_headers(), "/v1/responses", "unsupported_route", 400),
     ],
 )

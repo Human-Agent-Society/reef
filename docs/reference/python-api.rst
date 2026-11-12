@@ -76,9 +76,8 @@ loads published snapshots into its engines (see `Runtime responsibilities`_).
 generation, unloads adapters, and reports the runtime load IDs that the engines
 serve. ``InferenceEngine`` names the operations one engine actor offers, which
 ``ReefSGLangEngine`` and ``ReefVLLMEngine`` implement. The engine supervision
-hooks an inference integration also implements (``InferenceEngineGroup``,
-``InferenceMonitor``, ``EngineHealthChecks``, ``EngineHealthTarget``) live in
-``reef/inference/recovery.py``, next to the objects that drive them.
+hook an inference integration also implements (``InferenceEngineGroup``) lives
+in ``reef/inference/recovery.py``, next to ``InferenceControl``, which drives it.
 Implementations inherit the corresponding interface and provide every abstract
 operation. SGLang's ``SGLangInferenceBackend`` inherits ``InferenceBackend``
 through ``EngineInferenceBackend``. ``InferenceService`` in
@@ -97,7 +96,7 @@ Two other extension points have separate names and purposes:
   The trainer's job size is its sample-to-job stage's ``job_samples``.
 - ``reef.inference.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
-  ``artifact_id``, an optional ``local_path``, and ``require_token_runtime_load_ids``.
+  ``artifact_id`` and an optional ``local_path``.
   Handlers receive no repository or snapshot locator. Runtime and recipe objects
   expose the handler as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -255,16 +254,6 @@ Common members
 |                                                   |                             | its kind and admission check   |
 |                                                   |                             | (default                       |
 |                                                   |                             | ``AcceptAnyArtifact()``)       |
-+---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_artifact_validator()``                    | ``ArtifactValidator``       | kept from before component     |
-|                                                   |                             | checks: joins the check of the |
-|                                                   |                             | one component served, admits   |
-|                                                   |                             | the whole snapshot of a recipe |
-|                                                   |                             | serving none (inside a         |
-|                                                   |                             | composite, that recipe's       |
-|                                                   |                             | component); an override on a   |
-|                                                   |                             | recipe serving several is      |
-|                                                   |                             | refused at build               |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``serving_status()``                              | ``Mapping | None``          | runtime-wide state for         |
 |                                                   |                             | ``/reef/status``               |

@@ -604,13 +604,6 @@ scenario gets a new identifier. The same retention settings apply across all
 active and archived stores in the configured schema, while preserving active
 records and retry hashes.
 
-When you upgrade, Reef imports the model configuration files that earlier
-versions kept in ``agent_record_dir`` into the storage backend. Reef then moves
-the imported files to ``agent_record_dir/archived/imported-*``. Reef does not
-read the ``*.commits.jsonl`` files of earlier versions. A deployment upgraded
-from such a version recovers each scenario from its last checkpointed release,
-as after a lost commit history.
-
 A change from one backend to another does not move records or commit history.
 Use a new deployment directory or schema for a new backend.
 
@@ -940,22 +933,18 @@ refuses that configuration.
 Upgrade from a Reef that wrote older formats
 --------------------------------------------
 
-This Reef reads only ``reef-commit/8`` commit records and ``reef-scenario/7``
-scenario metadata. It also reads no older record locator, consumption receipt,
-queued work item or ``release_id`` selector. A scenario with older data does not
-load, and its error names the format. Reef does not change or delete that data.
+This Reef reads only the formats that it writes: ``reef-commit/8`` commit
+records, ``reef-scenario/7`` scenario metadata, and the current tables of the
+record database, the data store and the coordination store. It does not
+upgrade a store that an older Reef wrote.
 
-To keep a scenario, rewrite its commit records with the last Reef that has
-``reef migrate-commits``, before you upgrade to this Reef:
+A scenario with an older commit record or older scenario metadata does not
+load, and its error names the format. A PostgreSQL record schema of another
+version stops the start with ``unsupported PostgreSQL record schema version``.
+Reef does not change or delete older data.
 
-#. Stop every Reef process that writes to the deployment.
-#. Back up the deployment (see `Back up a deployment`_).
-#. Run ``reef migrate-commits -c <config>``, and then run it with ``--apply``.
-#. Upgrade Reef, and upgrade ``reef-client`` on each machine with an install.
-
-The command does not rewrite stored records or Git history. A scenario that
-holds an older record locator or a snapshot without an artifact ID does not load
-after the upgrade, so create it again.
+To move to this Reef from one that wrote older formats, use a new deployment
+directory and, for PostgreSQL, a new schema. Then create the scenarios again.
 
 Back up a deployment
 --------------------

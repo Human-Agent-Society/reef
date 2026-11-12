@@ -6,7 +6,6 @@ from dataclasses import replace
 from threading import Barrier
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
 
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
@@ -16,9 +15,8 @@ from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.deployment_config import translate_layout
 from reef.service.deploy.service_config import ServiceConfig, service_config_arguments, service_config_from_mapping
 from reef.storage.commits import CommitRecord
-from reef.storage.postgres import OLD_RECORD_TABLES, PostgresRecordDatabase, PostgresScenarioStorage, postgres_url
-from reef.storage.record_items import ItemRecordStore, record_item
-from reef.storage.scenario import ScenarioSettings
+from reef.storage.postgres import PostgresRecordDatabase, PostgresScenarioStorage, postgres_url
+from reef.storage.record_items import ItemRecordStore
 
 
 def record(record_id="first", scenario="math"):
@@ -97,49 +95,6 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path):
             assert store.history() == ()
             assert store.records.count("math") == 0
             assert store.records.append_result(record("second")).inserted
-
-
-def old_record_tables(url: str, schema: str) -> set[str]:
-    engine = create_engine(postgres_url(url), hide_parameters=True)
-    try:
-        with engine.connect() as connection:
-            return set(inspect(connection).get_table_names(schema=schema)) & set(OLD_RECORD_TABLES)
-    finally:
-        engine.dispose()
-
-
-@pytest.mark.parametrize("copied", [True, False], ids=["copied", "not-copied"])
-def test_a_storage_drops_the_old_record_tables_only_when_their_records_are_record_items(
-    postgres_config, tmp_path, copied
-):
-    url, schema = postgres_config
-    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
-        storage.write_settings("math", ScenarioSettings(owner="acme"))
-        storage.write_settings("archived", ScenarioSettings())
-        if copied:
-            storage.data.create("acme", [record_item(record("newest"))])
-        storage.archive("archived")
-    engine = create_engine(postgres_url(url), hide_parameters=True)
-    with engine.begin() as connection:
-        connection.execute(
-            text(
-                f"CREATE TABLE {schema}.agent_record (sequence BIGSERIAL PRIMARY KEY, storage_id VARCHAR(32), "
-                "agent_record_id TEXT, scenario TEXT)"
-            )
-        )
-        connection.execute(text(f"CREATE TABLE {schema}.record_eviction (storage_id VARCHAR(32))"))
-        # Each active generation counts, and an archived one does not.
-        connection.execute(
-            text(
-                f"INSERT INTO {schema}.agent_record (storage_id, agent_record_id, scenario) "
-                f"SELECT storage_id, unnest(ARRAY['older', 'newest']), name FROM {schema}.record_store "
-                "WHERE name = 'math' AND active_key IS NOT NULL "
-                f"UNION ALL SELECT storage_id, 'gone', name FROM {schema}.record_store WHERE name = 'archived'"
-            )
-        )
-    engine.dispose()
-    PostgresScenarioStorage(url, tmp_path, schema=schema).close()
-    assert old_record_tables(url, schema) == (set() if copied else {"agent_record", "record_eviction"})
 
 
 @pytest.mark.parametrize(

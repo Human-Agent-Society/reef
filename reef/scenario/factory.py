@@ -284,7 +284,7 @@ class ScenarioFactory:
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
-        components = self._recipe.scenario_components(scenario)
+        components = self._recipe.build_components(scenario)
         if registration is None:
             self.register(scenario, backend, components, start)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from

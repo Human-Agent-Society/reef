@@ -1,11 +1,7 @@
 """Contracts for evaluating and selecting produced updates.
 
 A candidate-evaluation plugin is one class that both measures (``evaluate``)
-and decides (``decide``). The built-in policies are abstract mixins a plugin
-composes at class-definition time — :class:`AlwaysSelectMixin` and
-:class:`RegressionCheckMixin` — with its own ``evaluate``. Each implements one
-half of the contract and leaves the other abstract, so only a plugin that
-supplies both halves is instantiable. The harness publication policies (``compare``, ``floor`` and
+and decides (``decide``). The harness publication policies (``compare``, ``floor`` and
 ``none``) are whole plugins that measure through a harness evaluator.
 """
 
@@ -14,12 +10,10 @@ from __future__ import annotations
 import pytest
 
 from reef.evaluation import (
-    AlwaysSelectMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     CandidateSelector,
     EvaluationResult,
-    RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,
 )
@@ -76,31 +70,8 @@ def test_built_ins_explicitly_implement_their_public_contracts() -> None:
         assert issubclass(plugin, CandidateEvaluationPlugin)
         assert callable(plugin.evaluate)
         assert callable(plugin.decide)
-    # The policies are mixins: they supply decide() and stay abstract on the half
-    # they do not implement, so a mixin cannot stand up as a plugin on its own.
-    for mixin in (AlwaysSelectMixin, RegressionCheckMixin):
-        assert callable(mixin.decide)
-        assert mixin.__abstractmethods__ == frozenset({"evaluate"})
     # The harness run policies share their measurement, and each one decides.
     assert TaskScorePolicy.__abstractmethods__ == frozenset({"decide"})
-    with pytest.raises(TypeError, match="abstract"):
-        AlwaysSelectMixin()  # type: ignore[abstract]
-
-
-def test_always_select_returns_an_explainable_structured_decision() -> None:
-    class AlwaysSelect(AlwaysSelectMixin):
-        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-            raise AssertionError("this case exercises decide(), not evaluate()")
-
-    candidate = UpdateCandidate("job-7")
-    decision = AlwaysSelect().decide(candidate, evaluation())
-
-    assert decision.selected is True
-    assert decision.policy == "always"
-    assert decision.to_dict()["evaluation"]["metrics"] == {
-        "candidate_reward": 0.8,
-        "current_reward": 0.7,
-    }
 
 
 def test_a_plugin_mixes_its_measurement_and_its_decision() -> None:

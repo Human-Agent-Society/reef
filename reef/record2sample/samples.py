@@ -147,8 +147,7 @@ def make_policy_trajectory(
     ``response.training`` attached by an inference backend is authoritative
     for policy tensors. The record's ``artifact_id``, which the inference
     service writes, names the artifact that produced the tokens; a rollout of
-    Reef's own names it in its ``training`` block. Top-level tensors remain supported
-    for harnesses that already ship exact policy data. Missing tensors stay empty and are
+    Reef's own names it in its ``training`` block. Missing tensors stay empty and are
     rejected at the training boundary; Reef never reconstructs sampled ids from
     decoded text.
     """
@@ -156,7 +155,7 @@ def make_policy_trajectory(
     training = recorded_training(payload)
 
     def field(name: str) -> Any:
-        return training.get(name, payload.get(name, ()))
+        return training.get(name, ())
 
     tokens = field("tokens")
     loss_mask = field("loss_mask")

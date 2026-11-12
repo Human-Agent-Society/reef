@@ -206,9 +206,8 @@ Training and inference meet only through contracts that neither side owns.
   ``InferenceService`` component and selects its implementation.
   ``registry.py`` owns the runtime factories and ``RuntimeRegistry``.
   ``serving.py`` loads saved weights into serving engines that the control
-  plane controls directly. ``recovery.py`` owns ``InferenceControl`` and
-  ``EngineHealthMonitor``, and ``residency.py`` holds the
-  ``AdapterResidencyManager``. These modules import no concrete integration.
+  plane controls directly. ``recovery.py`` owns ``InferenceControl``, and
+  ``residency.py`` holds the ``AdapterResidencyManager``. These modules import no concrete integration.
 - ``train/component.py`` defines bounded training jobs, the
   ``TrainingComponent`` interface, and its factories. Each backend package owns
   its job parameters and objectives. ``train/learning_rate.py`` holds the
@@ -326,8 +325,7 @@ The extension points those packages expose are in `Python API
   maintenance. ``postgres.py`` supplies PostgreSQL tables and pooled
   transactions. ``commit_history.py`` owns the ``CommitHistory`` base and
   ``CommitHistoryScenarioStore``, which accepts any ``RecordStore``,
-  ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time
-  upgrades of older schemas and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
+  ``TaskStorage`` and ``CommitHistory``. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.
 - Does it persist or materialize versioned bytes, or declare a snapshot

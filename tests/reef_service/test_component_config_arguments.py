@@ -106,7 +106,7 @@ def resolve_deployment(config, argv=()):
 def test_extension_yaml_cli_and_runtime_values_are_equivalent(extension, field, value, cli):
     base = {"reef": {"recipe": "reef_config_extension:Training"}}
     yaml_config = resolve_deployment({"reef": {**base["reef"], field: value}})
-    cli_config = resolve_deployment(base, [f"--{field}={cli}"])
+    cli_config = resolve_deployment(base, [f"--recipe.config.{field}={cli}"])
     yaml_values = resolve_config_field_values(ExtensionRecipe, {field: yaml_config["reef"][field]}, {})
     cli_values = resolve_config_field_values(ExtensionRecipe, {field: cli_config["reef"][field]}, {})
     backend = extension.runtime.parse_config({field: value}, {})
@@ -120,7 +120,7 @@ def test_extension_yaml_cli_and_runtime_values_are_equivalent(extension, field, 
 def test_cli_overrides_yaml_then_environment_then_defaults(extension, monkeypatch):
     monkeypatch.setenv("REEF_EXTENSION_COUNT", "8")
     config = {"reef": {"recipe": "reef_config_extension:Training", "count": "${MISSING_COUNT:?}"}}
-    combined = resolve_deployment(config, ["--count", "2"])
+    combined = resolve_deployment(config, ["--recipe.config.count", "2"])
     env = {"REEF_EXTENSION_COUNT": "8"}
     assert resolve_config_field_values(ExtensionRecipe, {"count": combined["reef"]["count"]}, env)["count"] == 2
     assert resolve_config_field_values(ExtensionRecipe, {"count": "6"}, env)["count"] == 6
@@ -130,16 +130,24 @@ def test_cli_overrides_yaml_then_environment_then_defaults(extension, monkeypatc
     assert extension.runtime.parse_config({"count": 0}, env)["count"] == 0
 
 
-def test_last_alias_wins_and_boolean_can_be_disabled(extension):
+def test_last_occurrence_wins_and_boolean_can_be_disabled(extension):
     config = resolve_deployment(
         {"reef": {"recipe": "reef_config_extension:Training", "count": 9}},
-        ["--count", "1", "--reef.count", "2", "--count", "3", "--no-enabled"],
+        ["--recipe.config.count", "1", "--recipe.config.count", "3", "--no-recipe.config.enabled"],
     )
     assert config["reef"]["count"] == 3
     assert config["reef"]["enabled"] is False
 
 
-@pytest.mark.parametrize("argv", [["--label"], ["--count"], ["--no-enabled=true"], ["--no-enabled", "true"]])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--recipe.config.label"],
+        ["--recipe.config.count"],
+        ["--no-recipe.config.enabled=true"],
+        ["--no-recipe.config.enabled", "true"],
+    ],
+)
 def test_component_flags_validate_arity_after_discovery(extension, argv):
     with pytest.raises(ValueError, match="value"):
         resolve_deployment({"reef": {"recipe": "reef_config_extension:Training"}}, argv)
@@ -167,7 +175,7 @@ def test_recipe_and_runtime_errors_do_not_echo_values(extension):
 def test_runtime_definition_is_loaded_from_selected_dotted_factory(extension):
     config = resolve_deployment(
         {"reef": {"recipe": "reef_config_extension:Serving", "runtime": {"type": "reef_config_extension:runtime"}}},
-        ["--reef.data.label", "001", "--reef.runtime.label", "true", "--no-reef.runtime.enabled"],
+        ["--recipe.config.label", "001", "--recipe.runtime.label", "true", "--no-recipe.runtime.enabled"],
     )
     runtime = RuntimeRegistry().build(config["reef"]["runtime"], model_path="model", environ={})
     assert runtime.parsed_config["label"] == "true"
@@ -204,21 +212,11 @@ def test_component_help_has_namespaced_fields_without_destination_collisions(ext
     config = {"reef": {"recipe": "reef_config_extension:Training"}}
     parser = build_serve_parser(config=config)
     help_text = parser.format_help()
-    assert "--label" in help_text and "Label kept verbatim" in help_text
+    assert "--recipe.config.label" in help_text and "Label kept verbatim" in help_text
     assert "--execution.training.backend" in help_text
     args = vars(parser.parse_args(["--execution.training.backend", "ray", "--execution.rollout.backend", "custom:X"]))
     assert args["execution.training.backend"] == "ray"
     assert args["execution.rollout.backend"] == "custom:X"
-
-
-def test_component_field_cannot_shadow_public_cli_option(extension):
-    @dataclass(frozen=True)
-    class ConflictingRecipe(WeightTrainingRecipe):
-        port: int = config_field(1)
-
-    extension.Conflicting = ConflictingRecipe
-    with pytest.raises(ValueError, match=r"conflicts.*--port"):
-        component_config_arguments({"reef": {"recipe": "reef_config_extension:Conflicting"}})
 
 
 def test_mutable_component_defaults_are_independent():
@@ -246,7 +244,7 @@ def test_launch_rejects_invalid_extension_before_model_download(extension, tmp_p
     monkeypatch.setattr(orchestrator, "resolve_model_paths", forbidden)
     monkeypatch.setattr(orchestrator._Stack, "start", forbidden)
     with pytest.raises(DeployConfigError, match="count"):
-        orchestrator._run_orchestrator(str(path), _parse_overrides(["--count", "invalid"]))
+        orchestrator._run_orchestrator(str(path), _parse_overrides(["--recipe.config.count", "invalid"]))
 
 
 def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
@@ -267,7 +265,7 @@ def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
     )
     result = subprocess.run([sys.executable, "-c", script, str(path)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert "--reef.data.label" in result.stdout and "Lightweight label" in result.stdout
+    assert "--recipe.config.label" in result.stdout and "Lightweight label" in result.stdout
 
 
 def test_training_recipe_resolves_fields_once_before_connecting(extension, monkeypatch):
@@ -343,7 +341,9 @@ def test_optional_extension_null_and_string_null_are_distinct():
 
 def test_switching_recipe_uses_only_the_final_selected_schema(extension):
     config = {"reef": {"recipe": "missing_recipe:Missing"}}
-    combined = resolve_deployment(config, ["--reef.recipe", "reef_config_extension:Training", "--label", "001"])
+    combined = resolve_deployment(
+        config, ["--recipe.implementation", "reef_config_extension:Training", "--recipe.config.label", "001"]
+    )
     assert combined["reef"]["label"] == "001"
     assert "missing_recipe" not in sys.modules
 

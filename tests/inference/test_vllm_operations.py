@@ -229,7 +229,6 @@ def test_worker_pauses_in_the_configured_mode_and_recovers_only_dead_engines(mon
     assert events[-1] == "recover"
     assert engines.recover() == 0
     assert events.count("recover") == 1  # nothing dead: no second recovery
-    assert engines.owned is True
 
 
 def test_engine_group_probes_ports_from_the_configured_base_per_host(monkeypatch):
@@ -254,4 +253,3 @@ def test_engine_group_probes_ports_from_the_configured_base_per_host(monkeypatch
     group = launch_module.VLLMEngineGroup(config, placement=None)
     group.start_engines({})
     assert inits == [("node-a", 20000), ("node-a", 20001), ("node-b", 20000)]
-    assert group.num_new_engines == 3

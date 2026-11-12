@@ -9,7 +9,7 @@ import pytest
 
 from reef.inference import deployment as registry
 from reef.inference.vllm import deployment
-from reef.inference.vllm.config import REEF_CONNECTOR_CONFIG, VLLMConfig, kv_transfer_config
+from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.control import VLLMExecutor
 from reef.inference.vllm.service import INFERENCE_PROTOCOL, VLLMInferenceService
 
@@ -50,7 +50,6 @@ def test_config_derives_reef_serving_options():
     explicit = VLLMConfig(**base_values(options={"generation_config": "/models/qwen/generation"}))
     assert explicit.options["generation_config"] == "/models/qwen/generation"
     assert config.options["enable_prefix_caching"] is False
-    assert config.options["kv_transfer_config"] == REEF_CONNECTOR_CONFIG
     assert config.engine_count == 1
     retracting = VLLMConfig(**base_values(pause_mode="retract"))
     assert retracting.options["enable_prefix_caching"] is True
@@ -64,10 +63,8 @@ def test_config_derives_reef_serving_options():
         (base_values(num_gpus=4), "requires router_url"),
         (base_values(pause_mode="drain"), "unknown vLLM pause mode"),
         (base_values(options={"tensor_parallel_size": 2}), "derives these vLLM options"),
-        (base_values(options={"kv-offloading-size": 4}), "replaces the configured KV connector"),
         (base_values(options={"enable_prefix_caching": True}), "unless publication retracts"),
         (base_values(options={"enable_prefix_caching": "yes"}, pause_mode="retract"), "must be a boolean"),
-        (base_values(options={"kv_transfer_config": {"kv_role": "kv_both"}}), "naming kv_connector"),
         (base_values(request_timeout=0), "timeouts must be positive"),
         (base_values(engine_port_base=0), "engine_port_base"),
         (base_values(engine_port_base=65501), "engine_port_base"),
@@ -83,24 +80,6 @@ def test_two_engines_serve_behind_a_configured_router():
     assert config.engine_count == 2
 
 
-def test_configured_connectors_compose_with_reef_under_multi_connector():
-    offloading = {
-        "kv_connector": "OffloadingConnector",
-        "kv_role": "kv_both",
-        "kv_connector_extra_config": {"cpu_bytes_to_use": 1},
-    }
-    composed = kv_transfer_config(offloading)
-    assert composed["kv_connector"] == "MultiConnector"
-    assert composed["kv_connector_extra_config"]["connectors"] == [offloading, REEF_CONNECTOR_CONFIG]
-    # A MultiConnector the operator wrote gains Reef's connector once and keeps its other settings.
-    assert kv_transfer_config(composed) == composed
-    multi = {"kv_connector": "MultiConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"connectors": []}}
-    assert kv_transfer_config(multi)["kv_connector_extra_config"]["connectors"] == [REEF_CONNECTOR_CONFIG]
-    assert kv_transfer_config('{"kv_connector": "ReefConnector", "kv_role": "kv_both"}')["kv_connector"] == (
-        "ReefConnector"
-    )
-
-
 def test_factory_imports_and_builds_with_training_stack_and_vllm_blocked():
     result = subprocess.run(
         [
@@ -111,7 +90,7 @@ import sys
 sys.modules.update(dict.fromkeys(('slime', 'megatron', 'torch', 'vllm', 'reef.train.slime_backend')))
 from reef.inference.vllm.deployment import create_inference
 service = create_inference(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
-assert service.config.options['kv_transfer_config']['kv_connector'] == 'ReefConnector'
+assert service.config.options['logprobs_mode'] == 'processed_logprobs'
 from reef.inference.vllm import backend, control, engine, launch, service as service_module, worker
 from reef.inference.interfaces import InferenceEngine
 assert engine.ReefVLLMEngine.__bases__ == (InferenceEngine,)

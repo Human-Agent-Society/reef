@@ -2,9 +2,8 @@
 
 The shared OpenAI and Anthropic handling lives in :mod:`reef.inference.chat`.
 This module shapes SGLang's request, reads the exact sample out of its
-``meta_info`` (sampled ids beside log-probs, and the per-token weight versions
-Reef's scheduler plugin stamps), and relays SGLang's incremental stream so
-clients see tokens as they are produced.
+``meta_info`` (sampled ids beside log-probs), and relays SGLang's incremental
+stream so clients see tokens as they are produced.
 """
 
 from __future__ import annotations
@@ -29,8 +28,8 @@ from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.inference.interfaces import InferenceArtifact, InferenceStream
 
 SGLANG_GENERATE_PATH = "/generate"
-#: ``meta_info`` entries that hold per-token tensors; they feed the training block, never a client.
-PRIVATE_META_KEYS = frozenset({"_reef_token_runtime_load_ids", "input_token_logprobs", "output_token_logprobs"})
+#: ``meta_info`` entries that hold per-token tensors; a client never receives them.
+PRIVATE_META_KEYS = frozenset({"input_token_logprobs", "output_token_logprobs"})
 
 
 def output_tensors(meta: Mapping[str, Any]) -> tuple[list[int], list[float]]:
@@ -115,20 +114,16 @@ class SGLangGenerateClient(NativeGenerateClient):
                 native_payload[key] = request[key]
         return native_payload
 
-    def parse(self, artifact: InferenceArtifact, response: Mapping[str, Any]) -> CapturedGeneration:
-        normalized = normalize_native_response(artifact, dict(response))
+    def parse(self, response: Mapping[str, Any]) -> CapturedGeneration:
+        normalized = normalize_native_response(dict(response))
         meta = normalized["meta_info"]
         text = normalized.get("text")
         if not isinstance(text, str):
             raise ValueError("SGLang response is missing generated text")
         output_ids, rollout_log_probs = output_tensors(meta)
-        stamped = normalized["_reef_token_runtime_load_ids"]
-        if len(stamped) != len(output_ids):
-            raise ValueError("SGLang response has incomplete token runtime load IDs")
         return CapturedGeneration(
             output_ids=output_ids,
             rollout_log_probs=rollout_log_probs,
-            token_runtime_load_ids=list(stamped),
             finish_reason=normalize_finish_reason(meta.get("finish_reason")),
             text=text,
             public_meta={key: value for key, value in meta.items() if key not in PRIVATE_META_KEYS},
@@ -142,32 +137,23 @@ class SGLangGenerateClient(NativeGenerateClient):
         return FunctionCallParser([Tool.model_validate(tool) for tool in tools], parser_name)
 
 
-def normalize_native_response(artifact: InferenceArtifact, response: dict[str, Any]) -> dict[str, Any]:
-    """Require scheduler-stamped per-token versions, or SGLang's engine version for a local release."""
-    exact_runtime_load_ids_required = artifact.require_token_runtime_load_ids
+def normalize_native_response(response: dict[str, Any]) -> dict[str, Any]:
+    """Check the response's ``meta_info`` and give the engine's weight version Reef's name.
+
+    SGLang's ``meta_info`` carries the runtime load ID as ``weight_version``.
+    The result's ``meta_info`` also carries it as ``runtime_load_id`` when the
+    engine reports a non-empty one.
+    """
     meta = response.get("meta_info")
     if not isinstance(meta, Mapping):
         raise ValueError("SGLang /generate response lacks meta_info")
-    pairs = meta.get("output_token_logprobs")
-    if not isinstance(pairs, list):
+    if not isinstance(meta.get("output_token_logprobs"), list):
         raise ValueError("SGLang /generate response lacks output token log probabilities")
-    stamped = meta.get("_reef_token_runtime_load_ids")
-    if stamped is None and not exact_runtime_load_ids_required:
-        # Raw SGLang meta_info carries the runtime-load-ID under SGLang's
-        # own field name; the normalized meta below re-keys it for Reef.
-        version = meta.get("weight_version")
-        stamped = [version] * len(pairs)
-    if (
-        not isinstance(stamped, list)
-        or len(stamped) != len(pairs)
-        or any(not isinstance(version, str) or not version for version in stamped)
-    ):
-        raise ValueError("SGLang /generate response lacks scheduler-stamped token runtime load IDs")
     normalized_meta = dict(meta)
-    if stamped:
-        normalized_meta["runtime_load_id"] = stamped[-1]
+    version = meta.get("weight_version")
+    if isinstance(version, str) and version:
+        normalized_meta["runtime_load_id"] = version
     response["meta_info"] = normalized_meta
-    response["_reef_token_runtime_load_ids"] = stamped
     return response
 
 
@@ -180,7 +166,6 @@ class NativeStreamCapture:
         "output_token_ids_logprobs",
         "output_token_sampling_mask",
         "output_token_sampling_logprobs",
-        "_reef_token_runtime_load_ids",
     )
 
     def __init__(self) -> None:
@@ -238,11 +223,7 @@ class NativeStreamCapture:
     def response(self) -> dict[str, Any]:
         if not self.seen:
             raise ValueError("SGLang stream completed without a generation event")
-        response: dict[str, Any] = {"text": self.text, "meta_info": dict(self.meta)}
-        versions = self.meta.get("_reef_token_runtime_load_ids")
-        if versions is not None:
-            response["_reef_token_runtime_load_ids"] = versions
-        return response
+        return {"text": self.text, "meta_info": dict(self.meta)}
 
 
 class SGLangInferenceHandler(TokenNativeChatHandler):
@@ -292,9 +273,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         async def chunks() -> AsyncIterator[bytes]:
             # ``stream`` is bound below, before the first chunk is pulled; the
             # relay records the completed response on it.
-            async for frame in self._relay_stream(
-                stream, upstream, relay, artifact, call, chat_id, message_id, created
-            ):
+            async for frame in self._relay_stream(stream, upstream, relay, call, chat_id, message_id, created):
                 yield frame
 
         stream = InferenceStream(
@@ -311,7 +290,6 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         stream: InferenceStream,
         upstream: InferenceStream,
         relay: ChatStreamRelay,
-        artifact: InferenceArtifact,
         call: ChatCall,
         chat_id: str,
         message_id: str,
@@ -338,7 +316,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
                 for frame in relay.piece(kind, value):
                     yield frame
 
-            captured = self.client.parse(artifact, capture.response())
+            captured = self.client.parse(capture.response())
             # Streaming parsers are stateful. Parse the complete sample with a
             # fresh instance for the canonical response that the record keeps.
             response = self._response_from_capture(call, captured, self._configured_tool_parser(call.request))

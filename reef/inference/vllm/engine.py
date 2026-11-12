@@ -85,11 +85,6 @@ class ReefVLLMEngine(InferenceEngine):
     def get_url(self) -> str:
         return f"http://{self.server_host}:{self.server_port}"
 
-    def health_generate(self, timeout: float = 5) -> bool:
-        response = requests.get(f"{self.get_url()}/health", timeout=timeout)
-        response.raise_for_status()
-        return True
-
     def shutdown(self) -> None:
         if self.process is None:
             return

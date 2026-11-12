@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from reef.inference.vllm import engine as engine_module
-from reef.inference.vllm.config import REEF_CONNECTOR_CONFIG, VLLMConfig
+from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.engine import ReefVLLMEngine
 
 
@@ -62,7 +62,7 @@ def test_server_command_line_carries_placement_reef_requirements_then_options(en
     assert arguments[arguments.index("--max-model-len") + 1] == "4096"
     assert "--enable-lora" in arguments
     assert "--no-enable-prefix-caching" in arguments
-    assert json.loads(arguments[arguments.index("--kv-transfer-config") + 1]) == REEF_CONNECTOR_CONFIG
+    assert "--kv-transfer-config" not in arguments
     environment = engine.server_environment()
     assert environment["CUDA_VISIBLE_DEVICES"] == "6,7"
     assert environment["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] == "1"

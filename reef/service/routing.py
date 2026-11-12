@@ -834,9 +834,8 @@ class RoutingAdapter:
                 raise RoutingRequestError(f"request repeats the {name} header", code="duplicate_header")
             if name in RESERVED_HEADERS or name.startswith(RESERVED_HEADER_PREFIX):
                 raise RoutingRequestError(f"{name} is not accepted from clients", code="reserved_header")
-        for name in ("x-reef-release-id", "x-reef-artifact-id"):
-            if values.get(name, [""])[0].strip():
-                raise RoutingRequestError(f"routed external targets do not accept {name}", code="release_pin")
+        if values.get("x-reef-artifact-id", [""])[0].strip():
+            raise RoutingRequestError("routed external targets do not accept x-reef-artifact-id", code="release_pin")
         name = values.get(SCENARIO_HEADER, [""])[0]
         if not name:
             raise RoutingRequestError("routing requires x-reef-scenario", code="missing_scenario")

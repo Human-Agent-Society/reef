@@ -42,18 +42,6 @@ to forced cleanup of the managed service processes.
    ``-V, --version``
        the installed reef version. Takes no command: ``reef --version``.
 
-Check artifacts before an upgrade
----------------------------------
-
-.. code-block:: bash
-
-   reef check-artifacts -c path/to/stack.yaml
-
-The command checks that each scenario's commit history resolves to stored
-files. It prints each problem, and it exits with status 1 when it finds one and
-0 when it finds none. See the `upgrade steps
-<../user-guide/operate.rst#upgrade-from-a-reef-that-wrote-older-formats>`__.
-
 Selecting the model
 -------------------
 
@@ -72,9 +60,7 @@ the prefix.
 
    reef serve --model ollama/gemma4:26b
 
-Reef bundles no deployment profiles. ``reef serve --recipe <name>`` exits
-with ``--recipe <name>: built in profiles were removed; pass -c <config file>``.
-Pass a recipe's deployment config with ``-c`` instead.
+Reef bundles no deployment profiles. Pass a recipe's deployment config with ``-c``.
 
 Overriding config values
 ------------------------
