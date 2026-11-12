@@ -62,7 +62,7 @@ Fields and where Reef reads them
 | ``layout``                       | ``scenario/committer.py``,          | Check an imported directory against the component's snapshot layout  |
 |                                  | ``scenario/factory.py``             | before admission. Without ``layout``, the component takes no import. |
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``files``                        | ``service/request_service.py``      | Read the files a client pulls from the frozen release. Without a     |
+| ``files``                        | ``service/request_service.py``      | Read the files a client pulls from the frozen snapshot. Without a    |
 |                                  |                                     | component with ``files``, harness file routes reject the scenario.   |
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``kind``                         | ``scenario/binding.py``,            | The ``ArtifactKind`` of the component. A ``model`` or                |
@@ -99,7 +99,7 @@ Built-in recipes
 
 **Weights.** ``InferenceRuntime.activate_checkpoint`` makes the runtime serve
 a snapshot. It returns the runtime load ID that serves the snapshot: a new load
-ID for a runtime that loads weights, or the release ID for one that loads
+ID for a runtime that loads weights, or the artifact ID for one that loads
 nothing, such as a proxy. The runtime loads only published weights; no trainer
 changes what the engines serve. The runtime load ID stays inside the runtime:
 each record names the artifact that answered by its ``artifact_id`` (see
@@ -164,8 +164,8 @@ committer carries the other forward from the previous checkpoint:
 
 The root snapshot of such a scenario keeps one directory per component
 (``weights/``, ``harness/``). ``CompositeRecipe`` (``reef.recipe.composite``)
-builds exactly this from existing flat recipes, one per component, and runs
-each one's trainer as its own worker; see `configuration
+maps each component name to an existing flat recipe. Reef builds exactly
+this from the mapping, and runs each recipe's trainer as its own worker; see `configuration
 <../reference/configuration.rst#recipe-configuration>`__ for its layout.
 
 Remote weight snapshots
@@ -173,10 +173,10 @@ Remote weight snapshots
 
 An inference runtime implements ``activate_checkpoint(artifact)``. The
 saved-weight serving runtimes (``reef.inference.serving``) load the snapshot's
-files into the engines. A proxy runtime loads nothing and returns the release
+files into the engines. A proxy runtime loads nothing and returns the artifact
 ID. An inference runtime that serves immutable remote snapshots validates the
 checkpoint and binds its remote sampler. Tinker's inference runtime uses this
 to serve the authoritative artifact before the scenario serves requests. The
 training component does not read the head: the next job starts from the
-trainer's committed start, and a ``train-from`` imports the snapshot into the
-component with ``import_start``.
+trainer's committed start, and after a ``train-from`` the training service
+imports the snapshot into the component with ``import_start``.

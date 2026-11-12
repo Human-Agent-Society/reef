@@ -6,20 +6,11 @@ from dataclasses import replace
 
 import pytest
 from tests.support.conversations import conversation, turn
+from tests.support.records import report
 
-from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.record2sample import ReportSamples, ReportSet, TrajectorySamples
 from reef.train import PipelineContext
-
-
-def report(record_id: str, *references: str, score: float = 1.0) -> AgentRecord:
-    return AgentRecord.create(
-        agent_record_id=record_id,
-        scenario="math",
-        request_type=RequestType.REPORT,
-        payload={"score": score, "references": list(references)},
-    )
 
 
 def report_stage() -> ReportSamples:

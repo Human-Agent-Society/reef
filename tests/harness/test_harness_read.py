@@ -3,27 +3,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-from tests.support.harness_steps import IdleMethod, evolution_config
+from tests.support.harness_jobs import configured_live, evolution_config
 
-from reef.artifact import Artifact, ArtifactNotFound, DefaultStart, InMemoryRepositoryBackend
+from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.components import ScenarioComponents
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import EvaluationSettings
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
-from reef.inference.http import InferenceProxyRuntime
-from reef.recipe import Recipe
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
+from reef.recipe import CompositeRecipe, Recipe
+from reef.recipe.deployment import harness_adapter
+from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.harness_backend.settings import EvolutionSettings
 
 #: The files pi reads for a tree that holds only ``rules.md`` with the text ``rule``: its package and empty configs.
 PI_RULES_RENDER = render_tree(HarnessTree({"rules.md": "rule"}), get_adapter("pi"))
 #: A pi harness evolution recipe: what its components serves is the subject here, so it never builds a backend.
-PI_RECIPE = HarnessEvolutionRecipe(
-    method=IdleMethod(), evolution=EvolutionSettings(), evaluation=EvaluationSettings(policy="none")
-)
+PI_RECIPE = HarnessEvolutionRecipe(evolution=EvolutionSettings(), evaluation=EvaluationSettings(policy="none"))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -40,10 +41,11 @@ class _HarnessRecipe(Recipe):
         return DefaultStart(files={} if self.rules is None else {"rules.md": self.rules})
 
 
-def _service(tmp_path, *, recipe) -> RequestService:
+def _service(tmp_path, *, recipe, live: LiveObjects | None = None) -> RequestService:
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(None),
         coordination=memory_coordination(),
@@ -73,13 +75,13 @@ def test_current_files_rejects_a_weights_scenario_without_materializing(tmp_path
     monkeypatch.setattr(
         service.dispatcher.get_or_create_scenario("delivery").repository, "materialize", fail_materialize
     )
-    with pytest.raises(ArtifactNotFound, match="the deployment's recipe declares no harness component"):
+    with pytest.raises(ArtifactNotFoundError, match="the deployment's recipe declares no harness component"):
         service.harness_manifest({"x-reef-scenario": "delivery"})
 
 
 def test_current_files_never_creates_a_scenario(tmp_path) -> None:
     service = _service(tmp_path, recipe=_HarnessRecipe(rules="x"))
-    with pytest.raises(ArtifactNotFound):
+    with pytest.raises(ArtifactNotFoundError):
         service.harness_manifest({"x-reef-scenario": "unknown"})
 
 
@@ -87,7 +89,7 @@ def test_manifest_error_distinguishes_a_scenario_without_a_published_tree(tmp_pa
     # A scenario exists and its recipe has a harness components, but its snapshot holds no tree yet. The message must
     # tell the operator that nothing has been published, not that the components is missing.
     service = _service(tmp_path, recipe=_HarnessRecipe(rules=None))
-    with pytest.raises(ArtifactNotFound, match="holds no harness tree"):
+    with pytest.raises(ArtifactNotFoundError, match="holds no harness tree"):
         service.harness_manifest({"x-reef-scenario": "delivery"})
 
 
@@ -120,17 +122,13 @@ def test_harness_components_ignore_repository_bookkeeping(tmp_path) -> None:
     assert components.read_files(Artifact.local(root)) == PI_RULES_RENDER
 
 
-@dataclass(frozen=True, kw_only=True)
-class ClaudeHarnessRecipe(_HarnessRecipe):
-    @property
-    def harness_adapter(self) -> str | None:
-        return "claude"
-
-
 def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
     (tmp_path / "harness").mkdir()
     (tmp_path / "weights").mkdir()
-    harness = _service(tmp_path / "harness", recipe=ClaudeHarnessRecipe(rules="x")).dispatcher
+    claude = load_recipe(
+        HarnessEvolutionRecipe, {"model": {"path": "small"}, **evolution_config(adapter="claude")}, {}
+    )
+    harness = _service(tmp_path / "harness", recipe=claude, live=configured_live(claude)).dispatcher
     weights = _service(tmp_path / "weights", recipe=Recipe()).dispatcher
     assert [(row["scenario"], row["adapter"]) for row in harness.list_scenarios()] == [("delivery", "claude")]
     assert all("adapter" not in row for row in weights.list_scenarios())
@@ -145,8 +143,9 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
 
 def test_harness_recipes_name_their_adapter() -> None:
     config = {"model": {"path": "small"}, **evolution_config(adapter="claude")}
-    built = HarnessEvolutionRecipe.from_environment(
-        {}, config=config, runtime=InferenceProxyRuntime(model_path="small", base_url="http://up")
-    )
-    assert built.harness_adapter == "claude"
-    assert Recipe().harness_adapter is None
+    built = load_recipe(HarnessEvolutionRecipe, config, {})
+    assert harness_adapter(built) == "claude"
+    assert harness_adapter(Recipe()) is None
+    # A composite names the adapter of its harness component, wherever that component stands.
+    assert harness_adapter(CompositeRecipe(components={"config": Recipe(), "harness": built})) == "claude"
+    assert harness_adapter(CompositeRecipe(components={"config": Recipe(), "records": Recipe()})) is None

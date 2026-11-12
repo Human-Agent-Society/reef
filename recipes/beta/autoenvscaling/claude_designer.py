@@ -10,10 +10,10 @@ route with 404.
 The Designer supplies the token through the existing executor environment. The sandbox launcher includes environment
 values in bubblewrap's command arguments. Claude Code removes the token from its Bash, hook and MCP subprocesses
 (``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The Designer redacts its log and error messages and the retained run files.
-It refuses a check of a task that holds the token and admits no such task (:class:`CredentialHeld`).
+It refuses a check of a task that holds the token and admits no such task (:class:`CredentialHeldError`).
 
-A run that ends on the model provider's refusal of its content is that proposal's failure (:class:`ModelRefused`);
-every other error of Claude Code's but its turn limit is an outage (:class:`DesignerOutage`).
+A run that ends on the model provider's refusal of its content is that proposal's failure (:class:`ModelRefusedError`);
+every other error of Claude Code's but its turn limit is an outage (:class:`DesignerOutageError`).
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ from recipes.beta.autoenvscaling.designer import (
     AgentTools,
     CandidateChecks,
     DesignedTask,
-    DesignerOutage,
-    ModelRefused,
+    DesignerOutageError,
+    ModelRefusedError,
     SeedVariantDesigner,
     TaskVariant,
     agent_prompt,
@@ -49,10 +49,15 @@ from recipes.beta.autoenvscaling.designer import (
     workspace_reply,
     write_inputs,
 )
-from recipes.beta.autoenvscaling.designer_credentials import CredentialChecks, CredentialHeld, clean_run, scrubbed
+from recipes.beta.autoenvscaling.designer_credentials import CredentialChecks, CredentialHeldError, clean_run, scrubbed
 from recipes.beta.autoenvscaling.sources import SessionSource
 from reef.execution.sandbox.environment import execute
-from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout, SandboxUnavailable
+from reef.execution.sandbox.process import (
+    ProgramExecutor,
+    ProgramLaunchError,
+    ProgramTimeoutError,
+    SandboxUnavailableError,
+)
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
@@ -237,13 +242,13 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         variant of a seeded parent, written from the parent alone. ``tags`` go unused, since Reef records none of its
         model calls.
 
-        Raises :class:`CredentialHeld` when the task holds the token, also after a refused run or an outage, which its
-        message names and which is its cause: the task is not admitted.
+        Raises :class:`CredentialHeldError` when the task holds the token, also after a refused run or an outage, which
+        its message names and which is its cause: the task is not admitted.
         """
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
         write_inputs(self.reef, source, work_dir, variant)
-        failure: ModelRefused | DesignerOutage | None = None
+        failure: ModelRefusedError | DesignerOutageError | None = None
         transcript = ""
         try:
             if source is not None:
@@ -261,7 +266,7 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
                     prompt=agent_prompt(variant, source is None),
                     is_seeded=source is None,
                 )
-            except (ModelRefused, DesignerOutage) as exc:
+            except (ModelRefusedError, DesignerOutageError) as exc:
                 # A held token ends the generation as a held token, which a refusal or an outage would not report, so
                 # the token check comes first.
                 failure = exc
@@ -272,9 +277,9 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         if is_held:
             held = "the agent's task held the run's Claude Code token, so it is not admitted"
             if failure is None:
-                raise CredentialHeld(held)
+                raise CredentialHeldError(held)
             # The failure, such as a spent plan or a lost sign-in, can meet the next run too.
-            raise CredentialHeld(f"{held}; the run also ended with: {failure}") from failure
+            raise CredentialHeldError(f"{held}; the run also ended with: {failure}") from failure
         if failure is not None:
             raise failure
         # The transcript's path names the file as renamed.
@@ -297,13 +302,14 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         Designer's rules are the seed rules (:func:`agent_rules`): the inputs hold no session. Answers the path of its
         transcript, relative to ``work_dir``, or ``""``.
 
-        Raises :class:`ModelRefused` when Claude Code ended on the model provider's refusal of the run's content
-        (:func:`is_refusal`): a run on the same inputs is likely to meet the same refusal. Raises :class:`DesignerOutage` when the
-        run could not start or was stopped, and when Claude Code ended with any other error but its turn limit: an
-        outage (a spent plan, a lost sign-in) must not pass for the agent's failure. Every message is redacted.
+        Raises :class:`ModelRefusedError` when Claude Code ended on the model provider's refusal of the run's content
+        (:func:`is_refusal`): a run on the same inputs is likely to meet the same refusal. Raises
+        :class:`DesignerOutageError` when the run could not start or was stopped, and when Claude Code ended with any
+        other error but its turn limit: an outage (a spent plan, a lost sign-in) must not pass for the agent's failure.
+        Every message is redacted.
         """
         if stop.is_set():
-            raise DesignerOutage("the agent's run was stopped before it started")
+            raise DesignerOutageError("the agent's run was stopped before it started")
         executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
         rules = agent_rules(tools.checks, self.has_behaviour_rule, extra_rules, is_seeded)
         # The rules reach Claude Code as the plugin that --plugin-dir loads, as the adapter's run does, and
@@ -372,14 +378,14 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
                 writable_paths=state,
                 readonly_paths=tuple(work_dir / PurePosixPath(relative) for relative in files),
             )
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             # The sandbox copied the workspace back: the task stands as the agent left it.
             logger.info("AutoEnvScaling Claude Code timed out after %.0f s", time.monotonic() - started)
             return transcript_path(work_dir, "")
-        except (ProgramLaunchError, SandboxUnavailable) as exc:
+        except (ProgramLaunchError, SandboxUnavailableError) as exc:
             if stop.is_set():
-                raise DesignerOutage("the agent's run was stopped") from None
-            raise DesignerOutage(f"Claude Code could not run: {scrubbed(str(exc), self.claude_token)}") from None
+                raise DesignerOutageError("the agent's run was stopped") from None
+            raise DesignerOutageError(f"Claude Code could not run: {scrubbed(str(exc), self.claude_token)}") from None
         finally:
             finished.set()
             if session is not None:
@@ -393,7 +399,7 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         result = claude_result(outcome.stdout)
         if result is None:
             tail = scrubbed(outcome.stderr.strip() or outcome.stdout.strip(), self.claude_token)[-ERROR_TEXT_CHARS:]
-            raise DesignerOutage(f"Claude Code exited {outcome.exit_code} without a result: {tail}")
+            raise DesignerOutageError(f"Claude Code exited {outcome.exit_code} without a result: {tail}")
         # The result holds the agent's own text, so each field logged or raised is redacted.
         subtype = scrubbed(str(result.get("subtype")), self.claude_token)
         errors = result.get("errors")
@@ -417,6 +423,6 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         ):
             cut = scrubbed(text, self.claude_token)[:ERROR_TEXT_CHARS]
             if is_refusal(result, text):
-                raise ModelRefused(f"the model provider refused Claude Code's run: {cut}")
-            raise DesignerOutage(f"Claude Code's run ended with an error ({subtype}): {cut}")
+                raise ModelRefusedError(f"the model provider refused Claude Code's run: {cut}")
+            raise DesignerOutageError(f"Claude Code's run ended with an error ({subtype}): {cut}")
         return transcript

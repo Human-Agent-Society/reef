@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from tests.support.config_helpers import connect_training_objects
 from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.core.errors import RuntimeConfigError
 from reef.inference.null import NullInferenceRuntime
-from reef.inference.registry import RuntimeFactory
-from reef.service.assembly import connect_training_component
-from reef.service.deploy.service_config import ServiceConfig
+from reef.inference.registry import BUILTIN_FACTORIES, RuntimeFactory
+from reef.service.deploy.service_config import ServiceSettings
 
 # The Slime component module imports Ray; the base installation has none.
 slime_component = pytest.importorskip("reef.train.slime_backend.component", exc_type=ImportError)
@@ -19,7 +19,7 @@ class ClosingComponent(StubTrainingComponent):
     """A stub component that records whether the factory released it."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(name="slime")
         self.closed = False
 
     def close(self) -> None:
@@ -44,7 +44,7 @@ def created(monkeypatch):
     return calls
 
 
-def training_settings(**changes) -> ServiceConfig:
+def training_settings(**changes) -> ServiceSettings:
     values = {
         "recipe": "recipes.sao.recipe:SAORecipe",
         "training_backend": "slime",
@@ -53,21 +53,21 @@ def training_settings(**changes) -> ServiceConfig:
         "ray_address": "ray://head:10001",
         "ray_namespace": "training-cluster",
         "train_timeout_s": 14400,
-        "training_backend_options": {"global-batch-size": 8},
+        "training_backend_options": {"global-batch-size": 8, "hf-checkpoint": "model"},
         "execution_config": {"execution": {"training": {"backend": "ray", "options": {"queue": "gpu"}}}},
     }
-    return ServiceConfig(**{**values, **changes})
+    return ServiceSettings(**{**values, **changes})
 
 
 def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
-    component, runtime = connect_training_component(
+    component, runtime = connect_training_objects(
         training_settings(), model_path="model", default_parameters=SAO_PARAMETERS
     )
     try:
         [(settings, built)] = created
         assert component is built
         assert isinstance(runtime, NullInferenceRuntime)
-        assert settings.arguments == ("--global-batch-size=8",)
+        assert settings.arguments == ("--global-batch-size=8", "--hf-checkpoint=model")
         # The recipe registered sao by name; each job's driver, a new process, gets its reference.
         assert (settings.loss_family, settings.recipe) == (
             "recipes.sao.slime:SaoAlgorithm",
@@ -85,7 +85,7 @@ def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
 def test_slime_requires_a_ray_cluster_before_creating_the_component(created, monkeypatch):
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
     with pytest.raises(RuntimeConfigError, match=r"training\.ray-address or RAY_ADDRESS"):
-        connect_training_component(
+        connect_training_objects(
             training_settings(ray_address=None), model_path="model", default_parameters=SAO_PARAMETERS
         )
     assert created == []
@@ -101,8 +101,8 @@ def test_a_serving_factory_that_builds_no_inference_runtime_releases_the_trainin
             built.append(ClosingComponent())
             return built[-1]
 
-    monkeypatch.setattr("reef.inference.registry._runtime_kinds", {"none": WrongServingFactory()})
+    monkeypatch.setitem(BUILTIN_FACTORIES, "none", WrongServingFactory)
     with pytest.raises(TypeError, match="must build an InferenceRuntime, not ClosingComponent: a runtime serves"):
-        connect_training_component(training_settings(), model_path="model", default_parameters=SAO_PARAMETERS)
+        connect_training_objects(training_settings(), model_path="model", default_parameters=SAO_PARAMETERS)
     [(_, component)] = created
     assert component.closed

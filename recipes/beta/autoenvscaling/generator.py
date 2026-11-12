@@ -78,8 +78,8 @@ from recipes.beta.autoenvscaling.designer import (
     AgentDesigner,
     CandidateChecks,
     DesignedTask,
-    DesignerOutage,
-    ModelRefused,
+    DesignerOutageError,
+    ModelRefusedError,
     PromptDesigner,
     SeedVariantDesigner,
     SourceError,
@@ -89,13 +89,13 @@ from recipes.beta.autoenvscaling.designer import (
     VariantDirection,
     workspace_reply,
 )
-from recipes.beta.autoenvscaling.designer_credentials import CredentialHeld
+from recipes.beta.autoenvscaling.designer_credentials import CredentialHeldError
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.execution.sandbox.config import remote_executor
-from reef.execution.sandbox.process import SandboxUnavailable
+from reef.execution.sandbox.process import SandboxUnavailableError
 from reef.execution.sandbox.remote import RemoteExecutor
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
@@ -107,11 +107,11 @@ from reef.recipe.generated_tasks.generator import (
     TaskValidationResult,
 )
 from reef.record2sample.generator.client import (
-    DuplicateTask,
+    DuplicateTaskError,
     Generator,
     GeneratorError,
     HttpGenerator,
-    TaskNameConflict,
+    TaskNameConflictError,
 )
 from reef.record2sample.generator.designer import parse_harbor_reply
 from reef.record2sample.generator.harbor import (
@@ -413,7 +413,7 @@ class GeneratorChecks(CandidateChecks):
         candidate = replace(task, name=f"{task.name}-check-{number}")
         try:
             result = asyncio.run_coroutine_threadsafe(self.oracle(candidate), self.loop).result()
-        except DuplicateTask as exc:
+        except DuplicateTaskError as exc:
             error = f"the task is the same as one the generator holds already: {exc}"
             return {"passed": False, "stage": "write", "errors": error[:ERROR_CHARS]}
         answer: dict[str, object] = {
@@ -455,7 +455,7 @@ class GeneratorChecks(CandidateChecks):
             self.is_closed = True
 
 
-class ProposalRefused(ValueError):
+class ProposalRefusedError(ValueError):
     """A session became no task: ``stage`` says where it stopped; ``record_id`` is the Designer's last recorded call."""
 
     def __init__(self, reason: str, *, stage: str, record_id: str = "") -> None:
@@ -1149,7 +1149,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 seeds=seed_tasks(Path(seed_tasks_path).expanduser()) if seed_tasks_path is not None else (),
                 concurrency=config.get("concurrency", DEFAULT_CONCURRENCY),
             )
-        except (OSError, ValueError, SandboxUnavailable) as exc:
+        except (OSError, ValueError, SandboxUnavailableError) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc
 
     def save_cursor(self, cursor: GenerationCursor) -> None:
@@ -1197,9 +1197,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
         proposal with stage ``credential``, since the token may have left the sandbox: :meth:`rebuilt` gives the run
         :data:`STOPPED_RUN_SECONDS` to end.
 
-        Raises :class:`DesignerOutage` when an outage leaves the generation with no task, after it saved the report of
-        the attempt (:meth:`save_report`), since no task waits for results: the recipe tries the generation again,
-        and a round whose generation runs out of attempts is not complete, so a restart gives it back. An empty
+        Raises :class:`DesignerOutageError` when an outage leaves the generation with no task, after it saved the
+        report of the attempt (:meth:`save_report`), since no task waits for results: the recipe tries the generation
+        again, and a round whose generation runs out of attempts is not complete, so a restart gives it back. An empty
         generation that ends would count as a complete round.
         """
         # The recipe keeps its generation numbers when an upgrade drops this generator's state: never number below
@@ -1238,17 +1238,17 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 is_outage = False
                 try:
                     # Shielded, so a cancelled generation is cancelled here and not through the slot, whose stopped run
-                    # can end with CredentialHeld instead.
+                    # can end with CredentialHeldError instead.
                     task = await asyncio.shield(writing[index])
-                except ProposalRefused as exc:
+                except ProposalRefusedError as exc:
                     refused.append(
                         replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc))
                     )
-                except DesignerOutage as exc:
+                except DesignerOutageError as exc:
                     # An outage must not pass for the Designer's failure: it ends the generation, and the report names
                     # it. So does a task that held the token, which may have left the sandbox.
                     error = f"the Designer could not rebuild {proposal.source_record_id}: {exc}"
-                    is_outage = not isinstance(exc, CredentialHeld)
+                    is_outage = not isinstance(exc, CredentialHeldError)
                     ended_on_outage = is_outage
                     stage = STAGE_OUTAGE if is_outage else STAGE_CREDENTIAL
                     refused.append(replace(proposal, stage=stage, refusal=error))
@@ -1282,7 +1282,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
             await asyncio.gather(*writing.values(), return_exceptions=True)
             for index, running in writing.items():
                 held = None if index in taken or running.cancelled() else running.exception()
-                if isinstance(held, CredentialHeld):
+                if isinstance(held, CredentialHeldError):
                     # The slot takes nothing, but the token may have left the sandbox, so the report names it.
                     proposal = task_slots[index].proposal
                     refusal = f"the Designer could not rebuild {proposal.source_record_id}: {held}"
@@ -1293,7 +1293,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
             # No task waits for results, so the attempt closes now. The recipe's retry saves its open generation under
             # the same name, which would leave this attempt's taken sessions and its outage in no report.
             self.save_report(open_generation, refused, {})
-            raise DesignerOutage(error)
+            raise DesignerOutageError(error)
         self.save_open(request.generation, open_generation)
         # The seeds are taken once the open generation holds them, so a restart continues with the next one. An
         # attempt that raised or was cancelled returned no task, so it takes no seed: the retry uses them again.
@@ -1347,11 +1347,11 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """The task of ``slot`` (:meth:`rebuilt`), once one of ``designer_slots`` is free.
 
         The slots start in order. An outage or a cancellation sets ``stopped`` before it frees its slot, so no slot
-        starts after it: the slots after it end with :class:`DesignerOutage`, and ``generate`` takes none of them.
+        starts after it: the slots after it end with :class:`DesignerOutageError`, and ``generate`` takes none of them.
         """
         async with designer_slots:
             if stopped.is_set():
-                raise DesignerOutage("the generation stopped before this slot started")
+                raise DesignerOutageError("the generation stopped before this slot started")
             try:
                 return await self.rebuilt(
                     slot.source,
@@ -1359,7 +1359,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     variant=slot.variant,
                     source_record_id=slot.proposal.source_record_id,
                 )
-            except (DesignerOutage, asyncio.CancelledError):
+            except (DesignerOutageError, asyncio.CancelledError):
                 stopped.set()
                 raise
 
@@ -1433,9 +1433,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
         names the seed in ``seed_task``, as each variant of a seeded parent does.
 
         Raises ``ValueError`` for a None ``source`` without a ``variant`` and a ``source_record_id``,
-        :class:`ProposalRefused` when the session becomes no task, also when the model provider refused the Designer's
-        run (stage ``authoring``), and ``DesignerOutage`` when the Designer could not run. A cancelled call stops the
-        run and raises ``CancelledError``, or :class:`CredentialHeld` when the run ends within
+        :class:`ProposalRefusedError` when the session becomes no task, also when the model provider refused the
+        Designer's run (stage ``authoring``), and ``DesignerOutageError`` when the Designer could not run. A cancelled
+        call stops the run and raises ``CancelledError``, or :class:`CredentialHeldError` when the run ends within
         :data:`STOPPED_RUN_SECONDS` and its task held the token.
         """
         if source is None and (variant is None or not source_record_id):
@@ -1486,17 +1486,17 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 await stopped_run_end(designing)
                 raise
             except SourceError as exc:
-                raise ProposalRefused(
+                raise ProposalRefusedError(
                     f"the source {record_source} cannot be rebuilt: {exc}", stage=STAGE_SOURCE
                 ) from exc
-            except ModelRefused as exc:
+            except ModelRefusedError as exc:
                 logger.warning("AutoEnvScaling generation %d: %s", self.generation, exc)
-                raise ProposalRefused(str(exc), stage=STAGE_AUTHORING) from exc
+                raise ProposalRefusedError(str(exc), stage=STAGE_AUTHORING) from exc
             finally:
                 # A check the agent left running finishes, and deletes its candidate, before the task is written.
                 await asyncio.to_thread(checks.close)
             if not designed.record_ids and not designed.transcript:
-                raise ProposalRefused("the Designer made no model call that Reef recorded", stage=STAGE_AUTHORING)
+                raise ProposalRefusedError("the Designer made no model call that Reef recorded", stage=STAGE_AUTHORING)
             record_id = designed.record_ids[-1] if designed.record_ids else ""
             try:
                 task = admitted_task(
@@ -1508,7 +1508,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     parent=checks.parent,
                 )
             except (ValueError, HarborTaskError) as exc:
-                raise ProposalRefused(
+                raise ProposalRefusedError(
                     f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
                 ) from exc
             lineage = {} if variant is None else {"parent_task": variant.parent, "variant": variant.direction}
@@ -1545,7 +1545,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """
         try:
             written = await self.service.write_task(task)
-        except (DuplicateTask, TaskNameConflict) as exc:
+        except (DuplicateTaskError, TaskNameConflictError) as exc:
             self.save_validation(task.name, (), STAGE_CHECK, "")
             return TaskValidationResult((f"refused: {exc}",))
         results: list[CheckResult] = []
@@ -1732,14 +1732,14 @@ class AutoEnvScalingGenerator(TaskGenerator):
 
 async def stopped_run_end(designing: asyncio.Task[DesignedTask]) -> None:
     """Wait up to :data:`STOPPED_RUN_SECONDS` for a stopped Designer's run to end, and raise its
-    :class:`CredentialHeld`: the task's token may have left the sandbox. A run that has not ended by then goes unread,
-    as a cancelled await's would."""
+    :class:`CredentialHeldError`: the task's token may have left the sandbox. A run that has not ended by then goes
+    unread, as a cancelled await's would."""
     try:
         await asyncio.wait((designing,), timeout=STOPPED_RUN_SECONDS)
     finally:
         designing.cancel()
     held = designing.exception() if designing.done() else None
-    if isinstance(held, CredentialHeld):
+    if isinstance(held, CredentialHeldError):
         raise held
 
 

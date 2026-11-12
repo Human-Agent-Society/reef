@@ -11,8 +11,9 @@ classification.
 Reefine refines a coding harness from plain-language instructions. It is a
 [harness evolution](../../../docs/user-guide/evolve-your-harness.rst) recipe:
 its implementation is `recipes.beta.reefine:ReefineRecipe`, a
-`HarnessEvolutionRecipe` with its own method (`ReefineMethod`), scorer, seed
-and evaluation defaults. It needs no training GPUs. The example configuration
+`HarnessEvolutionRecipe` that only sets defaults: the method (`ReefineMethod`),
+the scorer, the seed and the evaluation. The recipe builds nothing; Reef's
+harness training component builds the method from the `evolution` section. It needs no training GPUs. The example configuration
 refines a pi harness; [Adapters other than pi](#adapters-other-than-pi) covers
 the others.
 
@@ -20,12 +21,12 @@ the others.
 
 ```text
 beta/reefine/
-  recipe.py            ReefineRecipe: the defaults, the agent's isolation and the multimodal gateway
+  recipe.py            ReefineRecipe: Reefine's defaults for the evolution section
   method.py            ReefineMethod: answers a request, or learns one skill from failing traces
   answer.py            the text answer: the served model writes the design, the files and the review
   prompts/             the text answer's prompts and the agent's request prompt (<name>.md), and the
                        words they take for each kind of harness (env_words.yaml)
-  agent.py             the agent answer: pi edits and runs the step's tree
+  agent.py             the agent answer: pi edits and runs the job's tree
   agent_gateway.py     the loopback gateway the agent and its trials reach models through
   agent_rules.md, agent_tools.ts, trial.py, trial_driver.mjs
                        the agent's instructions, its tools and its trial runner
@@ -52,7 +53,7 @@ reef serve -c recipes/beta/reefine/examples/configs/serve.yaml \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b \
   --inference.upstream-api-key dummy \
-  --recipe.config.evolution.multimodal.api_key sk-or-...
+  --recipe.config.evolution.method.config.multimodal.api_key sk-or-...
 ```
 
 `--model ollama/gemma4:26b` is a short form of the three `--inference`
@@ -69,7 +70,7 @@ Leave it out to go without them, or when the upstream is OpenRouter.
 
 The service listens on `127.0.0.1:8901`. It requires no token unless
 `REEF_TOKEN` is set. It keeps state under `~/.reef/reefine/`, outside the
-checkout: with `sandbox: none` the agent works in a step's directory there,
+checkout: with `sandbox: none` the agent works in a job's directory there,
 and pi reads every `AGENTS.md` and `CLAUDE.md` in the directories above it
 (see [The agent](#the-agent)). Move that directory aside to start fresh. For
 a custom deployment, copy `examples/configs/serve.yaml` and pass your copy
@@ -94,15 +95,15 @@ measurement of which requests passed the checks.
    client's session and the snapshot it runs, empty when it runs none yet.
    The answer carries the training record id and `page_path`, the
    request's page (`GET /reef/harness/requests/<id>/page`). The page
-   reloads every five seconds and names the step's state until the result
-   is on it, with the step's summary: the design, how to use the change and
+   reloads every five seconds and names the job's state until the result
+   is on it, with the job's summary: the design, how to use the change and
    the review.
    `GET /reef/harness/requests/<id>/progress` gives the same state as
    JSON. The [manual training API](../../../docs/reference/http-api.rst#manual-training)
    lists the fields a request carries.
-2. Step. In `training-mode: manual` the service runs one evolve step for
+2. Job. In `training-mode: manual` the service runs one evolve job for
    each accepted request. Where the host can isolate it, a coding agent
-   answers the request (see [The agent](#the-agent)): it edits the step's
+   answers the request (see [The agent](#the-agent)): it edits the job's
    tree, runs the changed harness for real and stops, and a review call reads
    the files against the request. Otherwise the served model answers it in a
    few calls: it writes a design first (the
@@ -113,7 +114,7 @@ measurement of which requests passed the checks.
    whether the files deliver the requested behavior or only put a
    substitute in its place, such as a rule describing it. When the review
    is partial or finds a substitute, the model writes the answer again with
-   the review's findings, up to three answers in all. The step keeps the
+   the review's findings, up to three answers in all. The job keeps the
    delivering answer with the fewest uncovered points, and its notes say
    which answer it kept when it wrote more than one (`kept_attempt`); when
    no answer delivers, it is skipped with the reason. A point the harness's
@@ -122,21 +123,21 @@ measurement of which requests passed the checks.
    uncovered points: it starts no retry, and the loop ends when only limits
    remain. The evaluation runs the candidate on the health task: it
    publishes when the tree still works. The health task is no test of the
-   requested behavior, which only the review reads. The step's summary
+   requested behavior, which only the review reads. The job's summary
    carries the design and the review either way. A review call that
    answers with no text is asked once more with room for both its
-   reasoning and its reply; when it still gives none, the step records why
+   reasoning and its reply; when it still gives none, the job records why
    and its summary says the review did not run, rather than reading like a
-   step that had no review to give.
-3. Result. The request page and the step's page
+   job that had no review to give.
+3. Result. The request page and the job's page
    (`GET /reef/harness/artifacts/<step>/page`) give the result: published
    as a snapshot, inactive because it changes an extension, rejected by the
-   evaluation, or skipped with the reason, followed by the step's summary.
+   evaluation, or skipped with the reason, followed by the job's summary.
    The request page also gives the next action: the update call that serves
    an inactive artifact, `GET /reef/harness` for an active one.
 4. Activate. A snapshot that touches an `extension` file is inactive: Reef
-   does not serve it, so it reaches no client on its own. Read its step page,
-   which carries the step's summary (the design, how to use the change and
+   does not serve it, so it reaches no client on its own. Read its job page,
+   which carries the job's summary (the design, how to use the change and
    the review) and the numbers. Then activate it: set `served` to the
    artifact id the page names, with weight 100:
 
@@ -158,8 +159,8 @@ measurement of which requests passed the checks.
 
 ## Behavior and configuration
 
-* `training-mode: manual` runs one step for each accepted request on
-  `POST /reef/train`. Each step also reads the failing reports in the manual
+* `training-mode: manual` runs one job for each accepted request on
+  `POST /reef/train`. Each job also reads the failing reports in the manual
   buffer, which a client fills
   ([Choose the samples that train](../../../docs/reference/http-api.rst#choose-the-samples-that-train));
   new reports do not join it by themselves. Use `auto` to learn from failing
@@ -186,9 +187,9 @@ measurement of which requests passed the checks.
 * What only you can provide (a phone number, a credential, a permission, an
   account) is a `requires` item, `{name, kind, check?, prompt?}`, whose
   `prompt` is one sentence of at most 200 characters that a client shows
-  when it asks for the item; the Setup table of the step's page has a prompt
-  column. A step may require at most eight distinct items, including
-  those the method adds. Exceeding this limit skips the step with an
+  when it asks for the item; the Setup table of the job's page has a prompt
+  column. A job may require at most eight distinct items, including
+  those the method adds. Exceeding this limit skips the job with an
   explanation and publishes no change; split the request into smaller
   changes before retrying. On pi an `env` item's value is read at run time from
   `process.env.NAME`: the prompt says that an extension never asks
@@ -255,24 +256,24 @@ An answer whose form slipped is written again while attempts remain: JSON
 that does not parse (a list or an object that decodes inside a broken outer
 array is a fragment of it, not the answer), files every one of which was
 dropped, or files the harness's validation refuses (each answer meets the
-validation the step runs next). When validation refused the files, the retry
+validation the job runs next). When validation refused the files, the retry
 shows that answer's design and files, so what it got right stays. Each
-dropped answer's reason is recorded in the step's notes
+dropped answer's reason is recorded in the job's notes
 (`method_notes.dropped_attempts`) and shows in the request page's Activity
-while the step runs. A review reply whose JSON a stray quote broke is asked
-once more. The review reads the whole design; the step
+while the job runs. A review reply whose JSON a stray quote broke is asked
+once more. The review reads the whole design; the job
 records it cut to 4000 characters with its last paragraph, the How to use,
 kept whole.
 
 Off pi, a design that says no file this harness takes can deliver the
-request is an answer, not a failure: the review runs on it, the step
+request is an answer, not a failure: the review runs on it, the job
 records it under `method_notes.declined` with the design and what is
 out of reach, and its summary says it was answered with no change. When that
 review finds a point a file could still deliver, the request is written
 again. On pi such a reply stays an answer with nothing to apply, its
 reason under `failure`.
 
-The step's summary carries the design with its How to use paragraph, so a
+The job's summary carries the design with its How to use paragraph, so a
 person learns the form the snapshot takes (`$chat` on codex) rather than
 one taken from the request, and the review, which lists what the harness
 puts out of reach one point per line.
@@ -282,12 +283,12 @@ puts out of reach one point per line.
 The text answer writes an extension it never runs, so a model name it
 guessed or a parameter a provider refuses only shows once you use the
 change. The agent runs the served model as a pi coding agent instead. Its
-current directory is the step's tree, `harness/` in the step's workspace,
+current directory is the job's tree, `harness/` in the job's workspace,
 where it may change `skills/<name>/SKILL.md`, `rules.md`,
 `commands/<name>.md` and `extensions/<name>.ts`. Beside it, it writes
 `output/requires.json`, `output/design.md` and `output/progress.md`, and
 reads `scratch/reference/pi-extension-api.md`, this deployment's summary of
-the extension API, and the step's `material/`. The step does not read back a
+the extension API, and the job's `material/`. The job does not read back a
 file the agent writes at a path that no part of pi's tree takes, a file of a
 part a request may not change, or a symbolic link, and the check names each
 one. It names a directory that holds no file of the harness tree, such as the
@@ -302,7 +303,7 @@ A behavior that requires changes to pi itself is recorded as a limitation
 in the design. The agent may also read provider documentation on the network
 and has three tools of its own:
 
-* `harness_check` runs the tree through Reef's validation, as the step
+* `harness_check` runs the tree through Reef's validation, as the job
   will.
 * `harness_trial` runs the changed harness for real, online, on a task the
   agent writes, and returns the session's final text, the tools it called,
@@ -327,27 +328,27 @@ While it runs, the request page's Activity lists each tool the agent calls,
 each check and trial with its result, and each image or speech call with the
 provider's status, so a long run shows what it is doing.
 
-When the agent stops, its tree is the step's candidate: the head tree with
+When the agent stops, its tree is the job's candidate: the head tree with
 the files it changed of the parts a request may write, beside its `requires`
 items and design, reviewed as a text answer is. A run that changed no file,
 ran past its limit or ended on a failed model response hands back no change,
-its reason under `failure`. The step record keeps the agent's session log
+its reason under `failure`. The job record keeps the agent's session log
 as `output/agent-session.jsonl`, and its check and trial observations as
 `output/agent-checks.jsonl`, each identified by the candidate tree's
 checksum. When the candidate is not the tree the agent left (a failed run,
 or files left out), that tree stays in `output/agent-harness/`. These are
 diagnostic files, not published changes or an automatic resume mechanism.
-They follow the deployment's step-record retention.
+They follow the deployment's job-record retention.
 
 The agent holds no credential. It and its trials reach models through a
 loopback gateway whose address carries a random token: the served model
 with the served key (always the served model, whatever a request names),
 and `/v1/images`, `/v1/embeddings`, `/v1/audio/speech` and
-`/v1/decisions` on the recipe's multimodal gateway (`evolution.multimodal`,
+`/v1/decisions` on the method's multimodal gateway (`evolution.method.config.multimodal`,
 see below), and the provider's
 model list (`GET /models?modality=`, fetched with its key), so the agent picks
 a model that exists without holding a key. Every call spends from
-`evolution.max_model_calls_per_step` and is recorded in the step's
+`evolution.max_model_calls_per_step` and is recorded in the job's
 `calls.json`. Nothing else is reachable through it, Reef's own routes
 included.
 
@@ -357,7 +358,7 @@ Isolation (`evolution.agent.sandbox`, or `REEF_AGENT_SANDBOX`):
   a bubblewrap jail with an empty environment and a read-only system. The
   agent may write only its tree (its working directory), `output/` and
   pi's session state; a trial runs in a new temporary directory outside
-  the step's, where it may write only its own working directory and
+  the job's, where it may write only its own working directory and
   session state. The jail is in a network namespace pasta connects to the
   internet with no host address reachable but the gateway's port. It
   needs `bwrap` and `pasta` (the `passt` package) and a service that
@@ -380,7 +381,7 @@ Isolation (`evolution.agent.sandbox`, or `REEF_AGENT_SANDBOX`):
   If the command connection drops, Reef attempts to reconnect to the same
   process twice within the original time limit; it does not rerun the command.
   The tunnel retries interrupted response transfers without duplicating chunks.
-  A response that cannot be completed remains a failed stream. Failed steps
+  A response that cannot be completed remains a failed stream. Failed jobs
   appear as `Failed` on the request and release pages, with the recorded
   error, and publish no snapshot. After resolving the error, submit the request again.
 
@@ -401,7 +402,7 @@ Isolation (`evolution.agent.sandbox`, or `REEF_AGENT_SANDBOX`):
   end or its limit without a reconnect.
 * `none`: no isolation. The agent runs with the service's user and full
   network access, fed your clients' text. Choose it only where you trust
-  every client, such as your own machine. It runs in the step's directory
+  every client, such as your own machine. It runs in the job's directory
   under `evolution.state_dir`, and pi reads every `AGENTS.md` or
   `CLAUDE.md` in the directories above it, so keep the state directory
   outside a project that holds such files. The example configuration keeps
@@ -409,8 +410,8 @@ Isolation (`evolution.agent.sandbox`, or `REEF_AGENT_SANDBOX`):
 * Left unset on a host that cannot isolate, the agent is off and the served
   model answers in text; the service logs why.
 
-`timeout_s` (1800) bounds the whole agent run and `trial_timeout_s` (300)
-each trial. Trials also respect the remaining run budget, reserving the
+`evolution.agent.timeout_s` (1800) bounds the whole agent run, and the
+method's setting `evolution.method.config.trial_timeout_s` (300) each trial. Trials also respect the remaining run budget, reserving the
 last 10 percent (at most 60 seconds) for saving files and finishing. The
 agent receives a reminder to finish during this interval; it is still
 subject to the outer hard timeout. A run past its limit hands back no change.
@@ -419,9 +420,25 @@ Set
 an agent run makes a model call per turn and may probe several provider
 models before it settles on one.
 
+`ReefineMethod` reads two settings from its own config: `trial_timeout_s`
+and `multimodal` (below). It takes the agent from its job's services
+(`job.services.agent`), so it needs no recipe of its own. `ReefineRecipe`
+only declares defaults, and names the method when the deployment names none.
+A deployment that names `reef.recipe.harness:HarnessEvolutionRecipe` runs the
+method without Reefine's defaults. Both write the settings in one place:
+
+```yaml
+evolution:
+  method:
+    module: recipes.beta.reefine:ReefineMethod
+    config:
+      trial_timeout_s: 300
+      multimodal: {preset: openrouter, api_key_env: REEF_MULTIMODAL_API_KEY}
+```
+
 ## Images, speech, embeddings and decisions
 
-`evolution.multimodal` names one gateway that serves these modalities behind
+The method's `multimodal` setting names one gateway that serves these modalities behind
 a single key. The agent and its trials reach it through their loopback
 gateway, in the provider's own format, and hold no provider key. Reef's HTTP
 service does not relay these modalities: a scenario's clients call only the
@@ -429,16 +446,20 @@ chat model routes.
 
 ```yaml
 evolution:
-  multimodal:
-    preset: openrouter          # or openai-compatible (OrcaRouter, LiteLLM, ...)
-    url: https://openrouter.ai/api   # the preset's address unless set; required for openai-compatible
-    api_key: ${REEF_MULTIMODAL_API_KEY}   # or api_key_env: NAME
+  method:
+    module: recipes.beta.reefine:ReefineMethod
+    config:
+      multimodal:
+        preset: openrouter          # or openai-compatible (OrcaRouter, LiteLLM, ...)
+        url: https://openrouter.ai/api   # the preset's address unless set; required for openai-compatible
+        api_key: ${REEF_MULTIMODAL_API_KEY}   # or api_key_env: NAME
 ```
 
 `api_key` takes the key the way `inference.upstream_api_key` takes the chat
 key; the example configuration sets it to `${REEF_MULTIMODAL_API_KEY}`, and
-`--recipe.config.evolution.multimodal.api_key` sets it on the command line.
-Empty, the upstream key serves when the upstream is the same address, so a
+`--recipe.config.evolution.method.config.multimodal.api_key` sets it on the command line.
+`api_key_env` names a variable of the service's environment instead.
+Empty, the served model's key serves when the served model is at the same address, so a
 deployment that chats through OpenRouter needs nothing more. Without a key,
 or for a route the preset does not serve (`openai-compatible` has no
 decisions), the agent's call answers 501. Recipes other than Reefine offer none.
@@ -457,7 +478,7 @@ evaluation:
 Reefine's evaluator ([`scorer.py`](scorer.py)) grades the reply's last line, `reef-ok` exactly. The
 floor answers one question: does the tree still work after the change? The
 model binding answers, the shell tool runs, every extension loads. It says
-nothing about whether the change does what was asked; the step's design and
+nothing about whether the change does what was asked; the job's design and
 review notes and the person judge that. Set both
 `evolution.evaluation.tasks` and `evolution.evaluation.scorer` for a
 workload of your own, and
@@ -513,7 +534,7 @@ curl -sS http://127.0.0.1:8901/reef/train \
 ```
 
 The answer carries the request's `agent_record_id`. Open
-`GET /reef/harness/requests/<id>/page` for that scenario to inspect the step:
+`GET /reef/harness/requests/<id>/page` for that scenario to inspect the job:
 accepting the request alone does not mean it passed evaluation. The
 health task should score 1; inspect the selection result and published snapshot
 on the page before using the new tree.
@@ -530,20 +551,20 @@ temp directory. A run on E2B gets none of these.
 [Harness adapters](../../../docs/developer-guide/harness-adapters.rst) shows the config that runs
 it through Reef yourself, including the `x-reef-scenario` header.
 
-## What the step records
+## What the job records
 
-Every step's catalog row carries the request under
+Every job's catalog row carries the request under
 `metrics.training_request`, the method's plain-text summary under
 `metrics.method_summary` (why nothing changed, the design with its How to
 use paragraph, and the review) and its notes under `metrics.method_notes`;
-the step page (`GET /reef/harness/artifacts/<step>/page`) shows them:
+the job page (`GET /reef/harness/artifacts/<step>/page`) shows them:
 
 * `design`: the plan for the request, a few sentences ending with the How
   to use paragraph.
 * `review`: the review call's result, `complete` or `partial`, with
   the points of the request the files cover and the ones they leave
   uncovered, and the `limits` the harness puts out of reach. Absent when
-  the review call failed, which never blocks the step; `review_failure`
+  the review call failed, which never blocks the job; `review_failure`
   then says why.
 * `refused_requires`: the `requires` items the model wrote that could
   not be honored, each with the reason. An `env` item whose check is a
@@ -552,7 +573,7 @@ the step page (`GET /reef/harness/artifacts/<step>/page`) shows them:
 * `undeclared_env`: the variables a written extension reads through
   `process.env` that no `requires` item names. Nothing adds them; the
   notes show them so you can set them or ask for the item.
-* `failure`: why a request step produced no change: the model call
+* `failure`: why a request job produced no change: the model call
   failed (how long it took, the reply budget and the endpoint's error; a
   reply without text adds that a thinking model may have spent the budget
   on its reasoning and names `REEF_REEFINE_CALL_MAX_TOKENS`) or the reply

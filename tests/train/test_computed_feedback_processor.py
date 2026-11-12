@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id

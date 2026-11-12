@@ -1,23 +1,23 @@
-"""The workspace of one harness step: the directories a method reads and edits.
+"""The workspace of one harness job: the directories a method reads and edits.
 
-Each step gets one directory, which is kept afterwards as the step record::
+Each job gets one directory, which is kept afterwards as the job record::
 
     harness/      the head tree, which the method edits into the candidate
-    material/     what the step learns from, read-only:
+    material/     what the job learns from, read-only:
                     traces/<n>/trace.json        one trace (``Trace``): a client's request, or a run
                     traces/<n>/trajectory.json   the ATIF trajectory of a client's request
-                    request.json                 the request the step answers (request steps only)
-                    evaluation.json              the step's evaluation tasks and repeats
+                    request.json                 the request the job answers (request jobs only)
+                    evaluation.json              the job's evaluation tasks and repeats
                     host.json                    the adapter, the parts of its tree, and its config targets
-    state/        the method's own files, committed with the step
-    scratch/      temporary files, removed when the step ends
-    output/       files the method keeps with the step record, and what it says about its step:
-                    summary.md                   plain text for the step pages
+    state/        the method's own files, committed with the job
+    scratch/      temporary files, removed when the job ends
+    output/       files the method keeps with the job record, and what it says about its job:
+                    summary.md                   plain text for the job pages
                     notes.json                   a JSON object, the commit's method_notes
                     requires.json                what the change needs where the harness runs
 
 The scenario's history (``reef.evaluation.harness.history``) is beside the
-steps, at ``Workspace.history_dir``; a method reads it and never writes it.
+jobs, at ``Workspace.history_dir``; a method reads it and never writes it.
 Material is client data: a method treats its text as untrusted and wraps it
 with ``reef.core.prompts.untrusted_text`` before the text enters a prompt.
 """
@@ -54,11 +54,11 @@ TRAJECTORY_FILE = "trajectory.json"
 REQUEST_FILE = "request.json"
 EVALUATION_FILE = "evaluation.json"
 HOST_FILE = "host.json"
-#: In ``output/``: what a method says about its step. Each file is optional.
+#: In ``output/``: what a method says about its job. Each file is optional.
 SUMMARY_FILE = "summary.md"
 NOTES_FILE = "notes.json"
 REQUIRES_FILE = "requires.json"
-#: Where a trace came from: a client's request (``traffic``), or a run the step ran on a train task
+#: Where a trace came from: a client's request (``traffic``), or a run the job ran on a train task
 #: (``run``).
 TRACE_SOURCES = ("traffic", "run")
 #: The most bytes ``state/`` may hold: the commit record stores every file of it.
@@ -67,7 +67,7 @@ MAX_STATE_BYTES = 16 * 1024 * 1024
 
 @dataclass(frozen=True)
 class Trace:
-    """One trace of a step's material: a request a client sent, as served, or a run the step rolled out.
+    """One trace of a job's material: a request a client sent, as served, or a run the job rolled out.
 
     Values: ``source`` is one of ``TRACE_SOURCES``. ``directory`` holds
     ``trace.json``, and for traffic the request's ATIF ``trajectory.json``;
@@ -85,7 +85,7 @@ class Trace:
     or the history run of the run. ``client`` is the client's tag,
     ``"untagged"`` without one and for a run.
     Purpose: ``Workspace.create`` writes one per traffic sample and one per
-    rolled-out run of the step; ``Workspace.traces`` reads them for a
+    rolled-out run of the job; ``Workspace.traces`` reads them for a
     method.
     """
 
@@ -136,16 +136,16 @@ def json_object(value: Any) -> dict[str, Any]:
 
 
 @dataclass(frozen=True)
-class StepOutput:
-    """What a method said about its step, read back from its ``output/``.
+class JobOutput:
+    """What a method said about its job, read back from its ``output/``.
 
     Values: ``summary`` is the stripped text of ``summary.md``, empty without
     one. ``notes`` is the JSON object of ``notes.json``, and ``requires`` the
     ``reef.core.requirements`` items of ``requires.json``; each is empty
     without its file or when the file was refused. ``refused`` maps the name
     of each refused file to the reason.
-    Purpose: ``Workspace.read_output`` makes it after the method's step; the
-    backend keeps it with the step and the history.
+    Purpose: ``Workspace.read_output`` makes it after the method's job; the
+    backend keeps it with the job and the history.
     """
 
     summary: str = ""
@@ -161,13 +161,13 @@ class StepOutput:
 
 @dataclass(frozen=True)
 class Workspace:
-    """The directories of one harness step.
+    """The directories of one harness job.
 
     Values: ``root`` holds ``harness/``, ``material/``, ``state/``,
     ``scratch/`` and ``output/``; ``history_dir`` is the scenario's history
-    directory, which may be empty; ``step`` ≥ 1 is the step's number.
-    Purpose: the backend makes one per step with ``create`` and passes it to
-    ``Method.step``; the method reads and edits the directories, directly or
+    directory, which may be empty; ``step`` ≥ 1 is the job's number.
+    Purpose: the backend makes one per job with ``create`` and passes it to
+    ``Method.run``; the method reads and edits the directories, directly or
     through the readers below.
     """
 
@@ -216,7 +216,7 @@ class Workspace:
         request: TrainingRequest | None = None,
         state_files: Mapping[str, str] | None = None,
     ) -> Workspace:
-        """Write a step's workspace under ``root``, which must be absent or empty.
+        """Write a job's workspace under ``root``, which must be absent or empty.
 
         ``tree`` goes to ``harness/`` and ``state_files`` (relative path to
         text) to ``state/``. ``material/`` gets one traffic trace per sample,
@@ -263,7 +263,7 @@ class Workspace:
         return tuple(traces)
 
     def request(self) -> TrainingRequest | None:
-        """The request this step answers, ``None`` for a step without one."""
+        """The request this job answers, ``None`` for a job without one."""
         path = self.material / REQUEST_FILE
         if not path.is_file():
             return None
@@ -271,7 +271,7 @@ class Workspace:
         return TrainingRequest.from_dict(payload, request_id=str(payload.get("id", "")))
 
     def tasks(self) -> tuple[str, ...]:
-        """The tasks this step's evaluation runs, the seed tasks first."""
+        """The tasks this job's evaluation runs, the seed tasks first."""
         return tuple(json.loads((self.material / EVALUATION_FILE).read_text(encoding="utf-8"))["tasks"])
 
     def evaluation_repeats(self) -> int:
@@ -284,9 +284,9 @@ class Workspace:
         return json.loads((self.material / HOST_FILE).read_text(encoding="utf-8"))
 
     def history(self) -> History:
-        """The scenario's history as it was when the step started reading it.
+        """The scenario's history as it was when the job started reading it.
 
-        Records of this step's number or a later one come from an attempt of this step that did not commit;
+        Records of this job's number or a later one come from an attempt of this job that did not commit;
         a method that counts or compares what it tried skips them.
         """
         return History(self.history_dir)
@@ -294,13 +294,13 @@ class Workspace:
     def write_output(
         self, summary: str = "", notes: Mapping[str, Any] | None = None, requires: Sequence[Mapping[str, Any]] = ()
     ) -> None:
-        """Say what the step did: ``summary.md``, ``notes.json`` and ``requires.json`` in ``output/``.
+        """Say what the job did: ``summary.md``, ``notes.json`` and ``requires.json`` in ``output/``.
 
         An empty argument writes no file. ``ValueError``, before any file is
         written, when ``notes`` is not a JSON object or an item of
         ``requires`` is not a requirement.
         """
-        checked = StepOutput(summary=summary, notes=notes or {}, requires=tuple(requires))
+        checked = JobOutput(summary=summary, notes=notes or {}, requires=tuple(requires))
         self.output.mkdir(parents=True, exist_ok=True)
         if summary.strip():
             (self.output / SUMMARY_FILE).write_text(summary.strip() + "\n", encoding="utf-8")
@@ -309,8 +309,8 @@ class Workspace:
         if checked.requires:
             write_json(self.output / REQUIRES_FILE, [dict(item) for item in checked.requires])
 
-    def read_output(self) -> StepOutput:
-        """What the method said about its step; a ``notes.json`` or ``requires.json`` that is not valid is refused."""
+    def read_output(self) -> JobOutput:
+        """What the method said about its job; a ``notes.json`` or ``requires.json`` that is not valid is refused."""
         summary = output_text(self.output / SUMMARY_FILE)
         notes: dict[str, Any] = {}
         requires: tuple[Mapping[str, Any], ...] = ()
@@ -325,7 +325,7 @@ class Workspace:
                 requires = tuple(parse_requires(json.loads(text)))
             except ValueError as exc:
                 refused[REQUIRES_FILE] = str(exc)
-        return StepOutput(summary, notes, requires, refused)
+        return JobOutput(summary, notes, requires, refused)
 
     def state_files(self) -> dict[str, str]:
         """Every file in ``state/`` as relative path to text.
@@ -340,7 +340,7 @@ class Workspace:
         size = sum(len(path.encode("utf-8")) + len(text.encode("utf-8")) for path, text in files.items())
         if size > MAX_STATE_BYTES:
             raise ValueError(
-                f"state/ cannot be committed: it holds {size} bytes, and a step commits at most {MAX_STATE_BYTES}"
+                f"state/ cannot be committed: it holds {size} bytes, and a job commits at most {MAX_STATE_BYTES}"
             )
         return files
 

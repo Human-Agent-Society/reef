@@ -447,12 +447,13 @@ def test_user_facing_example_deployments_are_discovered() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("config_path", EXAMPLE_DEPLOYMENTS, ids=_config_id)
 def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
-    from reef.recipe import load_recipe_config
+    from reef.recipe import WeightTrainingRecipe, load_recipe_config
     from reef.recipe.registry import recipe_class_for
     from reef.service.assembly import _recipe_owned_settings
     from reef.service.deploy.execution import validate_services
     from reef.service.deploy.service_config import service_config_from_mapping
     from reef.service.deploy.serving import inference_handler_factory_for
+    from reef.service.deploy.training import training_recipe_config
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
@@ -491,8 +492,8 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
             assert named_recipe.is_file(), f"{config_path} selects unknown recipe {settings.recipe!r}"
             recipe_type = recipe_class_for(load_recipe_config(named_recipe)["implementation"])
     assert recipe_type is not None
-    if settings.model_path is not None and hasattr(recipe_type, "service_config"):
-        recipe_type.service_config(_recipe_owned_settings(settings), model_path=settings.model_path)
+    if settings.model_path is not None and issubclass(recipe_type, WeightTrainingRecipe):
+        training_recipe_config(recipe_type, _recipe_owned_settings(settings), model_path=settings.model_path)
 
 
 @pytest.mark.unit

@@ -20,7 +20,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
 import pytest
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     NAMES,
     REQUEST,
     SESSION_ID,
@@ -55,12 +55,12 @@ from recipes.beta.autoenvscaling.designer import (
     AgentTools,
     CandidateChecks,
     DesignedTask,
-    DesignerOutage,
-    ModelRefused,
+    DesignerOutageError,
+    ModelRefusedError,
     TaskVariant,
     VariantDesigner,
 )
-from recipes.beta.autoenvscaling.designer_credentials import CredentialChecks, CredentialHeld, rename_holding
+from recipes.beta.autoenvscaling.designer_credentials import CredentialChecks, CredentialHeldError, rename_holding
 from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import write_harbor_task
@@ -441,7 +441,7 @@ def test_max_turns_keeps_workspace_and_model_error_is_outage(
 ) -> None:
     session = ScriptedClaudeSession(stdout=stdout or "not json", exit_code=exit_code, stderr="boom")
     if error:
-        with pytest.raises(DesignerOutage, match=error):
+        with pytest.raises(DesignerOutageError, match=error):
             designed_in(tmp_path, reef_url, session)
     else:
         assert "port.txt" in designed_in(tmp_path, reef_url, session).reply
@@ -461,9 +461,9 @@ def test_a_run_that_the_model_provider_refused_is_a_refusal_and_not_an_outage(
     tmp_path: Path, reef_url: str, stdout: str
 ) -> None:
     session = ScriptedClaudeSession(stdout=stdout, exit_code=1)
-    with pytest.raises(ModelRefused, match="the model provider refused Claude Code's run: API Error: ") as raised:
+    with pytest.raises(ModelRefusedError, match="the model provider refused Claude Code's run: API Error: ") as raised:
         designed_in(tmp_path, reef_url, session)
-    assert not isinstance(raised.value, DesignerOutage)
+    assert not isinstance(raised.value, DesignerOutageError)
     assert session.is_closed.is_set()
 
 
@@ -484,7 +484,7 @@ def test_a_spent_plan_or_a_lost_sign_in_stays_an_outage(
     tmp_path: Path, reef_url: str, fields: dict[str, object]
 ) -> None:
     session = ScriptedClaudeSession(stdout=result_json("success", True, stop_reason="stop_sequence", **fields))
-    with pytest.raises(DesignerOutage, match=r"Claude Code's run ended with an error \(success\)"):
+    with pytest.raises(DesignerOutageError, match=r"Claude Code's run ended with an error \(success\)"):
         designed_in(tmp_path, reef_url, session)
 
 
@@ -506,7 +506,7 @@ def test_a_refused_or_failed_run_whose_task_holds_the_token_ends_as_a_held_token
     tmp_path: Path, reef_url: str, stdout: str, exit_code: int, failure: str
 ) -> None:
     session = ScriptedClaudeSession(stdout=stdout, exit_code=exit_code, task_leak=TOKEN)
-    with pytest.raises(CredentialHeld, match="held the run's Claude Code token") as raised:
+    with pytest.raises(CredentialHeldError, match="held the run's Claude Code token") as raised:
         designed_in(tmp_path, reef_url, session)
     # The failure, which can meet the next run too, stays in the message and as the cause.
     assert str(raised.value.__cause__).startswith(failure)
@@ -565,7 +565,7 @@ def test_a_refused_variant_takes_its_parents_slot_and_a_lost_sign_in_leaves_it(
         assert "parent_task" not in task.metadata, "the generation goes on to the session's slot"
         [variant] = state_document(tmp_path, f"open/{REQUEST.generation:05d}")["refused"]
     else:
-        with pytest.raises(DesignerOutage, match="Please run /login"):
+        with pytest.raises(DesignerOutageError, match="Please run /login"):
             asyncio.run(generator.generate(REQUEST))
         # An attempt that made no task has no results to wait for: its report is saved before it raises.
         [variant] = report(tmp_path, generator.generation)["proposals"]
@@ -599,7 +599,7 @@ def test_token_never_reaches_errors_logs_run_dir_or_task(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     failing = ScriptedClaudeSession(stdout=result_json(result=f"API Error: 401 {TOKEN} was refused"), leak=TOKEN)
-    with pytest.raises(DesignerOutage) as raised:
+    with pytest.raises(DesignerOutageError) as raised:
         designed_in(tmp_path / "failing", reef_url, failing)
     assert TOKEN not in str(raised.value) and "[redacted] was refused" in str(raised.value)
     run_dir = tmp_path / "failing" / "run"
@@ -607,7 +607,7 @@ def test_token_never_reaches_errors_logs_run_dir_or_task(
     assert files_holding(run_dir, "[redacted]") == [str(next(run_dir.glob(f"claude/projects/*/{SESSION_ID}.jsonl")))]
 
     holding = ScriptedClaudeSession(task_leak=TOKEN)
-    with pytest.raises(DesignerOutage, match="held the run's Claude Code token"):
+    with pytest.raises(DesignerOutageError, match="held the run's Claude Code token"):
         designed_in(tmp_path / "holding", reef_url, holding)
     assert not files_holding(tmp_path / "holding" / "run", TOKEN)
     assert "[redacted]" in (tmp_path / "holding" / "run" / "workspace" / "task" / "instruction.md").read_text()
@@ -622,7 +622,7 @@ def test_token_never_reaches_errors_logs_run_dir_or_task(
 )
 def test_cut_error_text_keeps_no_part_of_the_token(tmp_path: Path, reef_url: str, stdout: str, stderr: str) -> None:
     session = ScriptedClaudeSession(stdout=stdout, exit_code=1, stderr=stderr)
-    with pytest.raises(DesignerOutage) as raised:
+    with pytest.raises(DesignerOutageError) as raised:
         designed_in(tmp_path, reef_url, session)
     assert "[redacted]" in str(raised.value) and not holds_part_of_token(str(raised.value))
 
@@ -633,7 +633,7 @@ def test_result_fields_are_redacted_in_the_log_and_the_error(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     session = ScriptedClaudeSession(stdout=result_json(f"odd-{TOKEN}", num_turns=f"many-{TOKEN}"))
-    with pytest.raises(DesignerOutage, match=r"error \(odd-\[redacted\]\)") as raised:
+    with pytest.raises(DesignerOutageError, match=r"error \(odd-\[redacted\]\)") as raised:
         designed_in(tmp_path, reef_url, session)
     assert TOKEN not in str(raised.value)
     [ended] = [record.getMessage() for record in caplog.records if "ended with" in record.getMessage()]
@@ -646,7 +646,7 @@ def test_launch_error_and_close_warning_are_redacted(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     session = ScriptedClaudeSession(launch_error=f"no process: env {TOKEN}", close_error=f"still up: {TOKEN}")
-    with pytest.raises(DesignerOutage, match=r"could not run: no process: env \[redacted\]") as raised:
+    with pytest.raises(DesignerOutageError, match=r"could not run: no process: env \[redacted\]") as raised:
         designed_in(tmp_path, reef_url, session)
     assert TOKEN not in str(raised.value)
     [warning] = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
@@ -680,7 +680,7 @@ def test_a_name_that_cannot_take_the_redacted_name_is_deleted(tmp_path: Path) ->
 def test_check_and_admission_refuse_a_task_link_to_the_token(tmp_path: Path, reef_url: str) -> None:
     checks = CountingChecks()
     session = ScriptedClaudeSession(checks=([],), link_leak=TOKEN)
-    with pytest.raises(CredentialHeld):
+    with pytest.raises(CredentialHeldError):
         designed_in(tmp_path, reef_url, session, checks)
     [output] = session.check_outputs
     assert "holds this run's credential" in output and checks.count == 0
@@ -702,7 +702,7 @@ def test_task_holding_token_ends_generation_with_stage_credential(tmp_path: Path
 def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None:
     checks = CountingChecks()
     session = ScriptedClaudeSession(checks=([],), task_leak=TOKEN)
-    with pytest.raises(DesignerOutage, match="not admitted"):
+    with pytest.raises(DesignerOutageError, match="not admitted"):
         designed_in(tmp_path, reef_url, session, checks)
     [output] = session.check_outputs
     assert "holds this run's credential" in output and TOKEN not in output
@@ -823,7 +823,7 @@ def test_claude_config_builds_claude_code_on_the_agent_settings(tmp_path: Path) 
 def test_stop_signal_closes_claude_sandbox(tmp_path: Path, reef_url: str) -> None:
     stop = threading.Event()
     session = ScriptedClaudeSession(stop=stop)
-    with pytest.raises(DesignerOutage, match="stopped"):
+    with pytest.raises(DesignerOutageError, match="stopped"):
         claude_code(tmp_path, reef_url, session).design(
             source_of(sources(1)[0]), tmp_path / "run", NoChecks(1), tags={}, stop=stop
         )

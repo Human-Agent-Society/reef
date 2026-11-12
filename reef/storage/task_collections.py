@@ -16,7 +16,7 @@ from reef.core.errors import ReefError
 from reef.core.evaluation import COLLECTION_AVERAGES, CollectionAverage
 
 
-class CollectionNotFound(ReefError):
+class CollectionNotFoundError(ReefError):
     """A collection name that the owner does not store."""
 
 
@@ -41,7 +41,7 @@ class TaskCollection:
     has no benchmark, and a client can add them later. ``collections`` names other collections of the same owner,
     and does not have ``name``. ``average`` is ``task`` or ``benchmark``: how an evaluation on the collection
     computes its mean score (``EvaluationCollection``).
-    Purpose: a client stores it (``DataStore.put_collection``); the collection routes and an evaluation on the
+    Purpose: a client stores it (``DataStore.write_collection``); the collection routes and an evaluation on the
     collection read its benchmarks (``collection_benchmarks``).
     """
 
@@ -106,4 +106,4 @@ def collection_benchmarks(stored: Mapping[str, TaskCollection], name: str) -> tu
     return tuple(found)
 
 
-__all__ = ["CollectionNotFound", "TaskCollection", "check_names", "collection_benchmarks"]
+__all__ = ["CollectionNotFoundError", "TaskCollection", "check_names", "collection_benchmarks"]

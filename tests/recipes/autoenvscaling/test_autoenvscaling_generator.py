@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     DESCRIPTION,
     NAMES,
     REQUEST,
@@ -44,7 +44,7 @@ from recipes.beta.autoenvscaling import (
     CalibrationCheck,
     CandidateChecks,
     DesignedTask,
-    DesignerOutage,
+    DesignerOutageError,
     GeneratorChecks,
     PromptDesigner,
     SessionSource,
@@ -56,7 +56,7 @@ from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling import workspace_reply
 from recipes.beta.autoenvscaling.checks import CheckResult, PassRateBand
 from recipes.beta.autoenvscaling.designer import AgentTools, TaskVariant
-from recipes.beta.autoenvscaling.designer_credentials import CredentialHeld
+from recipes.beta.autoenvscaling.designer_credentials import CredentialHeldError
 from recipes.beta.autoenvscaling.tinker import AutoEnvScalingTinkerObjective
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
@@ -70,12 +70,12 @@ from reef.recipe.generated_tasks.processor import (
     complete_generation_count,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
-from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenTask
+from reef.record2sample.generator import DuplicateTaskError, GeneratorError, WrittenTask
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
-from reef.train.tinker_backend.objectives import resolve_tinker_objective
+from reef.train.tinker_backend.objectives import resolve_objective
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
 TINKER_EXAMPLES = ("recorded_sessions/serve-tinker.yaml", "tmax_seeds/serve-tinker.yaml")
@@ -150,14 +150,16 @@ def test_a_generator_without_state_numbers_from_the_recipe_generation_and_never_
 
 
 #: How a stopped run ends: as the outage of a stopped run, or with a task that held the Claude Code token.
-STOPPED_RUN = DesignerOutage("the agent's run was stopped")
-STOPPED_HOLDING_THE_TOKEN = CredentialHeld("the agent's task held the run's Claude Code token, so it is not admitted")
+STOPPED_RUN = DesignerOutageError("the agent's run was stopped")
+STOPPED_HOLDING_THE_TOKEN = CredentialHeldError(
+    "the agent's task held the run's Claude Code token, so it is not admitted"
+)
 
 
 class BlockingDesigner(TaskDesigner):
     """A Designer whose run lasts until it is stopped, and then raises ``stopped_error``."""
 
-    def __init__(self, stopped_error: DesignerOutage) -> None:
+    def __init__(self, stopped_error: DesignerOutageError) -> None:
         self.started = threading.Event()
         self.stopped = threading.Event()
         self.work_dirs: list[Path] = []
@@ -185,7 +187,7 @@ class BlockingDesigner(TaskDesigner):
     "stopped_error", [STOPPED_RUN, STOPPED_HOLDING_THE_TOKEN], ids=("stopped", "stopped-holding-the-token")
 )
 def test_a_cancelled_generation_stops_its_agent_and_takes_no_session(
-    tmp_path: Path, stopped_error: DesignerOutage
+    tmp_path: Path, stopped_error: DesignerOutageError
 ) -> None:
     # A stopped run whose task held the token does not make the cancelled generation return.
     designer = BlockingDesigner(stopped_error)
@@ -258,7 +260,7 @@ class OutageStandIn(TaskDesigner):
     """The first session's task is an outage once the second session's task is being written; that one runs until
     it is stopped, and then raises ``stopped_error``."""
 
-    def __init__(self, stopped_error: DesignerOutage) -> None:
+    def __init__(self, stopped_error: DesignerOutageError) -> None:
         self.sources: list[str] = []
         self.second = threading.Event()
         self.stopped = threading.Event()
@@ -277,7 +279,7 @@ class OutageStandIn(TaskDesigner):
         self.sources.append(source.record_id)
         if source.record_id == "session-1":
             self.second.wait(10)
-            raise DesignerOutage("the agent could not run: the sandbox did not start")
+            raise DesignerOutageError("the agent could not run: the sandbox did not start")
         self.second.set()
         if stop.wait(10):
             self.stopped.set()
@@ -291,11 +293,11 @@ class OutageStandIn(TaskDesigner):
     ids=("stopped", "stopped-holding-the-token"),
 )
 def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(
-    tmp_path: Path, stopped_error: DesignerOutage, stages: list[tuple[int, str]]
+    tmp_path: Path, stopped_error: DesignerOutageError, stages: list[tuple[int, str]]
 ) -> None:
     stand_in = OutageStandIn(stopped_error)
     generator = autoenvscaling(tmp_path, stand_in, source_count=4, count=4, concurrency=2)
-    with pytest.raises(DesignerOutage, match="the Designer could not rebuild session-1"):
+    with pytest.raises(DesignerOutageError, match="the Designer could not rebuild session-1"):
         asyncio.run(generator.generate(REQUEST))
     assert stand_in.stopped.wait(10), "the task being written after the outage was stopped"
     assert sorted(stand_in.sources) == ["session-1", "session-2"], "no task started after the outage"
@@ -311,7 +313,7 @@ def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(
 def test_a_retry_after_an_outage_that_made_no_task_keeps_the_failed_attempts_report(tmp_path: Path) -> None:
     designer = StandInDesigner(unusable=("session-1",), unreachable=("session-2",))
     generator = autoenvscaling(tmp_path, designer, source_count=5, count=3)
-    with pytest.raises(DesignerOutage, match="the Designer could not rebuild session-2"):
+    with pytest.raises(DesignerOutageError, match="the Designer could not rebuild session-2"):
         asyncio.run(generator.generate(REQUEST))
     # The recipe tries the same generation again, and this attempt makes its tasks.
     asyncio.run(generator.record_results(run_tasks(generator), generation=REQUEST.generation))
@@ -570,7 +572,10 @@ def test_the_check_tool_writes_checks_and_deletes_a_candidate_through_the_genera
         results.extend([await asyncio.to_thread(polled, tools), await asyncio.to_thread(polled, tools)])
         await asyncio.to_thread(checks.close)
         results.append(await asyncio.to_thread(polled, tools))
-        for error in (DuplicateTask("duplicate of a task already under the root"), GeneratorError("refused (500)")):
+        for error in (
+            DuplicateTaskError("duplicate of a task already under the root"),
+            GeneratorError("refused (500)"),
+        ):
             refusing = AgentTools(tmp_path / "run", checks_on(RefusingGenerator(tmp_path / "other", error)))
             results.append(await asyncio.to_thread(polled, refusing))
         return results
@@ -578,7 +583,7 @@ def test_the_check_tool_writes_checks_and_deletes_a_candidate_through_the_genera
     passed, unavailable, passed_again, spent, closed, duplicate, refused = asyncio.run(checked())
     assert [result["check_id"] for result in (passed, unavailable, passed_again, spent, closed)] == [1, 2, 3, 4, 5]
     assert passed["state"] == "done" and passed["passed"] is True and passed["check"] == 1
-    assert unavailable["ran"] is False and "OracleUnavailable" in unavailable["error"]
+    assert unavailable["ran"] is False and "OracleUnavailableError" in unavailable["error"]
     assert unavailable["checks_left"] == 1, "a check that could not run uses up none"
     assert passed_again["check"] == 2 and passed_again["checks_left"] == 0
     assert spent["error"] == "all 2 checks are used; finish with the task as it stands"
@@ -979,7 +984,7 @@ def test_an_examples_calibration_and_training_agents_match_and_cap_each_reply(na
     # A training rollout that fills the context ends and is scored.
     assert rollout_agent["import_path"] == "reef.record2sample.generator.terminus:VerifiedTerminus2"
     # Each rollout's advantage is its reward minus its task's mean reward.
-    objective = resolve_tinker_objective(config["recipe"]["config"]["job_parameters"]["objective"])
+    objective = resolve_objective(config["recipe"]["config"]["job_parameters"]["objective"])
     assert isinstance(objective, AutoEnvScalingTinkerObjective)
     # The official solver's cap of one reply; on chat completions, model_info caps nothing.
     assert kwargs["llm_kwargs"]["max_tokens"] == 16384

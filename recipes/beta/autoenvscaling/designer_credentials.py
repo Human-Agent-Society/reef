@@ -6,7 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
-from recipes.beta.autoenvscaling.designer import CandidateChecks, DesignerOutage, workspace_reply
+from recipes.beta.autoenvscaling.designer import CandidateChecks, DesignerOutageError, workspace_reply
 
 REDACTED = "[redacted]"
 #: Retain rendered configuration and transcripts, but remove account state.
@@ -17,7 +17,7 @@ TOKEN_REFUSAL = (
 )
 
 
-class CredentialHeld(DesignerOutage):
+class CredentialHeldError(DesignerOutageError):
     """The agent's task held the run's Claude Code token, so it is not admitted.
 
     Values: the message names no token; after a refused run or an outage it names that failure, which is its cause.

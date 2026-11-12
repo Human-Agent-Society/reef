@@ -1,15 +1,15 @@
 """Published harnesses remain staged until their scenario journal commits."""
 
 import copy
-import dataclasses
 
 import pytest
 from tests.support.git_lfs import fake_git_lfs
+from tests.support.harness_jobs import rebuilt_recipe
 from tests.support.harness_methods import IMPROVED, SEED, QueueChat, meta_harness_recipe, proposal_reply
 from tests.support.harness_service import checkpoint_result, report_once
 
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
+from reef.artifact.artifact import Artifact, ArtifactConflictError, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
@@ -21,7 +21,7 @@ __all__ = ["fake_git_lfs"]
 @pytest.fixture(params=["memory", "git"])
 def publication_case(tmp_path, request):
     chat = QueueChat(proposal_reply(SEED, IMPROVED))
-    recipe = meta_harness_recipe(tmp_path, chat)
+    recipe, live = meta_harness_recipe(tmp_path, chat)
     # A new scenario's root snapshot holds the recipe's seed, as a deployment's does.
     memory = InMemoryRepositoryBackend.factory(directory=tmp_path / "memory")
 
@@ -38,15 +38,16 @@ def publication_case(tmp_path, request):
             cache_dir=tmp_path / "cache",
         )
 
-    return recipe, factory, chat, tmp_path / "records"
+    return recipe, live, factory, chat, tmp_path / "records"
 
 
 @pytest.mark.parametrize("recovery", ["retry", "restart"])
 def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publication_case, monkeypatch, recovery):
-    recipe, factory, chat, records = publication_case
+    recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -84,16 +85,18 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
 
             monkeypatch.setattr(journal, "append", durable_append)
             scenario.commit(result)
-            assert scenario.scenario_step == 2
+            assert scenario.commit_number == 2
             assert scenario.trainer.state == result.state
             assert scenario.current_snapshot() == scenario.repository.backend.current() != head
             assert len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
+    # Each process makes its own harness component, as each service process builds its recipe.
+    restarted_recipe, restarted_live = rebuilt_recipe(recipe, live)
     restarted = Dispatcher(
-        # Each process makes its own harness component, as each service process builds its recipe.
-        dataclasses.replace(recipe, harness_component=None),
+        restarted_recipe,
         factory(),
+        live=restarted_live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -101,7 +104,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
     try:
         scenario = restarted.get_or_create_scenario("selected-commit")
         assert scenario.trainer.state == (result.state if recovery == "retry" else previous)
-        assert scenario.scenario_step == (2 if recovery == "retry" else 1)
+        assert scenario.commit_number == (2 if recovery == "retry" else 1)
         assert scenario.current_snapshot() == scenario.repository.backend.current()
         assert len(chat.prompts) == 1
     finally:
@@ -109,10 +112,11 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
 
 
 def test_restart_repairs_artifact_head_from_successful_journal_commit(publication_case, monkeypatch):
-    recipe, factory, chat, records = publication_case
+    recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -129,7 +133,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         with monkeypatch.context() as patch:
             patch.setattr(scenario.repository.backend, "commit_snapshot", unavailable)
             scenario.commit(result)
-        assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
+        assert scenario.commit_number == 2 and scenario.trainer.state == result.state
         committed_head = scenario.current_snapshot()
         assert committed_head != old_head
         assert scenario.repository.backend.current() == old_head
@@ -143,17 +147,19 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         assert scenario.store.history()[-1].snapshot == committed_head
     finally:
         dispatcher.close()
+    # Each process makes its own harness component, as each service process builds its recipe.
+    restarted_recipe, restarted_live = rebuilt_recipe(recipe, live)
     restarted = Dispatcher(
-        # Each process makes its own harness component, as each service process builds its recipe.
-        dataclasses.replace(recipe, harness_component=None),
+        restarted_recipe,
         factory(),
+        live=restarted_live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
     )
     try:
         scenario = restarted.get_or_create_scenario("stale-artifact-head")
-        assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
+        assert scenario.commit_number == 2 and scenario.trainer.state == result.state
         assert scenario.current_snapshot() == scenario.repository.backend.current() == committed_head
         assert len(scenario.store.history()) == 2 and len(chat.prompts) == 1
     finally:
@@ -161,10 +167,11 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
 
 
 def test_without_a_journal_the_backend_publication_remains_the_commit(publication_case, monkeypatch):
-    recipe, factory, _, _ = publication_case
+    recipe, live, factory, _, _ = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -194,10 +201,11 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
 
 
 def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(publication_case, monkeypatch):
-    recipe, factory, chat, records = publication_case
+    recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -206,20 +214,20 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
         scenario = dispatcher.get_or_create_scenario("lost-journal-ack")
         report_once(scenario, "1")
         result = checkpoint_result(scenario)
-        commit_step = scenario.store.commit_step
+        append_commit = scenario.store.append_commit
 
         def lose_ack(**keywords):
-            commit_step(**keywords)
+            append_commit(**keywords)
             raise OSError("journal acknowledgment lost")
 
         with monkeypatch.context() as patch:
-            patch.setattr(scenario.store, "commit_step", lose_ack)
+            patch.setattr(scenario.store, "append_commit", lose_ack)
             with pytest.raises(OSError, match="acknowledgment lost"):
                 scenario.commit(result)
         committed = scenario.store.history()[-1]
         scenario.commit(result)
 
-        assert scenario.scenario_step == 2 and len(chat.prompts) == 1
+        assert scenario.commit_number == 2 and len(chat.prompts) == 1
         assert scenario.current_snapshot() == committed.snapshot
         assert scenario.repository.resolve(committed.snapshot).local_path.is_dir()
         assert len(scenario.store.history()) == 2
@@ -228,10 +236,11 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
 
 
 def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publication_case, monkeypatch):
-    recipe, factory, chat, records = publication_case
+    recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -263,29 +272,31 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
             scenario.commit(result)
 
         committed = scenario.store.history()[-1]
-        assert scenario.scenario_step == committed.step == 2
+        assert scenario.commit_number == committed.commit_number == 2
         assert scenario.trainer.state == committed.algorithm_state == result.state
         assert scenario.current_snapshot() == committed.snapshot
         assert backend.current() == unrelated, scenario.commit_status
         assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
         assert scenario.repository.checkpoint_artifact == committed.snapshot
         assert unrelated not in (old_head, committed.snapshot)
-        with pytest.raises(ArtifactConflict):
+        with pytest.raises(ArtifactConflictError):
             scenario.repository.synchronize_checkpoint()
         assert backend.current() == unrelated and len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
 
+    # Each process makes its own harness component, as each service process builds its recipe.
+    restarted_recipe, restarted_live = rebuilt_recipe(recipe, live)
     restarted = Dispatcher(
-        # Each process makes its own harness component, as each service process builds its recipe.
-        dataclasses.replace(recipe, harness_component=None),
+        restarted_recipe,
         factory(),
+        live=restarted_live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
     )
     try:
-        with pytest.raises(ArtifactConflict):
+        with pytest.raises(ArtifactConflictError):
             restarted.get_or_create_scenario("postcommit-head-conflict")
         assert len(chat.prompts) == 1
     finally:

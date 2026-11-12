@@ -42,7 +42,7 @@ from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramExecutor,
     ProgramLaunchError,
-    ProgramTimeout,
+    ProgramTimeoutError,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tasks.trajectory import reader_for
@@ -177,7 +177,7 @@ def launch_agent(
     ``{root}`` as ``home``, and stay read-only; the descriptor's state
     directories under ``home`` (``writable_paths``) and ``writable`` stay
     writable, and ``readonly`` names more paths the process only reads.
-    Raises ``ProgramTimeout`` as the executor does, and ``ProgramLaunchError``
+    Raises ``ProgramTimeoutError`` as the executor does, and ``ProgramLaunchError``
     when a file cannot be written or the process cannot start.
     """
     write_rendered(descriptor, files, home, str(home))
@@ -272,7 +272,7 @@ def run_task(
             outcome = launch_agent(
                 descriptor, executor, argv, files, env, root=root, home=root, cwd=root / "workspace", timeout=timeout
             )
-        except (ProgramLaunchError, ProgramTimeout) as exc:
+        except (ProgramLaunchError, ProgramTimeoutError) as exc:
             raise TaskRunError(str(exc)) from exc
         trajectory = reader(root / descriptor.trajectory_path)
         written = {str(PurePosixPath(relative)) for relative in files}

@@ -98,7 +98,7 @@ class TrainingPoolSettings:
         if not is_whole_number(self.capacity) or self.capacity < 1:
             raise ValueError("a training pool's capacity must be a positive integer")
         if not isinstance(self.review, ReviewSettings):
-            raise TypeError("a training pool's review must be ReviewSettings")
+            raise ValueError("a training pool's review must be ReviewSettings")
 
 
 @dataclass(frozen=True)

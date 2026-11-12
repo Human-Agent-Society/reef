@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     NAMES,
     REQUEST,
     TOKEN,
@@ -27,13 +27,13 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     StandInDesigner,
     cursor,
     generating_config,
+    parents,
     report,
     run_tasks,
     serving_reef,
     sources_file,
     stand_in_e2b_package,
     state,
-    state_document,
     write_workspace_task,
 )
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator
@@ -46,7 +46,7 @@ from recipes.beta.autoenvscaling import (
     ClaudeCodeDesigner,
     ContaminationCheck,
     DesignedTask,
-    DesignerOutage,
+    DesignerOutageError,
     ReviewCheck,
     SeedVariantDesigner,
     SessionSource,
@@ -213,11 +213,6 @@ def seeded(
         is_adaptive=True,
         seeds=seed_tasks(write_seeds(tmp_path / "seeds", seed_count, seed_config)),
     )
-
-
-def parents(tmp_path: Path) -> list[dict[str, object]]:
-    kept: list[dict[str, object]] = state_document(tmp_path, "adaptive")
-    return kept
 
 
 @pytest.mark.unit
@@ -456,7 +451,7 @@ def test_an_attempt_that_raises_or_is_cancelled_takes_no_seed(tmp_path: Path, is
             if not is_cancelled:
                 raise OSError("disk full while copying the snapshot")
             stop.wait(10)
-            raise DesignerOutage("the agent's run was stopped")
+            raise DesignerOutageError("the agent's run was stopped")
 
     failing = FailingSessionDesigner()
     generator = seeded(tmp_path, failing, seed_count=1, source_count=1)

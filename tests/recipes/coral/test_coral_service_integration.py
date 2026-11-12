@@ -29,6 +29,7 @@ from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -98,8 +99,9 @@ async def _post_through(mw, scope, body: bytes):
 def test_full_loop_against_real_reef_service(tmp_path):
     # The runtime's engine has an HTTP address, so the scenario has a served model; the stub answers for it.
     dispatcher = Dispatcher(
-        Recipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
+        Recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )

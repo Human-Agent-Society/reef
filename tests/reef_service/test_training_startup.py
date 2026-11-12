@@ -25,7 +25,7 @@ from reef.service.deploy.inference import (
     local_inference_component,
 )
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
 from reef.train.slime_backend.launch import SlimeDeployment, global_batch_size, slime_arguments
 
@@ -128,7 +128,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         (
             {
                 "inference.backend": "none",
-                "inference.handler-factory": "reef.inference.sglang.chat.SGLangInferenceHandler",
+                "inference.handler-factory": "reef.inference.sglang.chat:SGLangInferenceHandler",
             },
             "remove inference.handler-factory",
         ),
@@ -376,7 +376,7 @@ def test_generated_services_share_tokens_and_ray_cluster_and_clean_up(
 
 def test_local_inference_component_listens_on_loopback_and_records_its_address(tmp_path):
     config = {"reef": {}, "run_dir": str(tmp_path / "run")}
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe=RECIPE, port=8900, inference_backend="vllm", ray_address="10.0.0.1:6379", training_ready_timeout=77
     )
     service = local_inference_component(config, settings)
@@ -409,7 +409,7 @@ def test_local_inference_component_keeps_operator_tokens_and_defaults_to_sglang(
     monkeypatch.setenv(CONTROL_TOKEN_ENV, "control")
     monkeypatch.setenv(INFERENCE_TOKEN_ENV, "inference")
     config = {"reef": {}}
-    service = local_inference_component(config, ServiceConfig(recipe=RECIPE))
+    service = local_inference_component(config, ServiceSettings(recipe=RECIPE))
     command = service["command"]
     assert command[command.index("--engine") + 1] == "sglang"
     assert command[command.index("--work-dir") + 1] == str(Path(".reef/run") / INFERENCE_COMPONENT_SERVICE)
@@ -421,7 +421,7 @@ def test_local_inference_component_refuses_one_token_for_control_and_inference(m
     monkeypatch.setenv(CONTROL_TOKEN_ENV, "shared")
     monkeypatch.setenv(INFERENCE_TOKEN_ENV, "shared")
     with pytest.raises(DeployConfigError, match="must differ"):
-        local_inference_component({"reef": {}}, ServiceConfig(recipe=RECIPE))
+        local_inference_component({"reef": {}}, ServiceSettings(recipe=RECIPE))
 
 
 def test_free_loopback_port_skips_the_reserved_port(monkeypatch):

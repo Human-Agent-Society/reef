@@ -44,8 +44,16 @@ _METRIC_NAMESPACE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 
 
 @dataclass(frozen=True, slots=True)
-class WandbConfig:
-    """Validated first-class ``observability.wandb`` configuration."""
+class WandbSettings:
+    """The settings of the ``observability.wandb`` section.
+
+    Values: ``enabled`` and ``upload_checkpoints`` are bools. ``mode`` is ``online``, ``offline`` or ``disabled``.
+    ``project`` is a non-empty string. ``entity``, ``group_prefix``, ``name_prefix`` and ``directory`` are None
+    or non-empty strings. ``tags`` is a tuple of distinct non-empty strings. No string has surrounding space.
+    The constructor strips the strings, reads a blank optional string as None and a blank or null ``project``
+    as ``reef``, drops repeated tags, and refuses other values with ``ValueError``.
+    Purpose: ``from_mapping`` parses it from the section; ``WandbExperimentTracker`` reads it.
+    """
 
     enabled: bool = False
     project: str = "reef"
@@ -57,8 +65,30 @@ class WandbConfig:
     directory: str | None = None
     upload_checkpoints: bool = False
 
+    def __post_init__(self) -> None:
+        _boolean(self.enabled, "observability.wandb.enabled")
+        mode = _optional_string(self.mode, "observability.wandb.mode")
+        if mode not in {"online", "offline", "disabled"}:
+            raise ValueError("observability.wandb.mode must be online, offline, or disabled")
+        object.__setattr__(self, "mode", mode)
+        object.__setattr__(self, "project", _optional_string(self.project, "observability.wandb.project") or "reef")
+        object.__setattr__(self, "entity", _optional_string(self.entity, "observability.wandb.entity"))
+        object.__setattr__(
+            self, "group_prefix", _optional_string(self.group_prefix, "observability.wandb.group_prefix")
+        )
+        object.__setattr__(self, "name_prefix", _optional_string(self.name_prefix, "observability.wandb.name_prefix"))
+        object.__setattr__(self, "tags", _tags(self.tags))
+        object.__setattr__(self, "directory", _optional_string(self.directory, "observability.wandb.directory"))
+        _boolean(self.upload_checkpoints, "observability.wandb.upload_checkpoints")
+
     @classmethod
-    def from_mapping(cls, value: object) -> WandbConfig:
+    def from_mapping(cls, value: object) -> WandbSettings:
+        """Read the ``observability.wandb`` section; ``None`` is the default settings.
+
+        A section without ``mode``, or with a blank one, is ``online`` when ``enabled`` and ``disabled`` otherwise.
+        ``ValueError`` when ``value`` is no mapping, names an unknown setting, or holds a value that the
+        constructor refuses.
+        """
         if value is None:
             return cls()
         if not isinstance(value, Mapping):
@@ -77,24 +107,21 @@ class WandbConfig:
         unknown = sorted(str(key) for key in value if key not in allowed)
         if unknown:
             raise ValueError(f"unknown observability.wandb settings: {', '.join(unknown)}")
-
-        enabled = _boolean(value.get("enabled", False), "observability.wandb.enabled")
-        mode = _optional_string(value.get("mode"), "observability.wandb.mode") or ("online" if enabled else "disabled")
-        if mode not in {"online", "offline", "disabled"}:
-            raise ValueError("observability.wandb.mode must be online, offline, or disabled")
+        enabled = value.get("enabled", False)
+        default_mode: WandbMode = "online" if enabled else "disabled"
+        mode = value.get("mode")
+        if mode is None or (isinstance(mode, str) and not mode.strip()):
+            mode = default_mode
         return cls(
             enabled=enabled,
-            project=_optional_string(value.get("project"), "observability.wandb.project") or "reef",
-            entity=_optional_string(value.get("entity"), "observability.wandb.entity"),
-            group_prefix=_optional_string(value.get("group_prefix"), "observability.wandb.group_prefix"),
-            name_prefix=_optional_string(value.get("name_prefix"), "observability.wandb.name_prefix"),
-            tags=_tags(value.get("tags", ())),
-            mode=mode,  # type: ignore[arg-type]
-            directory=_optional_string(value.get("directory"), "observability.wandb.directory"),
-            upload_checkpoints=_boolean(
-                value.get("upload_checkpoints", False),
-                "observability.wandb.upload_checkpoints",
-            ),
+            project=value.get("project", "reef"),
+            entity=value.get("entity"),
+            group_prefix=value.get("group_prefix"),
+            name_prefix=value.get("name_prefix"),
+            tags=value.get("tags", ()),
+            mode=mode,
+            directory=value.get("directory"),
+            upload_checkpoints=value.get("upload_checkpoints", False),
         )
 
     @property
@@ -129,7 +156,7 @@ class _WandbScenarioLogger(ExperimentLogger):
         return TrainingExperimentContext(
             scenario=self._scenario,
             recipe=self._recipe,
-            step=self._run_segment,
+            commit_number=self._run_segment,
             source_artifacts=self._source_artifacts,
             run_segment=self._run_segment,
         )
@@ -167,7 +194,7 @@ class WandbExperimentTracker(ExperimentTracker):
 
     def __init__(
         self,
-        config: WandbConfig,
+        config: WandbSettings,
         *,
         model: str | None,
         training_config: Mapping[str, Any],
@@ -296,7 +323,7 @@ class WandbExperimentTracker(ExperimentTracker):
                     run.summary.update(
                         {
                             "reef/ended_by": "train_from",
-                            "reef/train_from_step": event.step,
+                            "reef/train_from_commit_number": event.commit_number,
                             "reef/train_from_artifact_ids": event.start_artifacts.artifact_ids,
                         }
                     )
@@ -307,7 +334,7 @@ class WandbExperimentTracker(ExperimentTracker):
             if scenario_logger is not None:
                 scenario_logger._rotate(
                     source_artifacts=event.start_artifacts,
-                    run_segment=event.step,
+                    run_segment=event.commit_number,
                 )
                 context = scenario_logger._context()
                 next_run_id = self._run_id(context)
@@ -351,9 +378,11 @@ class WandbExperimentTracker(ExperimentTracker):
             metadata = {**metadata, "component": component}
         values: dict[str, Any] = {
             **numeric,
-            **{f"reef/{key}": value for key, value in metadata.items() if value is not None and key != "step"},
+            **{
+                f"reef/{key}": value for key, value in metadata.items() if value is not None and key != "commit_number"
+            },
             "train/step": event.context.run_step,
-            "reef/step": event.context.step,
+            "reef/commit_number": event.context.commit_number,
         }
         try:
             run.log(values)
@@ -423,7 +452,7 @@ class WandbExperimentTracker(ExperimentTracker):
                                 type(exc).__name__,
                             )
                 values[f"{prefix}/step"] = start + logged
-                values["reef/step"] = event.context.step
+                values["reef/commit_number"] = event.context.commit_number
                 run.log(values)
                 logged += 1
             run.summary[counter] = start + logged
@@ -550,7 +579,7 @@ class WandbExperimentTracker(ExperimentTracker):
         source = event.context.source_artifacts
         produced = event.produced_artifacts
         return {
-            "step": event.context.step,
+            "commit_number": event.context.commit_number,
             "run_segment": event.context.run_segment,
             "run_step": event.context.run_step,
             "run_id": run_id,
@@ -568,7 +597,7 @@ class WandbExperimentTracker(ExperimentTracker):
         client = self._client
         if client is None or event.checkpoint_path is None:
             return
-        identity = event.training_job_id or f"{event.context.scenario}-step-{event.context.step}"
+        identity = event.training_job_id or f"{event.context.scenario}-commit-{event.context.commit_number}"
         artifact = client.Artifact(name=f"reef-checkpoint-{_artifact_name(identity)}", type="model")
         artifact.add_dir(event.checkpoint_path)
         run.log_artifact(artifact)
@@ -680,4 +709,4 @@ def _metric_namespace(value: str) -> str:
     return value
 
 
-__all__ = ["WandbConfig", "WandbExperimentTracker", "stable_run_id"]
+__all__ = ["WandbExperimentTracker", "WandbSettings", "stable_run_id"]

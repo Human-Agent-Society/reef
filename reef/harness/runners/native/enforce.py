@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from reef.core.errors import InternalError
 from reef.execution.sandbox.process import TOOL_ISOLATION as ISOLATION
 from reef.execution.sandbox.process import ProgramLaunchError, run_process
 
@@ -43,11 +44,11 @@ EXEC_PATHS: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/etc/alternati
 CHILD = Path(__file__).with_name("sandboxed.py")
 
 
-class ToolFailed(Exception):
+class ToolFailedError(InternalError):
     """The tool's ``run`` raised in the child; the message is already the child's type and text."""
 
 
-class SandboxFailed(Exception):
+class SandboxFailedError(InternalError):
     """The enforcer could not run the call at all, so the failure is the sandbox's and not the tool's."""
 
 
@@ -142,7 +143,7 @@ class BwrapEnforcer(Enforcer):
 
     def run(self, tool: Tool, arguments: dict[str, Any], workdir: Path) -> Any:
         if tool.path is None:
-            raise SandboxFailed(f"tool {tool.name!r} has no module file to run in a child process")
+            raise SandboxFailedError(f"tool {tool.name!r} has no module file to run in a child process")
         argv = bwrap_argv(
             tool.capabilities,
             workdir=workdir,
@@ -163,7 +164,7 @@ class BwrapEnforcer(Enforcer):
                 new_session=False,
             )
         except (OSError, ProgramLaunchError) as exc:
-            raise SandboxFailed(f"bwrap could not start: {exc}") from exc
+            raise SandboxFailedError(f"bwrap could not start: {exc}") from exc
         reply: Any = None
         if done.exit_code == 0:
             try:
@@ -171,9 +172,9 @@ class BwrapEnforcer(Enforcer):
             except json.JSONDecodeError:
                 reply = None
         if not isinstance(reply, dict):
-            raise SandboxFailed(f"tool process exited {done.exit_code}: {done.stderr.strip()[-600:]}")
+            raise SandboxFailedError(f"tool process exited {done.exit_code}: {done.stderr.strip()[-600:]}")
         if not reply.get("ok"):
-            raise ToolFailed(str(reply.get("error") or "the tool failed"))
+            raise ToolFailedError(str(reply.get("error") or "the tool failed"))
         return reply.get("text", "")
 
 

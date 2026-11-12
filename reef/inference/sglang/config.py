@@ -6,12 +6,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.execution.executor import Executor
-from reef.inference.engine_control import EngineConfig
+from reef.inference.engine_control import EngineSettings
 from reef.inference.sglang.lora_schema import adapter_scoped_prefix_cache_supported
 
 
 @dataclass(frozen=True)
-class SGLangConfig(EngineConfig):
+class SGLangSettings(EngineSettings):
     """One model served by identical single-node SGLang engines on the reserved inference GPUs.
 
     Values: the three GPU counts are positive, ``num_gpus`` is a multiple of

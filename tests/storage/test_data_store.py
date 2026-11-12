@@ -14,8 +14,8 @@ import pytest
 import sqlalchemy
 import sqlalchemy.event
 from sqlalchemy import func, select
-from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
+from tests.support.trajectories import policy_trajectory
 
 from reef.core.atif_payloads import canonical_json
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
@@ -23,10 +23,17 @@ from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceConfig
-from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
+from reef.service.deploy.service_config import ServiceSettings
+from reef.storage.data import (
+    ItemConflictError,
+    ItemNotFoundError,
+    MemoryDataStore,
+    NewItem,
+    RecordLink,
+    ScenarioArchivedError,
+)
 from reef.storage.item_kinds import json_digest
-from reef.storage.job_data import job_data_key, read_job_data
+from reef.storage.job_data import job_data_key
 from reef.storage.record_items import (
     evaluation_call_item,
     evaluation_call_items,
@@ -126,7 +133,7 @@ def test_only_the_create_that_stores_an_item_marks_it_inserted(store):
 def test_the_same_content_again_changes_nothing_and_other_content_is_a_conflict_that_stores_nothing(store):
     (first,) = store.create("acme", [trajectory("t1", "one")])
     assert store.create("acme", [trajectory("t1", "one")]) == (first,)
-    with pytest.raises(ItemConflict):
+    with pytest.raises(ItemConflictError):
         store.create("acme", [trajectory("t3", "three"), trajectory("t1", "changed")])
     assert [item.item_id for item in store.query("acme")] == ["t1"]
 
@@ -266,7 +273,7 @@ def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store
     ]:
         with pytest.raises(ValueError, match=reason):
             store.update("acme", ["t1"], patch)
-    with pytest.raises(ItemNotFound):
+    with pytest.raises(ItemNotFoundError):
         store.update("acme", ["t1", "missing"], {"scenarios": {"coding": "train"}})
     assert store.query("acme", scenario="coding") == ()
 
@@ -297,7 +304,7 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
     assert store.replace_task("acme", "fix-bug", second) == replaced
     assert store.scenario_items("acme", "coding", kinds=("task",))[0][0] == used_after
 
-    with pytest.raises(ItemNotFound):
+    with pytest.raises(ItemNotFoundError):
         store.replace_task("acme", "missing", second)
     with pytest.raises(ValueError, match="same name"):
         store.replace_task("acme", "fix-bug", first.parent)
@@ -356,13 +363,13 @@ def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, t
 
 def test_an_owner_stores_replaces_and_removes_its_collections(store):
     coding = TaskCollection("coding", benchmarks=("lite", "full"))
-    store.put_collection("acme", coding)
-    store.put_collection("acme", TaskCollection("all", collections=("coding",), average="benchmark"))
+    store.write_collection("acme", coding)
+    store.write_collection("acme", TaskCollection("all", collections=("coding",), average="benchmark"))
     assert store.collections("acme") == (TaskCollection("all", (), ("coding",), "benchmark"), coding)
     assert store.collections("globex") == ()
-    store.put_collection("acme", TaskCollection("coding", benchmarks=("lite",)))
+    store.write_collection("acme", TaskCollection("coding", benchmarks=("lite",)))
     assert [collection.benchmarks for collection in store.collections("acme")] == [(), ("lite",)]
-    assert store.remove_collection("acme", "coding") and not store.remove_collection("acme", "coding")
+    assert store.delete_collection("acme", "coding") and not store.delete_collection("acme", "coding")
     assert [collection.name for collection in store.collections("acme")] == ["all"]
 
 
@@ -569,7 +576,7 @@ def test_creates_that_wait_for_one_scenario_share_a_transaction(postgres_config,
         # A conflict in the shared transaction refuses only its own create.
         futures = held("e", "f", "a", "g")
         assert [future.exception(timeout=10) is None for future in futures] == [True, True, False, True]
-        assert isinstance(futures[2].exception(), ItemConflict)
+        assert isinstance(futures[2].exception(), ItemConflictError)
         assert {item.item_id for item in store.query("acme")} == set("abcdefg")
         # Two creates of one ID in one transaction: only the first stores it.
         futures = held("h", "i", "i")
@@ -584,7 +591,7 @@ def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
     with pytest.raises(ValueError, match="stays in 'coding'"):
         store.update("acme", [made.item_id], {"scenarios": {"coding": None}})
 
-    assert store.remove_scenario("acme", "coding") == 2
+    assert store.delete_scenario("acme", "coding") == 2
     assert store.query("acme", scenario="coding") == ()
     assert store.scenario_items("acme", "coding", kinds=("record", "trajectory")) == ()
     assert [(item.item_id, dict(item.scenarios)) for item in store.query("acme")] == [
@@ -592,8 +599,8 @@ def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
         ("t1", {"review": "train"}),
     ]
     assert store.scenarios_with_records("acme") == ("review",)
-    assert store.remove_scenario("acme", "coding") == 0
-    assert store.remove_scenario("globex", "review") == 0
+    assert store.delete_scenario("acme", "coding") == 0
+    assert store.delete_scenario("globex", "review") == 0
 
 
 def test_a_write_of_an_ended_generation_stores_nothing(store):
@@ -602,11 +609,11 @@ def test_a_write_of_an_ended_generation_stores_nothing(store):
     assert store.scenario_generation("globex", "coding") != generation
     first, second = calls(1, 2)
     assert store.create("acme", [first], generation=generation)[0].inserted
-    with pytest.raises(ScenarioArchived, match="no longer current"):
+    with pytest.raises(ScenarioArchivedError, match="no longer current"):
         store.create("acme", [second], generation="other")
 
-    store.remove_scenario("acme", "coding")
-    with pytest.raises(ScenarioArchived):
+    store.delete_scenario("acme", "coding")
+    with pytest.raises(ScenarioArchivedError):
         store.create("acme", [second], generation=generation)
     assert store.read("acme", second.item_id) is None
     renewed = store.scenario_generation("acme", "coding")
@@ -804,8 +811,8 @@ def test_items_survive_a_restart(open_durable_store):
         assert second.delete("acme", "t1") is False
 
 
-def deployment(tmp_path, **storage) -> ServiceConfig:
-    return ServiceConfig(
+def deployment(tmp_path, **storage) -> ServiceSettings:
+    return ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),
@@ -849,7 +856,7 @@ def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, d
 )
 def test_the_deployment_refuses_an_invalid_data_store(data_store, reason):
     with pytest.raises(ValueError, match=reason):
-        ServiceConfig(recipe="recipe", data_store=data_store)
+        ServiceSettings(recipe="recipe", data_store=data_store)
 
 
 def test_archiving_a_scenario_never_moves_an_owners_task_files(tmp_path):
@@ -875,7 +882,7 @@ def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_
             text = "changed" if index == 7 else "same"
             try:
                 stores[index % len(stores)].create("acme", [trajectory(f"t{n}", text) for n in range(10)])
-            except ItemConflict:
+            except ItemConflictError:
                 return "conflict"
             return "created"
 
@@ -898,7 +905,7 @@ def test_a_record_retry_with_a_new_time_matches(store):
     assert store.create("acme", [retry]) == (created,)
     stored = store.read("acme", item.item_id)
     changed = {**item.content, "references": ["other"]}
-    with pytest.raises(ItemConflict, match="other content"):
+    with pytest.raises(ItemConflictError, match="other content"):
         store.create("acme", [NewItem(item.item_id, changed, item.metadata)])
     assert store.read("acme", item.item_id) == stored
 
@@ -909,18 +916,18 @@ def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_jo
     # A job of the same samples, under another data ID, uses the same directory.
     again = store.write_job_directory(JobData("s:request:r1", (sample,)))
     assert (again.uri, again.data_id, again.sample_count, again.kind) == (first.uri, "s:request:r1", 1, "trajectory")
-    assert read_job_data(store.open_job_directory(again.to_dict()).path).samples == (sample,)
+    assert store.open_job_directory(again.to_dict()).read().samples == (sample,)
     other = store.write_job_directory(JobData("s:data:2", (sample, sample)))
     assert other.uri != first.uri
     # A directory that no job used since the time goes; a used one stays.
-    store.record_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
+    store.write_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
     assert store.delete_unused_job_directories(100.0) == 1
     with pytest.raises(FileNotFoundError):
         store.open_job_directory(first.to_dict())
-    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+    assert store.open_job_directory(other.to_dict()).read().samples == (sample, sample)
     # The periodic work keeps a directory that a job used within the time to live.
     store.maintain()
-    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+    assert store.open_job_directory(other.to_dict()).read().samples == (sample, sample)
 
 
 def evaluation_call(turns: int, attempt: int, index: int, status: int = 200, response: object = "reply"):

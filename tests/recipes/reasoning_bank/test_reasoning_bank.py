@@ -1,6 +1,6 @@
 """ReasoningBank on the workspace protocol: runs become memory items in the bank and Agent Skills in the tree.
 
-Each step runs on a real workspace (``Workspace.create``) with the backend's own services (``StepServices``), so every
+Each step runs on a real workspace (``Workspace.create``) with the backend's own services (``JobServices``), so every
 model call goes through the step's budgeted bindings and ``services.check`` is the pi validation. The judge and the
 extractor are canned models that answer in order and keep every prompt.
 """
@@ -13,9 +13,9 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_jobs import MODEL, PI_SEED, configured_component, job_services
 from tests.support.harness_methods import QueueChat
-from tests.support.harness_steps import MODEL, PI_SEED, step_services
+from tests.support.trajectories import recorded_trajectory
 
 from recipes.reasoning_bank import ReasoningBank
 from recipes.reasoning_bank.method import FOCUS
@@ -26,9 +26,10 @@ from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, TreePatch, validate_tree
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.record2sample.traces import InferenceSamples
-from reef.train.harness_backend import StepContext, Workspace
-from reef.train.harness_backend.workspace import StepOutput
+from reef.train.harness_backend import MethodJob, Workspace
+from reef.train.harness_backend.workspace import JobOutput
 
 PI = get_adapter("pi")
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes" / "reasoning_bank" / "examples" / "serve.yaml"
@@ -64,7 +65,7 @@ def run_step(
     tree: HarnessTree = SEED,
     state: dict[str, str] | None = None,
     **config: Any,
-) -> tuple[Workspace, StepOutput]:
+) -> tuple[Workspace, JobOutput]:
     """Step ``number`` of a ReasoningBank whose judge and extractor are the named models ``judge`` and ``extract``."""
     workspace = Workspace.create(
         tmp_path / "steps" / str(number),
@@ -78,9 +79,9 @@ def run_step(
         samples=samples,
         state_files=state,
     )
-    services = step_services(workspace, ModelBindings(served=MODEL, named={"judge": judge, "extract": extractor}))
+    services = job_services(workspace, ModelBindings(served=MODEL, named={"judge": judge, "extract": extractor}))
     method = ReasoningBank.from_config({"judge_model": "judge", "extract_model": "extract", **config})
-    method.step(StepContext(workspace, services))
+    method.run(MethodJob(workspace, services))
     return workspace, workspace.read_output()
 
 
@@ -181,10 +182,10 @@ def test_a_reply_that_is_not_the_asked_json_skips_its_run_and_an_item_with_a_cre
 
 def test_the_example_deploys_the_method_without_runs_and_a_bad_setting_is_refused() -> None:
     config = recipe_config_from_file_layout(yaml.safe_load(EXAMPLE.read_text(encoding="utf-8")))
-    recipe = HarnessEvolutionRecipe.from_environment({}, config=config)
-    assert isinstance(recipe, HarnessEvolutionRecipe) and isinstance(recipe.method, ReasoningBank)
-    assert recipe.method.settings.max_items == 50
-    assert (recipe.evaluation.policy, recipe.scorer) == ("none", None)
+    recipe = load_recipe(HarnessEvolutionRecipe, config, {})
+    component = configured_component(recipe)
+    assert isinstance(component.method, ReasoningBank) and component.method.settings.max_items == 50
+    assert (recipe.evaluation.policy, component.scorer) == ("none", None)
     assert recipe.pipeline_stages is not None and recipe.pipeline_stages.record2sample.plugin_class is InferenceSamples
     with pytest.raises(PluginConfigError, match="max_items_per_trace must be at least 1"):
         ReasoningBank.from_config({"max_items_per_trace": 0})

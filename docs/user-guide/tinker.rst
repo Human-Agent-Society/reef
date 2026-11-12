@@ -93,6 +93,14 @@ remote training state and sampler. The inference side serves the sampler that
 a snapshot names. Each job starts from the scenario's last saved checkpoint,
 which ``state-dir`` keeps across restarts.
 
+A new scenario starts from a base root: a ``base.json`` file that names the
+model, the LoRA rank and the service. Control writes it from the
+configuration and calls no Tinker service for it. Serving it samples the base
+model. The first job from it makes a new LoRA from ``seed``. With
+``seed: null``, the training service saves one untrained adapter when the
+first such job runs, keeps its manifest in ``<state-dir>/base/``, and starts
+every such job from it.
+
 ``training.options.batch-size`` (default 1) is the batch size: the samples in
 one optimizer step. ``pipeline.sample2job.config.job_samples`` is the job size:
 the training pipeline submits a job when it holds this many samples. Set it
@@ -109,10 +117,9 @@ per-sample inputs that function reads. The built-in ``importance_sampling``
 family places the trajectory advantage on every response token the loss mask
 selects. The built-in ``sft`` family trains Tinker's ``cross_entropy`` on the
 same tokens, so the `SFT recipe <recipes/sft.rst>`__ runs on Tinker; its
-samples need no rollout log probabilities. A method registers its own ``TinkerLoss`` with
-``register_loss_family_ref(name, "package.module:CLASS", backend="tinker")``,
-next to its Slime reference; the class is imported when the family is first
-resolved. Its ``loss_fn`` names the Tinker built-in it trains with and
+samples need no rollout log probabilities. A method gives its own ``TinkerLoss`` a ``loss_family`` name and decorates the class with
+``@register_loss_family`` (``reef.train.tinker_backend.loss_families``), in the module of
+its ``TinkerObjective``; the class is imported when a job first names that objective. Its ``loss_fn`` names the Tinker built-in it trains with and
 ``inputs`` shapes that function's ``loss_fn_inputs``. A ``TinkerCustomLoss``
 instead computes the loss on the Reef host from the token log probabilities
 Tinker returns, through ``forward_backward_custom``; that path needs torch
@@ -376,7 +383,8 @@ Prerequisites:
 
 The default start is a reference to the base revision (`Import an artifact
 <operate.rst#import-an-artifact>`__), which a new scenario's root snapshot
-holds; a job from it starts a new model with the base's own weights.
+holds. Control writes it from the configuration. A job from it starts a new
+model with the base's own weights.
 
 Every snapshot refers to its weights on Hugging Face. When Spindle saves a
 checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint

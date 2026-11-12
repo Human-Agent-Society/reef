@@ -75,13 +75,13 @@ from reef.storage.data import (
     JOB_DIRECTORY_TTL_SECONDS,
     MAX_QUERY_LIMIT,
     DataStore,
-    ItemConflict,
+    ItemConflictError,
     ItemGroup,
     ItemKind,
-    ItemNotFound,
+    ItemNotFoundError,
     NewItem,
     RecordLink,
-    ScenarioArchived,
+    ScenarioArchivedError,
     StoredItem,
     check_filters,
     check_groups,
@@ -285,12 +285,12 @@ class PendingCreate:
 class SQLDataStore(DataStore):
     """A data store in the tables of ``data_tables``.
 
-    A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``insert_new_items``
+    A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``write_new_items``
     (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``. Every
     operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
-    ``ItemConflict``, never in a failed insert. ``create``, ``update`` and ``delete`` take ``lock_scenarios`` for the
-    scenarios that they give a use or whose trajectory nodes they change. Concurrent creates of one owner and one
+    ``ItemConflictError``, never in a failed insert. ``create``, ``update`` and ``delete`` take ``lock_scenarios`` for
+    the scenarios that they give a use or whose trajectory nodes they change. Concurrent creates of one owner and one
     set of scenarios in this process share one transaction (a group commit), because only one of them can hold
     the lock at a time. ``segments`` is None, or the segment store that keeps the content of
     trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_directories`` keeps
@@ -326,7 +326,7 @@ class SQLDataStore(DataStore):
         self.group_lock = Lock()
         self.waiting: dict[tuple[str, frozenset[str]], list[PendingCreate]] = {}
 
-    def record_job_directory_use(self, key: str, time: float) -> None:
+    def write_job_directory_use(self, key: str, time: float) -> None:
         table = self.job_directory_table
         with self.transaction() as connection:
             connection.execute(delete(table).where(table.c.key == key))
@@ -350,7 +350,7 @@ class SQLDataStore(DataStore):
         remove a row between two of them."""
 
     @abstractmethod
-    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         """Insert the ``data_item`` rows ``values`` in one statement, each unless the owner has its ID already; return
         the sequence of each row that it inserted, by item ID.
 
@@ -456,7 +456,7 @@ class SQLDataStore(DataStore):
                     owner=partition.partition, segment_id=segment_id, created_at=time.time(), byte_count=len(data)
                 )
             )
-        partition.store.put(partition.partition, segment_id, data)
+        partition.store.write(partition.partition, segment_id, data)
         return places
 
     def stored_items(
@@ -628,7 +628,7 @@ class SQLDataStore(DataStore):
     def commit_group(self, group: tuple[str, frozenset[str]]) -> None:
         """Write the first waiting creates of ``group``, up to ``GROUP_COMMIT_ITEMS`` items, in one transaction, and
         give the lead to the next waiting create. When the transaction fails, write each create alone, so that one
-        create's ``ItemConflict`` does not refuse the others."""
+        create's ``ItemConflictError`` does not refuse the others."""
         owner = group[0]
         with self.group_lock:
             waiting = self.waiting[group]
@@ -663,7 +663,7 @@ class SQLDataStore(DataStore):
     def commit_creates(self, owner: str, batch: Sequence[PendingCreate]) -> list[tuple[StoredItem, ...]]:
         """Write the rows of the creates ``batch`` of ``owner`` in one transaction, and return the items of each.
 
-        An ID in two creates gets the row of the first; another digest in the later one is an ``ItemConflict``.
+        An ID in two creates gets the row of the first; another digest in the later one is an ``ItemConflictError``.
         """
         prepared = [entry for pending in batch for entry in pending.prepared]
         values: dict[str, dict[str, Any]] = {}
@@ -682,8 +682,8 @@ class SQLDataStore(DataStore):
             current = {origin: self.current_generation(connection, owner, origin) for origin, _ in checked}
             for origin, generation in checked:
                 if current[origin] != generation:
-                    raise ScenarioArchived(f"generation {generation!r} of {origin!r} is no longer current")
-            sequences = self.insert_new_items(connection, list(values.values()))
+                    raise ScenarioArchivedError(f"generation {generation!r} of {origin!r} is no longer current")
+            sequences = self.write_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
             uses = [
                 {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
@@ -692,7 +692,7 @@ class SQLDataStore(DataStore):
             ]
             if uses:
                 connection.execute(self.scenarios_table.insert().values(uses))
-            self.trajectory_nodes(owner).add_many(
+            self.trajectory_nodes(owner).append_many(
                 connection,
                 [
                     replace(calls[item_id], node_sequence=sequence)
@@ -707,14 +707,14 @@ class SQLDataStore(DataStore):
             stored_rows = self.rows(connection, owner, kept) if kept else {}
             for item_id, row in stored_rows.items():
                 if row["digest"] != values[item_id]["digest"]:
-                    raise ItemConflict(f"item {item_id!r} of {owner!r} is stored with other content")
+                    raise ItemConflictError(f"item {item_id!r} of {owner!r} is stored with other content")
             stored = {
                 item.item_id: item
                 for item in self.stored_items(connection, owner, list(stored_rows.values()), content=False)
             }
             for item, _, digest in prepared:
                 if item.item_id in sequences and digest != values[item.item_id]["digest"]:
-                    raise ItemConflict(f"item {item.item_id!r} of {owner!r} is stored with other content")
+                    raise ItemConflictError(f"item {item.item_id!r} of {owner!r} is stored with other content")
             return [
                 tuple(
                     (
@@ -836,7 +836,7 @@ class SQLDataStore(DataStore):
                 TaskCollection.from_json(json.loads(value)) for value in connection.execute(statement).scalars()
             )
 
-    def put_collection(self, owner: str, collection: TaskCollection) -> None:
+    def write_collection(self, owner: str, collection: TaskCollection) -> None:
         check_owner(owner)
         table = self.collections_table
         with self.transaction() as connection:
@@ -847,7 +847,7 @@ class SQLDataStore(DataStore):
                 )
             )
 
-    def remove_collection(self, owner: str, name: str) -> bool:
+    def delete_collection(self, owner: str, name: str) -> bool:
         check_owner(owner)
         table = self.collections_table
         with self.transaction() as connection:
@@ -942,7 +942,7 @@ class SQLDataStore(DataStore):
             existing = self.rows(connection, owner, unique_ids, lock=True)
             missing = [item_id for item_id in unique_ids if item_id not in existing]
             if missing:
-                raise ItemNotFound(f"{owner!r} stores no item {missing[0]!r}")
+                raise ItemNotFoundError(f"{owner!r} stores no item {missing[0]!r}")
             patched = {
                 item_id: patched_metadata(json.loads(existing[item_id]["metadata_json"]), patch)
                 for item_id in unique_ids
@@ -1111,7 +1111,7 @@ class SQLDataStore(DataStore):
             select(generations.c.generation).where(generations.c.owner == owner, generations.c.scenario == scenario)
         ).scalar_one_or_none()
 
-    def remove_scenario(self, owner: str, scenario: str) -> int:
+    def delete_scenario(self, owner: str, scenario: str) -> int:
         check_owner(owner)
         items, uses = self.items_table, self.scenarios_table
         with self.transaction() as connection:
@@ -1153,7 +1153,7 @@ class SQLDataStore(DataStore):
         with self.transaction() as connection:
             row = self.rows(connection, owner, [item_id]).get(item_id)
             if row is None:
-                raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+                raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
             metadata = json.loads(row["metadata_json"])
             # The lock orders this write with the other writes of the item's scenarios, as an update does.
             self.lock_scenarios(connection, owner, scenarios_of([metadata]))
@@ -1509,7 +1509,7 @@ class SQLiteDataStore(SQLDataStore):
                 self.connection.exec_driver_sql("BEGIN IMMEDIATE")
                 yield self.connection
 
-    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         statement = (
             sqlite_insert(self.items_table)
             .values(list(values))
@@ -1609,7 +1609,7 @@ class PostgresDataStore(SQLDataStore):
         with self.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
             yield connection
 
-    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         statement = (
             postgresql_insert(self.items_table)
             .values(list(values))

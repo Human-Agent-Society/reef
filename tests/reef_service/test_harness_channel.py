@@ -9,15 +9,14 @@ import asyncio
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import changed_rules, harness_recipe, rebuilt_recipe
 from tests.support.harness_render import descriptor_data, write_descriptor
 from tests.support.harness_service import EchoInference, harness_dispatcher, job_backend
-from tests.support.harness_steps import changed_rules, harness_recipe
 
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
@@ -27,7 +26,7 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.service.app import create_app
-from reef.train.pipeline import PipelineConfig
+from reef.train.pipeline import PipelineSettings
 
 #: Each patch strictly raises the marker count, so every evaluated step wins and publishes.
 PATCHES = (TreePatch(changed_rules("marker rules\n")), TreePatch(changed_rules("marker marker rules\n")))
@@ -70,16 +69,16 @@ def channel_dispatcher(
         else {}
     )
     stages["sample2job"] = {"config": {"job_samples": job_samples}}
-    recipe = replace(
-        harness_recipe(
+    recipe, live = rebuilt_recipe(
+        *harness_recipe(
             tmp_path,
             lambda workspace, services: next(candidates, None),
             seed=seed,
             score=evaluate,
         ),
-        pipeline_stages=PipelineConfig.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
+        pipeline_stages=PipelineSettings.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
     )
-    dispatcher = harness_dispatcher(tmp_path, recipe)
+    dispatcher = harness_dispatcher(tmp_path, recipe, live)
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
 
@@ -119,7 +118,7 @@ async def committed_step(client: TestClient) -> dict:
     deadline = asyncio.get_running_loop().time() + UPDATE_TIMEOUT_S
     while True:
         scenario = (await (await client.get("/reef/status")).json())["scenarios"]["delivery"]
-        committed = scenario["last_committed_step"]
+        committed = scenario["last_training_commit"]
         if committed is not None and committed["metrics"]["training_job"]["event"] != "submitted":
             return scenario
         if asyncio.get_running_loop().time() >= deadline:
@@ -149,16 +148,16 @@ async def evaluated_step(client: TestClient) -> dict:
 
 
 @pytest.mark.unit
-def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> None:
+def test_status_reports_a_commit_that_published_no_harness(tmp_path) -> None:
     async def run() -> None:
         async with served(channel_dispatcher(tmp_path, ())) as client:
             status = await (await client.get("/reef/status")).json()
-            assert status["scenarios"]["delivery"]["last_committed_step"] is None
+            assert status["scenarios"]["delivery"]["last_training_commit"] is None
             await scored_exchange(client)
             scenario = await committed_step(client)
-            committed = scenario["last_committed_step"]
+            committed = scenario["last_training_commit"]
             # The step's job committed its submission, then its end.
-            assert scenario["scenario_step"] == committed["step"] == 2
+            assert scenario["commit_number"] == committed["commit_number"] == 2
             assert isinstance(committed["recorded_at"], float)
             assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
             # The empty seed serves nothing until a step publishes a tree.
@@ -174,8 +173,8 @@ def test_status_reports_a_committed_rejection(tmp_path) -> None:
         async with served(channel_dispatcher(tmp_path, (TreePatch(changed_rules("no help\n")),))) as client:
             await scored_exchange(client)
             scenario = await committed_step(client)
-            committed = scenario["last_committed_step"]
-            assert scenario["scenario_step"] == committed["step"] == 2
+            committed = scenario["last_training_commit"]
+            assert scenario["commit_number"] == committed["commit_number"] == 2
             assert committed["metrics"]["selected"] is False
             assert committed["metrics"]["selection"]["selected"] is False
             assert (await client.get("/reef/harness", headers=HEADERS)).status == 404
@@ -286,7 +285,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 
     async def run() -> None:
         dispatcher = channel_dispatcher(tmp_path, PATCHES)
-        backend = job_backend(dispatcher.get_or_create_scenario("delivery").trainer)
+        backend = job_backend(dispatcher.get_or_create_scenario("delivery").trainer, dispatcher=dispatcher)
         evaluate_candidate = backend.evaluate
 
         def blocked_evaluate(candidate: UpdateCandidate, **options) -> EvaluationResult:

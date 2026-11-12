@@ -10,7 +10,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     NAMES,
     REQUEST,
     NoChecks,
@@ -21,11 +21,11 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     autoenvscaling,
     cursor,
     generating_config,
+    parents,
     report,
     run_tasks,
     stand_in_e2b_package,
     state,
-    state_document,
 )
 
 from recipes.beta.autoenvscaling import (
@@ -34,14 +34,14 @@ from recipes.beta.autoenvscaling import (
     CalibrationCheck,
     CandidateChecks,
     DesignedTask,
-    DesignerOutage,
+    DesignerOutageError,
     TaskVariant,
     VariantDesigner,
 )
 from recipes.beta.autoenvscaling import designer as designer_module
 from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling.checks import PassRateBand
-from recipes.beta.autoenvscaling.designer_credentials import CredentialHeld
+from recipes.beta.autoenvscaling.designer_credentials import CredentialHeldError
 from recipes.beta.autoenvscaling.generator import ParentTask
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource
 from reef.core.plugins import PluginConfigError
@@ -51,11 +51,6 @@ from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, Rejec
 @pytest.fixture(autouse=True)
 def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
     stand_in_e2b_package(monkeypatch)
-
-
-def parents(tmp_path: Path) -> list[dict[str, object]]:
-    kept: list[dict[str, object]] = state_document(tmp_path, "adaptive")
-    return kept
 
 
 @pytest.mark.unit
@@ -154,7 +149,7 @@ class TokenHoldingStandIn(StandInDesigner):
         variant: TaskVariant | None = None,
     ) -> DesignedTask:
         if variant is not None:
-            raise CredentialHeld("the agent's task held the run's token")
+            raise CredentialHeldError("the agent's task held the run's token")
         return super().design(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
 
@@ -173,7 +168,7 @@ def test_an_outage_leaves_the_parent_its_slot_and_a_held_token_takes_it(
     if is_varied:
         assert asyncio.run(failed.generate(REQUEST)) == (), "a held token ends the generation empty"
     else:
-        with pytest.raises(DesignerOutage, match="the sandbox did not start"):
+        with pytest.raises(DesignerOutageError, match="the sandbox did not start"):
             asyncio.run(failed.generate(REQUEST))
     assert parents(tmp_path)[0]["varied"] is is_varied
     stand_in = StandInDesigner()
@@ -391,7 +386,7 @@ class BlockingVariantDesigner(VariantDesigner):
         self.started.set()
         if stop.wait(10):
             self.stopped.set()
-        raise DesignerOutage("the agent's run was stopped")
+        raise DesignerOutageError("the agent's run was stopped")
 
 
 @pytest.mark.unit

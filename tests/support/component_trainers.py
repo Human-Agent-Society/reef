@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import threading
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples import data_storage
+from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
@@ -23,16 +25,19 @@ from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.scenario import Scenario
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
 from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
+from reef.train.trainer_builder import TrainerBuilder
 
 WEIGHTS = "weights"
 HARNESS = "harness"
 from reef.execution.workers import SERVICE_COMPONENTS
+from reef.train.types import TrainingCommit
 
 
 class ComponentJobs(StubTrainingComponent):
@@ -92,6 +97,20 @@ class ComponentJobs(StubTrainingComponent):
         self.statuses[job.job_id] = status
 
 
+def checked_commit(
+    scenario: Scenario, component: str | None = None, *, seconds: float = 10.0
+) -> TrainingCommit | None:
+    """``scenario.next_commit(component)``, called again while the trainer's reserved job waits for the check of the
+    training service, as the trainer's worker polls. ``AssertionError`` when no answer comes within ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while True:
+        result = scenario.next_commit(component)
+        if result is not None or not scenario.trainer_for(component).job_check_waits:
+            return result
+        assert time.monotonic() < deadline, "the training service did not check the job"
+        time.sleep(0.01)
+
+
 def finish_job(scenario: Scenario, component: str, checkpoint_metrics: Mapping[str, Any] | None = None) -> None:
     """Commit the checkpoint and the end of ``component``'s running job, when its trainer's component is a
     ``ComponentJobs``, whose jobs end in ``submit``: the commits that follow the job's submission. ``checkpoint_metrics``
@@ -104,7 +123,7 @@ def finish_job(scenario: Scenario, component: str, checkpoint_metrics: Mapping[s
         assert result is not None, "a job that ended in submit has its checkpoint and its end to commit"
         if checkpoint_metrics is not None and result.metrics["training_job"]["event"] == "checkpoint":
             result = replace(result, metrics={**result.metrics, **checkpoint_metrics})
-            trainer.pending_step = replace(trainer.pending_step, result=result)
+            trainer.pending_commit = replace(trainer.pending_commit, result=result)
         scenario.commit(result, component=component)
 
 
@@ -166,6 +185,8 @@ class _TwoTrainerRecipe(Recipe):
 
     backends: Mapping[str, ComponentJobs]
     auto_only_components: frozenset[str] = frozenset()
+    #: Whether the deployment's training component trains the weights; then the runtime loads them.
+    trains_weights: bool = False
     #: The content of a new scenario's root snapshot.
     start: DefaultStart = field(default_factory=lambda: seeded_start((WEIGHTS, HARNESS)))
 
@@ -179,7 +200,7 @@ class _TwoTrainerRecipe(Recipe):
         return ScenarioComponents(
             components={
                 # A training component's weights load through the runtime, so train-from imports them as a start.
-                WEIGHTS: (ComponentSpec() if self.training_component is None else ComponentSpec(kind="model")),
+                WEIGHTS: (ComponentSpec(kind="model") if self.trains_weights else ComponentSpec()),
                 HARNESS: ComponentSpec(files=TextFileTree()),
             }
         )
@@ -191,8 +212,34 @@ class _TwoTrainerRecipe(Recipe):
             )
         return threshold_pipeline(context, job_samples=1, max_staleness=MAX_STALENESS)
 
+
+class TwoTrainerBuilder(TrainerBuilder):
+    """Builds the trainers of a ``_TwoTrainerRecipe``: one for each of its backends, whose jobs run on the trainer's
+    own thread, and the weights trainer when ``live`` has a training component.
+
+    ``recipe`` gives the backends and the pipelines. ``live`` gives the training component. ``_dispatcher`` makes
+    the builder with ``waits_for_live=True`` and calls ``bind`` with the dispatcher's live objects, whose training
+    component is the jobs queue's view of it. A worker of the dispatcher can load a scenario before ``_dispatcher``
+    binds, so ``build_trainers`` waits for ``bind``; without the wait it would build no weights trainer.
+    """
+
+    def __init__(
+        self, recipe: _TwoTrainerRecipe, live: LiveObjects | None = None, *, waits_for_live: bool = False
+    ) -> None:
+        self.recipe = recipe
+        self.live = LiveObjects() if live is None else live
+        self.live_bound = threading.Event()
+        if not waits_for_live:
+            self.live_bound.set()
+
+    def bind(self, live: LiveObjects) -> None:
+        """Give the builder the live objects that its trainers use, and let ``build_trainers`` go on."""
+        self.live = live
+        self.live_bound.set()
+
     def build_trainers(
         self,
+        specs,
         scenario,
         records,
         *,
@@ -204,11 +251,15 @@ class _TwoTrainerRecipe(Recipe):
         samples=None,
         root=None,
     ):
+        if not self.live_bound.wait(timeout=30):
+            raise RuntimeError("the trainer builder got no live objects: _dispatcher did not call bind")
+        recipe = self.recipe
+
         def factory_for(component: str):
-            return lambda context: self.pipeline_for(component, context)
+            return lambda context: recipe.pipeline_for(component, context)
 
         # Each trainer reads the samples as the component that its commits name; the only trainer names none.
-        alone = len(self.backends) + (self.training_component is not None) == 1
+        alone = len(recipe.backends) + (self.live.training_component is not None) == 1
 
         def samples_for(component: str) -> TrainerSamples | None:
             return None if samples is None else samples.for_trainer("" if alone else component)
@@ -227,9 +278,9 @@ class _TwoTrainerRecipe(Recipe):
                     root=root,
                 ),
             )
-            for component, backend in self.backends.items()
+            for component, backend in recipe.backends.items()
         )
-        training = self.training_component
+        training = self.live.training_component
         if training is None:
             return trainers
         # The weights trainer submits jobs to the training component; it comes first, as the local weights trainer does.
@@ -359,12 +410,17 @@ def _dispatcher(
     hold_local_cycles: bool = False,
     components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
     start: DefaultStart | None = None,
+    trainer_builder: TrainerBuilder | None = None,
+    live: LiveObjects | None = None,
 ) -> tuple[Dispatcher, dict[str, ComponentJobs]]:
-    """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` when one is given. ``start`` is the
+    """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` and its ``live`` objects when
+    one is given. ``start`` is the
     two trainer recipe's default start, one seed file per component by default. ``components`` are the services that
-    it runs; without ``samples``, only the test makes samples (``make_samples``)."""
+    it runs; without ``samples``, only the test makes samples (``make_samples``). ``trainer_builder`` builds the
+    trainers; None is a ``TwoTrainerBuilder`` for a ``_TwoTrainerRecipe``."""
     repository = _repository(tmp_path) if backend_factory is None else backend_factory
     seeds = {} if start is None else {"start": start}
+    live = LiveObjects() if live is None else live
     if recipe is not None:
         backends = {} if backends is None else backends
     elif training is None:
@@ -375,27 +431,31 @@ def _dispatcher(
         # harness keeps its local backend.
         backends = {HARNESS: ComponentJobs(HARNESS, tmp_path / "candidates")} if backends is None else backends
         recipe = _TwoTrainerRecipe(
-            backends=backends,
-            auto_only_components=auto_only_components,
-            runtime=StubInferenceRuntime(),
-            training_component=training,
-            **seeds,
+            backends=backends, auto_only_components=auto_only_components, trains_weights=True, **seeds
+        )
+        live = LiveObjects(
+            runtime=StubInferenceRuntime(), training_component=training, training_facts=StubFacts(training)
         )
     records = tmp_path / "records" if records_dir is None else records_dir
     storage = data_storage(records)
+    if trainer_builder is None and isinstance(recipe, _TwoTrainerRecipe):
+        trainer_builder = TwoTrainerBuilder(recipe, waits_for_live=True)
     dispatcher = Dispatcher(
         recipe,
         repository,
+        live=replace(live, data_store=storage.data),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage,
         record_storage=storage.inner,
-        data_store=storage.data,
         experiment_tracker=experiment_tracker,
         hold_local_cycles=hold_local_cycles,
         # The work queues live beside the records, so a restarted dispatcher finds the running job, as in a deployment.
         coordination=open_coordination("sqlite", agent_record_dir=str(records), record_database_url=None),
         components=components,
+        trainer_builder=trainer_builder,
     )
+    if isinstance(trainer_builder, TwoTrainerBuilder):
+        trainer_builder.bind(dispatcher.live)
     return dispatcher, backends
 
 

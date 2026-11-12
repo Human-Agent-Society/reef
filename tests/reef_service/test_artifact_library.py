@@ -9,9 +9,10 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.polling import wait_until
+from tests.support.runtime_stubs import live_objects
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -60,12 +61,12 @@ def cell(tmp_path: Path, name: str) -> Dispatcher:
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = SQLiteScenarioStorage(root / "records", task_files=task_files, data=data)
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
+        TestPolicyRecipe(),
         UriBackend.factory(directory=root / "repository"),
+        live=live_objects(runtime, runtime.inference, data_store=data),
         local_artifact_dir=root / "staged",
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
-        data_store=data,
         coordination=memory_coordination(),
     )
     dispatcher.workers.add(
@@ -234,7 +235,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
                 # The root is the only release: no default start was written first.
-                assert len(scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)) == 1
+                assert len(scenario.snapshot_queries.snapshot_rows(scenario.commit_number)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
                 again = await client.post(
@@ -287,19 +288,11 @@ def test_a_new_owner_gets_the_artifact_items_that_a_copy_made_for_the_default_ow
         item_id = f"s/{scenario.artifacts()[0]['artifact_id']}"
         store = dispatcher.data_store
         assert store is not None
-        wait_until(lambda: store.read("s", item_id) is not None)
+        wait_until(lambda: store.read("s", item_id) is not None, message="the data service did not copy the item")
         dispatcher.set_scenario_owner("s", "acme")
-        wait_until(lambda: store.read("acme", item_id) is not None)
+        wait_until(lambda: store.read("acme", item_id) is not None, message="the data service did not copy the item")
     finally:
         dispatcher.close()
-
-
-def wait_until(condition, seconds: float = 10.0) -> None:
-    deadline = time.monotonic() + seconds
-    while not condition():
-        if time.monotonic() >= deadline:
-            raise AssertionError("the data service did not copy the item")
-        time.sleep(0.05)
 
 
 def test_an_artifact_item_without_a_source_uri_is_listed_but_not_imported(tmp_path: Path) -> None:

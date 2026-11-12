@@ -9,14 +9,11 @@ from __future__ import annotations
 import io
 import json
 import tarfile
-from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
 import pytest
-from tests.support._strategies import resolve_task_scorer
-from tests.support.harness_service import backend_step
-from tests.support.harness_steps import (
+from tests.support.harness_jobs import (
     COMPONENT,
     MODEL,
     PI_SEED,
@@ -28,7 +25,10 @@ from tests.support.harness_steps import (
     harness_recipe,
     head_of,
     make_pi_binary,
+    rebuilt_recipe,
 )
+from tests.support.harness_service import backend_step
+from tests.support.strategies import resolve_task_scorer
 
 from reef.evaluation.harness import TaskEvaluationWorker
 from reef.evaluation.harness.runner import TaskRun
@@ -40,7 +40,7 @@ from reef.harness.tasks.run import TaskRunError, TrajectoryKeepError, run_task
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.harness_backend.records import StepRecord
+from reef.train.harness_backend.records import JobRecord
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData, TrainingCommit
 
@@ -108,7 +108,7 @@ def native_backend(
     **fields,
 ) -> tuple[HarnessBackend, TreeArtifacts]:
     """The native backend over the fake native binary, and its in-memory history whose base is the native seed."""
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path,
         method,
         seed=NATIVE_SEED,
@@ -117,9 +117,9 @@ def native_backend(
         binary=binary or str(make_native_binary(tmp_path)),
         **fields,
     )
-    recipe = replace(recipe, worker_executor=ExecutorSettings(workers=workers))
+    recipe, live = rebuilt_recipe(recipe, live, worker_executor=ExecutorSettings(workers=workers))
     releases = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, "demo", releases), releases
+    return build_harness_backend(recipe, live, "demo", releases), releases
 
 
 def steps_dir(tmp_path: Path) -> Path:
@@ -127,9 +127,9 @@ def steps_dir(tmp_path: Path) -> Path:
     return (tmp_path / "harness" / "demo" / COMPONENT / "steps").resolve()
 
 
-def step(backend: HarnessBackend, state=None, scenario_step: int | None = None) -> TrainingCommit:
+def step(backend: HarnessBackend, state=None, commit_number: int | None = None) -> TrainingCommit:
     state = HarnessState().to_json() if state is None else state
-    return backend_step(backend, JobData("demo:1"), state, scenario_step=scenario_step)
+    return backend_step(backend, JobData("demo:1"), state, commit_number=commit_number)
 
 
 def read_json(path: Path):
@@ -313,29 +313,29 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
     before = {path.relative_to(first): path.stat().st_mtime_ns for path in first.rglob("*")}
 
     # The same step number again (a crash between prepare and commit) lands beside the first attempt.
-    result = step(backend, scenario_step=0)
+    result = step(backend, commit_number=0)
     second = root / "1-2"
     assert result.metrics["step_record"] == str(second)
     assert {path.relative_to(first): path.stat().st_mtime_ns for path in first.rglob("*")} == before
     assert {path.relative_to(second) for path in second.rglob("*")} == set(before)
-    step(backend, scenario_step=0)
+    step(backend, commit_number=0)
     assert sorted(path.name for path in root.iterdir()) == ["1", "1-2", "1-3"]
 
     with pytest.raises(FileExistsError):
-        StepRecord.write(first, "calls.json", [])
+        JobRecord.write(first, "calls.json", [])
     assert read_json(first / "calls.json") == []
 
 
 def test_an_run_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
     backend, _ = native_backend(tmp_path)
-    prepared = backend.prepare_step(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
     assert prepared.candidate is not None
     # A file where the run records go stands in for a full or unwritable history volume.
     (backend.history.root / "runs").write_text("in the way")
     with pytest.raises(TrajectoryKeepError, match="cannot keep run trajectory"):
         backend.evaluate(prepared.candidate)
-    backend.abort_step(prepared)
-    assert backend.failed_step_metrics()["failed_stage"] == "evaluating"
+    backend.abort_job(prepared)
+    assert backend.failed_job_metrics()["failed_stage"] == "evaluating"
 
     # The failure is not a run failure: run_task raises it past the launch mapping, and the run
     # root is still removed on the way out.

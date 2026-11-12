@@ -76,7 +76,7 @@ def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, mon
         release.set()
         value.registry.experiment_reports.flush()
         # The job's submission, checkpoint and end are steps 1 to 3.
-        assert [event.step for event in tracker.starts] == [4, 5]
+        assert [event.commit_number for event in tracker.starts] == [4, 5]
     finally:
         release.set()
         value.close()
@@ -121,7 +121,7 @@ def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
             finally:
                 release.set()
             assert operation.result(timeout=5)
-        assert scenario.scenario_step == 1
+        assert scenario.commit_number == 1
     finally:
         release.set()
         value.close()

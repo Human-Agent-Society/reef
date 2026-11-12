@@ -7,17 +7,17 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import open_sample_store
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
+from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import Artifact, DefaultStart
+from reef.artifact import Artifact
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import CommitPending, TrainingStartRefused
+from reef.core.errors import CommitPendingError, TrainingStartRefusedError
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
 from reef.core.training_request import TrainingRequest
@@ -25,7 +25,6 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
 from reef.storage.data import NewItem
-from reef.storage.job_data import read_job_data
 from reef.storage.record_items import ItemRecordStore
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
@@ -56,8 +55,9 @@ class FakeComponent(TrainingComponent):
     def concurrent_jobs(self) -> bool:
         return self.runs_concurrent_jobs
 
-    def default_start(self) -> DefaultStart:
-        return DefaultStart()
+    @property
+    def default_start_inputs(self) -> dict[str, str]:
+        return {}
 
     def root_start(self, root: ScenarioRoot) -> str:
         return "fake:base"
@@ -411,13 +411,13 @@ def test_an_import_is_refused_without_a_change_when_the_trainer_cannot_start(com
         raise ValueError("these weights cannot train")
 
     monkeypatch.setattr(component, "import_start", refuse)
-    with pytest.raises(TrainingStartRefused, match="these weights cannot train"):
+    with pytest.raises(TrainingStartRefusedError, match="these weights cannot train"):
         trainer.start_from(trainer.import_start(Artifact.local(Path("/releases/old"))))
     assert component.cancelled == []
     assert JobLoopState.from_dict(trainer.state) == running
     # A trainer that trains nothing has no start to set.
     observer = Trainer.build("math", memory_records("math"), pipeline_factory=threshold_pipeline)
-    with pytest.raises(TrainingStartRefused, match="trains nothing"):
+    with pytest.raises(TrainingStartRefusedError, match="trains nothing"):
         observer.import_start(Artifact.local(Path("/releases/old")))
 
 
@@ -429,7 +429,7 @@ def test_start_from_is_refused_while_a_commit_is_pending(component):
     assert not pending.has_pending_commit
     assert pending.advance_job() is not None
     assert pending.has_pending_commit
-    with pytest.raises(CommitPending, match="waits for its commit"):
+    with pytest.raises(CommitPendingError, match="waits for its commit"):
         pending.start_from("fake:old")
     assert component.cancelled == [] and JobLoopState.from_dict(pending.state) == running
 
@@ -607,7 +607,7 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
     assert train(train_record("sft", {"learning_rate": 2e-5}, "t1")) == {"objective": "sft", "learning_rate": 2e-5}
     rl = {"objective": "provided:Objective", "rollout": {"rollouts_per_task": 4}}
     assert train(train_record("rl", rl, "task-a")) == rl
-    assert [type(sample).__name__ for job in component.jobs for sample in read_job_data(job.data_dir).samples] == [
+    assert [type(sample).__name__ for job in component.jobs for sample in job.read_data().samples] == [
         "TrajectorySample",
         "TaskSample",
     ]

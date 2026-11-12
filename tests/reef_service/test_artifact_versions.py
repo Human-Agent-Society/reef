@@ -14,7 +14,6 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.reef_service.test_served_artifacts import serving_dispatcher
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import (
     ImportingComponent,
     RecordingExperimentTracker,
@@ -23,7 +22,8 @@ from tests.support.artifact_versions import (
     report,
     train,
 )
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.dispatcher import Dispatcher
@@ -33,7 +33,7 @@ from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.component import SavedCheckpoint
+from reef.train.component import SavedCheckpoint, SnapshotStart
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 
@@ -61,8 +61,9 @@ def restart(tmp_path: Path, backend_factory) -> tuple[Dispatcher, ImportingCompo
     """A new process on the same repository and commit storage."""
     component = ImportingComponent(tmp_path / "restarted-export")
     value = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -111,7 +112,7 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     assert before[-1]["artifact_id"] == scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
     target = before[-2]
     target_ref = scenario.artifact_snapshot(target["artifact_id"])[1]
-    last_training_step = value.build_training_status()["scenarios"]["math"]["last_committed_step"]
+    last_training_commit = value.build_training_status()["scenarios"]["math"]["last_training_commit"]
     checkpoint = scenario.repository.checkpoint_artifact
     stored = stored_paths(tmp_path)
     trainer_state = dict(scenario.trainer.state)
@@ -141,8 +142,8 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     assert len(after) == len(before)
     assert [row["artifact_id"] for row in after if row["active"]] == [target["artifact_id"]]
     status = value.build_training_status()["scenarios"]["math"]
-    assert status["scenario_step"] == 10
-    assert status["last_committed_step"] == last_training_step
+    assert status["commit_number"] == 10
+    assert status["last_training_commit"] == last_training_commit
     # Activating the active artifact changes nothing.
     assert value.activate("math", target["artifact_id"]) == activated
     assert len(scenario.store.history()) == 10
@@ -165,7 +166,8 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     assert start.artifact_id == target["artifact_id"]
     assert scenario.current_snapshot() == served
     assert runtime.activated[served_before:] == []
-    assert runtime.restore_order == ["training"]
+    # Control imports nothing: it names the snapshot, and the training service imports it for the next job.
+    assert runtime.restore_order == []
     record = scenario.store.history()[-1]
     assert (record.operation, record.selection.components, record.component) == (
         "train_from",
@@ -175,11 +177,12 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     assert [row["artifact_id"] for row in value.list_artifacts("math") if row["active"]] == [
         scenario.repository.resolve(served).artifact_id
     ]
-    imported = str(runtime.imported[-1])
-    assert JobLoopState.from_dict(scenario.trainer.state).start == imported
-    # The next job starts from the imported snapshot.
+    named = SnapshotStart.from_text(JobLoopState.from_dict(scenario.trainer.state).start)
+    assert named is not None and named.root is None
+    # The next job starts from the snapshot, which the training service imports when it takes the job.
     train(value, 3)
-    assert runtime.submitted[-1].start == imported
+    assert runtime.restore_order[0] == "training"
+    assert runtime.submitted[-1].start == str(runtime.imported[-1])
     assert value.list_artifacts("math")[0]["parent_artifact_id"] == target["artifact_id"]
     value.close()
 
@@ -200,21 +203,28 @@ def test_restore_and_operation_history_use_artifact_identities(tmp_path) -> None
             response = await client.get("/reef/scenarios/math/operations?limit=2")
             assert response.status == 200
             history = await response.json()
-            assert history["next_after_step"] == 2
+            assert history["next_after_commit_number"] == 2
             operation = history["operations"][-1]
             assert operation["components"] == {component: target["artifact_id"]}
             assert "artifact_ref" not in operation
-            restored = await client.post("/reef/scenarios/math/restore", json={"step": operation["step"]})
+            restored = await client.post(
+                "/reef/scenarios/math/restore", json={"commit_number": operation["commit_number"]}
+            )
             assert restored.status == 200
             assert await restored.json() == {"scenario": "math", "components": {component: target["artifact_id"]}}
             assert stored_paths(tmp_path) == stored
             assert scenario.artifact_status()[component] == {"active": target["artifact_id"], "training_start": start}
             assert scenario.store.history()[-1].operation == "restore"
             assert len(scenario.artifacts()) == len(artifacts)
-            for payload in ({"step": True}, {"step": -1}, {"step": 999}, {"artifact_id": "old"}):
+            for payload in (
+                {"commit_number": True},
+                {"commit_number": -1},
+                {"commit_number": 999},
+                {"artifact_id": "old"},
+            ):
                 assert (await client.post("/reef/scenarios/math/restore", json=payload)).status == 400
-            assert (await client.post("/reef/scenarios/missing/restore", json={"step": 0})).status == 404
-            root = await client.post("/reef/scenarios/math/restore", json={"step": 0})
+            assert (await client.post("/reef/scenarios/missing/restore", json={"commit_number": 0})).status == 404
+            root = await client.post("/reef/scenarios/math/restore", json={"commit_number": 0})
             assert (await root.json())["components"] == {component: artifacts[-1]["artifact_id"]}
         value.close()
 
@@ -241,7 +251,7 @@ def test_activation_and_training_start_survive_a_restart(tmp_path) -> None:
     assert component.activated == ["w1"]
     assert [row["artifact_id"] for row in recovered.artifacts() if row["active"]] == [first["artifact_id"]]
     # The training start is taken again: the trainer's own commits do not record it yet.
-    assert JobLoopState.from_dict(recovered.trainer.state).start == str(component.imported[-1])
+    assert SnapshotStart.from_text(JobLoopState.from_dict(recovered.trainer.state).start) is not None
     train(restarted, 3)
     assert component.submitted[-1].start == str(component.imported[-1])
     restarted.close()
@@ -256,12 +266,12 @@ def test_a_lost_activation_record_leaves_the_release_the_log_names(tmp_path) -> 
     newest = scenario.current_snapshot()
     value.activate("math", value.list_artifacts("math")[-2]["artifact_id"])
     assert isinstance(scenario.store, CommitHistoryScenarioStore)
-    last_step = scenario.store.history()[-1].step
+    last_step = scenario.store.history()[-1].commit_number
     value.close()
     # Lose the activation behind the store's back, as a crash before its append would.
     database = tmp_path / "agent-record" / f"{hashlib.sha256(b'math').hexdigest()}.sqlite3"
     with closing(sqlite3.connect(database)) as connection, connection:
-        connection.execute("DELETE FROM scenario_commit WHERE step = ?", (last_step,))
+        connection.execute("DELETE FROM scenario_commit WHERE commit_number = ?", (last_step,))
 
     restarted, _ = restart(tmp_path, backend_factory)
     recovered = restarted.get_or_create_scenario("math")
@@ -293,7 +303,7 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
         *((8, run_step) for run_step in range(3)),
     ]
     (start,) = tracker.starts
-    assert (start.step, start.run_segment) == (8, 0)
+    assert (start.commit_number, start.run_segment) == (8, 0)
     assert start.start_artifacts.components == {"weights": creation["artifact_id"]}
     # The steps after the new start name the training start as their source, not the active selection.
     assert {event.context.source_artifacts.components["weights"] for event in tracker.events[6:7]} == {
@@ -315,7 +325,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
     restarted, _ = restart(tmp_path, backend_factory)
     recovered = restarted.get_or_create_scenario("math")
-    assert [version["operation"] for version in recovered.snapshot_queries.snapshot_rows(recovered.scenario_step)] == [
+    assert [version["operation"] for version in recovered.snapshot_queries.snapshot_rows(recovered.commit_number)] == [
         *(["training"] * 9),
         "creation",
     ]
@@ -350,7 +360,7 @@ def test_request_records_the_artifact_id_captured_before_inference(tmp_path) -> 
             response = await request
             assert response.status == 200
             record_id = response.headers["x-reef-agent-record-id"]
-        item = value.get_or_create_scenario("math").records.get("math", record_id)
+        item = value.get_or_create_scenario("math").records.read("math", record_id)
         assert backend.artifact_id == selected_version
         assert item.artifact_id is not None
         assert item.artifact_id == selected_version
@@ -413,7 +423,7 @@ def test_served_and_train_from_http_api(tmp_path, monkeypatch) -> None:
             def refuse(release):
                 raise ValueError("these weights cannot train")
 
-            monkeypatch.setattr(runtime, "import_start", refuse)
+            monkeypatch.setattr(runtime, "check_import_start", refuse)
             refused = await client.post("/reef/scenarios/math/train-from", json={"artifact_id": target["artifact_id"]})
             assert refused.status == 400
             assert "cannot train" in await refused.text()
@@ -445,7 +455,7 @@ def test_a_failed_start_preserves_training_and_reports_inference_failure(tmp_pat
         raise RuntimeError("restore failed")
 
     if component == "training":
-        monkeypatch.setattr(training, "import_start", fail_restore)
+        monkeypatch.setattr(training, "check_import_start", fail_restore)
         operation = value.train_from
     else:
         monkeypatch.setattr(training.inference, "activate_checkpoint", fail_restore)
@@ -529,11 +539,11 @@ def test_experiment_events_follow_durable_commits_and_a_new_training_start(
     advance_to = scenario._committer.advance_to
 
     def record(event: TrainingExperimentEvent) -> None:
-        observed.append((event.context.step, scenario.store.history()[-1].step))
+        observed.append((event.context.commit_number, scenario.store.history()[-1].commit_number))
         recorded.set()
 
     def record_start(event: TrainFromExperimentEvent) -> None:
-        observed.append((event.step, scenario.store.history()[-1].step))
+        observed.append((event.commit_number, scenario.store.history()[-1].commit_number))
         observed.append(runtime.inference.inference_admission_status["open"])
 
     def advance_after_report(step: int) -> None:
@@ -558,7 +568,7 @@ def test_experiment_events_follow_durable_commits_and_a_new_training_start(
         value.registry.experiment_reports.flush()
         # A new start leaves serving alone: the trained snapshot still serves.
         assert observed == [(4, 4), True]
-        assert scenario.scenario_step == 4
+        assert scenario.commit_number == 4
         assert scenario.current_snapshot() == trained
     finally:
         value.close()
@@ -634,7 +644,7 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
         commit = scenario.store.history()[0]
         assert commit.metrics["experiment/run_id"] == "run-0"
         assert event.metrics == commit.metrics
-        assert event.context.step == commit.step == 1
+        assert event.context.commit_number == commit.commit_number == 1
         assert event.context.source_artifacts.components == {
             "weights": scenario.repository.resolve(initial).artifact_id
         }

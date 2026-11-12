@@ -128,7 +128,7 @@ a unit ready when the samples of all its record sets are made.
 
 When a unit is ready, the pipeline saves each of the unit's samples
 (``unit_samples``) as a data item of the scenario's owner that the scenario
-uses (``TrainerSamples.add_record_samples``, RFC #1140). Then the scenario's
+uses (``TrainerSamples.write_record_samples``, RFC #1140). Then the scenario's
 training state records the unit's records as consumed by the trainer. The stage
 then ends the unit (``consume``) and forgets its samples. Sample ``i`` of record
 set ``s`` is the item ``<scenario>.<trainer>:<s>:<i>``, or
@@ -310,32 +310,43 @@ reads the directory (RFC #1140). The jobs queue keeps only a reference to it.
 The directory holds the samples, not the training request: Reef keeps the
 request for its own accounting.
 
-Format 1 of a directory:
+Format 2 of a directory:
 
 .. code:: text
 
-   job.json        {"format": 1, "key", "sample_count", "kind"}
+   job.json        {"format": 2, "key", "sample_count", "kind"}
    samples.jsonl   one sample per line, in job order
-   tasks/<n>/<directory name>/
 
 - ``job.json`` gives the directory's key, its number of samples, and the kind
   of its samples: ``trajectory``, ``task``, or ``null`` without samples.
-- Each line of ``samples.jsonl`` is the entry of ``JobData.to_dict``. A task's
-  ``task_path`` is relative to the directory: ``tasks/<n>/<directory name>``,
-  where ``n`` counts the tasks from 0.
-- ``tasks/`` holds a copy of each task's directory.
+- Each line of ``samples.jsonl`` is the entry of ``JobData.to_dict``, with one
+  difference for a task. The line of a task has no ``task_path``. Its
+  ``files`` names the task's directory in the task file store
+  (``storage.task_file_backend``): ``partition`` and ``digest``, and ``name``,
+  the name of the directory.
+
+The directory holds no file of a task. The task file store keeps the one copy
+of each task's files, so a job of many tasks writes two small files. Each
+task of a job must therefore be in the task file store: ``TaskSample.files``
+names it there, and Reef refuses job data with a task that has no ``files``.
+The samples that Reef makes from imported and generated tasks have it.
 
 A directory does not change after Reef writes it, and several jobs can read
-it, so a component must not write in it. A component reads it with
-``reef.storage.job_data.read_job_data(job.data_dir, job.data_id)``. A
-component that runs the job elsewhere, such as in a container, gives that
-place ``job.data_uri`` and mounts or copies the directory there.
+it, so a component must not write in it. A component reads the data with
+``job.read_data()``. Each task sample of the result has a local
+``task_path``, which the data store took from the task file store when it
+opened the job. The component must not change that directory.
+
+A component that runs the job elsewhere, such as in a container, gives that
+place ``job.data_uri`` and mounts or copies the directory there. That place
+reads ``files`` from each task line and gets the directory from the task file
+store of the deployment by ``partition`` and ``digest``.
 
 The data store keeps the directories (``DataStore.write_job_directory``,
 ``open_job_directory`` and ``delete_unused_job_directories``) in its segment
 store (``storage.segment_backend``), or in
-``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its samples and of the
-files of its tasks (``job_data_key``). So a job of the same samples, such as
+``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its lines (``job_data_key``): the
+samples, and the digest of each task's files. So a job of the same samples, such as
 a second job on one dataset, uses the directory that exists and writes
 nothing. The data store records when a job last used each directory, and its
 periodic work (``DataStore.maintain``, which the data service calls) deletes a
@@ -880,7 +891,7 @@ that the end ends, with its rewards, and runs the review that is due after every
 ``review_interval`` jobs. Then it makes the sample of each active task's next
 use, ``generated-tasks/<task name>@<k>`` for use ``k``, which waits after the
 samples that wait already. A review that retires a task ends the scenario's use
-of the task's waiting sample (``TrainerSamples.remove_samples``), so no later
+of the task's waiting sample (``TrainerSamples.delete_samples``), so no later
 job takes it; the item stays in the data store with its train counts. See
 `generated tasks <../reference/configuration.rst#generated-tasks>`__ for the
 keys.

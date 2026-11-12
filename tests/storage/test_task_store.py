@@ -14,7 +14,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import (
@@ -22,7 +22,7 @@ from reef.storage.tasks import (
     LocalTaskFileStore,
     StoredTask,
     TaskCandidate,
-    TaskConflict,
+    TaskConflictError,
     TaskStoreError,
     files_digest,
 )
@@ -76,7 +76,7 @@ def test_a_generation_records_candidates_and_outcomes(session, tmp_path):
     assert store.begin_generation(generation=0, source_record_ids=("record-1", "record-2")) == GenerationState(
         generation=0, source_record_ids=("record-1", "record-2")
     )
-    assert store.save_candidates(generation=0, directories=directories).candidates == tuple(
+    assert store.write_candidates(generation=0, directories=directories).candidates == tuple(
         TaskCandidate(task.name, digest) for task, digest in zip(tasks, digests, strict=True)
     )
     alpha = store.publish_task(generation=0, index=0, split="train")
@@ -111,7 +111,7 @@ def test_identical_retries_change_nothing(session, tmp_path):
     tasks = (generated("alpha"), generated("beta"))
     for _ in range(2):
         store.begin_generation(generation=3, source_record_ids=("record-1",))
-        store.save_candidates(generation=3, directories=candidates(tmp_path, *tasks))
+        store.write_candidates(generation=3, directories=candidates(tmp_path, *tasks))
         store.publish_task(generation=3, index=0, split="train")
         store.reject_task(generation=3, index=1, reason="invalid")
         store.complete_generation(generation=3)
@@ -128,13 +128,13 @@ def test_identical_retries_change_nothing(session, tmp_path):
 def test_conflicting_generation_writes_are_refused(session, tmp_path):
     store = session.tasks.open("tasks")
     with pytest.raises(TaskStoreError, match="does not exist"):
-        store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
+        store.write_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
     store.begin_generation(generation=0, source_record_ids=("record-1",))
     with pytest.raises(TaskStoreError, match="other source records"):
         store.begin_generation(generation=0, source_record_ids=("record-2",))
-    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha"), generated("beta")))
+    store.write_candidates(generation=0, directories=candidates(tmp_path, generated("alpha"), generated("beta")))
     with pytest.raises(TaskStoreError, match="other candidates"):
-        store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
+        store.write_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
     with pytest.raises(TaskStoreError, match="no candidate 2"):
         store.publish_task(generation=0, index=2, split="train")
     with pytest.raises(TaskStoreError, match="candidates without outcome"):
@@ -142,7 +142,7 @@ def test_conflicting_generation_writes_are_refused(session, tmp_path):
 
     store.publish_task(generation=0, index=0, split="train")
     store.reject_task(generation=0, index=1, reason="invalid")
-    with pytest.raises(TaskConflict, match="published to train, not eval"):
+    with pytest.raises(TaskConflictError, match="published to train, not eval"):
         store.publish_task(generation=0, index=0, split="eval")
     with pytest.raises(TaskStoreError, match="is published"):
         store.reject_task(generation=0, index=0, reason="invalid")
@@ -155,20 +155,20 @@ def test_conflicting_generation_writes_are_refused(session, tmp_path):
 def test_a_task_name_is_published_once(session, tmp_path):
     store = session.tasks.open("tasks")
     store.begin_generation(generation=0, source_record_ids=("record-1",))
-    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
+    store.write_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
     first = store.publish_task(generation=0, index=0, split="eval")
     store.begin_generation(generation=1, source_record_ids=("record-1",))
-    store.save_candidates(
+    store.write_candidates(
         generation=1,
         directories=candidates(
             tmp_path, generated("alpha"), generated("alpha"), generated("alpha", instruction="Other.")
         ),
     )
 
-    with pytest.raises(TaskConflict, match="published to eval, not train"):
+    with pytest.raises(TaskConflictError, match="published to eval, not train"):
         store.publish_task(generation=1, index=0, split="train")
     assert store.publish_task(generation=1, index=1, split="eval") == first
-    with pytest.raises(TaskConflict, match="published with other files"):
+    with pytest.raises(TaskConflictError, match="published with other files"):
         store.publish_task(generation=1, index=2, split="eval")
     assert store.tasks() == (first,)
 
@@ -176,7 +176,7 @@ def test_a_task_name_is_published_once(session, tmp_path):
 def test_documents_are_written_once_and_trained_marks_name_published_train_tasks(session, tmp_path):
     store = session.tasks.open("tasks")
     store.begin_generation(generation=0, source_record_ids=("record-1",))
-    store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha"), generated("beta")))
+    store.write_candidates(generation=0, directories=candidates(tmp_path, generated("alpha"), generated("beta")))
     store.publish_task(generation=0, index=0, split="train")
     store.publish_task(generation=0, index=1, split="eval")
 
@@ -207,9 +207,9 @@ def test_a_state_document_is_replaced_and_removed_apart_from_the_documents(sessi
     assert store.state_document_keys(prefix="open/") == ("open/00002", "open/00010"), "the prefix is exact"
     assert store.state_document_keys(prefix="open%") == ("open%",)
 
-    store.remove_state_document(key="open/00002")
-    store.remove_state_document(key="open/00002")
-    store.remove_state_document(key="unknown")
+    store.delete_state_document(key="open/00002")
+    store.delete_state_document(key="open/00002")
+    store.delete_state_document(key="unknown")
     assert store.state_document("open/00002") is None
     assert store.state_document_keys(prefix="open/") == ("open/00010",), "an unknown key changes nothing"
     with pytest.raises(TaskStoreError, match="non-empty key"):
@@ -221,19 +221,19 @@ def test_a_state_document_is_replaced_and_removed_apart_from_the_documents(sessi
 def test_saved_files_are_read_by_their_digest_and_change_no_generation(session, tmp_path):
     store = session.tasks.open("tasks")
     (directory,) = candidates(tmp_path, generated("parent"))
-    digest = store.save_files(directory)
-    assert digest == files_digest(directory) == store.save_files(directory), "a repeated save changes nothing"
+    digest = store.write_files(directory)
+    assert digest == files_digest(directory) == store.write_files(directory), "a repeated save changes nothing"
     assert store.path(digest).name == "parent" and read_harbor_task(store.path(digest)) == generated("parent")
     assert store.generations() == () and store.tasks() == ()
     (directory / "link").symlink_to(directory / "instruction.md")
     with pytest.raises(TaskStoreError, match="not a file"):
-        store.save_files(directory)
+        store.write_files(directory)
 
 
 def test_store_names_are_separate(session, tmp_path):
     alpha = session.tasks.open("alpha")
     alpha.begin_generation(generation=0, source_record_ids=("record-1",))
-    alpha.save_candidates(generation=0, directories=candidates(tmp_path, generated("one")))
+    alpha.write_candidates(generation=0, directories=candidates(tmp_path, generated("one")))
     alpha.publish_task(generation=0, index=0, split="train")
 
     beta = session.tasks.open("beta")
@@ -263,14 +263,14 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         store = session.tasks.open("tasks")
         store.begin_generation(generation=0, source_record_ids=("record-1",))
-        store.save_candidates(generation=0, directories=candidates(sources, generated("alpha"), generated("beta")))
+        store.write_candidates(generation=0, directories=candidates(sources, generated("alpha"), generated("beta")))
         store.publish_task(generation=0, index=0, split="train")
         store.write_document(key="rollout/alpha", document="saved")
         store.write_state_document(key="cursor", document="first")
         store.write_state_document(key="cursor", document="second")
         store.write_state_document(key="open/00000", document="removed")
-        store.remove_state_document(key="open/00000")
-        saved_digest = store.save_files(candidates(sources, generated("parent"))[0])
+        store.delete_state_document(key="open/00000")
+        saved_digest = store.write_files(candidates(sources, generated("parent"))[0])
 
     with closing(open_durable_storage()) as storage:
         with closing(storage.open("math")) as session:
@@ -312,8 +312,8 @@ def test_the_local_file_store_keeps_binary_files_by_digest(tmp_path):
     (source / "instruction.md").write_text("Describe the image.\n")
 
     with closing(LocalTaskFileStore(tmp_path / "files")) as files:
-        digest = files.put("math", source)
-        assert files.put("math", source) == digest == files_digest(source)
+        digest = files.write("math", source)
+        assert files.write("math", source) == digest == files_digest(source)
         copy = files.path("math", digest)
         assert copy.name == "image-task"
         assert (copy / "environment" / "data.bin").read_bytes() == bytes(range(256))
@@ -322,7 +322,7 @@ def test_the_local_file_store_keeps_binary_files_by_digest(tmp_path):
 
         (source / "link").symlink_to(source / "instruction.md")
         with pytest.raises(TaskStoreError, match="not a file"):
-            files.put("math", source)
+            files.write("math", source)
 
         (archived,) = files.archive("math")
         assert (Path(archived) / digest / "image-task" / "environment" / "data.bin").exists()
@@ -352,7 +352,7 @@ class SubdirectoryTaskFileStore(LocalTaskFileStore):
     ],
 )
 def test_the_deployment_selects_the_task_file_store(tmp_path, backend, files_root):
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),
@@ -365,7 +365,7 @@ def test_the_deployment_selects_the_task_file_store(tmp_path, backend, files_roo
     try:
         store = dispatcher.get_or_create_scenario("math").store.tasks.open("tasks")
         store.begin_generation(generation=0, source_record_ids=("record-1",))
-        store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
+        store.write_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
         directory = store.path(store.publish_task(generation=0, index=0, split="train").files_digest)
         assert directory.is_relative_to(tmp_path / files_root)
     finally:
@@ -378,4 +378,4 @@ def test_the_deployment_selects_the_task_file_store(tmp_path, backend, files_roo
 )
 def test_the_deployment_rejects_an_invalid_task_file_backend(backend):
     with pytest.raises(ValueError, match="task_file_backend"):
-        ServiceConfig(recipe="recipe", task_file_backend=backend)
+        ServiceSettings(recipe="recipe", task_file_backend=backend)

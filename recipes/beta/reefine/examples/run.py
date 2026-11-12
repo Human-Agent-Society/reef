@@ -48,7 +48,7 @@ from urllib.parse import urlencode
 from reef_client import ReefClient, ReefClientError
 
 from recipes.beta.reefine.agent import launch_pi, tool_calls
-from reef.execution.sandbox.process import LocalExecutor, ProgramTimeout
+from reef.execution.sandbox.process import LocalExecutor, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.trajectory import final_assistant_text
@@ -387,7 +387,7 @@ def show(mode, run_dir):
             descriptor, binary, executor, files, prompt, {}, root=root, timeout=SHOW_TIMEOUT_S
         )
         exit_code = outcome.exit_code
-    except ProgramTimeout:
+    except ProgramTimeoutError:
         exit_code, trajectory = None, []
     calls = [f"{call['tool']}({call.get('arguments', call.get('error', ''))[:60]})" for call in tool_calls(trajectory)]
     answer = (final_assistant_text(trajectory) or "").strip()

@@ -3,7 +3,7 @@
 ``QueueChat`` is a model that answers canned replies: the Meta-Harness, ACE
 and ReasoningBank tests give it to their method. ``proposal_reply`` is one
 reply of the Meta-Harness proposer. ``MarkerScorer`` scores a run of the
-fake pi binary of ``tests.support.harness_steps`` by the marker in the rules
+fake pi binary of ``tests.support.harness_jobs`` by the marker in the rules
 it rendered. ``meta_harness_sections`` is a deployment's recipe section over
 that binary, and ``meta_harness_recipe`` the recipe built from it with a
 ``QueueChat``.
@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tests.support.harness_steps import make_pi_binary
+from tests.support.harness_jobs import configured_live, make_pi_binary
 
 from reef.evaluation.harness import TaskScorer
 from reef.harness.tasks.model_binding import ModelBinding
@@ -24,7 +24,8 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.recipe.registry import build_recipe
+from reef.recipe.loading import build_recipe
+from reef.scenario.live_objects import LiveObjects
 
 #: What the scorer looks for in the rules a run completed with.
 MARKER = "META-HARNESS-WINNER"
@@ -99,14 +100,17 @@ def meta_harness_sections(tmp_path: Path, *, adapter: str = "pi", **method: Any)
     }
 
 
-def meta_harness_recipe(tmp_path: Path, chat: QueueChat, **method: Any) -> HarnessEvolutionRecipe:
-    """The recipe ``meta_harness_sections`` names, built over the fake pi binary, with ``chat`` as its proposer."""
+def meta_harness_recipe(tmp_path: Path, chat: QueueChat, **method: Any) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
+    """The recipe ``meta_harness_sections`` names, loaded over the fake pi binary, with ``chat`` as its proposer,
+    and the live objects that run it: ``served_runtime()`` and the harness training component that the service
+    builds for the recipe."""
     make_pi_binary(tmp_path)
     config = meta_harness_sections(tmp_path, **method)
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
+    recipe = build_recipe(config["implementation"], {}, config=config)
     if not isinstance(recipe, HarnessEvolutionRecipe):
         raise TypeError(f"the section built a {type(recipe).__name__}")
-    return dataclasses.replace(recipe, models={"proposer": chat})
+    recipe = dataclasses.replace(recipe, models={"proposer": chat})
+    return recipe, configured_live(recipe, LiveObjects(runtime=served_runtime()))
 
 
 __all__ = [

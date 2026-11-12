@@ -6,13 +6,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE
-from tests.support._trajectories import policy_trajectory
+from tests.support.grouped_pg import GROUPED_PG_OBJECTIVE
+from tests.support.trajectories import policy_trajectory
 
-from reef.train.algos.schedule import StepScheduling
-from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, TaskSample, trajectories
 
 SFT_OBJECTIVE = "tests.slime_backend.test_slime_job_preparation:SampleSftObjective"

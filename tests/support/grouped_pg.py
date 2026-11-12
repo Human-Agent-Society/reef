@@ -9,7 +9,7 @@ uses them — the grouping machinery they exercise (group keys, slots, the
 runtime) IS production code, and these suites are what keep it pinned.
 
 ``GROUPED_PG_OBJECTIVE`` is the dotted ``module:Objective`` spelling the
-resolver (``reef.train.slime_backend.objectives.resolve_slime_objective``) accepts, so tests exercise
+resolver (``reef.train.slime_backend.objectives.resolve_objective``) accepts, so tests exercise
 the same custom-objective path a reader's package would.
 """
 
@@ -17,21 +17,21 @@ from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
 from dataclasses import replace
-from typing import Any
+from typing import Any, Self
 
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.sample2job import Sample2Job
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import TrainingSignal
+from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.objectives import SlimeObjective
+from reef.train.slime_backend.schedule import next_steps
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, Sample, TrajectorySample, trajectory_groups
 
-GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
+GROUPED_PG_OBJECTIVE = "tests.support.grouped_pg:GroupedPolicyObjective"
 
 
 class GroupedPolicyObjective(SlimeObjective):
@@ -51,7 +51,7 @@ class GroupedPolicyObjective(SlimeObjective):
         return TrainingSignal("train", {"steps": steps}, {"advantages": normalized}, normalized)
 
 
-def _comparison_set_id(report: AgentRecord) -> str | None:
+def comparison_set_id(report: AgentRecord) -> str | None:
     metadata = report.payload.get("metadata", {})
     set_id = metadata.get("comparison_set") if isinstance(metadata, Mapping) else None
     return set_id if isinstance(set_id, str) and set_id else None
@@ -61,7 +61,7 @@ class ComparisonSetGrouping(ReportGrouping):
     """Reports with one ``metadata.comparison_set`` form one group, ready at two members."""
 
     def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
-        return _comparison_set_id(context.report), None
+        return comparison_set_id(context.report), None
 
     def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
         return GroupDecision.READY if len(members) >= 2 else GroupDecision.INCOMPLETE
@@ -74,14 +74,30 @@ class ComparisonSetSamples(ReportSamples):
         super().__init__(context, ComparisonSetGrouping())
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        return cls(context, SampleAssemblySettings.parse(config, plugin_class=cls))
+
     def make_sample(self, context: ReportContext) -> TrajectorySample:
-        set_id = _comparison_set_id(context.report)
+        set_id = comparison_set_id(context.report)
         if set_id is None:
             raise ValueError("grouped training requires metadata.comparison_set")
         return replace(self.assembly.build(context, context.require_score()), group_id=set_id)
 
 
 class GroupedPolicyJobData(Sample2Job):
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2sample: Record2Sample,
+        environ: Mapping[str, str],
+    ) -> Self:
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
+        return cls(context, settings.buffer_size, settings.job_samples)
+
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 

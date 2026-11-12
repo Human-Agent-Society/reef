@@ -10,10 +10,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.support.harness_jobs import COMPONENT, PI_SEED, changed_rules, harness_recipe
 from tests.support.harness_service import harness_repository, run_step
-from tests.support.harness_steps import COMPONENT, PI_SEED, changed_rules, harness_recipe
 
-from reef.artifact import Artifact, ArtifactConflict, ArtifactNotFound
+from reef.artifact import Artifact, ArtifactConflictError, ArtifactNotFoundError
 from reef.core.plugins import PluginReference
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
@@ -29,9 +29,11 @@ MARKED = PI_SEED.apply(MARKER)
 
 
 def harness_scenario(tmp_path: Path, method, *, durable: bool = True, **fields) -> tuple[Dispatcher, Scenario]:
+    recipe, live = harness_recipe(tmp_path, method, **fields)
     dispatcher = Dispatcher(
-        harness_recipe(tmp_path, method, **fields),
+        recipe,
         harness_repository(tmp_path),
+        live=live,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record" if durable else None),
         # The tests commit each step themselves (``run_step``), so no local cycle commits the same job.
@@ -69,7 +71,7 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
         # Every committed snapshot reads by id, the root included; an id the scenario never committed is not found.
         assert releases.artifact(created, COMPONENT).files == PI_SEED.files
         assert releases.artifact(published, COMPONENT).files == MARKED.files
-        with pytest.raises(ArtifactNotFound, match="has no artifact 'nope'"):
+        with pytest.raises(ArtifactNotFoundError, match="has no artifact 'nope'"):
             releases.artifact("nope", COMPONENT)
     finally:
         dispatcher.close()
@@ -130,7 +132,7 @@ def test_a_sync_moves_the_head_to_the_persons_tree(tmp_path: Path) -> None:
         # The synced release serves and is the training start, so the next step builds on the person's tree.
         assert releases.head(COMPONENT) == ArtifactTextFiles(synced.artifact_id, dict(person.files))
         history = scenario.store.history()
-        with pytest.raises(ArtifactConflict, match="changed its active artifacts"):
+        with pytest.raises(ArtifactConflictError, match="changed its active artifacts"):
             dispatcher.sync_artifact(
                 "demo", Artifact.local(tmp_path / "person"), component=COMPONENT, expected_selection=active, metrics={}
             )

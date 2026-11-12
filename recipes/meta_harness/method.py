@@ -1,15 +1,15 @@
 """Meta-Harness: full-history search over complete harness trees, scored on fixed evaluation tasks.
 
-A training request starts each step: the deployment trains in ``manual`` mode,
-and each ``POST /reef/train`` runs one step, its text an instruction the
-proposer reads. The step gives one proposer model the search so far, read from
+A training request starts each job: the deployment trains in ``manual`` mode,
+and each ``POST /reef/train`` runs one job, its text an instruction the
+proposer reads. The job gives one proposer model the search so far, read from
 the scenario's history: the seed and every tree the method proposed, each with
 its files, its parent, what the proposer said about it, its outcome and its
 scores on the evaluation tasks; excerpts of the records of those runs; and the
 parts of the adapter's tree. The reply names any candidate as its parent and
-returns one complete tree. The step checks that tree and leaves it in
+returns one complete tree. The job checks that tree and leaves it in
 ``workspace.harness`` as the candidate. A refused reply (invalid, or a
-tree the history holds) leaves the head unchanged, so the step skips.
+tree the history holds) leaves the head unchanged, so the job skips.
 
 A deployment selects with the ``compare`` policy and ``statistic: mean``. The
 incumbent's scores come from the score cache, not from new runs, so a
@@ -38,11 +38,11 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import redact_secret_shaped
-from reef.train.harness_backend import Method, Services, StepContext, Workspace
+from reef.train.harness_backend import Method, MethodJob, Services, Workspace
 
 #: ``full_history`` branches from any candidate; ``incumbent_only``, the greedy control, from the served one.
 MODES = ("full_history", "incumbent_only")
-#: What happened to a candidate: the step builds on it, a decision selected it, decisions only rejected it, or none
+#: What happened to a candidate: the job builds on it, a decision selected it, decisions only rejected it, or none
 #: decided it.
 OUTCOMES = ("served", "selected", "rejected", "undecided")
 #: The fields of a proposer reply.
@@ -65,7 +65,7 @@ class MetaHarnessSettings(PluginSettings):
     ``max_files`` ≥ 1, ``max_runs`` ≥ 0 and ``run_chars`` ≥ 1 bound one
     proposal and one prompt.
     Purpose: ``MetaHarness.from_config`` parses it, and the method reads it
-    in each step.
+    in each job.
     """
 
     mode: str = config_option(
@@ -103,8 +103,8 @@ class Member:
 
     Values: ``record`` is the candidate's history record and ``tree`` its
     files, with ``tree.checksum() == record.tree``. ``outcome`` is one of
-    ``OUTCOMES``: ``served`` when the tree is the head of the step; otherwise
-    ``selected`` when a step's decision selected it, ``rejected`` when the
+    ``OUTCOMES``: ``served`` when the tree is the head of the job; otherwise
+    ``selected`` when a job's decision selected it, ``rejected`` when the
     decisions on it only rejected it, and ``undecided`` when no decision is on
     it. ``runs`` are runs of ``tree``: its latest one for each (task,
     repeat) of the evaluation tasks, in task order and then repeat order.
@@ -141,11 +141,11 @@ class Member:
 
 
 class MetaHarness(Method):
-    """Propose one complete tree per step from the whole search history.
+    """Propose one complete tree per job from the whole search history.
 
     Values: ``settings`` is the method's config.
     Purpose: a deployment names it in ``evolution.method``; the backend calls
-    ``step`` once per step.
+    ``run`` once per job.
     """
 
     def __init__(self, settings: MetaHarnessSettings | None = None) -> None:
@@ -155,8 +155,8 @@ class MetaHarness(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(MetaHarnessSettings.parse(config, plugin_class=cls))
 
-    def step(self, context: StepContext) -> None:
-        workspace, services, settings = context.workspace, context.services, self.settings
+    def run(self, job: MethodJob) -> None:
+        workspace, services, settings = job.workspace, job.services, self.settings
         host = workspace.host()
         layout = get_adapter(str(host["adapter"])).layout
         parts = settings.components or tuple(layout.parts)
@@ -285,11 +285,11 @@ def search_population(
 ) -> tuple[Member, ...]:
     """The candidates a proposal at ``step`` may branch from, in the order the history first saw them.
 
-    ``head`` is the checksum of the tree the step builds on, which the history
+    ``head`` is the checksum of the tree the job builds on, which the history
     holds; it is always a member. In full history the seed and every tree the
     method proposed before ``step`` are members too. A tree that an earlier
     attempt of ``step`` proposed is not: that attempt never committed.
-    Outcomes read the final decision of each step before ``step``, the latest
+    Outcomes read the final decision of each job before ``step``, the latest
     one the history holds for it. The runs are those on ``tasks``.
     """
     decisions = {decision.step: decision for decision in history.decisions if decision.step < step}

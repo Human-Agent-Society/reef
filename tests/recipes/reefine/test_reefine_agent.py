@@ -13,26 +13,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from tests.recipes.reefine.reefine_support import TREE, Served, designed, reefine_step, step_workspace
-from tests.support.harness_steps import step_services
+from tests.recipes.reefine.support import TREE, Served, designed, reefine_step, step_workspace
+from tests.support.harness_jobs import job_services
 
 from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import agent as reefine_agent
 from recipes.beta.reefine.agent import AgentRun, CheckTool, ReefineAgent, TrialTool, agent_rules, answer_with_agent
 from recipes.beta.reefine.agent_gateway import ReefineGateway
-from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider
+from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider, MultimodalSettings
 from recipes.beta.reefine.trial import trial_script
 from reef.core.training_request import TrainingRequest
 from reef.execution.sandbox.e2b import E2BSession
-from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramTimeout, SandboxExecutor
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramTimeoutError, SandboxExecutor
 from reef.execution.sandbox.remote import pack
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import reply_tool_calls, tool_summary
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import TreePatch
-from reef.train.harness_backend import Services, StepContext, Workspace
-from reef.train.harness_backend.agent.run import AgentExecution
-from reef.train.harness_backend.calls import StepCalls
+from reef.train.harness_backend import AgentExecution, MethodJob, Services, Workspace
+from reef.train.harness_backend.agent.settings import AgentSettings
+from reef.train.harness_backend.calls import JobCalls
 from reef.train.types import JobData
 
 REVIEW = {"result": "complete", "covered": ["reads answers aloud"], "uncovered": [], "delivers": True}
@@ -209,13 +209,15 @@ def agent_of(binary: Path, provider: MultimodalProvider | None = None, *, timeou
 def agent_step(tmp_path: Path, models: ModelBindings) -> tuple[Workspace, Services]:
     """A request step's workspace over ``TREE`` and its services, the served model ``models``."""
     workspace = step_workspace(tmp_path, request=ASK)
-    return workspace, step_services(workspace, models)
+    return workspace, job_services(workspace, models)
 
 
 @pytest.mark.unit
 def test_the_agent_changes_the_steps_tree_tries_it_and_the_step_publishes_it_reviewed(tmp_path, upstream) -> None:
-    method = ReefineMethod(agent_of(fake_pi(tmp_path), provider_of(upstream)))
-    result, activity = reefine_step(tmp_path, method, JobData("demo:1", (), request=ASK), served_of(upstream))
+    # The method takes the agent from its job's services, and its gateway from its own config.
+    method = ReefineMethod(30.0, MultimodalSettings(PRESETS["openrouter"], f"{upstream.url}/api", "sk-or-test"))
+    agent = AgentSettings("pi", LocalExecutor(), 60.0, str(fake_pi(tmp_path)))
+    result, activity = reefine_step(tmp_path, method, JobData("demo:1", (), request=ASK), served_of(upstream), agent)
     metrics = result.metrics
     assert metrics["selected"] is True and metrics["patch"] == {"extensions/speak.ts": SPEAK}
     notes = metrics["method_notes"]
@@ -225,16 +227,16 @@ def test_the_agent_changes_the_steps_tree_tries_it_and_the_step_publishes_it_rev
     assert notes["unread"] == ["harness/notes.txt is not a path of the harness tree, so it is not read"]
     assert metrics["method_summary"].startswith("Design:\nSpeak each answer with a TTS model.\n\nReview: complete")
     assert [item["name"] for item in metrics["training_request"]["requires"]] == ["afplay"]
-    step_dir = Path(metrics["step_record"])
-    assert not (step_dir / "harness" / "notes.txt").exists()
-    assert (step_dir / "output" / "agent-harness" / "notes.txt").read_text() == "scratch"
-    assert (step_dir / "output" / "agent-session.jsonl").read_text().count('"done"') == 1
-    checks = [json.loads(line) for line in (step_dir / "output" / "agent-checks.jsonl").read_text().splitlines()]
+    job_dir = Path(metrics["step_record"])
+    assert not (job_dir / "harness" / "notes.txt").exists()
+    assert (job_dir / "output" / "agent-harness" / "notes.txt").read_text() == "scratch"
+    assert (job_dir / "output" / "agent-session.jsonl").read_text().count('"done"') == 1
+    checks = [json.loads(line) for line in (job_dir / "output" / "agent-checks.jsonl").read_text().splitlines()]
     assert [check["kind"] for check in checks] == ["check", "trial"] and checks[0]["valid"] is True
     # The trial's speech call reached the provider, and its refusal is in the step's call record for the agent.
     speech = [r for r in upstream.requests if r["path"] == "/api/v1/audio/speech"]
     assert speech and speech[0]["body"]["model"] == "not/real"
-    calls = json.loads((step_dir / "calls.json").read_text())
+    calls = json.loads((job_dir / "calls.json").read_text())
     assert any(entry.get("path") == "/v1/audio/speech" and entry.get("status") == 400 for entry in calls)
     # The live activity tells the run as it went: the agent's start, its check and trial, the refused speech call,
     # its end, and the review's model call.
@@ -273,11 +275,13 @@ def test_an_agent_that_changes_nothing_or_fails_its_model_call_hands_back_no_cha
 
 @pytest.mark.unit
 def test_off_pi_the_agent_stays_idle_and_the_served_model_answers(tmp_path) -> None:
-    """The agent's rules and trials are pi's: on another adapter a method that holds an agent answers in text."""
+    """The agent's rules and trials are pi's: on another adapter a job whose services hold an agent answers in
+    text."""
     workspace = step_workspace(tmp_path, adapter="dsh")
     served = Served(designed({"rules.md": "Run the tests first.\n"}), json.dumps(REVIEW))
-    method = ReefineMethod(agent_of(tmp_path / "no-such-pi"))
-    method.step(StepContext(workspace, step_services(workspace, ModelBindings(served=served))))
+    execution = agent_of(tmp_path / "no-such-pi").execution
+    services = job_services(workspace, ModelBindings(served=served), agent=execution)
+    ReefineMethod().run(MethodJob(workspace, services))
     assert workspace.tree() == TREE.apply(TreePatch({"rules.md": "Run the tests first.\n"}))
     assert workspace.read_output().notes["review"] == REVIEW and "This harness is" in served.prompts[1]
 
@@ -289,7 +293,7 @@ def test_a_run_past_its_limit_keeps_its_tree_and_progress_without_publishing(tmp
         assert "pi.getActiveTools()" in reference and "**replaces**" in reference
         (workspace / "rules.md").write_text("Unfinished candidate")
         (root / "output" / "progress.md").write_text("API confirmed; tool isolation remains unchecked.")
-        raise ProgramTimeout("deadline")
+        raise ProgramTimeoutError("deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     workspace, services = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
@@ -424,7 +428,7 @@ def test_a_trial_reserves_finish_time_and_records_the_exact_candidate(tmp_path, 
 
     def launch(*args, timeout, **kwargs):
         timeouts.append(timeout)
-        raise ProgramTimeout("trial deadline")
+        raise ProgramTimeoutError("trial deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     run, gateway = gateway_run(tmp_path, timeout_s=100)
@@ -474,7 +478,7 @@ def test_a_scripted_driver_failure_is_returned_to_the_agent(tmp_path, monkeypatc
 @pytest.mark.unit
 def test_the_gateway_serves_the_served_model_and_the_provider_and_nothing_else(upstream) -> None:
     record: list[dict] = []
-    calls = StepCalls(3, record)
+    calls = JobCalls(3, record)
     served = ModelBinding(base_url=upstream.url, model="served-model", api_key="served-key")
     gateway = ReefineGateway(served, calls, no_tools(), provider_of(upstream))
     gateway.start()
@@ -512,7 +516,7 @@ def test_the_gateway_serves_the_served_model_and_the_provider_and_nothing_else(u
 
 @pytest.mark.unit
 def test_without_a_provider_a_provider_call_is_501(upstream) -> None:
-    gateway = ReefineGateway(ModelBinding(base_url=upstream.url, model="m"), StepCalls(0, []), no_tools(), None)
+    gateway = ReefineGateway(ModelBinding(base_url=upstream.url, model="m"), JobCalls(0, []), no_tools(), None)
     gateway.start()
     try:
         assert post(f"{gateway.base_url}/v1/images", {"model": "x", "prompt": "reef"})[0] == 501
@@ -522,7 +526,7 @@ def test_without_a_provider_a_provider_call_is_501(upstream) -> None:
 
 @pytest.mark.unit
 def test_the_gateway_notes_each_tool_the_agent_calls_and_what_it_says(upstream) -> None:
-    calls = StepCalls(0, [])
+    calls = JobCalls(0, [])
     gateway = ReefineGateway(ModelBinding(base_url=upstream.url, model="m"), calls, no_tools(), None)
     gateway.start()
     try:
@@ -657,7 +661,7 @@ def test_script_rejects_ambiguous_or_unobservable_checks(script) -> None:
 
 @pytest.mark.unit
 def test_gateway_validates_scripted_trials_and_preserves_online_tasks(upstream) -> None:
-    gateway = ReefineGateway(ModelBinding(base_url=upstream.url, model="m"), StepCalls(0, []), no_tools(), None)
+    gateway = ReefineGateway(ModelBinding(base_url=upstream.url, model="m"), JobCalls(0, []), no_tools(), None)
     gateway.start()
     try:
         script = {"steps": [{"prompt": "hello", "expect": {"model_called": True}}]}

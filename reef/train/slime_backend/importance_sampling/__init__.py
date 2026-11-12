@@ -22,12 +22,8 @@ from __future__ import annotations
 import math
 from argparse import Namespace
 
-from reef.train.slime_backend.algorithm import (
-    PolicyGradientWeight,
-    SlimeAlgorithm,
-    is_finite_number,
-    register_loss_family,
-)
+from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, is_finite_number
+from reef.train.slime_backend.loss_families import register_loss_family
 
 
 @register_loss_family

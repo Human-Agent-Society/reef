@@ -9,13 +9,14 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-from tests.support._threshold_processor import threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
+from tests.support.threshold_processor import threshold_pipeline
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import Artifact, ArtifactPublicationError, DefaultStart, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import CommitPending
+from reef.core.errors import CommitPendingError
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.recipe import Recipe
@@ -51,22 +52,28 @@ class _LocalJobs(StubTrainingComponent):
 
 @dataclass(frozen=True)
 class _LocalRecipe(Recipe):
-    backend: _LocalJobs
-
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={"model.txt": "initial"})
 
-    def build(
+
+class _LocalTrainers(OneTrainerBuilder):
+    """Builds a trainer whose jobs run on ``backend``, on the trainer's own thread."""
+
+    def __init__(self, backend: _LocalJobs) -> None:
+        self.backend = backend
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
         return Trainer.build(
             scenario,
@@ -83,11 +90,12 @@ class _LocalRecipe(Recipe):
 def local_scenario(tmp_path):
     backend = _LocalJobs(tmp_path / "candidates")
     dispatcher = Dispatcher(
-        _LocalRecipe(backend=backend),
+        _LocalRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
+        trainer_builder=_LocalTrainers(backend),
         # The test makes the samples and commits each step itself. No samples worker makes them, and control's local
         # training workers run no cycle: a woken worker would prepare and commit the same result as the test.
         components=frozenset(SERVICE_COMPONENTS) - {"samples"},
@@ -137,7 +145,7 @@ def _prepare(scenario: Scenario) -> TrainingCommit:
     """Commit the end of the last job and the submission of the next one; the next job's checkpoint, which publishes
     its artifact, not committed yet."""
     _finish(scenario)
-    _queue_batch(scenario, scenario.scenario_step + 1)
+    _queue_batch(scenario, scenario.commit_number + 1)
     submitted = scenario.next_commit()
     assert submitted is not None
     scenario.commit(submitted)
@@ -198,10 +206,10 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
         result = training.result(timeout=2)
         assert result.metrics["training_job"]["event"] == "submitted"
         # The submission waits for its commit, so the activation is refused.
-        with pytest.raises(CommitPending, match="waits for its commit"):
+        with pytest.raises(CommitPendingError, match="waits for its commit"):
             writer.result(timeout=2)
         assert scenario.current_snapshot() == current_ref
-        assert scenario.scenario_step == 3
+        assert scenario.commit_number == 3
 
 
 @pytest.mark.unit
@@ -253,7 +261,7 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
             # The head stays put until the journal commits, and publication reads wait for it.
             assert scenario.current_snapshot() == previous_ref
             # Each job commits its submission, its checkpoint and its end; the next job's submission is committed.
-            assert scenario.scenario_step == (7 if operation == "commit" else 5)
+            assert scenario.commit_number == (7 if operation == "commit" else 5)
             readers = [executor.submit(read) for read in (read_catalog, read_selection, read_version)]
             for started in readers_started:
                 assert started.wait(2), "reader did not start"
@@ -267,7 +275,7 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
         catalog, selection, version = [reader.result(timeout=2) for reader in readers]
 
     current_ref = scenario.current_snapshot()
-    assert scenario.scenario_step == (8 if operation == "commit" else 6)
+    assert scenario.commit_number == (8 if operation == "commit" else 6)
     # The catalog marks exactly one active artifact; an activation adds no row.
     [active] = [row for row in catalog if row["active"]]
     assert active["snapshot"].revision == current_ref.revision
@@ -292,7 +300,7 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
         scenario.commit(first)
         committed = scenario.current_snapshot()
         # The job's submission, then its checkpoint.
-        assert scenario.scenario_step == 2
+        assert scenario.commit_number == 2
         assert scenario.repository.checkpoint_artifact == committed
         assert scenario.commit_status["artifact_head_sync"] == {
             "state": "pending",
@@ -308,14 +316,14 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
         patch.setattr(backend, "publish", unexpected_publish)
         with pytest.raises(ArtifactPublicationError, match="storage unavailable"):
             scenario.commit(ended)
-        assert scenario.scenario_step == 2
+        assert scenario.commit_number == 2
         assert len(scenario.store.history()) == 2
         assert scenario.current_snapshot() == committed
 
     # Retry the same prepared commit after storage recovers; the committed
     # parent is repaired first, and the commit advances exactly once.
     scenario.commit(ended)
-    assert scenario.scenario_step == 3
+    assert scenario.commit_number == 3
     assert len(scenario.store.history()) == 3
     assert scenario.repository.checkpoint_artifact == backend.current()
     assert scenario.commit_status["artifact_head_sync"] == {
@@ -324,7 +332,7 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
     }
 
 
-def test_pointer_conflict_preserves_committed_step_and_activation_leaves_the_backend_head(
+def test_pointer_conflict_preserves_the_commit_and_activation_leaves_the_backend_head(
     local_scenario, monkeypatch, tmp_path
 ):
     scenario, _ = local_scenario
@@ -345,7 +353,7 @@ def test_pointer_conflict_preserves_committed_step_and_activation_leaves_the_bac
     with monkeypatch.context() as patch:
         patch.setattr(backend, "commit_snapshot", competing_writer)
         scenario.commit(first)
-    assert scenario.scenario_step == 2
+    assert scenario.commit_number == 2
     assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
     assert backend.current() == unrelated
     # An activation writes to the commit history only: the conflicted backend head stays as it is.
@@ -354,7 +362,7 @@ def test_pointer_conflict_preserves_committed_step_and_activation_leaves_the_bac
         == scenario.repository.resolve(initial).artifact_id
     )
     assert scenario.current_snapshot() == initial
-    assert scenario.scenario_step == 3
+    assert scenario.commit_number == 3
     assert backend.current() == unrelated
     assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
 
@@ -374,7 +382,7 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
             patch.setattr(backend, method, unavailable)
         activated = scenario.activate(scenario.repository.resolve(initial).artifact_id)
     assert activated.artifact_id == scenario.repository.resolve(initial).artifact_id
-    assert scenario.scenario_step == 3
+    assert scenario.commit_number == 3
     assert scenario.store.history()[-1].operation == "activate"
     assert scenario.current_snapshot() == initial
     # The chain tip stays the parent of the next publication, and the backend head never moves backward.
@@ -391,14 +399,14 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
 def test_committed_record_retry_reports_pointer_failure_without_repeating_step(local_scenario, monkeypatch):
     scenario, _ = local_scenario
     result = _prepare(scenario)
-    commit_step = scenario.store.commit_step
+    append_commit = scenario.store.append_commit
 
     def lose_ack(**keywords):
-        commit_step(**keywords)
+        append_commit(**keywords)
         raise OSError("commit acknowledgment lost")
 
     with monkeypatch.context() as patch:
-        patch.setattr(scenario.store, "commit_step", lose_ack)
+        patch.setattr(scenario.store, "append_commit", lose_ack)
         with pytest.raises(OSError, match="acknowledgment lost"):
             scenario.commit(result)
     committed = scenario.store.history()[-1]
@@ -408,7 +416,7 @@ def test_committed_record_retry_reports_pointer_failure_without_repeating_step(l
 
     monkeypatch.setattr(scenario.repository.backend, "commit_snapshot", unavailable)
     scenario.commit(result)
-    assert scenario.scenario_step == 2
+    assert scenario.commit_number == 2
     assert len(scenario.store.history()) == 2
     assert scenario.trainer.state == result.state
     assert scenario.current_snapshot() == committed.snapshot

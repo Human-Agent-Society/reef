@@ -42,7 +42,7 @@ from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, RoutingPu
 from reef.service.deploy.routing.deployment_controller import (
     RoutingDeploymentController,
     RoutingDeploymentError,
-    RoutingReadinessTimeout,
+    RoutingReadinessTimeoutError,
 )
 from reef.service.deploy.routing.policy import (
     PolicyState,
@@ -55,11 +55,11 @@ from reef.service.deploy.routing.policy import (
 from reef.service.deploy.routing.reef_lifecycle_client import (
     LifecycleStatus,
     RoutingControlError,
-    RoutingControlTimeout,
+    RoutingControlTimeoutError,
 )
 from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
 from reef.service.request_service import RequestService
 from reef.service.routing import RoutingAdapter, RoutingSnapshot
@@ -338,7 +338,7 @@ def started_case(tmp_path: Path, source: Path, *, resolved_image: str | None = N
         finalization_timeout_seconds=0.05,
         container_stop_timeout_seconds=0.05,
     )
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe", host="127.0.0.1", routing_manifest=str(source), tokens=("service",), routing_deployment=policy
     )
     runtime = FakeRuntime(actions)
@@ -481,7 +481,7 @@ def test_a_lost_policy_open_reply_is_confirmed_without_opening_a_new_cycle(
     def lose_reply(action: str | None = None, **kwargs) -> LifecycleStatus:
         status = original(action, **kwargs)
         if action == "open":
-            raise RoutingControlTimeout("lost reply")
+            raise RoutingControlTimeoutError("lost reply")
         return status
 
     monkeypatch.setattr(case.control, "request", lose_reply)
@@ -675,7 +675,7 @@ def test_an_endpoint_change_republishes_the_child_although_the_router_runs_the_s
     [
         RoutingControlError("REEF candidate check returned HTTP 409: requires environment variable NEW_KEY"),
         RoutingControlError("REEF candidate check returned HTTP 503: target_unavailable"),
-        RoutingControlTimeout("REEF candidate check timed out"),
+        RoutingControlTimeoutError("REEF candidate check timed out"),
     ],
     ids=["refused", "provider_unavailable", "timeout"],
 )
@@ -886,7 +886,7 @@ def test_a_trickling_router_holds_neither_a_reopening_nor_an_update_past_its_pha
     case.actions.clear()
     case.controller.ready_deadline = time.monotonic() + 0.3
     started = time.monotonic()
-    with pytest.raises(RoutingReadinessTimeout):
+    with pytest.raises(RoutingReadinessTimeoutError):
         case.controller.wait_ready(initial=False)
     assert time.monotonic() - started < 1 and "control:open" not in case.actions
     case.controller.policy = replace(case.controller.policy, ready_timeout_seconds=0.3)

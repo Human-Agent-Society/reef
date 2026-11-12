@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.support._activation_rule_plugin import ComponentRule
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.activation_rule_plugin import ComponentRule
 
 from recipes.sao import SAORecipe
 from reef.core.activation import MadeArtifact
@@ -12,8 +11,10 @@ from reef.core.evaluation import PolicyEvaluation, PolicyHarness, PolicyModel, R
 from reef.evaluation import AlwaysActivate, EvaluatedActivation, NeverActivate
 from reef.evaluation.activation import activation_reference, build_activation_rule
 from reef.recipe import RecipeConfigError
+from reef.recipe.loading import load_recipe
+from reef.service.deploy.training import training_recipe_config
 
-PLUGIN = "tests.support._activation_rule_plugin"
+PLUGIN = "tests.support.activation_rule_plugin"
 
 
 def evaluation(*values: float) -> PolicyEvaluation:
@@ -58,10 +59,10 @@ def test_an_activation_section_names_a_built_in_rule_or_a_plugin_class() -> None
 
 @pytest.mark.unit
 def test_the_recipe_carries_its_activation_rule_into_each_scenario() -> None:
-    config = SAORecipe.service_config({}, model_path="/models/student")
+    config = training_recipe_config(SAORecipe, {}, model_path="/models/student")
     config["activation"] = {"module": "never"}
     config["pipeline"] = {"sample2job": {"config": {"job_samples": 1}}}
-    recipe = SAORecipe.from_environment({}, config=config, **runtime_bindings())
+    recipe = load_recipe(SAORecipe, config, {})
     assert isinstance(recipe.activation_rule(), NeverActivate)
 
 
@@ -69,7 +70,7 @@ def test_the_recipe_carries_its_activation_rule_into_each_scenario() -> None:
 @pytest.mark.parametrize(
     ("config", "match"),
     [
-        ({"module": "not-dotted"}, r"must be 'package\.module:ClassName'"),
+        ({"module": "not-dotted"}, r"unknown activation 'not-dotted'; use one of: always, evaluated, never, 'package"),
         ({"module": f"{PLUGIN}:missing"}, r"cannot import activation"),
         ({"module": f"{PLUGIN}:plain_function"}, r"must name a class that inherits ActivationRule"),
         ({"module": f"{PLUGIN}:EvaluatorOnly"}, r"must name a class that inherits ActivationRule"),
@@ -83,7 +84,7 @@ def test_the_recipe_carries_its_activation_rule_into_each_scenario() -> None:
     ],
 )
 def test_an_invalid_activation_section_fails_the_deployment(config, match) -> None:
-    recipe_config = SAORecipe.service_config({}, model_path="/models/student")
+    recipe_config = training_recipe_config(SAORecipe, {}, model_path="/models/student")
     recipe_config["activation"] = config
     with pytest.raises(RecipeConfigError, match=match):
-        SAORecipe.from_environment({}, config=recipe_config, **runtime_bindings())
+        load_recipe(SAORecipe, recipe_config, {})

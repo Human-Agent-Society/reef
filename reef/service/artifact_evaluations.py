@@ -34,7 +34,7 @@ from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.sources import ArtifactSources
-from reef.core.errors import CommitPending, ReefError, UnknownScenario
+from reef.core.errors import CommitPendingError, InternalError, ReefError, ScenarioNotFoundError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
@@ -67,10 +67,10 @@ from reef.harness.harbor.agent import can_run_in_task_container, task_agent_tool
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
 from reef.service.collections import collection_tasks
-from reef.service.data import DataAccess, NoDataStore
+from reef.service.data import DataAccess, DataStoreUnavailableError
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, StoredItem, record_source
-from reef.storage.evaluations import EvaluationStateConflict, StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflictError, StoredEvaluation
 from reef.storage.item_kinds import evaluation_call_id
 from reef.storage.observer import RecordObserver
 from reef.storage.record_items import (
@@ -79,7 +79,7 @@ from reef.storage.record_items import (
     evaluation_trajectory_items,
     stored_evaluation_call,
 )
-from reef.storage.task_collections import CollectionNotFound
+from reef.storage.task_collections import CollectionNotFoundError
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
@@ -141,7 +141,7 @@ class NewArtifacts(RecordObserver):
         revision = commit.snapshot.revision
         selected = commit.artifact_ids
         if selected is None:
-            raise ValueError(f"commit step {commit.step} made an artifact and names no artifact ID")
+            raise ValueError(f"commit {commit.commit_number} made an artifact and names no artifact ID")
         names = tuple(selected) if commit.component is None else (commit.component,)
         for name in names:
             component = None if len(selected) == 1 and commit.component is None else name
@@ -391,7 +391,7 @@ class EvaluationResults:
         evaluation went with the scenario, so an unknown scenario is no failure."""
         try:
             self.settle(scenario, evaluation_id)
-        except UnknownScenario:
+        except ScenarioNotFoundError:
             logger.debug("evaluation %s: its scenario %s no longer exists", evaluation_id, scenario)
         except Exception:
             logger.exception("could not end evaluation %s of %s", evaluation_id, scenario)
@@ -401,7 +401,7 @@ class EvaluationResults:
         failed (``max_failed_fraction``); add the rollouts that wait while fewer than ``max_concurrent_rollouts`` are
         not final; end the evaluation once all of them are in the queue and final."""
         with self.dispatcher.locked_scenario(scenario) as current:
-            stored = current.store.evaluations.get(evaluation_id)
+            stored = current.store.evaluations.read(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
                 return
             # Read under the lock: a retry changes the evaluation and its rollouts under it, and rollouts read
@@ -432,7 +432,7 @@ class EvaluationResults:
                 template = EvaluationRollout.from_item(items[0])
                 for position in range(len(items), len(items) + min(free, waiting)):
                     index, repeat = divmod(position, request.rollouts_per_task)
-                    self.queue.add(
+                    self.queue.append(
                         rollout_work(
                             replace(template, task_index=index, task_name=request.task_names[index], repeat=repeat)
                         )
@@ -471,7 +471,7 @@ class EvaluationResults:
         try:
             with self.dispatcher.locked_scenario(scenario) as current:
                 evaluations = current.store.evaluations
-                current_state = evaluations.get(evaluation_id)
+                current_state = evaluations.read(evaluation_id)
                 if current_state is not None and current_state.state == "queued":
                     evaluations.begin(evaluation_id)
                 if result is not None:
@@ -482,6 +482,8 @@ class EvaluationResults:
                     )
                 else:
                     evaluations.fail(evaluation_id, error=error or "the evaluation failed", finished_at=time.time())
+        except InternalError:
+            raise
         except (ReefError, ValueError) as exc:
             # The scenario was deleted, or the evaluation ended already: nothing is left to record it in.
             logger.warning("could not store the end of evaluation %s: %s", evaluation_id, exc)
@@ -495,8 +497,10 @@ class EvaluationResults:
             try:
                 self.dispatcher.activate(scenario, request.artifact_id, request.component)
                 return
-            except CommitPending:
+            except CommitPendingError:
                 time.sleep(ACTIVATION_RETRY_SECONDS * (attempt + 1))
+            except InternalError:
+                raise
             except (ReefError, ValueError) as exc:
                 logger.warning("could not activate artifact %s of %s: %s", request.artifact_id, scenario, exc)
                 return
@@ -604,8 +608,8 @@ class ArtifactEvaluations:
     def start(self, scenario: str, body: object) -> StoredEvaluation:
         """Check a client's request ``body`` against ``scenario``, store it, and queue its rollouts.
 
-        Raise ``ValueError`` or ``ReefError`` for a request that the scenario cannot run, ``UnknownScenario``
-        for an unknown scenario, and ``ArtifactNotFound`` for an unknown artifact.
+        Raise ``ValueError`` or ``ReefError`` for a request that the scenario cannot run, ``ScenarioNotFoundError``
+        for an unknown scenario, and ``ArtifactNotFoundError`` for an unknown artifact.
         """
         artifact_id, settings = request_settings(body)
         return self.accept(scenario, artifact_id, settings, state="running")
@@ -619,7 +623,7 @@ class ArtifactEvaluations:
         rollout that waits for ``max_concurrent_rollouts`` starts. An evaluation that ended stays as it is.
         """
         with self.dispatcher.locked_scenario(scenario) as current:
-            stored = current.store.evaluations.get(evaluation_id)
+            stored = current.store.evaluations.read(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
                 return stored
             # ``settle`` adds rollouts under this lock and adds none to a failed evaluation, so the listed rollouts
@@ -642,11 +646,11 @@ class ArtifactEvaluations:
         as the others end. When the rollouts are final, ``EvaluationResults`` ends the evaluation as it ends a first
         run, and gives a finished one to the activation rule.
 
-        ``EvaluationStateConflict`` for an evaluation with no rollout to run again, and for an ended one whose
+        ``EvaluationStateConflictError`` for an evaluation with no rollout to run again, and for an ended one whose
         rollouts the queue no longer keeps (``WorkQueue.delete_final``).
         """
         with self.dispatcher.locked_scenario(scenario) as current:
-            stored = current.store.evaluations.get(evaluation_id)
+            stored = current.store.evaluations.read(evaluation_id)
             if stored is None:
                 return None
             request = stored.request
@@ -664,11 +668,13 @@ class ArtifactEvaluations:
                 or [item.id for item in items] != expected
                 or (stored.state == "finished" and len(items) < total)
             ):
-                raise EvaluationStateConflict(f"evaluation {evaluation_id!r}: Reef no longer keeps its rollouts")
+                raise EvaluationStateConflictError(f"evaluation {evaluation_id!r}: Reef no longer keeps its rollouts")
             again = [item for item in items if item.final and rollout_failed(item)]
             # An ended evaluation with rollouts that never started has those to run, also with no failed rollout.
             if not again and not (ended and len(items) < total):
-                raise EvaluationStateConflict(f"evaluation {evaluation_id!r} has no ended rollout without a score")
+                raise EvaluationStateConflictError(
+                    f"evaluation {evaluation_id!r} has no ended rollout without a score"
+                )
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             retried = current.store.evaluations.reopen(evaluation_id) if ended else stored
@@ -758,7 +764,7 @@ class ArtifactEvaluations:
             raise ValueError(f"scenario {scenario!r} has no owner, so it can use no collection")
         try:
             stored, tasks = collection_tasks(DataAccess.of(self.dispatcher).require_store(), owner, name)
-        except (NoDataStore, CollectionNotFound) as exc:
+        except (DataStoreUnavailableError, CollectionNotFoundError) as exc:
             raise ValueError(str(exc)) from exc
         benchmarks = tuple(
             (benchmark, in_split)
@@ -781,7 +787,7 @@ class ArtifactEvaluations:
             raise ValueError(f"scenario {scenario!r} has no owner, so it can use no artifact item")
         try:
             item = DataAccess.of(self.dispatcher).require_store().read(owner, item_id)
-        except NoDataStore as exc:
+        except DataStoreUnavailableError as exc:
             raise ValueError(str(exc)) from exc
         if item is None:
             raise ValueError(f"{owner!r} stores no item {item_id!r}")
@@ -893,7 +899,7 @@ class ArtifactEvaluations:
         added: list[str] = []
         try:
             for rollout in rollouts[: request.max_concurrent_rollouts]:
-                self.queue.add(rollout_work(rollout))
+                self.queue.append(rollout_work(rollout))
                 added.append(rollout.item_id())
             with self.dispatcher.locked_scenario(scenario) as current:
                 stored = current.store.evaluations.create(
@@ -1072,7 +1078,7 @@ class ArtifactEvaluations:
         then the trajectories stitched from its calls."""
         if self.get(scenario, evaluation_id) is None:
             return None
-        item = self.queue.get(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, task_index, repeat))
+        item = self.queue.read(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, task_index, repeat))
         if item is None:
             return []
         if caller == "agent":
@@ -1117,7 +1123,7 @@ class ArtifactEvaluations:
     def get(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id`` of ``scenario``, or None."""
         with self.dispatcher.locked_scenario(scenario) as current:
-            return current.store.evaluations.get(evaluation_id)
+            return current.store.evaluations.read(evaluation_id)
 
     def status_json(self, scenario: str, evaluations: Sequence[StoredEvaluation]) -> list[dict[str, object]]:
         """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its

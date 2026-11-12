@@ -14,7 +14,6 @@ development check, not a runtime dependency.
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import sys
@@ -22,9 +21,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_jobs import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe
+from tests.support.trajectories import recorded_trajectory
 
 gepa = pytest.importorskip("gepa")
 
@@ -32,7 +31,7 @@ from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
 from recipes.gepa import GEPA, Feedback, GEPASettings
 from recipes.gepa.archive import Archive
-from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
+from recipes.gepa.method import ARCHIVE_FILE, archive_for_job
 from reef.evaluation.harness import ComparePolicy
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
@@ -156,7 +155,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
         trainset_size=len(TRAIN),
     )
     validation = tuple(example["input"] for example in VAL)
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path,
         GEPA(settings, ReefFeedback()),
         seed=HarnessTree({"rules.md": SEED_TEXT}),
@@ -164,14 +163,14 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
         tasks=validation,
         binary=str(binary),
     )
-    recipe = dataclasses.replace(recipe, models={"reflection": Reflector("http://model.test", "reflection")})
+    recipe, live = rebuilt_recipe(recipe, live, models={"reflection": Reflector("http://model.test", "reflection")})
     releases = TreeArtifacts(recipe.seed)
-    backend = build_harness_backend(recipe, "fidelity", releases)
+    backend = build_harness_backend(recipe, live, "fidelity", releases)
     policy = ComparePolicy(backend, statistic="mean")
 
     def committed_archive(state: dict[str, Any], text: str) -> Archive:
         archive = HarnessState.from_json(state).method_files.get(ARCHIVE_FILE)
-        return archive_for_step(
+        return archive_for_job(
             archive, backend.history, validation, {"rules.md": text}, repeats=recipe.evaluation.repeats
         )
 

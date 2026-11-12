@@ -7,7 +7,8 @@ from collections import Counter
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_served_artifacts import ArtifactEcho, two_artifacts, wait_for_serving
+from tests.reef_service.test_served_artifacts import ArtifactEcho, two_artifacts
+from tests.support.serving import wait_for_serving
 
 from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import FixedEngineClients
@@ -125,7 +126,7 @@ def test_weights_split_requests_and_each_record_names_the_artifact_that_answered
 
             # Each record names the artifact that answered.
             scenario = value.get_or_create_scenario("math")
-            stored = [scenario.records.get("math", record_id) for record_id in answers]
+            stored = [scenario.records.read("math", record_id) for record_id in answers]
             assert [item.artifact_id for item in stored] == handler.artifact_ids
             assert stored[0].payload["metadata"]["traffic"]["weights"] == weights
 

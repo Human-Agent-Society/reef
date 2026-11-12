@@ -8,13 +8,14 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-from tests.support.runtime_stubs import runtime_bindings
 
+from reef.recipe.loading import load_recipe
 from reef.service.deploy import orchestrator
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.execution import validate_services
 from reef.service.deploy.inference import INFERENCE_COMPONENT_SERVICE, command_line_config
 from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
+from reef.service.deploy.training import training_recipe_config
 
 OPENCLAW = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 
@@ -75,9 +76,11 @@ def test_recipe_endpoint_follows_cli_over_yaml_without_launching_a_process(tmp_p
     assert component["executor"] == http["executor"] == "uni"
     assert http["depends_on"] == [component["name"]]
     settings = service_config_from_mapping(config)
-    recipe_config = OpenClawRLRecipe.service_config(_recipe_owned_settings(settings), model_path=settings.model_path)
+    recipe_config = training_recipe_config(
+        OpenClawRLRecipe, _recipe_owned_settings(settings), model_path=settings.model_path
+    )
     recipe_config["pipeline"] = settings.pipeline_settings
-    recipe = OpenClawRLRecipe.from_environment({}, config=recipe_config, **runtime_bindings())
+    recipe = load_recipe(OpenClawRLRecipe, recipe_config, {})
     assert recipe.stages().record2sample.config == {
         "prm_url": "http://other:9000",
         "prm_tokenizer_path": "/models/other",
@@ -100,7 +103,7 @@ def test_recipe_rejects_model_service_launch_options(tmp_path, field, cli):
 
 
 def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
-    from reef.service.assembly import _serving_recipe
+    from reef.service.assembly import _load_deployment
     from reef.service.deploy.service_config import service_config_from_mapping
 
     raw = {
@@ -111,8 +114,10 @@ def test_declared_runtime_starts_http_without_upstream_fields(tmp_path):
     }
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [process["name"] for process in validate_services(config, "test")] == ["reef"]
-    recipe = _serving_recipe(raw["recipe"]["implementation"], service_config_from_mapping(config), {})
-    assert recipe.runtime.base_url == "http://localhost:8000"
+    _, live = _load_deployment(
+        raw["recipe"]["implementation"], service_config_from_mapping(config), {}, runs_training=True
+    )
+    assert live.runtime.base_url == "http://localhost:8000"
 
 
 @pytest.mark.parametrize("fail_inference", [False, True])

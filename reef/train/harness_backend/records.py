@@ -1,18 +1,18 @@
-"""The step records: each harness step's workspace, kept after the step for debugging and audit.
+"""The job records: each harness job's workspace, kept after the job for debugging and audit.
 
-Each step claims a fresh directory ``<steps>/<step>`` (a retried step
+Each job claims a fresh directory ``<steps>/<step>`` (a retried job
 ``<step>-<attempt>``) under the scenario's state directory. The directory is
-the step's workspace (``reef.train.harness_backend.workspace``) without its
-``scratch/``, plus ``calls.json``, every model call of the step. What the
-method says about its step is in the workspace's ``output/``. The backend
+the job's workspace (``reef.train.harness_backend.workspace``) without its
+``scratch/``, plus ``calls.json``, every model call of the job. What the
+method says about its job is in the workspace's ``output/``. The backend
 redacts credential-shaped literals from ``calls.json`` and from the summary
 and notes in ``output/``, and clips them, since they hold model traffic that
 the tree's checks have not seen.
 ``material/`` keeps the traces as the clients sent them, as the record store
-does, and ``harness/`` the tree as the method left it. ``read_step_records``
+does, and ``harness/`` the tree as the method left it. ``read_job_records``
 redacts every text it serves, so the snapshot pages show no credential of
 either.
-``StepRecord.read`` serves bounded raw reads of a step's files to the
+``JobRecord.read`` serves bounded raw reads of a job's files to the
 snapshot pages.
 """
 
@@ -28,12 +28,12 @@ from reef.harness.tree.checks import redact_secret_shaped
 CALLS_FILE = "calls.json"
 
 
-class StepRecord:
-    """The directory that holds one scenario's step records.
+class JobRecord:
+    """The directory that holds one scenario's job records.
 
     Values: ``root`` is the directory, created at construction so an
     unwritable path refuses to start.
-    Purpose: the backend claims one directory per step here, and the snapshot
+    Purpose: the backend claims one directory per job here, and the snapshot
     pages read the records through ``read``.
     """
 
@@ -42,51 +42,51 @@ class StepRecord:
         try:
             self.root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise ValueError(f"the step record directory {root} cannot be created: {exc}") from exc
+            raise ValueError(f"the job record directory {root} cannot be created: {exc}") from exc
 
     def claim(self, step: int) -> Path:
-        """A fresh directory for ``step``; a retried step gets ``<step>-<attempt>``, so no record is overwritten."""
+        """A fresh directory for ``step``; a retried job gets ``<step>-<attempt>``, so no record is overwritten."""
         attempt = 1
-        step_dir = self.root / str(step)
+        job_dir = self.root / str(step)
         while True:
             try:
-                step_dir.mkdir(parents=True)
+                job_dir.mkdir(parents=True)
             except FileExistsError:
                 attempt += 1
-                step_dir = self.root / f"{step}-{attempt}"
+                job_dir = self.root / f"{step}-{attempt}"
                 continue
-            return step_dir
+            return job_dir
 
     @staticmethod
-    def write(step_dir: Path, name: str, payload: Any) -> None:
-        """One record file of a step as JSON, created exclusively: a record file is never replaced."""
-        with open(step_dir / name, "x", encoding="utf-8") as handle:
+    def write(job_dir: Path, name: str, payload: Any) -> None:
+        """One record file of a job as JSON, created exclusively: a record file is never replaced."""
+        with open(job_dir / name, "x", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, indent=2, default=str) + "\n")
 
     def read(self, directory: str, relative: str | None) -> dict[str, Any]:
-        """The listing of a step's retained JSON files, or one file's text, within the inspection limits."""
-        return read_step_records(self.root, directory, relative)
+        """The listing of a job's retained JSON files, or one file's text, within the inspection limits."""
+        return read_job_records(self.root, directory, relative)
 
 
 MAX_RECORD_BYTES = 4 * 1024 * 1024
 MAX_RECORD_FILES = 1000
 
 
-def read_step_records(root: Path, directory: str, relative: str | None) -> dict[str, Any]:
-    """Bounded raw reads of one step's record directory under ``root``, never interpreting trajectories."""
+def read_job_records(root: Path, directory: str, relative: str | None) -> dict[str, Any]:
+    """Bounded raw reads of one job's record directory under ``root``, never interpreting trajectories."""
     base = root.resolve()
-    step = Path(directory)
-    # A recorded step is one immediate child of this backend's scenario directory.
-    if step.is_symlink() or step.resolve().parent != base:
-        raise ValueError("step record is outside this scenario's record directory")
-    if not step.is_dir():
+    record = Path(directory)
+    # A recorded job is one immediate child of this backend's scenario directory.
+    if record.is_symlink() or record.resolve().parent != base:
+        raise ValueError("job record is outside this scenario's record directory")
+    if not record.is_dir():
         return {"status": "missing", "files": []}
-    step = step.resolve()
+    record = record.resolve()
     if relative is not None:
         parts = Path(relative).parts
         if not parts or Path(relative).is_absolute() or ".." in parts:
             raise ValueError("path must name a relative record file")
-        target = step
+        target = record
         for part in parts:
             target = target / part
             if target.is_symlink():
@@ -97,18 +97,18 @@ def read_step_records(root: Path, directory: str, relative: str | None) -> dict[
             content = handle.read(MAX_RECORD_BYTES + 1)
         if len(content) > MAX_RECORD_BYTES:
             raise ValueError("record exceeds the 4 MiB inspection limit")
-        # A step record holds what the method wrote and what clients sent; the route serves no credential of either.
+        # A job record holds what the method wrote and what clients sent; the route serves no credential of either.
         text = redact_secret_shaped(content.decode("utf-8", errors="replace"))
         return {"status": "retained", "path": relative, "text": text}
     files = []
     visited = 0
-    for current, dirs, names in os.walk(step, followlinks=False):
+    for current, dirs, names in os.walk(record, followlinks=False):
         dirs[:] = sorted(name for name in dirs if not (Path(current) / name).is_symlink())
         visited += len(dirs) + len(names)
         if visited > MAX_RECORD_FILES:
-            raise ValueError("step exceeds the 1000 entry inspection limit")
+            raise ValueError("job record exceeds the 1000 entry inspection limit")
         for name in sorted(names):
             target = Path(current) / name
             if target.suffix in {".json", ".jsonl"} and not target.is_symlink() and target.is_file():
-                files.append({"path": target.relative_to(step).as_posix(), "bytes": target.stat().st_size})
+                files.append({"path": target.relative_to(record).as_posix(), "bytes": target.stat().st_size})
     return {"status": "retained", "files": sorted(files, key=lambda item: item["path"])}

@@ -34,10 +34,10 @@ from reef.evaluation.rollout_worker import (
     verifier_output,
 )
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import WorkerStopped
+from reef.execution.workers import WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
-from reef.storage.work_queue import NewWork, WorkLeaseLost
+from reef.storage.work_queue import NewWork, WorkLeaseLostError
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:
@@ -235,10 +235,10 @@ class CalledThenFailedLab(TaskLab):
 def test_a_rollout_that_called_the_model_and_failed_finishes_with_its_reason(tmp_path):
     queue = memory_coordination().work_queue
     value = replace(rollout(), agent={"name": "x", "kwargs": {"api_base": "{base_url}/v1"}})
-    queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     worker = ServedWorker(queue, AnsweringEndpoints(tmp_path / "tasks"), worker_id="w", lab=CalledThenFailedLab())
     assert worker.run_once() is True
-    item = queue.get(EVALUATIONS_QUEUE, value.item_id())
+    item = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert (item.state, item.error) == ("finished", None)
     assert item.result == {
         "score": FAILED,
@@ -255,7 +255,7 @@ def turn(path: str, status: int, response: dict[str, object] | None) -> Captured
 def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
     value = rollout(repeat=1)
     queue = memory_coordination().work_queue
-    item = queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    item = queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     assert item.id == rollout_item_id("e1", 2, 1) == "evaluation_rollout:e1:00002:00001"
     assert EvaluationRollout.from_item(item) == value
 
@@ -264,13 +264,13 @@ def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
 def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 2})
     value = rollout()
-    queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     worker = ServedWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
 
     assert worker.run_once() is True
-    assert queue.get(EVALUATIONS_QUEUE, value.item_id()).state == "queued"
+    assert queue.read(EVALUATIONS_QUEUE, value.item_id()).state == "queued"
     assert worker.run_once() is True
-    failed = queue.get(EVALUATIONS_QUEUE, value.item_id())
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert failed.state == "failed" and "cannot be served" in failed.error
     assert worker.run_once() is False
 
@@ -428,7 +428,7 @@ def test_a_verifier_output_that_cannot_be_kept_is_logged_and_changes_nothing(tmp
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLost), ("stopped", WorkerStopped)])
+@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLostError), ("stopped", WorkerStoppedError)])
 def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops(monkeypatch, event, error):
     monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
     cancelled = threading.Event()

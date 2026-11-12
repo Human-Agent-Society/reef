@@ -16,36 +16,37 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from reef.artifact.artifact import ArtifactConflict, ArtifactNotFound, ArtifactSourceError
-from reef.artifact.snapshot_chain import SnapshotNotRestorable
+from reef.artifact.artifact import ArtifactConflictError, ArtifactNotFoundError, ArtifactSourceError
+from reef.artifact.snapshot_chain import SnapshotNotRestorableError
 from reef.core.errors import (
-    CommitPending,
-    InferenceUnavailable,
+    CommitPendingError,
+    InferenceUnavailableError,
+    InternalError,
     ReefError,
-    TrainingStartRefused,
-    UnknownScenario,
+    ScenarioNotFoundError,
+    TrainingStartRefusedError,
     UpstreamStatusError,
 )
 from reef.service.errors import translate_error, translate_errors
-from reef.storage.records import RecordConflict
+from reef.storage.records import RecordConflictError
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("error", "status"),
     [
-        # ArtifactNotFound and ArtifactConflict precede ArtifactError: a
+        # ArtifactNotFoundError and ArtifactConflictError precede ArtifactError: a
         # missing or conflicting artifact is the caller's answer, not the
         # 503 that its base class reports for unreachable storage.
-        (ArtifactNotFound("no such artifact"), 404),
-        (ArtifactConflict("artifact moved under you"), 409),
+        (ArtifactNotFoundError("no such artifact"), 404),
+        (ArtifactConflictError("artifact moved under you"), 409),
         (ArtifactSourceError("source unreachable"), 503),
-        (UnknownScenario("no such scenario"), 404),
-        (SnapshotNotRestorable("release has no durable bytes"), 400),
-        (CommitPending("a training result waits for its commit"), 409),
-        (TrainingStartRefused("the trainer cannot start from this snapshot"), 400),
-        (RecordConflict("record id already used"), 409),
-        (InferenceUnavailable("this deployment serves no inference requests"), 503),
+        (ScenarioNotFoundError("no such scenario"), 404),
+        (SnapshotNotRestorableError("release has no durable bytes"), 400),
+        (CommitPendingError("a training result waits for its commit"), 409),
+        (TrainingStartRefusedError("the trainer cannot start from this snapshot"), 400),
+        (RecordConflictError("record id already used"), 409),
+        (InferenceUnavailableError("this deployment serves no inference requests"), 503),
         (ReefError("generic reef failure"), 400),
         (ValueError("bad field"), 400),
     ],
@@ -91,24 +92,35 @@ def test_upstream_statuses_relay_or_become_a_bad_gateway(upstream_status: int, s
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("error", [RuntimeError("boom"), KeyError("missing"), TypeError("wrong type")])
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError("boom"), KeyError("missing"), TypeError("wrong type"), InternalError("engine down")],
+)
 def test_unmapped_errors_stay_untranslated(error: Exception) -> None:
     assert translate_error(error) is None
 
 
 @pytest.mark.unit
-def test_middleware_answers_mapped_errors_and_lets_the_rest_become_a_500() -> None:
+def test_middleware_answers_mapped_errors_and_lets_the_rest_become_a_500(caplog: pytest.LogCaptureFixture) -> None:
     async def run() -> None:
         app = web.Application(middlewares=[translate_errors])
 
         async def conflict(request: web.Request) -> web.Response:
-            raise RecordConflict("record id already used")
+            raise RecordConflictError("record id already used")
 
         async def unmapped(request: web.Request) -> web.Response:
             raise RuntimeError("boom")
 
+        async def refused(request: web.Request) -> web.Response:
+            raise ReefError("the request is refused")
+
+        async def internal(request: web.Request) -> web.Response:
+            raise InternalError("the engine went down")
+
         app.router.add_get("/conflict", conflict)
         app.router.add_get("/unmapped", unmapped)
+        app.router.add_get("/refused", refused)
+        app.router.add_get("/internal", internal)
         client = TestClient(TestServer(app))
         await client.start_server()
         try:
@@ -120,6 +132,17 @@ def test_middleware_answers_mapped_errors_and_lets_the_rest_become_a_500() -> No
             # stays a 500 and never leaks a translated status.
             crashed = await client.get("/unmapped")
             assert crashed.status == 500
+
+            answered = await client.get("/refused")
+            assert answered.status == 400
+            assert "the request is refused" in await answered.text()
+
+            # An internal error is not the caller's fault: no translated status, and no text of the error.
+            caplog.clear()
+            crashed = await client.get("/internal")
+            assert crashed.status == 500
+            assert "the engine went down" not in await crashed.text()
+            assert not [record for record in caplog.records if record.name == "reef.service.errors"]
         finally:
             await client.close()
 

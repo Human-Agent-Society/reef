@@ -37,7 +37,7 @@ from recipes.beta.reefine.agent import launch_pi, rendered_files
 from reef.core.prompts import untrusted_text
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout
+from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import AgentGateway, AgentTool, refuse, relay
 from reef.harness.tasks.model_binding import ModelBinding
@@ -292,7 +292,7 @@ def agent_prompt(variant: TaskVariant | None, is_seeded: bool) -> str:
     return (SEED_VARIANT_PROMPT if is_seeded else VARIANT_PROMPT).format(direction=variant.direction)
 
 
-class DesignerOutage(RuntimeError):
+class DesignerOutageError(RuntimeError):
     """The Designer could not run: its session could not be read, its repository fetched, its agent run or its model
     call answered."""
 
@@ -302,7 +302,7 @@ class SourceError(ValueError):
     is not there. A data error, not an outage."""
 
 
-class ModelRefused(ValueError):
+class ModelRefusedError(ValueError):
     """The model provider refused the content of one Designer run: its safeguards flagged the session, the parent or
     the agent's own work. The proposal's failure, not an outage: a run on the same inputs is likely to meet the same
     refusal, so the generator does not try them again."""
@@ -389,7 +389,7 @@ class TaskDesigner(ABC):
     """An implementation that rebuilds any valid SessionSource as one DesignedTask.
 
     ``design`` reads a session and writes run files to a new work directory. It returns
-    the task reply and ordered model receipts, or raises SourceError, ModelRefused or DesignerOutage.
+    the task reply and ordered model receipts, or raises SourceError, ModelRefusedError or DesignerOutageError.
     Implementations may use CandidateChecks; tags label model calls and stop requests cancellation.
     """
 
@@ -403,8 +403,8 @@ class TaskDesigner(ABC):
         tags: Mapping[str, str],
         stop: threading.Event,
     ) -> DesignedTask:
-        """Rebuild source; raise SourceError for an unusable source, ModelRefused when the model provider refuses the
-        run's content, or DesignerOutage for an outage."""
+        """Rebuild source; raise SourceError for an unusable source, ModelRefusedError when the model provider refuses
+        the run's content, or DesignerOutageError for an outage."""
 
 
 class VariantDesigner(TaskDesigner):
@@ -492,9 +492,9 @@ def session_text(reef: ReefClient, source: SessionSource, *, budget_chars: int =
     except ReefClientError as exc:
         if exc.status == 404:
             raise SourceError(f"Reef holds no record {source.record_id} in {source.scenario}") from exc
-        raise DesignerOutage(f"the session {source.record_id} could not be read from Reef: {exc}") from exc
+        raise DesignerOutageError(f"the session {source.record_id} could not be read from Reef: {exc}") from exc
     except (OSError, ValueError) as exc:
-        raise DesignerOutage(f"the session {source.record_id} could not be read from Reef: {exc}") from exc
+        raise DesignerOutageError(f"the session {source.record_id} could not be read from Reef: {exc}") from exc
     if not body["payload"].get("messages"):
         raise SourceError(f"the record {source.record_id} holds no session messages")
     return untrusted_text(render_session(body["payload"], budget_chars=budget_chars), "recorded session")
@@ -659,7 +659,7 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
     clone and a checkout.
 
     Raises :class:`SourceError` when the repository is not there (deleted, private or a wrong URL) or has no such
-    commit, and :class:`DesignerOutage` when git timed out or the network failed.
+    commit, and :class:`DesignerOutageError` when git timed out or the network failed.
     """
     repository = source.repository
     target = cache_dir / f"{hashlib.sha256(repository.url.encode()).hexdigest()[:8]}-{repository.commit}"
@@ -709,9 +709,11 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
                 raise SourceError(
                     f"{repository.url} has no commit {repository.commit} to check out: {failure}"
                 ) from exc
-            raise DesignerOutage(failure) from exc
+            raise DesignerOutageError(failure) from exc
         except (subprocess.TimeoutExpired, OSError) as exc:
-            raise DesignerOutage(f"the snapshot of {repository.url} at {repository.commit} failed: {exc}") from exc
+            raise DesignerOutageError(
+                f"the snapshot of {repository.url} at {repository.commit} failed: {exc}"
+            ) from exc
         finally:
             shutil.rmtree(partial, ignore_errors=True)
         return target
@@ -889,11 +891,11 @@ class AgentDesigner(SeedVariantDesigner):
         the Designer's rules and ``prompt`` states the task to write. With ``is_seeded`` the Designer's rules are the
         seed rules (:func:`agent_rules`): the inputs hold no session.
 
-        Raises :class:`DesignerOutage` when the run could not start or was stopped, and when the model failed with
+        Raises :class:`DesignerOutageError` when the run could not start or was stopped, and when the model failed with
         the budget unspent: an outage (a spent plan, a lost sign-in) must not pass for the agent's failure.
         """
         if stop.is_set():
-            raise DesignerOutage("the agent's run was stopped before it started")
+            raise DesignerOutageError("the agent's run was stopped before it started")
         executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
         rules = agent_rules(tools.checks, self.has_behaviour_rule, extra_rules, is_seeded)
         agent_tree = HarnessTree({"rules.md": rules, TOOLS_PATH: TOOLS_EXTENSION.read_text(encoding="utf-8")})
@@ -926,13 +928,13 @@ class AgentDesigner(SeedVariantDesigner):
                 timeout=self.timeout_seconds,
             )
             ended = f"exited {outcome.exit_code}"
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             # The sandbox copied the workspace back: the task stands as the agent left it.
             trajectory = []
         except ProgramLaunchError as exc:
             if stop.is_set():
-                raise DesignerOutage("the agent's run was stopped") from exc
-            raise DesignerOutage(f"the agent could not run: {exc}") from exc
+                raise DesignerOutageError("the agent's run was stopped") from exc
+            raise DesignerOutageError(f"the agent could not run: {exc}") from exc
         finally:
             finished.set()
             if session is not None:
@@ -957,7 +959,7 @@ class AgentDesigner(SeedVariantDesigner):
             if not isinstance(message, Mapping) or message.get("role") != "assistant":
                 continue
             if message.get("stopReason") in ("error", "aborted") and not calls.is_spent:
-                raise DesignerOutage(
+                raise DesignerOutageError(
                     f"the agent's model call ended with {message.get('stopReason')}: "
                     f"{str(message.get('errorMessage') or '')[:500]}"
                 )
@@ -1058,7 +1060,7 @@ class PromptDesigner(TaskDesigner):
                 scenario=self.scenario, model=self.model, system=SYSTEM_PROMPT, prompt=prompt, tags=tags
             )
         except (DesignerError, ValueError) as exc:
-            raise DesignerOutage(f"the Designer's call failed: {exc}") from exc
+            raise DesignerOutageError(f"the Designer's call failed: {exc}") from exc
         # A reply without text is an empty reply, which admission refuses against the receipt.
         work_dir.mkdir(parents=True)
         (work_dir / "reply.md").write_text(answer.text, encoding="utf-8")

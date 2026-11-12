@@ -9,24 +9,18 @@ from contextlib import closing
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from tests.support.records import report
 
 from reef.artifact import SnapshotRef
-from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 
-def report(record_id: str, scenario: str = "math") -> AgentRecord:
-    return AgentRecord.create(
-        agent_record_id=record_id, scenario=scenario, request_type=RequestType.REPORT, payload={"score": 1.0}
-    )
-
-
 def commit(step: int = 1) -> CommitRecord:
     return CommitRecord(
         scenario="math",
-        step=step,
+        commit_number=step,
         snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
@@ -52,7 +46,7 @@ def test_a_storage_keeps_the_records_in_its_own_data_store_across_a_restart(tmp_
     with closing(SQLiteScenarioStorage(tmp_path)) as storage, closing(storage.open("math")) as session:
         session.records.append(first)
     with closing(SQLiteScenarioStorage(tmp_path)) as storage, closing(storage.open("math")) as session:
-        assert session.records.get("math", "r1") == first
+        assert session.records.read("math", "r1") == first
         assert storage.data.read("math", "math/r1") is not None
 
 

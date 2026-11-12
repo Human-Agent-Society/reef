@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, ImportingInference, dispatcher, train
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import live_objects
+from tests.support.serving import wait_for_serving
 
 from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
-from reef.artifact.artifact import ArtifactNotFound
+from reef.artifact.artifact import ArtifactNotFoundError
 from reef.core.errors import ReefError
 from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
@@ -58,8 +58,9 @@ def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, Repository
     component = NamedComponent(tmp_path / "exported")
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     value = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -80,19 +81,6 @@ def two_artifacts(tmp_path):
     train(value, 2)
     newest, older, _ = value.get_or_create_scenario("math").artifacts()
     return value, runtime, backend_factory, newest, older
-
-
-def wait_for_serving(value: Dispatcher) -> None:
-    """Wait until inference publishes the scenario's current selection, or report its startup failure."""
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        item = value.coordination.served_models.current_request("math")
-        if item is not None and item.state == "finished":
-            return
-        if item is not None and item.state == "failed":
-            raise AssertionError(f"inference startup failed: {item.error}")
-        time.sleep(0.01)
-    raise AssertionError("inference did not publish the selected artifact")
 
 
 @pytest.mark.unit
@@ -128,7 +116,7 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
             assert handler.artifact_ids == [newest["artifact_id"], older["artifact_id"], newest["artifact_id"]]
             # The record names the snapshot that answered.
             record_id = beside.headers["x-reef-agent-record-id"]
-            record = value.get_or_create_scenario("math").records.get("math", record_id)
+            record = value.get_or_create_scenario("math").records.read("math", record_id)
             assert record.artifact_id == older["artifact_id"]
 
             missing = await client.post("/reef/scenarios/math/artifacts/missing/v1/chat/completions", json=CHAT)
@@ -168,7 +156,7 @@ def test_a_mapping_serves_exactly_its_artifacts_and_the_commit_history_records_e
     assert value.set_served("math", {old_id: 100}) == {"served": {old_id: 100}}
     assert [record.operation for record in scenario.store.history()[-3:]] == ["serve", "activate", "stop_serving"]
     assert new_id not in scenario.served_beside()
-    with pytest.raises(ArtifactNotFound):
+    with pytest.raises(ArtifactNotFoundError):
         scenario.stop_serving(new_id)
     # The active artifact still answers at its artifact's URL; the stopped artifact has no row.
     wait_for_serving(value)
@@ -217,7 +205,7 @@ def test_a_mapping_that_names_an_unknown_artifact_changes_nothing(tmp_path) -> N
     new_id, old_id = newest["artifact_id"], older["artifact_id"]
     steps = len(scenario.store.history())
     for mapping in ({"missing": 100}, {new_id: 60, "missing": 40}, {old_id: 100, "missing": 0}):
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             value.set_served("math", mapping)
     with pytest.raises(ValueError, match="no component 'other'"):
         value.set_served("math", {old_id: 100}, "other")
@@ -278,8 +266,9 @@ def test_a_scenario_that_serves_nothing_serves_nothing_after_a_restart(tmp_path)
 
     component = NamedComponent(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -332,8 +321,9 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
     component = ImportingComponent(tmp_path / "restarted-export")
     answering_each_artifact(component)
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

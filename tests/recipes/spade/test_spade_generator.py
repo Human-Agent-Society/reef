@@ -26,7 +26,7 @@ from reef.recipe.generated_tasks.generator import (
 )
 from reef.recipe.generated_tasks.processor import GenerationJob
 from reef.recipe.generated_tasks.results import TaskRolloutResult
-from reef.record2sample.generator import GeneratorError, TaskNameConflict
+from reef.record2sample.generator import GeneratorError, TaskNameConflictError
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 
 DESCRIPTION = "shell tasks with hidden state under /var and /etc"
@@ -122,7 +122,7 @@ def test_a_history_task_never_replaces_a_conflicting_name(tmp_path: Path) -> Non
     service = StandInGenerator(tmp_path / "tasks", taken=("harbor-history-1",))
     task = task_for("harbor-history-1", "designer-1", 1)
     history = type(task)(**{**task.__dict__, "metadata": {"designer_record_id": "designer-1"}})
-    with pytest.raises(TaskNameConflict):
+    with pytest.raises(TaskNameConflictError):
         asyncio.run(spade(tmp_path, service).write(history))
     assert service.deleted == []
 
@@ -253,7 +253,7 @@ def test_a_check_that_could_not_run_raises_and_is_named_in_the_report(tmp_path: 
         asyncio.run(generator.validate(item))
     asyncio.run(generator.record_results((), generation=0))
     document = report(tmp_path, 0)
-    assert "OracleUnavailable" in document["error"] and document["proposals"] == []
+    assert "OracleUnavailableError" in document["error"] and document["proposals"] == []
     assert service.reports == [], "an unchecked task is no refusal"
 
 

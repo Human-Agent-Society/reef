@@ -21,7 +21,7 @@ torch = pytest.importorskip("torch")
 
 from tests.support.reference_algorithms import distill
 
-from reef.train.slime_backend.distill import DistillSettings
+from reef.train.slime_backend.distill import DistillAlgorithmSettings
 from reef.train.slime_backend.distill.objective import (
     chunked_token_divergence,
     restricted_divergence,
@@ -441,8 +441,8 @@ def test_the_current_weights_need_no_switch() -> None:
 
 @pytest.mark.unit
 def test_the_settings_pick_the_teacher_weights() -> None:
-    assert isinstance(teacher_weights(DistillSettings(teacher_update_rate=1.0)), CurrentWeights)
-    assert isinstance(teacher_weights(DistillSettings(teacher_update_rate=0.02)), MovingCopy)
-    assert isinstance(teacher_weights(DistillSettings(teacher_update_rate=0.0)), MovingCopy)
-    separate = teacher_weights(DistillSettings(teacher="separate", teacher_checkpoint="/models/teacher"))
+    assert isinstance(teacher_weights(DistillAlgorithmSettings(teacher_update_rate=1.0)), CurrentWeights)
+    assert isinstance(teacher_weights(DistillAlgorithmSettings(teacher_update_rate=0.02)), MovingCopy)
+    assert isinstance(teacher_weights(DistillAlgorithmSettings(teacher_update_rate=0.0)), MovingCopy)
+    separate = teacher_weights(DistillAlgorithmSettings(teacher="separate", teacher_checkpoint="/models/teacher"))
     assert isinstance(separate, SeparateCheckpoint)

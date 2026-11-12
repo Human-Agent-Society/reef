@@ -12,6 +12,8 @@ says where a snapshot's files come from: the snapshot itself
 
 ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
 base model; ``FullWeightServingRuntime`` serves one scenario's full weights.
+A base root (``reef.artifact.base_root``) holds no weight files: both runtimes
+answer it with the base model, and ask ``ArtifactWeights`` for nothing.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.base_root import read_base_root
 from reef.artifact.sources import HuggingFaceSource, download_huggingface_snapshot, read_reference
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
@@ -70,7 +73,7 @@ class ServingEngines(ABC):
 
     Values: ``base_url`` is the engines' HTTP(S) address, known without opening them. ``open`` attaches to the
     engines that run, or starts them when none run (``OpenedEngines``); a runtime calls it at most once.
-    ``watched`` is whether the runtime checks their health (``check_health``, which raises when they failed).
+    ``check_health`` raises when the engines failed; the runtime calls it on a schedule after ``open``.
     ``close`` releases what ``open`` took and stops no engine that serves requests.
 
     Purpose: a ``SavedWeightServingRuntime`` holds one and opens it in ``InferenceRuntime.open``. A process that
@@ -81,16 +84,12 @@ class ServingEngines(ABC):
     @abstractmethod
     def base_url(self) -> str: ...
 
-    @property
-    def watched(self) -> bool:
-        return False
-
     @abstractmethod
     def open(self) -> OpenedEngines: ...
 
+    @abstractmethod
     def check_health(self) -> None:
-        """Raise when the engines failed; engines that are not ``watched`` have no check."""
-        return
+        """Raise when the engines failed."""
 
     def close(self) -> None:
         """Release what ``open`` took; the default holds nothing."""
@@ -119,6 +118,17 @@ class ArtifactWeightFiles(ArtifactWeights):
         return WeightFiles(adapter, "adapter")
 
 
+def holds_base_root(artifact_dir: Path) -> bool:
+    """Whether the materialized snapshot in ``artifact_dir`` is a base root (``read_base_root``).
+
+    Raise ``ReefError`` when its base file is not readable, so a broken base root is never served as the base.
+    """
+    try:
+        return read_base_root(artifact_dir) is not None
+    except ValueError as exc:
+        raise ReefError(f"the snapshot in {artifact_dir} holds no readable base file: {exc}") from exc
+
+
 def check_engines_serve(backend: InferenceBackend, version: str) -> None:
     """Raise ``RuntimeContractError`` unless every engine of ``backend`` reports exactly ``version``."""
     reported = set(backend.runtime_load_ids())
@@ -142,7 +152,7 @@ class SavedWeightServingRuntime(InferenceRuntime):
     first replaces the engines that died since the last one
     (``InferenceBackend.recover``), while the engines are paused.
 
-    When ``engines`` are ``watched``, a thread checks their health every
+    After ``open``, a thread checks the engines' health every
     ``health_interval_s`` seconds. When the check fails, for example because
     the inference component restarted, ``recover_engines`` replaces the
     engines and loads what the runtime serves into them again, so the
@@ -192,7 +202,6 @@ class SavedWeightServingRuntime(InferenceRuntime):
                 backend.initialize_version(self._version)
             backend.resume()
             self._opened = backend
-        if self._engines.watched:
             self._watcher = threading.Thread(target=self.watch_engines, name="reef-serving-health", daemon=True)
             self._watcher.start()
 
@@ -286,6 +295,8 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     adapter, or none, and then the scenario samples the base model. The
     runtime records the artifact ID of each current adapter. Selecting that
     artifact again loads nothing, even when its storage snapshot changes.
+    A base root loads nothing: the scenario then serves no adapter, under
+    ``base_version``.
     """
 
     def __init__(
@@ -368,9 +379,12 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         """Serve the snapshot ``artifact`` of ``scenario``; return the version that serves it.
 
         An artifact that the engines already serve for the scenario loads
-        nothing. Any other artifact loads its adapter under a new
-        version; a root snapshot made from the default start holds an untrained adapter, which loads in
-        the same way. Raise ``ReefError`` without ``scenario``.
+        nothing. A base root (``holds_base_root``) loads nothing either: the scenario serves no adapter from
+        then on, so its requests sample the base model, and the result is ``base_version``. The adapter that
+        the scenario served before stays resident without protection, for the requests that still name it,
+        until its route stops (``stop_serving``) or another adapter needs its slot. Any other artifact loads
+        its adapter under a new version; a root snapshot of an older Reef, which holds an untrained adapter,
+        loads in the same way. Raise ``ReefError`` without ``scenario``.
         A failed load can leave the scenario serving no adapter, when the new
         adapter took the slot of its own previous one; the residency manager
         records that, so requests then sample the base model.
@@ -399,6 +413,9 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
             path = artifact.materialize().local_path
             if path is None:
                 raise ReefError("serving a snapshot requires a materialized artifact")
+            if holds_base_root(path):
+                self._residency.serve_base(scenario)
+                return self.base_version
             files = self._weights.weight_files(path, "adapter")
             version = self.next_version()
             self._backend.pause()
@@ -452,7 +469,9 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
     ``scenario``; the registry refuses a second training scenario on it
     (``shared_by_training_scenarios`` is False). The engines start with the
     base model. Every snapshot loads its files, a root snapshot's included,
-    unless the engines serve that artifact already.
+    unless the engines serve that artifact already. A base root has no files
+    of its own: it loads the base model's files, the directory ``model_path``
+    (``base_weight_files``), under a new version.
     """
 
     def __init__(
@@ -484,7 +503,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
             path = artifact.materialize().local_path
             if path is None:
                 raise ReefError("serving a snapshot requires a materialized artifact")
-            files = self._weights.weight_files(path, "full")
+            files = self.base_weight_files() if holds_base_root(path) else self._weights.weight_files(path, "full")
             version = self.next_version()
             self._backend.pause()
             try:
@@ -498,6 +517,20 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
             self._served_files = files
             self._version = version
             return version
+
+    def base_weight_files(self) -> WeightFiles:
+        """The base model's files, which a base root loads: the directory ``model_path``.
+
+        Raise ``ReefError`` when ``model_path`` is no directory on this host. The engines then cannot load the
+        base model again after another artifact, since a load sends them a directory of this host.
+        """
+        directory = Path(self._model_path).expanduser()
+        if not self._model_path or not directory.is_dir():
+            raise ReefError(
+                f"a base root serves the base model, but the model path {self._model_path!r} is no directory on "
+                "this host, so the engines cannot load it"
+            )
+        return WeightFiles(directory, "full")
 
     def reload_served(self) -> None:
         """Load the served artifact into every engine again under its version; the base the engines start with needs none."""

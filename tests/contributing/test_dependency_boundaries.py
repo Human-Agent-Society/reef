@@ -256,12 +256,13 @@ def test_scenario_state_enters_only_through_injected_storage() -> None:
     for path in sorted((REPO_ROOT / "reef/scenario").rglob("*.py")):
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
-        # Scenario state and served routes enter through injected storage readers.
+        # Scenario state and served routes enter through injected storage readers. The data store of the job data
+        # directories is injected too: the process gives it in its ``LiveObjects``.
         storage_imports = set(_imports_of(imported, "reef.storage")) - set(
             _imports_of(imported, "reef.storage.records")
             + _imports_of(imported, "reef.storage.scenario")
             + _imports_of(imported, "reef.storage.commits")
-            + ["reef.storage.served_models.ServedModels"]
+            + ["reef.storage.served_models.ServedModels", "reef.storage.data.DataStore"]
         )
         assert storage_imports == set(), str(path.relative_to(REPO_ROOT))
         for dependency in ("sqlite3", "sqlalchemy"):
@@ -275,7 +276,9 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
     # registry / named Ray actors — it never imports reef.train.slime or
     # reef.train.slime_backend at module scope. A lazy import inside a
     # function (an adapter reaching for the backend it was configured with)
-    # is the allowed escape hatch.
+    # is the allowed escape hatch. A method package's public half imports one
+    # name of the backend: ``register_objective``, which records the reference
+    # of the method's objective without importing it.
     core_packages = (
         "reef/core",
         "reef/dispatcher",
@@ -303,8 +306,15 @@ def test_backend_agnostic_core_never_imports_slime_backend_at_module_scope() -> 
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         tree = ast.parse(path.read_text(encoding="utf-8"))
         imported = _imported_modules(tree, package=package, module_scope_only=True)
+        allowed = (
+            {"reef.train.slime_backend.objectives.register_objective"} if package.startswith("recipes") else set()
+        )
         for prefix in ("reef.train.slime", "reef.train.slime_backend"):
-            offenders.extend(f"{path.relative_to(REPO_ROOT)}: {target}" for target in _imports_of(imported, prefix))
+            offenders.extend(
+                f"{path.relative_to(REPO_ROOT)}: {target}"
+                for target in _imports_of(imported, prefix)
+                if target not in allowed
+            )
     assert offenders == []
 
 
@@ -329,7 +339,7 @@ def test_scenario_factory_imports_without_a_cycle() -> None:
 def test_checkpoint_storage_import_does_not_require_ray() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; "
-        "from reef.train.slime_backend.reef_adapters import RetentionConfig; "
+        "from reef.train.slime_backend.reef_adapters import RetentionSettings; "
         "from reef.inference import recovery; "
         "from reef.train.slime_backend.reef_adapters.training_job import storage"
     )
@@ -492,6 +502,42 @@ def test_inference_and_training_contracts_import_without_loading_backends() -> N
     )
 
 
+def test_only_the_training_service_builds_a_training_component() -> None:
+    """One place builds a weight component and one a harness component, each only for a process that runs the
+    training service. Every other process holds the backend's facts and the jobs queue."""
+    builders = ("build_training_component", "from_settings")
+    built: dict[str, list[str]] = {}
+    for path in sorted((REPO_ROOT / "reef").rglob("*.py")):
+        if path == REPO_ROOT / "reef/train/component.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func
+            if isinstance(called, ast.Name) and called.id == "build_training_component":
+                built.setdefault(str(path.relative_to(REPO_ROOT)), []).append(called.id)
+            if (
+                isinstance(called, ast.Attribute)
+                and called.attr == "from_settings"
+                and isinstance(called.value, ast.Name)
+                and called.value.id == "HarnessTrainingComponent"
+            ):
+                built.setdefault(str(path.relative_to(REPO_ROOT)), []).append(called.attr)
+    assert built == {"reef/service/assembly.py": list(builders)}
+    assembly = ast.parse((REPO_ROOT / "reef/service/assembly.py").read_text(encoding="utf-8"))
+    guarded = [
+        ast.unparse(node.test)
+        for node in ast.walk(assembly)
+        if isinstance(node, ast.IfExp)
+        and any(name in ast.unparse(node.body) for name in ("build_training_component(", "from_settings("))
+    ]
+    assert guarded == ["runs_training", "runs_training"]
+    # Control's view of a backend holds its facts: it has no component to call.
+    from reef.train.job_queue import JobQueueComponent
+
+    assert list(inspect.signature(JobQueueComponent).parameters)[:2] == ["facts", "queue"]
+
+
 def test_training_backends_never_import_inference_implementations() -> None:
     for path in sorted((REPO_ROOT / "reef/train").rglob("*.py")):
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
@@ -543,11 +589,13 @@ def test_execution_jobs_depend_only_on_processes_and_lifecycle() -> None:
     )
 
 
-def test_processes_depend_only_on_the_standard_library_and_lifecycle() -> None:
+def test_processes_depend_only_on_the_standard_library_lifecycle_and_the_base_error() -> None:
     tree = ast.parse((REPO_ROOT / "reef/execution/processes.py").read_text(encoding="utf-8"))
     imports = _imported_modules(tree, package="reef.execution")
     assert all(
-        target.split(".")[0] in sys.stdlib_module_names or target.startswith("reef.execution.lifecycle.")
+        target.split(".")[0] in sys.stdlib_module_names
+        or target.startswith("reef.execution.lifecycle.")
+        or target == "reef.core.errors.InternalError"
         for target in imports
     )
     tree = ast.parse((REPO_ROOT / "reef/execution/lifecycle.py").read_text(encoding="utf-8"))
@@ -592,3 +640,285 @@ def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
                 assert any(
                     target == prefix or target.startswith(prefix + ".") for prefix in allowed
                 ), f"{path.relative_to(REPO_ROOT)} imports {target}"
+
+
+#: The methods that built a trainer or a pipeline on a recipe before RFC #1390 moved that work to the scenario
+#: factory (``reef.scenario.factory.read_trainer_specs``) and ``reef.train.trainer_builder``.
+TRAINER_CONSTRUCTION_METHODS = frozenset({"build", "build_trainers", "build_pipeline", "_build_trainer"})
+
+#: ``(file, class, method)`` of each such method that a later step of RFC #1390 still has to remove; none is left.
+KEPT_TRAINER_CONSTRUCTION_METHODS: frozenset[tuple[str, str, str]] = frozenset()
+
+
+def test_a_recipe_builds_no_trainer_and_no_pipeline() -> None:
+    # A recipe is configuration (RFC #1390): the scenario factory reads its values and builds the trainers.
+    found: set[tuple[str, str, str]] = set()
+    paths = [*(REPO_ROOT / "reef" / "recipe").rglob("*.py"), *(REPO_ROOT / "recipes").rglob("*.py")]
+    for path in sorted(paths):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ClassDef):
+                found.update(
+                    (str(path.relative_to(REPO_ROOT)), node.name, item.name)
+                    for item in node.body
+                    if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+                    and item.name in TRAINER_CONSTRUCTION_METHODS
+                )
+    assert found == KEPT_TRAINER_CONSTRUCTION_METHODS
+
+
+#: The methods that loaded a recipe, or decided for the launcher and the training service, on a recipe class
+#: before RFC #1390 moved that work to ``reef.recipe.loading`` and ``reef.service.deploy.training``.
+RECIPE_LOADING_METHODS = frozenset(
+    {
+        "from_environment",
+        "from_resolved_config",
+        "service_config",
+        "select_weight_training",
+        "resolve_training_component",
+    }
+)
+
+#: ``(file, class, method)`` of each such method, or method whose name begins with an underscore, that a later step
+#: of RFC #1390 still has to remove; none is left.
+KEPT_RECIPE_LOADING_METHODS: frozenset[tuple[str, str, str]] = frozenset()
+
+
+def test_a_recipe_class_does_not_load_itself_and_has_no_underscore_method() -> None:
+    # One loader makes the recipe value (RFC #1390): a recipe class declares its configuration. No class of the
+    # recipe packages has a loading method. A recipe class, which is a class with a base whose name ends in
+    # "Recipe", has no method whose name begins with an underscore either, other than a special method.
+    found: set[tuple[str, str, str]] = set()
+    paths = [*(REPO_ROOT / "reef" / "recipe").rglob("*.py"), *(REPO_ROOT / "recipes").rglob("*.py")]
+    for path in sorted(paths):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            bases = [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "") for base in node.bases]
+            is_recipe = node.name == "Recipe" or any(base.endswith("Recipe") for base in bases)
+            for item in node.body:
+                if not isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                special = item.name.startswith("__") and item.name.endswith("__")
+                if item.name in RECIPE_LOADING_METHODS or (is_recipe and item.name.startswith("_") and not special):
+                    found.add((str(path.relative_to(REPO_ROOT)), node.name, item.name))
+    assert found == KEPT_RECIPE_LOADING_METHODS
+
+
+#: The methods that built the objects of a harness job on a recipe before RFC #1390 moved that work into
+#: ``reef.train.harness_backend.component.HarnessTrainingComponent``, and the two hooks through which a recipe
+#: class changed its own loading before the loader read declarations alone (``section_defaults``, ``section_field``
+#: and ``reader_field``).
+HARNESS_CONSTRUCTION_METHODS = frozenset(
+    {"build_backend", "build_evaluator", "build_policy", "built_fields", "config_with_defaults"}
+)
+
+#: ``(file, class, method)`` of each such method that a later step of RFC #1390 still has to remove; none is left.
+KEPT_HARNESS_CONSTRUCTION_METHODS: frozenset[tuple[str, str, str]] = frozenset()
+
+#: The classes of the objects that run a harness job: the component, the backend, the evaluator and the policies.
+HARNESS_JOB_CLASSES = frozenset(
+    {
+        "HarnessTrainingComponent",
+        "HarnessBackend",
+        "HarnessTaskEvaluator",
+        "ComparePolicy",
+        "FloorPolicy",
+        "NoEvaluationPolicy",
+    }
+)
+
+#: The names of ``HARNESS_JOB_CLASSES`` that ``reef/recipe/harness.py`` still calls; none is left.
+KEPT_HARNESS_JOB_CALLS: frozenset[str] = frozenset()
+
+
+def test_a_recipe_builds_no_harness_backend_evaluator_or_policy() -> None:
+    # A harness recipe is configuration (RFC #1390): the harness training component builds itself and the objects
+    # of its jobs from the recipe's settings, so no recipe class defines a method that builds them, and no class
+    # of the recipe packages defines a hook that builds fields or rewrites the config for the loader.
+    found: set[tuple[str, str, str]] = set()
+    paths = [*(REPO_ROOT / "reef" / "recipe").rglob("*.py"), *(REPO_ROOT / "recipes").rglob("*.py")]
+    for path in sorted(paths):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ClassDef):
+                found.update(
+                    (str(path.relative_to(REPO_ROOT)), node.name, item.name)
+                    for item in node.body
+                    if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+                    and item.name in HARNESS_CONSTRUCTION_METHODS
+                )
+    assert found == KEPT_HARNESS_CONSTRUCTION_METHODS
+    # The harness recipe's module calls none of the classes, by a name or as an attribute.
+    called: set[str] = set()
+    module = ast.parse((REPO_ROOT / "reef" / "recipe" / "harness.py").read_text(encoding="utf-8"))
+    for node in ast.walk(module):
+        if isinstance(node, ast.Call):
+            function = node.func
+            name = (
+                function.id
+                if isinstance(function, ast.Name)
+                else function.attr if isinstance(function, ast.Attribute) else None
+            )
+            if name in HARNESS_JOB_CLASSES:
+                called.add(name)
+    assert called == KEPT_HARNESS_JOB_CALLS
+
+
+#: The types of the objects that run, and of the values that are built from a live runtime: a recipe class has no
+#: field and no method that holds or returns one (RFC #1390). A name that ends in ``TrainingComponent`` counts too.
+LIVE_OBJECT_TYPES = frozenset(
+    {
+        "InferenceRuntime",
+        "TrainingComponent",
+        "DataStore",
+        "RecordStore",
+        "ServedEndpoint",
+        "ModelBinding",
+        "ModelBindings",
+        "HarnessModels",
+    }
+)
+
+#: ``(file, class, member)`` of each field or method of a recipe package's class whose annotation names one of
+#: ``LIVE_OBJECT_TYPES`` on purpose, with the reason.
+KEPT_LIVE_OBJECT_ANNOTATIONS: dict[tuple[str, str, str], str] = {
+    ("reef/recipe/harness.py", "HarnessEvolutionRecipe", "models"): (
+        "configuration: the parsed evolution.models entries (URL, model name and key of each named model); "
+        "none is built from a runtime"
+    ),
+    ("reef/recipe/harness.py", "NamedModels", "read"): (
+        "the config reader of that field: it parses evolution.models entries from the config and the environment"
+    ),
+    ("recipes/gepa/examples/aime/run.py", "RunService", "binding"): (
+        "not a recipe class: the example's own service, which owns a dispatcher; the endpoint that a run reaches it by"
+    ),
+    ("recipes/gepa/examples/aime/run.py", "RunService", "records"): (
+        "not a recipe class: the example's own service, which owns a dispatcher; the records of its scenario"
+    ),
+}
+
+#: The methods that held, swapped or asked a live object on a recipe before RFC #1390 gave the live objects to
+#: ``reef.scenario.live_objects.LiveObjects``, and the three methods that a recipe may only define as a pure
+#: function of its configuration.
+LIVE_OBJECT_METHODS = frozenset(
+    {
+        "job_components",
+        "with_job_components",
+        "with_served_endpoint",
+        "harness_served_model",
+        "harness_models",
+        "build_components",
+        "default_start",
+        "check_root_start",
+    }
+)
+
+#: ``(file, class, method)`` of each such method that is kept on purpose, with the reason. Each one reads the
+#: recipe's configuration fields alone; ``reef.scenario.live_objects`` adds what a live object knows.
+KEPT_LIVE_OBJECT_METHODS: dict[tuple[str, str, str], str] = {
+    ("reef/recipe/base.py", "Recipe", "build_components"): (
+        "pure configuration: declares no component; a record or tree recipe overrides it with its own components"
+    ),
+    ("reef/recipe/base.py", "Recipe", "default_start"): (
+        "pure configuration: the empty start; a tree recipe overrides it with the seed of its configuration"
+    ),
+    ("reef/recipe/base.py", "WeightTrainingRecipe", "build_components"): (
+        "pure configuration: declares the weights component without kind and layout, which scenario_components "
+        "takes from the runtime and the training component; step 6 of RFC #1390 gives both a source in "
+        "configuration"
+    ),
+    ("reef/recipe/harness.py", "HarnessEvolutionRecipe", "build_components"): (
+        "pure configuration: the harness component of the adapter that evolution.adapter names"
+    ),
+    ("reef/recipe/harness.py", "HarnessEvolutionRecipe", "default_start"): (
+        "pure configuration: the seed tree that evolution.seed names"
+    ),
+}
+
+
+def test_a_recipe_class_holds_and_returns_no_live_object() -> None:
+    # A recipe is configuration (RFC #1390): the process holds the runtime, the training components, the stores and
+    # the served endpoint in ``reef.scenario.live_objects.LiveObjects``. No class of the recipe packages has a field
+    # annotation or a method return annotation that names a live object type, and none defines a method that held
+    # or asked one, apart from the kept ones.
+    def live_names(annotation: ast.expr | None) -> set[str]:
+        names: set[str] = set()
+        if annotation is None:
+            return names
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            annotation = ast.parse(annotation.value, mode="eval").body
+        for node in ast.walk(annotation):
+            name = node.id if isinstance(node, ast.Name) else node.attr if isinstance(node, ast.Attribute) else None
+            if name is not None and (name in LIVE_OBJECT_TYPES or name.endswith("TrainingComponent")):
+                names.add(name)
+        return names
+
+    annotated: set[tuple[str, str, str]] = set()
+    methods: set[tuple[str, str, str]] = set()
+    paths = [*(REPO_ROOT / "reef" / "recipe").rglob("*.py"), *(REPO_ROOT / "recipes").rglob("*.py")]
+    for path in sorted(paths):
+        relative = str(path.relative_to(REPO_ROOT))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for item in node.body:
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                    if live_names(item.annotation):
+                        annotated.add((relative, node.name, item.target.id))
+                elif isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                    if live_names(item.returns):
+                        annotated.add((relative, node.name, item.name))
+                    if item.name in LIVE_OBJECT_METHODS:
+                        methods.add((relative, node.name, item.name))
+    assert annotated == set(KEPT_LIVE_OBJECT_ANNOTATIONS)
+    assert methods == set(KEPT_LIVE_OBJECT_METHODS)
+
+
+#: The methods that ``CompositeRecipe`` defines. ``__post_init__`` checks the invariants of the mapping.
+COMPOSITE_RECIPE_METHODS = frozenset({"__post_init__"})
+
+#: The members that answered for the recipes of a composite before RFC #1390 made the composite a mapping. No
+#: recipe class of ``reef/recipe`` defines one: ``reef.recipe.composite.component_recipes`` gives the recipes of a
+#: deployment, and the owner of each result asks them.
+COMPOSITE_FAN_OUT_MEMBERS = frozenset(
+    {
+        "harness_adapter",
+        "harness_state_dir",
+        "scenario_state_dirs",
+        "for_record2sample_configs",
+        "report_contract",
+    }
+)
+
+
+def test_a_composite_recipe_is_a_mapping_of_child_recipes() -> None:
+    # A composite computes nothing from its children (RFC #1390): the class defines ``__post_init__`` alone, and
+    # no recipe class keeps a member that existed to give a caller the composite's answer.
+    fan_out: set[tuple[str, str]] = set()
+    composite_methods: set[str] | None = None
+    for path in sorted((REPO_ROOT / "reef" / "recipe").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            methods = {item.name for item in node.body if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)}
+            fan_out.update((node.name, name) for name in methods & COMPOSITE_FAN_OUT_MEMBERS)
+            if node.name == "CompositeRecipe":
+                composite_methods = methods
+    assert composite_methods == COMPOSITE_RECIPE_METHODS
+    assert fan_out == set()
+
+
+def test_only_configuration_writes_a_default_start() -> None:
+    # A new scenario's root comes from configuration (RFC #1390): a recipe's own ``default_start`` or the
+    # ``default_start`` of a training backend's facts. No training component, and no other class of ``reef``,
+    # defines the method, so no running component makes a root.
+    recipes = {("reef/recipe/base.py", "Recipe"), ("reef/recipe/harness.py", "HarnessEvolutionRecipe")}
+    others: list[tuple[str, str]] = []
+    for path in sorted((REPO_ROOT / "reef").rglob("*.py")):
+        relative = str(path.relative_to(REPO_ROOT))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            defines = any(isinstance(item, ast.FunctionDef) and item.name == "default_start" for item in node.body)
+            if defines and not node.name.endswith("Facts") and (relative, node.name) not in recipes:
+                others.append((relative, node.name))
+    assert others == []

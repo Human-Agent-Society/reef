@@ -28,7 +28,7 @@ class WorkerResources:
 
 @dataclass(frozen=True)
 class ExecutorSettings:
-    backend: str = config_option("auto", help="Built-in executor, import path, or named profile.")
+    backend: str = config_option("auto", help="Built-in executor, package.module:ClassName, or named profile.")
     options: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Backend-owned executor options.")
     )
@@ -181,7 +181,7 @@ def local_gpu_assignments(requirements: ExecutionRequirements) -> tuple[tuple[st
 
 
 def executor_settings(config: Mapping[str, Any], selection: Any) -> ExecutorSettings:
-    """Resolve a built-in/import path, inline object, or named executors profile."""
+    """Resolve a built-in name or ``package.module:ClassName``, an inline object, or a named executors profile."""
     profiles = config.get("executors", {})
     if not isinstance(profiles, Mapping):
         raise ValueError("executors must be an object")

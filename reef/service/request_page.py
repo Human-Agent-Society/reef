@@ -38,7 +38,7 @@ from reef.service.artifact_page import (
     unscored_failures,
 )
 from reef.service.page_layout import document, escape, requires_table, stamp, status_span
-from reef.train.harness_backend.backend import StepProgress
+from reef.train.harness_backend.backend import JobProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
 REFRESH_SECONDS = 5
@@ -202,7 +202,7 @@ def step_clock(seconds: float) -> str:
     return f"+{hours}:{rest // 60:02d}:{rest % 60:02d}" if hours else f"+{rest // 60}:{rest % 60:02d}"
 
 
-def activity_html(progress: StepProgress, now: float) -> str:
+def activity_html(progress: JobProgress, now: float) -> str:
     """What the method has done so far, newest first, each line at its time into the step; the newest says how
     long ago it happened, so a long wait on one model call shows as that."""
     lines = list(progress.activity)[-MAX_ACTIVITY_SHOWN:]
@@ -229,7 +229,7 @@ def activity_html(progress: StepProgress, now: float) -> str:
     return '<ol class="activity" aria-label="Method activity, newest first">' + "".join(items) + "</ol>" + more
 
 
-def request_state(record: Mapping[str, object], progress: StepProgress | None, consumed: bool) -> str:
+def request_state(record: Mapping[str, object], progress: JobProgress | None, consumed: bool) -> str:
     """Read the backend phase or reserved job data; an unreserved request is queued."""
     if progress is not None and progress.request_id == record["agent_record_id"]:
         return progress.phase
@@ -263,7 +263,7 @@ def request_html(record: Mapping[str, object]) -> str:
     return "\n".join(parts)
 
 
-def progress_html(record: Mapping[str, object], state: str, progress: StepProgress | None, now: float) -> str:
+def progress_html(record: Mapping[str, object], state: str, progress: JobProgress | None, now: float) -> str:
     summary = (
         f'<div class="outcome-summary"><div class="status">{status_span(state)}</div>'
         f"<p>{escape(STATE_WORDS.get(state, state))}</p></div>"
@@ -275,7 +275,7 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
         )
         if progress.runs_total is not None:
             lines.append(f"<div><dt>Evaluation runs</dt><dd>{progress.runs_total} in the evaluation</dd></div>")
-        lines.append(f'<div><dt>Step record</dt><dd class="id">{escape(progress.step_record)}</dd></div>')
+        lines.append(f'<div><dt>Step record</dt><dd class="id">{escape(progress.job_record)}</dd></div>')
     else:
         filed = record.get("created_at")
         if isinstance(filed, (int, float)):
@@ -383,7 +383,7 @@ def build_request_page(
     rows: Sequence[Mapping[str, object]],
     *,
     scenario: str,
-    progress: StepProgress | None = None,
+    progress: JobProgress | None = None,
     consumed: bool = False,
     link_query: Mapping[str, str] | None = None,
     now: float | None = None,

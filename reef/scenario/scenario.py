@@ -9,7 +9,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, SnapshotRef
 from reef.artifact.components import ScenarioComponents
 from reef.artifact.repository import Repository
-from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorable
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorableError
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
 from reef.core.artifact_selection import ArtifactSelection
@@ -52,7 +52,7 @@ class Scenario:
         root_source: RootSource,
         store: ScenarioStore,
         trainers: tuple[ComponentTrainer, ...],
-        scenario_step: int = 0,
+        commit_number: int = 0,
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
         training_requests: ScenarioTrainingRequests | None = None,
@@ -82,10 +82,10 @@ class Scenario:
         self._serves = True
         self._store = store
         self._closed = False
-        #: The newest step that each trainer has read (``Trainer.read_commits``), by component; the step that this
+        #: The newest commit number that each trainer has read (``Trainer.read_commits``), by component; the commit number that this
         #: instance loaded before that. A new pipeline reads the last job end from its own state.
-        self.loaded_step = scenario_step
-        self.job_ends_read_step: dict[str, int] = {}
+        self.loaded_commit_number = commit_number
+        self.job_ends_read_commit_number: dict[str, int] = {}
         #: Every trainer of this scenario with the component it evolves, in recipe order.
         self.trainers = validate_component_trainers(trainers, binding.components)
         self._artifact_chain = ArtifactSnapshotChain(repository)
@@ -95,7 +95,7 @@ class Scenario:
             artifacts=self._artifact_chain,
             trainers=self.trainers,
             root_source=root_source,
-            scenario_step=scenario_step,
+            commit_number=commit_number,
             store=store,
             recovered_head_record=recovered_head_record,
             experiment_observer=experiment_observer,
@@ -218,8 +218,8 @@ class Scenario:
         return self._committer.trainer_for(component)
 
     @property
-    def scenario_step(self) -> int:
-        return self._committer.step
+    def commit_number(self) -> int:
+        return self._committer.commit_number
 
     @property
     def components(self) -> ScenarioComponents:
@@ -287,11 +287,17 @@ class Scenario:
         component_trainer = self._committer.component_trainer(component)
         name = self._committer.component_on_record(component_trainer.component)
         records = self._store.history() if self._store.durable else ()
-        read_step = self.job_ends_read_step.get(component_trainer.component, self.loaded_step)
-        new = [record for record in records if record.step > read_step and self._committer.own_record(record, name)]
+        read_commit_number = self.job_ends_read_commit_number.get(
+            component_trainer.component, self.loaded_commit_number
+        )
+        new = [
+            record
+            for record in records
+            if record.commit_number > read_commit_number and self._committer.own_record(record, name)
+        ]
         component_trainer.trainer.read_commits(new)
         if new:
-            self.job_ends_read_step[component_trainer.component] = new[-1].step
+            self.job_ends_read_commit_number[component_trainer.component] = new[-1].commit_number
         return component_trainer.trainer.produce_samples(selection)
 
     def selection_serves(self) -> bool:
@@ -372,7 +378,7 @@ class Scenario:
         if serving is None or served_component is None:
             return
         history = self.snapshot_queries.served_history(
-            self._committer.step, served_component, self._committer.component_names()
+            self._committer.commit_number, served_component, self._committer.component_names()
         )
         if history:
             trainer.restore_served_artifacts(history, self.served_beside())
@@ -444,7 +450,7 @@ class Scenario:
 
     @property
     def commit_status(self) -> Mapping[str, Any]:
-        """The non-blocking committed step, training outcome, and artifact-head sync status."""
+        """The non-blocking commit number, training outcome, and artifact-head sync status."""
         return self._committer.commit_status
 
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
@@ -454,12 +460,14 @@ class Scenario:
     def artifact_rows(self) -> tuple[dict[str, Any], ...]:
         """Internal artifact catalog, including the storage locators needed to materialize each artifact."""
         with self.snapshot_queries.publication_lock:
-            return self.snapshot_queries.artifacts(self._committer.step, self._committer.component_names())
+            return self.snapshot_queries.artifacts(self._committer.commit_number, self._committer.component_names())
 
     def artifacts(self) -> tuple[dict[str, Any], ...]:
         """Public artifact catalog, with opaque artifact identities and component-specific parent links."""
         with self.snapshot_queries.publication_lock:
-            parents = self.snapshot_queries.artifact_parents(self._committer.step, self._committer.component_names())
+            parents = self.snapshot_queries.artifact_parents(
+                self._committer.commit_number, self._committer.component_names()
+            )
             return tuple(
                 {
                     **{key: value for key, value in row.items() if key != "snapshot"},
@@ -487,7 +495,7 @@ class Scenario:
             harness = [row for row in self.artifact_rows() if self.components.single or row["component"] == component]
             by_snapshot = {row["snapshot"].revision: row for row in harness}
             by_artifact = {row["artifact_id"]: row for row in harness}
-            manifests = self.snapshot_queries.manifests(self._committer.step)
+            manifests = self.snapshot_queries.manifests(self._committer.commit_number)
 
             def artifact_of(revision: str | None) -> dict[str, Any] | None:
                 if revision is None or revision in by_snapshot:
@@ -496,7 +504,7 @@ class Scenario:
 
             parents = {row["artifact_id"]: row["parent_artifact_id"] for row in self.artifacts()}
             kept: list[dict[str, Any]] = []
-            for row in self.snapshot_queries.snapshot_rows(self._committer.step):
+            for row in self.snapshot_queries.snapshot_rows(self._committer.commit_number):
                 metrics = row.get("metrics") or {}
                 job = metrics.get("training_job")
                 if isinstance(job, Mapping) and (
@@ -545,9 +553,9 @@ class Scenario:
         """Make ``artifact_id`` serve as ``component``; see :meth:`ScenarioCommitter.activate`."""
         return self._committer.activate(artifact_id, component)
 
-    def restore(self, step: int) -> Mapping[str, str]:
-        """Restore the full component selection after ``step`` without changing training starts."""
-        return self._committer.restore(step)
+    def restore(self, commit_number: int) -> Mapping[str, str]:
+        """Restore the full component selection after ``commit_number`` without changing training starts."""
+        return self._committer.restore(commit_number)
 
     def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Serve ``artifact_id`` beside the active selection; see :meth:`ScenarioCommitter.serve`."""
@@ -561,7 +569,9 @@ class Scenario:
         """The artifacts that the scenario serves beside its active selection, by ``artifact_id``; see
         :meth:`ScenarioSnapshots.served_beside`."""
         with self.snapshot_queries.publication_lock:
-            return self.snapshot_queries.served_beside(self._committer.step, self._committer.component_names())
+            return self.snapshot_queries.served_beside(
+                self._committer.commit_number, self._committer.component_names()
+            )
 
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
@@ -661,6 +671,6 @@ def validate_component_trainers(
 __all__ = [
     "SCENARIO_METADATA_KEY",
     "Scenario",
-    "SnapshotNotRestorable",
+    "SnapshotNotRestorableError",
     "validate_component_trainers",
 ]

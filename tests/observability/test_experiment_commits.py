@@ -51,19 +51,19 @@ class FailingTraceObserver(RecordObserver):
         raise ConnectionError("trace exporter unavailable")
 
 
-def training_record(step: int = 1) -> CommitRecord:
+def training_record(commit_number: int = 1) -> CommitRecord:
     return CommitRecord(
         scenario="math",
-        step=step,
-        snapshot=SnapshotRef(f"release-{step}", "seed"),
+        commit_number=commit_number,
+        snapshot=SnapshotRef(f"release-{commit_number}", "seed"),
         checkpoint=True,
-        algorithm_state={"steps": step},
+        algorithm_state={"steps": commit_number},
         high_water_sequence=0,
         high_water_offset=0,
         component="weights",
         metrics={"score": 0.8},
-        training_job_id=f"job-{step}",
-        selection=ArtifactSelection({"weights": f"release-{step}"}),
+        training_job_id=f"job-{commit_number}",
+        selection=ArtifactSelection({"weights": f"release-{commit_number}"}),
     )
 
 
@@ -81,14 +81,14 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         scenario="math",
         recipe="recipe",
         source_artifacts=ArtifactSelection({"weights": seed.revision}),
-        scenario_step=0,
+        commit_number=0,
         store=ObservedScenarioStore(inner, FailingTraceObserver()),
     )
     store = observer.store
     context = TrainingExperimentContext(
         scenario="math",
         recipe="recipe",
-        step=1,
+        commit_number=1,
         source_artifacts=ArtifactSelection({"weights": seed.revision}),
         component="weights",
         backend="stub",
@@ -96,22 +96,22 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
     )
     correlation = observer.prepare(context, checkpoint_path="/checkpoint/1")
     record = replace(training_record(), metrics={**correlation, "score": 0.8})
-    commit_step = inner.commit_step
+    append_commit = inner.append_commit
 
-    def fail_commit(*, expected_step: int, commit: CommitRecord) -> CommitRecord:
+    def fail_commit(*, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
         if lost_acknowledgment:
-            commit_step(expected_step=expected_step, commit=commit)
+            append_commit(expected_commit_number=expected_commit_number, commit=commit)
         raise OSError("lost storage acknowledgment")
 
     try:
-        monkeypatch.setattr(inner, "commit_step", fail_commit)
+        monkeypatch.setattr(inner, "append_commit", fail_commit)
         with pytest.raises(OSError, match="lost storage acknowledgment"):
-            store.commit_step(expected_step=0, commit=record)
+            store.append_commit(expected_commit_number=0, commit=record)
         observer.reports.flush()
         assert tracker.events == []
-        monkeypatch.setattr(inner, "commit_step", commit_step)
-        landed = store.commit_step(expected_step=0, commit=record)
-        store.commit_step(expected_step=0, commit=record)
+        monkeypatch.setattr(inner, "append_commit", append_commit)
+        landed = store.append_commit(expected_commit_number=0, commit=record)
+        store.append_commit(expected_commit_number=0, commit=record)
         observer.reports.flush()
         (event,) = tracker.events
         assert event.context == context
@@ -138,21 +138,24 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
         scenario="math",
         recipe="recipe",
         source_artifacts=ArtifactSelection({"weights": seed.revision}),
-        scenario_step=0,
+        commit_number=0,
         store=storage.open("math"),
     )
     store = observer.store
     context = TrainingExperimentContext(
-        scenario="math", recipe="recipe", step=1, source_artifacts=ArtifactSelection({"weights": seed.revision})
+        scenario="math",
+        recipe="recipe",
+        commit_number=1,
+        source_artifacts=ArtifactSelection({"weights": seed.revision}),
     )
     correlation = observer.prepare(context, checkpoint_path=None)
     assert correlation == ({} if failing else {"experiment/run_id": "run-0"})
     first = training_record()
 
-    def operation_record(step: int, operation: str, snapshot: SnapshotRef) -> CommitRecord:
+    def operation_record(commit_number: int, operation: str, snapshot: SnapshotRef) -> CommitRecord:
         return CommitRecord(
             scenario="math",
-            step=step,
+            commit_number=commit_number,
             snapshot=snapshot,
             checkpoint=False,
             algorithm_state=None,
@@ -164,19 +167,19 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
 
     start = operation_record(2, "train_from", seed)
     try:
-        store.commit_step(expected_step=0, commit=first)
-        store.commit_step(expected_step=1, commit=start)
-        store.commit_step(expected_step=1, commit=start)
+        store.append_commit(expected_commit_number=0, commit=first)
+        store.append_commit(expected_commit_number=1, commit=start)
+        store.append_commit(expected_commit_number=1, commit=start)
         # An activation of another artifact moves what serves and leaves the training run and its start alone.
-        store.commit_step(expected_step=2, commit=operation_record(3, "activate", first.snapshot))
-        store.commit_step(expected_step=3, commit=training_record(4))
+        store.append_commit(expected_commit_number=2, commit=operation_record(3, "activate", first.snapshot))
+        store.append_commit(expected_commit_number=3, commit=training_record(4))
         # Retrying an earlier step after a later one must not move tracking backwards.
-        store.commit_step(expected_step=0, commit=first)
+        store.append_commit(expected_commit_number=0, commit=first)
         observer.reports.flush()
         assert len(store.history()) == 4
         assert [(event.context.run_segment, event.context.run_step) for event in tracker.events] == [(0, 0), (2, 0)]
         (event,) = tracker.starts
-        assert event.run_segment == 0 and event.step == 2
+        assert event.run_segment == 0 and event.commit_number == 2
         assert event.start_artifacts.components == {"weights": seed.revision}
         # The step after the new start names the training start as its source, not the active selection.
         assert tracker.events[-1].context.source_artifacts.components == {"weights": seed.revision}
@@ -196,7 +199,7 @@ def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps
         scenario="math",
         recipe="recipe",
         source_artifacts=ArtifactSelection({"weights": seed.revision}),
-        scenario_step=0,
+        commit_number=0,
         store=storage.open("math"),
     )
     store = observer.store
@@ -204,8 +207,8 @@ def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps
     held = training_record()
     rejected = replace(training_record(2), checkpoint=False, snapshot=seed, metrics={"selected": False})
     try:
-        store.commit_step(expected_step=0, commit=held)
-        store.commit_step(expected_step=1, commit=rejected)
+        store.append_commit(expected_commit_number=0, commit=held)
+        store.append_commit(expected_commit_number=1, commit=rejected)
         observer.reports.flush()
         assert [event.produced_artifacts.components for event in tracker.events] == [
             {"weights": held.snapshot.revision}
@@ -220,15 +223,15 @@ def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps
         scenario="math",
         recipe="recipe",
         source_artifacts=ArtifactSelection({"weights": seed.revision}),
-        scenario_step=2,
+        commit_number=2,
         store=inner,
     )
     store = resumed.store
     try:
-        store.commit_step(expected_step=1, commit=rejected)
+        store.append_commit(expected_commit_number=1, commit=rejected)
         resumed.reports.flush()
         assert len(tracker.events) == 2
-        store.commit_step(expected_step=2, commit=training_record(3))
+        store.append_commit(expected_commit_number=2, commit=training_record(3))
         resumed.reports.flush()
         assert tracker.events[-1].context.run_step == 2
     finally:
@@ -236,13 +239,13 @@ def test_an_inactive_artifact_moves_the_training_start_and_a_rejected_step_keeps
         storage.close()
 
 
-def training_event(step: int) -> TrainingExperimentEvent:
-    ref = training_record(step).snapshot
+def training_event(commit_number: int) -> TrainingExperimentEvent:
+    ref = training_record(commit_number).snapshot
     return TrainingExperimentEvent(
         context=TrainingExperimentContext(
             scenario="math",
             recipe="recipe",
-            step=step,
+            commit_number=commit_number,
             source_artifacts=ArtifactSelection({"weights": ref.revision}),
         ),
         produced_artifacts=ArtifactSelection({"weights": ref.revision}),
@@ -261,7 +264,7 @@ def test_the_report_queue_sends_in_order_on_its_own_thread_and_goes_on_after_a_f
     def record(event):
         threads.append(current_thread().name)
         tracker.events.append(event)
-        if event.context.step == 1:
+        if event.context.commit_number == 1:
             raise ConnectionError("tracker unavailable")
 
     monkeypatch.setattr(tracker, "record", record)
@@ -270,7 +273,7 @@ def test_the_report_queue_sends_in_order_on_its_own_thread_and_goes_on_after_a_f
         reports.put(training_event(1))
         reports.put(training_event(2))
         reports.flush()
-        assert [event.context.step for event in tracker.events] == [1, 2]
+        assert [event.context.commit_number for event in tracker.events] == [1, 2]
         assert threads == ["reef-experiment-reports"] * 2
     finally:
         reports.close()
@@ -285,7 +288,7 @@ def test_close_sends_the_queued_events_and_a_later_event_goes_at_once(monkeypatc
     entered, release = Event(), Event()
 
     def record(event):
-        if event.context.step == 1:
+        if event.context.commit_number == 1:
             entered.set()
             assert release.wait(10)
         tracker.events.append(event)
@@ -302,9 +305,9 @@ def test_close_sends_the_queued_events_and_a_later_event_goes_at_once(monkeypatc
         finally:
             release.set()
         closing.result(timeout=5)
-    assert [event.context.step for event in tracker.events] == [1, 2]
+    assert [event.context.commit_number for event in tracker.events] == [1, 2]
     reports.put(training_event(3))
-    assert [event.context.step for event in tracker.events] == [1, 2, 3]
+    assert [event.context.commit_number for event in tracker.events] == [1, 2, 3]
 
 
 def test_training_start_ids_stay_independent_across_components_and_recovery(tmp_path):
@@ -316,7 +319,7 @@ def test_training_start_ids_stay_independent_across_components_and_recovery(tmp_
         scenario="math",
         recipe="composite",
         source_artifacts=root,
-        scenario_step=0,
+        commit_number=0,
         store=storage.open("math"),
     )
     # A stored snapshot may carry other components' serving artifacts. They
@@ -341,8 +344,8 @@ def test_training_start_ids_stay_independent_across_components_and_recovery(tmp_
         ),
     )
     try:
-        observer.store.commit_step(expected_step=0, commit=weights)
-        observer.store.commit_step(expected_step=1, commit=harness)
+        observer.store.append_commit(expected_commit_number=0, commit=weights)
+        observer.store.append_commit(expected_commit_number=1, commit=harness)
         observer.reports.flush()
         assert tracker.events[1].context.source_artifacts.components == {
             "weights": "weights-trained",
@@ -356,7 +359,7 @@ def test_training_start_ids_stay_independent_across_components_and_recovery(tmp_
             scenario="math",
             recipe="composite",
             source_artifacts=root,
-            scenario_step=2,
+            commit_number=2,
             store=storage.open("math"),
         )
         try:

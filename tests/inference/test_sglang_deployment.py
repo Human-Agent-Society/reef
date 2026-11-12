@@ -7,8 +7,8 @@ import sys
 
 import pytest
 
-from reef.inference.sglang import deployment
 from reef.inference.sglang.executor import SGLangExecutor
+from reef.inference.sglang.service import SGLangInferenceService
 
 
 @pytest.mark.parametrize("executor", [None, "auto", "ray"])
@@ -27,7 +27,7 @@ def test_native_inference_factory_accepts_plain_input_without_starting_workers(m
         "executor": executor,
         "executor_options": {"custom": "value"},
     }
-    service = deployment.create_inference(options)
+    service = SGLangInferenceService.from_config(options)
     assert service.config.executor is SGLangExecutor
     assert service.config.engine_count == 2
     assert service.config.executor_options == {"custom": "value"}
@@ -38,7 +38,7 @@ def test_native_inference_factory_accepts_plain_input_without_starting_workers(m
 @pytest.mark.parametrize("executor", ["mp", "uni"])
 def test_native_inference_factory_rejects_non_native_executor_aliases(executor):
     with pytest.raises(ValueError, match="SGLang inference requires ray"):
-        deployment.create_inference(
+        SGLangInferenceService.from_config(
             {"model_path": "model", "num_gpus": 1, "gpus_per_engine": 1, "gpus_per_node": 1, "executor": executor}
         )
 
@@ -52,7 +52,7 @@ def test_native_inference_factory_rejects_non_native_executor_aliases(executor):
 )
 def test_native_factory_refuses_engines_that_do_not_fit_the_reservation(capacities, message):
     with pytest.raises(ValueError, match=message):
-        deployment.create_inference({"model_path": "model", **capacities})
+        SGLangInferenceService.from_config({"model_path": "model", **capacities})
 
 
 def test_native_factory_imports_and_builds_with_training_stack_blocked():
@@ -63,8 +63,8 @@ def test_native_factory_imports_and_builds_with_training_stack_blocked():
             """
 import sys
 sys.modules.update(dict.fromkeys(('slime', 'megatron', 'torch', 'reef.train.slime_backend')))
-from reef.inference.sglang.deployment import create_inference
-service = create_inference(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
+from reef.inference.sglang.service import SGLangInferenceService
+service = SGLangInferenceService.from_config(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
 assert service.config.options['disable_radix_cache'] is True
 service.close()
 """,

@@ -16,7 +16,7 @@ from tests.support.records import memory_records
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
 from reef.service.app import create_app
-from reef.storage.records import RecordConflict
+from reef.storage.records import RecordConflictError
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -100,5 +100,5 @@ def test_store_dedups_identical_content_across_timestamps() -> None:
     different = AgentRecord.create(
         scenario="s", request_type=RequestType.REPORT, payload={"score": 0.0}, agent_record_id="fixed"
     )
-    with pytest.raises(RecordConflict):
+    with pytest.raises(RecordConflictError):
         store.append_result(different)

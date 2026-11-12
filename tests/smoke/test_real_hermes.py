@@ -14,13 +14,11 @@ import json
 import os
 import subprocess
 import threading
-from collections.abc import Sequence
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
 
 import pytest
 from tests.support.harness_render import write_rendered
+from tests.support.openai_stub import MODEL, StubOpenAI
 
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
@@ -31,77 +29,11 @@ REAL_HERMES = os.environ.get("REEF_REAL_HERMES_BINARY", "")
 
 pytestmark = pytest.mark.skipif(not REAL_HERMES, reason="REEF_REAL_HERMES_BINARY does not name a real hermes binary")
 
-MODEL = "smoke-model"
 RULES_SENTENCE = "The reef smoke marker phrase is TIDEPOOL-STONE-41."
 
 
-class StubOpenAI(ThreadingHTTPServer):
-    """A canned /v1 endpoint that records every request it is sent. It asks for the ``tool_calls``, (tool name,
-    arguments) pairs, one per answer, before it replies READY."""
-
-    def __init__(self, tool_calls: Sequence[tuple[str, dict[str, str]]] = ()) -> None:
-        super().__init__(("127.0.0.1", 0), StubHandler)
-        self.requests: list[tuple[str, str | None, str]] = []
-        self.tool_calls = list(tool_calls)
-
-
-class StubHandler(BaseHTTPRequestHandler):
-    server: StubOpenAI
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass  # keep the harness's stderr out of pytest output
-
-    def do_POST(self) -> None:
-        body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
-        self.server.requests.append((self.path, self.headers.get("Authorization"), body))
-        if not self.path.endswith("/chat/completions"):
-            self.send_response(404)  # hermes probes the base URL as a local endpoint first
-            self.end_headers()
-            return
-        usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-        request = json.loads(body)
-        answered = sum(1 for message in request.get("messages", []) if message.get("role") == "tool")
-        if answered < len(self.server.tool_calls):
-            name, arguments = self.server.tool_calls[answered]
-            call = {"name": name, "arguments": json.dumps(arguments)}
-            tool_call = {"index": 0, "id": f"call-{answered}", "type": "function", "function": call}
-            delta: dict[str, Any] = {"role": "assistant", "tool_calls": [tool_call]}
-            finish = "tool_calls"
-        else:
-            delta = {"role": "assistant", "content": "READY"}
-            finish = "stop"
-        if request.get("stream"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.end_headers()
-            chunks = [
-                {"choices": [{"index": 0, "delta": delta}]},
-                {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": usage},
-            ]
-            for chunk in chunks:
-                event = {"id": "chatcmpl-smoke", "object": "chat.completion.chunk", "model": MODEL, **chunk}
-                self.wfile.write(b"data: " + json.dumps(event).encode("utf-8") + b"\n\n")
-            self.wfile.write(b"data: [DONE]\n\n")
-        else:
-            payload = {
-                "id": "chatcmpl-smoke",
-                "object": "chat.completion",
-                "model": MODEL,
-                "choices": [
-                    {"index": 0, "message": {"role": "assistant", "content": "READY"}, "finish_reason": "stop"}
-                ],
-                "usage": usage,
-            }
-            raw = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
-
-
 def test_real_hermes_run_renders_runs_and_cleans_up() -> None:
-    server = StubOpenAI()
+    server = StubOpenAI(lists_models=False, chat_completions_only=True)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("hermes")
     try:
@@ -167,7 +99,11 @@ def test_real_hermes_run_makes_no_background_review_call_after_ten_tool_calls() 
     """hermes reviews the skill library in a background agent after ten tool calls in a turn; the defaults turn that
     off, so a run makes only its own model calls and writes no skill into the tree. The tree has no rules, like
     a scenario's seed tree, so hermes writes its default SOUL.md, which is not residue."""
-    server = StubOpenAI(tool_calls=[("terminal", {"command": f"echo step-{step}"}) for step in range(10)])
+    server = StubOpenAI(
+        lists_models=False,
+        chat_completions_only=True,
+        tool_calls=[("terminal", {"command": f"echo step-{step}"}) for step in range(10)],
+    )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("hermes")
     try:
@@ -192,7 +128,7 @@ def test_real_hermes_run_makes_no_background_review_call_after_ten_tool_calls() 
 def test_real_hermes_run_that_loads_a_skill_leaves_no_residue() -> None:
     """A skill_view of a tree skill makes hermes count the load in skills/.usage.json under a lock file, with no
     config key to turn that off. Both are hermes's own state, so the run reports no residue."""
-    server = StubOpenAI(tool_calls=[("skill_view", {"name": "notes"})])
+    server = StubOpenAI(lists_models=False, chat_completions_only=True, tool_calls=[("skill_view", {"name": "notes"})])
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("hermes")
     try:

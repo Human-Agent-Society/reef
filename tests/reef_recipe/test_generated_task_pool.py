@@ -8,10 +8,10 @@ from pathlib import Path
 from typing import Any, Self
 
 import pytest
+from tests.reef_recipe.support import CommittingPipeline
 from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
-from reef.artifact import SnapshotRef
 from reef.core.job_data import JobOutcome
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
@@ -29,9 +29,7 @@ from reef.recipe.generated_tasks.pool import PoolReview, RetiredTask, TaskUse, p
 from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.results import rollout_results
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.storage.commits import CommitRecord
 from reef.storage.samples import stage_item_id
-from reef.storage.scenario import ScenarioStore
 from reef.storage.tasks import TaskStore
 from reef.train.pipeline import TrainingPipeline
 
@@ -96,36 +94,6 @@ class InlineWorker(BackgroundJobWorker):
 
     def close(self) -> None:
         self.stage = None
-
-
-class CommittingPipeline(TrainingPipeline):
-    """A pipeline whose ``acknowledge`` commits what the job data consumed, as the trainer's commit of a job's
-    submission does, and whose look for job data makes the samples first, as the samples service does."""
-
-    def __init__(self, context: PipelineContext, session: ScenarioStore, **stages: Any) -> None:
-        super().__init__(context, **stages)
-        self.session = session
-
-    def advance(self) -> None:
-        self.produce()
-        super().advance()
-
-    def acknowledge(self, data_id: str) -> frozenset[str]:
-        consumed = super().acknowledge(data_id)
-        step = len(self.session.history())
-        commit = CommitRecord(
-            scenario="tasks",
-            step=step + 1,
-            snapshot=SnapshotRef(f"release:{step + 1}", "base"),
-            checkpoint=True,
-            algorithm_state={},
-            high_water_sequence=step + 1,
-            high_water_offset=step + 1,
-            consumed_ids=consumed,
-            recorded_at=1000.0 + step,
-        )
-        self.session.commit_step(expected_step=step, commit=commit)
-        return consumed
 
 
 def pipeline(

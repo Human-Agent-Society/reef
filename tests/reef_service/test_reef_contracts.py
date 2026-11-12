@@ -4,7 +4,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +11,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
-from tests.support.runtime_stubs import StubInferenceRuntime, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, live_objects
 
 from reef.artifact import (
     Artifact,
@@ -32,10 +31,12 @@ from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.recipe import Recipe
 from reef.record2sample.service import SAMPLES_QUEUE
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import TrainingCommit
+from reef.train.trainer_builder import SpecTrainerBuilder
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -76,12 +77,9 @@ def weight_dispatcher(tmp_path, *, training: bool = False):
     """A dispatcher of weight scenarios that a stub runtime serves; ``training`` gives them a training component.
     The commit history is durable, so a commit's activation queues a serving request."""
     return Dispatcher(
-        (
-            WeightRecipe(**runtime_bindings(runtime=serving_runtime()))
-            if training
-            else WeightRecipe(runtime=serving_runtime())
-        ),
+        WeightRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(runtime=serving_runtime()) if training else LiveObjects(runtime=serving_runtime()),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -99,8 +97,9 @@ def serving_dispatcher(tmp_path) -> Dispatcher:
     """A dispatcher of the record-only recipe whose runtime serves the created scenario "chat"; a /v1 call answers
     only for a scenario that exists. A commit's activation queues a serving request."""
     dispatcher = Dispatcher(
-        Recipe(runtime=serving_runtime()),
+        Recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=serving_runtime()),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -205,37 +204,20 @@ def test_a_release_header_on_a_report_neither_selects_nor_binds_the_scenarios_st
 
 
 @pytest.mark.unit
-def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
+def test_the_dispatcher_builds_a_scenarios_trainers_from_the_served_recipe(tmp_path) -> None:
     selected: list[str] = []
 
-    @dataclass(frozen=True)
-    class RecordingRecipe(Recipe):
-        def build(
-            self,
-            scenario,
-            records,
-            *,
-            algorithm_state=None,
-            experiment_logger=None,
-            task_storage=None,
-            artifacts=None,
-            samples=None,
-            root=None,
-        ):
-            selected.append(self.name)
-            return super().build(
-                scenario,
-                records,
-                algorithm_state=algorithm_state,
-                experiment_logger=experiment_logger,
-                root=root,
-            )
+    class RecordingTrainers(SpecTrainerBuilder):
+        def build_trainers(self, specs, scenario, records, **arguments):
+            selected.append(specs.name)
+            return super().build_trainers(specs, scenario, records, **arguments)
 
     dispatcher = Dispatcher(
-        RecordingRecipe(name="tttd"),
+        Recipe(name="tttd"),
         InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
+        trainer_builder=RecordingTrainers(),
     )
 
     dispatcher.get_or_create_scenario("discovery")
@@ -275,7 +257,7 @@ def test_new_dispatcher_recovers_scenario_metadata_from_repository(tmp_path) -> 
 
     assert recovered.repository.start_artifact == created.repository.start_artifact
     assert recovered.repository.current_artifact == created.repository.checkpoint_artifact
-    assert recovered.scenario_step == 0
+    assert recovered.commit_number == 0
 
 
 @pytest.mark.unit
@@ -617,8 +599,9 @@ def test_published_candidate_is_used_after_inference_startup(tmp_path) -> None:
 
     repository_backend = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = Dispatcher(
-        Recipe(runtime=serving_runtime()),
+        Recipe(),
         repository_backend,
+        live=LiveObjects(runtime=serving_runtime()),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
     )
@@ -931,19 +914,19 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     dispatcher.registry.get("math").commit(TrainingCommit(state={"label": "no artifact"}))
     # A no-artifact commit advances the step (the trainer consumed records and
     # state) but does not move the serving head: there is no candidate to publish.
-    assert dispatcher.get_or_create_scenario("math").scenario_step == 1
+    assert dispatcher.get_or_create_scenario("math").commit_number == 1
     assert dispatcher.get_or_create_scenario("math").repository.require_current_artifact() == math_head
 
     for scenario in ("math", "code", "math", "code"):
-        version = dispatcher.get_or_create_scenario(scenario).scenario_step + 1
+        version = dispatcher.get_or_create_scenario(scenario).commit_number + 1
         candidate = tmp_path / f"{scenario}-{version}"
         candidate.mkdir()
         dispatcher.registry.get(scenario).commit(
             TrainingCommit(state={"version": version}, artifact=Artifact.local(candidate))
         )
 
-    assert dispatcher.get_or_create_scenario("math").scenario_step == 3
-    assert dispatcher.get_or_create_scenario("code").scenario_step == 2
+    assert dispatcher.get_or_create_scenario("math").commit_number == 3
+    assert dispatcher.get_or_create_scenario("code").commit_number == 2
 
 
 @pytest.mark.unit
@@ -960,7 +943,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
         coordination=memory_coordination(),
     )
     runtime = dispatcher.get_or_create_scenario("chat")
-    previous = (runtime.repository.current_artifact, runtime.repository.checkpoint_artifact, runtime.scenario_step)
+    previous = (runtime.repository.current_artifact, runtime.repository.checkpoint_artifact, runtime.commit_number)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
 
@@ -972,7 +955,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
     assert (
         runtime.repository.current_artifact,
         runtime.repository.checkpoint_artifact,
-        runtime.scenario_step,
+        runtime.commit_number,
     ) == previous
     assert list((tmp_path / "local").rglob("*")) == []
 
@@ -1097,7 +1080,7 @@ class HarnessRecipe(Recipe):
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "recipe",
-    [HarnessRecipe(runtime=serving_runtime()), WeightRecipe(runtime=serving_runtime())],
+    [HarnessRecipe(), WeightRecipe()],
     ids=["harness", "weights"],
 )
 def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_runs_as_a_tag(tmp_path, recipe) -> None:
@@ -1110,6 +1093,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=serving_runtime()),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -1206,7 +1190,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
 
     from reef.core import AgentRecord
     from reef.core.reports import ReportValidationError
-    from reef.storage.records import RecordConflict
+    from reef.storage.records import RecordConflictError
 
     with closing(
         build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
@@ -1214,7 +1198,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
         item = AgentRecord.create(scenario="math", request_type=RequestType.INFERENCE, payload={})
         dispatcher.accept_record(item)
         dispatcher.accept_record(item)
-        with pytest.raises(RecordConflict):
+        with pytest.raises(RecordConflictError):
             dispatcher.accept_record(replace(item, payload={"different": True}))
         with pytest.raises(ReportValidationError):
             dispatcher.accept_record(

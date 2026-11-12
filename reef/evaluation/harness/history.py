@@ -2,10 +2,10 @@
 
 The history is one directory::
 
-    candidates.jsonl   one CandidateRecord per tree, the first time a step proposes or evaluates it; a second
-                       line adds the method's summary and notes when a step proposes a tree it scored first
+    candidates.jsonl   one CandidateRecord per tree, the first time a job proposes or evaluates it; a second
+                       line adds the method's summary and notes when a job proposes a tree it scored first
     runs.jsonl     one RunRecord per run that completed
-    decisions.jsonl    one DecisionRecord per step whose candidate the evaluation decided
+    decisions.jsonl    one DecisionRecord per job whose candidate the evaluation decided
     trees/<tree>/      the files of each tree, written once
     runs/<id>/     the record of each run: its trajectory files and run.json
 
@@ -14,9 +14,9 @@ and evaluation context runs again only when the earlier one failed (the
 environment could not run it); the latest one that did not fail is the cached
 one.
 Methods read the history. Only the harness backend writes it, from the
-training thread. The history keeps what happened, also in a step that did not
-commit (its method, its evaluation or its commit failed): such a step runs
-again under the same number, so a record of the current step or a later one
+training thread. The history keeps what happened, also in a job that did not
+commit (its method, its evaluation or its commit failed): such a job runs
+again under the same number, so a record of the current job or a later one
 comes from an attempt that did not commit, and a method that counts what it
 tried skips it.
 Each JSONL file is append only. A crash can leave a torn last line: a reader
@@ -44,7 +44,7 @@ RUNS_FILE = "runs.jsonl"
 DECISIONS_FILE = "decisions.jsonl"
 TREES_DIR = "trees"
 RUNS_DIR = "runs"
-#: Where a candidate came from: the seed tree, a method's step, or an earlier snapshot.
+#: Where a candidate came from: the seed tree, a method's job, or an earlier snapshot.
 ORIGINS = ("seed", "method", "release")
 
 
@@ -53,11 +53,11 @@ class CandidateRecord:
     """One tree of the history.
 
     Values: ``tree`` is the tree's checksum (``HarnessTree.checksum``).
-    ``step`` ≥ 1 is the step that first proposed or evaluated it. ``origin``
+    ``step`` ≥ 1 is the number of the job that first proposed or evaluated it. ``origin``
     is one of ``ORIGINS``. ``parent`` is the checksum of the head tree it was
     proposed against; it is ``None`` exactly when ``origin`` is ``seed`` or
-    ``release``. ``summary`` and ``notes`` describe the tree when a step
-    proposed it: what the method said. Both are empty for a tree that no step
+    ``release``. ``summary`` and ``notes`` describe the tree when a job
+    proposed it: what the method said. Both are empty for a tree that no job
     proposed. The latest line of a tree in ``candidates.jsonl`` is its record.
     Purpose: the history makes one per tree; a method reads them to choose a
     parent or to show what was tried.
@@ -104,7 +104,7 @@ class RunRecord:
     (tree, task) pair. ``context`` is the key of the evaluation context
     (``EvaluationContext``: the served and the named models, the adapter, the
     binary, the run executor, the scorer and the run settings).
-    ``step`` ≥ 1 is the step that ran it. ``score`` is its ``RolloutScore``:
+    ``step`` ≥ 1 is the number of the job that ran it. ``score`` is its ``RolloutScore``:
     failed when the environment could not run it, and then ``failure`` says
     why; a run that completed may also carry a ``failure`` (no answer, or a
     nonzero exit). The other
@@ -193,14 +193,14 @@ class RunRecord:
 
 @dataclass(frozen=True)
 class DecisionRecord:
-    """The evaluation's decision on one step's candidate.
+    """The evaluation's decision on one job's candidate.
 
-    Values: ``step`` ≥ 1 is the step; ``tree`` is the candidate's checksum
-    and ``head`` the checksum of the head tree the step started from, which
-    a comparison measured it against; ``selected`` says whether the step
+    Values: ``step`` ≥ 1 is the job's number; ``tree`` is the candidate's checksum
+    and ``head`` the checksum of the head tree the job started from, which
+    a comparison measured it against; ``selected`` says whether the job
     kept it, as a new artifact that the activation rule may serve;
     ``policy`` names the publication policy and ``reason`` explains it.
-    Purpose: the backend writes one when it settles a step; a method reads
+    Purpose: the backend writes one when it settles a job; a method reads
     them to learn what happened to its earlier candidates.
     """
 
@@ -265,7 +265,7 @@ class History:
     is above the number of every run directory and record, so a new
     run never reuses the directory of one that a crash left behind.
     Purpose: the harness backend opens one per scenario and writes it during
-    each step; the evaluator reads and fills the score cache through it; a
+    each job; the evaluator reads and fills the score cache through it; a
     method opens one on ``Workspace.history_dir`` to read it.
     """
 
@@ -323,7 +323,7 @@ class History:
         return tuple(latest.get((task, repeat)) for task in tasks for repeat in range(repeats))
 
     def decision(self, step: int) -> DecisionRecord | None:
-        """The decision on the candidate of ``step``; ``None`` when the step decided no candidate."""
+        """The decision on the candidate of job ``step``; ``None`` when that job decided no candidate."""
         return next((record for record in reversed(self.decisions) if record.step == step), None)
 
     def run_dir(self, run_id: str) -> Path:
@@ -349,13 +349,13 @@ class History:
         """The record of ``tree``: the existing one, or a new one written with the tree's files.
 
         An existing record without a summary or notes takes the ``summary`` and ``notes`` given here, as a new
-        line, so a step that proposes a tree its method scored earlier keeps what the method said about it.
+        line, so a job that proposes a tree its method scored earlier keeps what the method said about it.
         """
         checksum = tree.checksum()
         existing = self.candidates.get(checksum)
         if existing is not None:
             if (summary or notes) and not existing.summary and not existing.notes:
-                # A tree the method scored before its step proposed it: the step adds what the method said.
+                # A tree the method scored before its job proposed it: the job adds what the method said.
                 described = replace(existing, summary=summary, notes=notes or {})
                 append_jsonl(self.root / CANDIDATES_FILE, described.to_json())
                 self.candidates[checksum] = described
@@ -390,7 +390,7 @@ class History:
         self.cache(record)
 
     def add_decision(self, record: DecisionRecord) -> None:
-        """Append the decision on one step's candidate."""
+        """Append the decision on one job's candidate."""
         append_jsonl(self.root / DECISIONS_FILE, asdict(record))
         self.decisions.append(record)
 

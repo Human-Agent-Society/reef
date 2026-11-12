@@ -28,7 +28,7 @@ from recipes.beta.autoenvscaling import (
     AutoEnvScalingGenerator,
     CandidateChecks,
     DesignedTask,
-    DesignerOutage,
+    DesignerOutageError,
     Repository,
     SessionSource,
     SourceError,
@@ -45,7 +45,7 @@ from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramExecutor,
     ProgramLaunchError,
-    ProgramTimeout,
+    ProgramTimeoutError,
     SandboxProgram,
 )
 from reef.harness.harbor.rollouts import TaskRollout
@@ -325,7 +325,7 @@ class StandInDesigner(VariantDesigner):
         if source.record_id in self.unusable:
             raise SourceError(f"the record {source.record_id} holds no session messages")
         if source.record_id in self.unreachable:
-            raise DesignerOutage("the agent could not run: the sandbox did not start")
+            raise DesignerOutageError("the agent could not run: the sandbox did not start")
         # Each generation and index writes distinct content, so no task duplicates another.
         port = 8000 + 100 * int(tags["generation"]) + int(tags["index"])
         task_dir = write_workspace_task(work_dir / "workspace" / "task", port, has_tmux=self.has_tmux)
@@ -371,6 +371,12 @@ def state_document(tmp_path: Path, key: str) -> Any:
     document = state(tmp_path).read(key)
     assert document is not None
     return json.loads(document)
+
+
+def parents(tmp_path: Path) -> list[dict[str, object]]:
+    """The parents that the adaptive generator keeps in its state."""
+    kept: list[dict[str, object]] = state_document(tmp_path, "adaptive")
+    return kept
 
 
 def run_tasks(generator: AutoEnvScalingGenerator, *training: tuple[float, ...]) -> tuple[GeneratedTaskResult, ...]:
@@ -585,7 +591,7 @@ class ScriptedClaudeSession(E2BSession):
         (root / "claude" / "statsig" / "cache").write_text("gates")
         (root / "home" / ".cache").mkdir(parents=True, exist_ok=True)
         if self.is_timeout:
-            raise ProgramTimeout("the agent ran out of time")
+            raise ProgramTimeoutError("the agent ran out of time")
         return ProcessOutcome(self.exit_code, self.stdout, self.stderr)
 
     def pull(self, root: Path, relative: str = "") -> None:

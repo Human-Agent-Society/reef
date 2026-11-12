@@ -115,9 +115,9 @@ def test_a_selection_that_fails_is_retried_then_fails():
     queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={SAMPLES_QUEUE: 2})
     worker = SamplesWorker(queue, Producers(error=RuntimeError("judge down")), worker_id="samples-1")
     item = request_selection(queue, "s", "weights", trigger="records")
-    assert worker.run_once() and queue.get(SAMPLES_QUEUE, item.id).state == "queued"
+    assert worker.run_once() and queue.read(SAMPLES_QUEUE, item.id).state == "queued"
     assert worker.run_once()
-    failed = queue.get(SAMPLES_QUEUE, item.id)
+    failed = queue.read(SAMPLES_QUEUE, item.id)
     assert failed.state == "failed" and "judge down" in failed.error
 
 
@@ -153,7 +153,7 @@ def test_a_selection_names_each_trigger_once_with_the_time_of_its_first_request(
     request_selection(queue, "s", "weights", trigger="records")
     again = request_selection(queue, "s", "weights", trigger="commit")
     assert again.id == first.id
-    triggers = selection_triggers(queue.get(SAMPLES_QUEUE, first.id))
+    triggers = selection_triggers(queue.read(SAMPLES_QUEUE, first.id))
     assert [trigger["name"] for trigger in triggers] == ["commit", "records"]
     assert again.metadata["trigger:commit"] == first.metadata["trigger:commit"]
     with pytest.raises(ValueError, match="trigger"):
@@ -189,9 +189,9 @@ def test_a_running_selection_writes_its_counts_so_far_for_its_attempt():
         def produce(self, scenario, component, selection):
             assert selection.task_id == item.id
             selection.progress(4, 0)
-            seen.append(queue.get(SAMPLES_QUEUE, item.id).metadata["progress"])
+            seen.append(queue.read(SAMPLES_QUEUE, item.id).metadata["progress"])
             selection.progress(5, 1)  # within the interval: no write
-            seen.append(queue.get(SAMPLES_QUEUE, item.id).metadata["progress"])
+            seen.append(queue.read(SAMPLES_QUEUE, item.id).metadata["progress"])
             return ProducedSamples(changed=True, background=False, records_read=5, samples_created=1)
 
     item = request_selection(queue, "s", "weights", trigger="records")
@@ -241,7 +241,7 @@ def test_a_background_job_that_a_selection_submits_asks_for_the_next_selection_w
         release.set()
         # The job's end makes the queued selection available now.
         deadline = time.monotonic() + 5
-        while queue.get(SAMPLES_QUEUE, fallback.id).available_at > fallback.created_at + 1:
+        while queue.read(SAMPLES_QUEUE, fallback.id).available_at > fallback.created_at + 1:
             assert time.monotonic() < deadline, "the job's end asked for no selection"
             time.sleep(0.01)
     finally:

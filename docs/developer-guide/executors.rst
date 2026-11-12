@@ -24,11 +24,13 @@ from their owning modules.
 .. code:: mermaid
 
    flowchart TD
-       T[Weight trainer / JobLoop] -- submit, status, cancel, import_start --> C[TrainingComponent]
+       T[Weight trainer / JobLoop] -- submit, status, cancel --> Q[Jobs queue and training checks]
+       Q -- job, check --> C[TrainingComponent in the training service]
        C --> W[Framework workers: Slime, Tinker]
-       C -- saved checkpoint --> T
+       C -- saved checkpoint --> Q
+       Q -- status --> T
        T -- evaluate, select --> E[Candidate evaluation]
-       T -- publish release --> R[Artifact repository]
+       T -- publish snapshot --> R[Artifact repository]
        R -- activate, restore --> I[InferenceRuntime]
        I --> S[Serving engines or provider]
 
@@ -39,13 +41,22 @@ A ``TrainingJob`` is one bounded job. It has a job ID, the backend name, the
 start, the job data directory that it trains (``data_dir``, and its URI
 ``data_uri``; see `The job data directory
 <processors.rst#the-job-data-directory>`__), the backend's parameters and the
-scenario whose trainer submits it. The start is the
-directory of the weights that the job starts from, or ``None`` for the base
-model. Reef reads none of the parameters. The component contract is:
+scenario whose trainer submits it. The start is one that the component made,
+such as a saved checkpoint's ``path``. Reef reads none of the parameters.
+
+Only the training service builds a training component. Control, and every
+other service, holds the backend's facts (`Facts without a component`_) and
+reaches the component through the work queue (`Control and the training
+service`_). The component contract is:
 
 ``submit(job)``
    Record the job durably and return; the job runs in the background.
-   Submitting a job ID again does nothing.
+   Submitting a job ID again does nothing. Raise ``ValueError`` for a job
+   that the component refuses.
+``check_job(job)``
+   Raise ``ValueError`` for a job that the component cannot train. The
+   training service calls it before control adds the job to the queue, so a
+   refused job consumes no sample.
 ``status(job_id)``
    Report ``running``, ``finished`` or ``failed``, the checkpoints saved so
    far and the backend's metrics. Raise ``KeyError`` for an unknown job. A
@@ -56,17 +67,24 @@ model. Reef reads none of the parameters. The component contract is:
    The parts of the scenario component that the checkpoint changed from
    ``start``, which the scenario's activation rule reads. The default is
    none; the harness component diffs the trees.
-``import_start(release)``
+``import_start(artifact_dir)``
    Copy a published snapshot into the component's own storage and return it
-   as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
-   when the component cannot start from those weights.
+   as a start. The training service calls it when it takes a job whose start
+   names a snapshot. Raise ``ValueError`` when the component cannot start
+   from those weights. The same snapshot must give the same start again.
+   ``root_start(root)`` does the same for a scenario's root; its default is
+   ``import_start`` of the root's files.
+``check_remote_artifact(names)``
+   Raise ``ValueError`` unless what ``names`` names resolves on the
+   component's service. ``names`` is what the facts' ``check_artifact``
+   returned for an import. A backend whose facts return ``None`` does not
+   implement it.
 ``start_jobs()``
    Start running jobs in this process and resume the jobs that have not
    ended. Only the training service's job worker calls it, also in a
-   one-process deployment. Control and the other services use the component
-   to describe jobs and import starts, and never run a job. A component that
-   keeps its job state on disk, such as Tinker's ``state_dir``, locks it
-   here, so one process at a time runs its jobs.
+   one-process deployment. A component that keeps its job state on disk,
+   such as Tinker's ``state_dir``, locks it here, so one process at a time
+   runs its jobs.
 ``name``
    The backend name that jobs carry.
 ``shares_scenarios``
@@ -100,12 +118,14 @@ through ``reef.train.jobs.JobLoop``:
    it, the trainer runs one job at a time.
 #. A failed job ends like a finished one. Reef consumed the records of its data
    when it submitted the job, so they do not train again.
-#. For a ``train-from``, Reef first imports the snapshot with
-   ``import_start`` and cancels the running job that continues the start
-   before. It then writes the ``train_from`` commit. The next job that names
-   no start begins from the imported snapshot. A component that cannot load a
-   snapshot refuses it, and Reef answers the request with HTTP 400. A
-   request's ``train_from`` takes its start with ``import_start`` too. Activating an artifact changes only what serves; the
+#. For a ``train-from``, control first asks the backend's facts
+   (``check_import_start``) and cancels the running job that continues the
+   start before. It then writes the ``train_from`` commit. The training start
+   is now the name of the snapshot. The training service imports the snapshot
+   with ``import_start`` when it takes the next job that names no start. A
+   backend that cannot load the snapshot refuses it in the facts, and Reef
+   answers the request with HTTP 400. A request's ``train_from`` names its
+   start the same way. Activating an artifact changes only what serves; the
    component never sees it.
 
 The trainer stores its state, a ``JobLoopState``, in the scenario's commit
@@ -130,6 +150,112 @@ job runs, including the jobs that a restart left. After a restart,
 
 `Tinker integration <../reference/python-api.rst#tinker-integration>`__ in
 the Python API describes the Tinker component.
+
+Facts without a component
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A service that does not run a training component still needs some answers
+about it, and a new scenario needs its root before any job runs. A backend
+states both from its configuration as a
+``reef.train.component.TrainingBackendFacts`` value.
+``TrainingComponentFactory.facts(config, model_path, environ)`` returns it from
+the config that ``__call__`` builds the component from, and
+``training_backend_facts(config, model_path=...)`` calls it. Every factory
+defines ``facts``; it is abstract. Stating the facts builds no component,
+starts nothing, calls no service and imports no training framework or SDK. The
+members are:
+
+``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs``
+   The component's members of the same names.
+``default_start_inputs``
+   The ``inputs`` of the default start: the model and the settings that
+   decide its content.
+``default_start()``
+   The content of a new scenario's root, as a ``DefaultStart``: a few small
+   text files and ``default_start_inputs``. It holds no weight file. A backend
+   that trains a base model writes a base root (``base.json``,
+   ``reef.artifact.base_root``) or a reference to the base model's commit
+   (``hf-reference.json``).
+``parameters_schema(kind)``
+   The JSON Schema of a job's parameters, or ``None``.
+``check_root_start(root)``
+   Raise ``ValueError`` for a scenario root that the component's
+   ``root_start`` refuses. It reads the root's files and writes nothing.
+``check_import_start(artifact_dir)``
+   Raise ``ValueError`` for a published snapshot that the component's
+   ``import_start`` refuses. It writes nothing. Control calls it for a
+   ``train-from`` and for a request's ``train_from``.
+``check_artifact(files)``
+   Check the files of an import against the layout of the backend's
+   snapshots, as far as the files and the settings decide. Return ``None``
+   when that is the whole check. Return a JSON object when something must
+   also resolve on the backend's service; the component's
+   ``check_remote_artifact`` gets it in the training service. The default
+   checks ``artifact_format`` and returns ``None``.
+
+The component holds a value of the same type and answers these members from
+it, so the facts and the component give the same answers. The Slime component
+also refuses to start when its options, as written, state other facts than
+Slime's parser read from them.
+
+Everything else stays a call to the component in the training service,
+because it needs the backend's service, its files or its framework:
+``root_start`` and ``import_start`` (they write a start),
+``check_remote_artifact``, ``check_task_jobs``, ``check_job``,
+``changed_parts`` and the jobs.
+
+The facts are the one place that states the default start. A
+``TrainingComponent`` has no ``default_start`` method, and Reef asks no
+component for a root. The component has two duties toward the start:
+
+- ``default_start_inputs`` returns the same inputs as the facts.
+- ``root_start(root)`` accepts a root that holds the files of
+  ``facts.default_start()`` and returns the start of a job at the base model.
+  The default ``root_start`` calls ``import_start`` on the root's files.
+
+The harness component has no factory; ``HarnessFacts.from_settings`` makes its
+facts from the ``HarnessSettings``.
+
+Control and the training service
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Control's trainers see ``reef.train.job_queue.JobQueueComponent``. It holds the
+facts and the work queue, and no component. A deployment in one process takes
+the same path: its dispatcher runs the training service's workers beside
+control.
+
+- Jobs. ``submit`` first adds a check to the ``training_checks`` queue and
+  raises ``JobCheckPendingError``. The trainer releases the job's data and
+  builds the job again at its next poll: the same data names the same job, so
+  the poll finds the job's check. No lock and no reservation is held while
+  the answer is missing, so ``train-from``, activation, imports and the
+  commits of running jobs go on, and no sample is consumed.
+  ``TrainingCheckWorker`` in the training service answers with ``check_job``.
+  A refusal comes back as the component's ``ValueError``, where control's own
+  check raised it before. A check that could not run, for example because the
+  training service cannot reach the artifact store, ends after its attempts
+  with an error that says so; a request's job then fails the request, and its
+  samples stay untrained. An accepted job enters the ``jobs`` queue, and
+  ``TrainingJobWorker`` runs it. The check worker answers no check that
+  control did not ask for within 10 minutes, and control's sweep deletes
+  ended checks with the other ended work.
+- Starts. ``JobLoopState.start`` and a job's start can name a snapshot of the
+  scenario (``SnapshotStart``): the root of a new trainer, or the artifact of
+  a ``train-from``. The training service reads the snapshot from the artifact
+  store and makes the component's start of it (``resolved_job``). The facts
+  refuse a bad root or artifact at once.
+- Imports. The layout of the weight component
+  (``TrainingArtifactLayout``) runs the facts' ``check_artifact``. When the
+  facts return names, control adds an ``artifact`` check and waits up to 60
+  seconds for the answer. A refusal is the same HTTP 400. Without an answer
+  the import ends with HTTP 503.
+- Checkpoints. The training worker records the parts that each checkpoint
+  changed (``changed_parts``) in the job's progress, so control reads them
+  from the queue. A job item that does not parse, such as one that an older
+  release wrote, is a failed job with that error; the trainer goes on.
+
+An outside backend gets all of this from its component and its facts. It adds
+nothing to control.
 
 Decide what a scenario trains
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -293,8 +419,10 @@ the start's weights and objective state. The Tinker component does the same.
 Every driver loads Slime's latest checkpoint. A job therefore starts from
 the component's latest checkpoint; the start of the startup weights names the
 untrained weights, until the first rollout is saved. A scenario trains on Slime
-only when its root snapshot holds the default start of the configured inputs
-(``root_start``). The component checks the start
+only when its root snapshot came from the default start of the configured
+inputs (``root_start``). The default start is a base root. The workers make the
+startup weights from the model when they start, so ``root_start`` reads the
+root's source and none of its files. The component checks the start
 when Reef submits the job, and the driver again when the job runs: a queued
 job whose start an earlier job moved past fails. ``import_start`` refuses
 every snapshot, so a Slime scenario refuses ``train-from``. Because the jobs
@@ -348,13 +476,13 @@ Built-in executors
    Existing multi-worker Ray placement context or explicit cluster/Ray actor
    options select ``ray``.
 
-A Python class or ``package.module:ExecutorSubclass`` / ``package.module.Class``
-selects a custom executor. CPU-only execution does not import Ray, Slime,
+A Python class or the reference ``package.module:ExecutorSubclass``
+selects a custom executor. The dot form ``package.module.Class`` is not accepted. CPU-only execution does not import Ray, Slime,
 Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
 
 .. code:: python
 
-   from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec, resolve
+   from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec, resolve
 
    class Counter:
        def __init__(self, rank):
@@ -366,7 +494,7 @@ Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
            return self.rank, self.value
 
    if __name__ == "__main__":  # required for spawn
-       executor = Executor.create(ExecutorConfig(
+       executor = Executor.create(ExecutorLaunch(
            workers=tuple(WorkerSpec(Counter, args=(rank,)) for rank in range(2)),
        ))  # auto -> mp
        try:
@@ -418,7 +546,7 @@ Implement ``_init_executor``, ``rpc``, ``collective_rpc``, ``check_health`` and
 gets a future back can subclass ``SubmittingExecutor`` instead. It then
 implements only ``_submit`` and ``_submit_all``. The bundled ``uni``, ``mp``
 and ``ray`` executors and ``DelegatingExecutor`` are built that way.
-Backend-specific launch configuration belongs in ``ExecutorConfig.options``.
+Backend-specific launch configuration belongs in ``ExecutorLaunch.options``.
 GPU tensors, optimizer state, NCCL collectives and KV transfers remain the
 model backend's responsibility. Changing executors does not resize a live
 topology or reshard checkpoints.
@@ -454,7 +582,7 @@ placement, rank-zero rendezvous and the memory-saver environment. RPC goes
 through the shared ``RayExecutor``.
 
 ``--reef-executor-backend`` in ``training.options`` selects another worker
-executor. The executor receives these values in ``ExecutorConfig.options``:
+executor. The executor receives these values in ``ExecutorLaunch.options``:
 
 - ``args``, the parsed Slime arguments.
 - The node and GPU counts, and the placement group ``pg``.
@@ -609,12 +737,12 @@ does not import or initialize Ray to probe it. It does not count GPUs, change
 TP/PP, or retry a failed backend with another backend. Resource requests must
 describe the intended scheduling. Standalone SGLang commands still control
 their own model parallelism. ``auto`` is also the default
-``ExecutorConfig.backend`` for the low-level worker factory. A service
+``ExecutorLaunch.backend`` for the low-level worker factory. A service
 controller is not a model rank. Slime's specialized Ray requirement and
 service resource reservations stay specific to each component; they do not
 implement vLLM's TP/PP launcher.
 
-Each selector accepts a built-in name, import path, inline ``backend/options``
+Each selector accepts a built-in name, a ``package.module:ClassName`` reference, an inline ``backend/options``
 object, or a named profile under ``executors``. Explicit Slime command-line
 flags override the corresponding role selection; they also accept profile
 names. Profiles for training and rollout carry domain-launcher options, not

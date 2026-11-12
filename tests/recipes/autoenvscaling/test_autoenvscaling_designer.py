@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     USER_REQUEST,
     NoChecks,
     ScriptedSession,
@@ -27,7 +27,7 @@ from tests.support.task_service_stubs import DOCUMENT
 
 from recipes.beta.autoenvscaling import (
     CandidateChecks,
-    DesignerOutage,
+    DesignerOutageError,
     PromptDesigner,
     Repository,
     SessionSource,
@@ -157,7 +157,7 @@ def test_only_a_model_failure_with_the_budget_unspent_is_an_outage(
     message = {"role": "assistant", "stopReason": stop_reason, "errorMessage": "usage limit reached"}
     session = ScriptedSession([{"type": "message", "message": message}])
     if is_outage:
-        with pytest.raises(DesignerOutage, match=f"ended with {stop_reason}: usage limit reached"):
+        with pytest.raises(DesignerOutageError, match=f"ended with {stop_reason}: usage limit reached"):
             run_agent(tmp_path, session, calls, threading.Event())
     else:
         run_agent(tmp_path, session, calls, threading.Event())
@@ -168,7 +168,7 @@ def test_only_a_model_failure_with_the_budget_unspent_is_an_outage(
 def test_a_stop_signal_closes_the_sandbox_and_ends_the_run(tmp_path: Path) -> None:
     stop = threading.Event()
     session = ScriptedSession([], stop=stop)
-    with pytest.raises(DesignerOutage, match="stopped"):
+    with pytest.raises(DesignerOutageError, match="stopped"):
         run_agent(tmp_path, session, ModelCalls(5), stop)
     assert session.is_closed.is_set()
 
@@ -259,7 +259,7 @@ def test_a_repository_snapshot_starts_no_gc_that_could_prune_it_while_it_is_copi
     [
         ("nowhere", "3f2c1ab", SourceError, "does not appear to be a git repository"),
         ("origin", "0123456789abcdef0123456789abcdef01234567", SourceError, "has no commit"),
-        ("network", "3f2c1ab", DesignerOutage, "Failed to connect"),
+        ("network", "3f2c1ab", DesignerOutageError, "Failed to connect"),
     ],
 )
 def test_a_missing_repository_or_commit_is_a_bad_source_and_a_network_failure_an_outage(

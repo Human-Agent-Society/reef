@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from reef.execution.executor import ExecutorConfig
+from reef.execution.executor import ExecutorLaunch
 from reef.execution.executor.config import executor_settings, role_executor_settings
 from reef.execution.executor.uniproc import UniProcExecutor
 from reef.service.deploy.config_utils import DeployConfigError
@@ -20,7 +20,7 @@ from reef.service.deploy.process import ProcessWorker, RayProcessWorker
 
 
 class RecordingExecutor(UniProcExecutor):
-    created: list[ExecutorConfig] = []
+    created: list[ExecutorLaunch] = []
 
     def _init_executor(self):
         type(self).created.append(self.config)
@@ -102,7 +102,7 @@ def test_startup_failure_rolls_back_healthy_dependencies(tmp_path):
     [
         ({"name": "../escape"}, "invalid service name"),
         ({"depends_on": ["missing"]}, "unknown dependency"),
-        ({"executor": "missing"}, "invalid class import path"),
+        ({"executor": "missing"}, "unknown executor backend 'missing'"),
         ({"executor": "ray", "cuda": "0"}, "num_gpus"),
         ({"executor": "ray", "env": {"CUDA_VISIBLE_DEVICES": "0"}}, "num_gpus"),
         ({"executor": "uni", "resources": {"num_gpus": 1}}, "reservations require"),

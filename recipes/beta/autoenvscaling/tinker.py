@@ -16,12 +16,11 @@ from typing import Any
 
 from reef.core.job_data import JobData, trajectory_groups
 from reef.core.trajectories import trajectory_reward
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import TrainingSignal
-from reef.train.tinker_backend.objectives import TinkerObjective, register_tinker_objective
+from reef.train.tinker_backend.objectives import TinkerObjective
+from reef.train.tinker_backend.schedule import next_steps
+from reef.train.tinker_backend.signals import TrainingSignal
 
 
-@register_tinker_objective
 class AutoEnvScalingTinkerObjective(TinkerObjective):
     """Train each rollout on its reward minus its task's mean reward, on Tinker's ``importance_sampling`` loss."""
 

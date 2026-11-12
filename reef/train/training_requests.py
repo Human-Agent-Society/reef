@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from reef.core.training_request import TrainingRequest
-from reef.storage.records import RecordConflict
-from reef.storage.work_queue import JsonValue, NewWork, WorkConflict, WorkItem, WorkQueue
+from reef.storage.records import RecordConflictError
+from reef.storage.work_queue import JsonValue, NewWork, WorkConflictError, WorkItem, WorkQueue
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class ScenarioTrainingRequests:
         """Queue the request ``request_id`` with the normalized ``payload``; return its item.
 
         The same ID with the same payload returns the item that exists; with another payload it raises
-        ``RecordConflict``, as a record with the same ID and other content does.
+        ``RecordConflictError``, as a record with the same ID and other content does.
         """
         work = NewWork(
             TRAINING_REQUESTS_QUEUE,
@@ -100,13 +100,13 @@ class ScenarioTrainingRequests:
             serial_key=self.scenario,
         )
         try:
-            return self.queue.add(work)
-        except WorkConflict as exc:
-            raise RecordConflict(f"request {request_id!r} already has different content") from exc
+            return self.queue.append(work)
+        except WorkConflictError as exc:
+            raise RecordConflictError(f"request {request_id!r} already has different content") from exc
 
     def get(self, request_id: str) -> WorkItem | None:
         """The item of the request ``request_id`` of this scenario, in any state, or None."""
-        item = self.queue.get(TRAINING_REQUESTS_QUEUE, request_id)
+        item = self.queue.read(TRAINING_REQUESTS_QUEUE, request_id)
         return item if item is not None and item.scenario == self.scenario else None
 
     def queued(self) -> tuple[TrainingRequest, ...]:
@@ -122,7 +122,7 @@ class ScenarioTrainingRequests:
     def mark_failed(self, request_id: str, error: str) -> None:
         """Store that the step of the request ``request_id`` failed with ``error``, so that a reload or a restart
         still consumes the request with a skip row."""
-        self.queue.set_metadata(TRAINING_REQUESTS_QUEUE, request_id, REQUEST_FAILURE_KEY, error)
+        self.queue.write_metadata(TRAINING_REQUESTS_QUEUE, request_id, REQUEST_FAILURE_KEY, error)
 
     def cancel(self, request_id: str) -> WorkItem | None:
         """Cancel the request ``request_id``: a queued request fails with ``REQUEST_CANCELLED_ERROR``

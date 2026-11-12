@@ -3,7 +3,9 @@
 Every route raises domain errors and lets this middleware translate them;
 routes never carry their own try/except tables. The table is ordered most
 specific first because several entries are subclasses of later ones
-(``ArtifactNotFound`` is an ``ArtifactError``, everything is a ``ReefError``).
+(``ArtifactNotFoundError`` is an ``ArtifactError``, everything is a ``ReefError``).
+An ``InternalError`` is not the caller's fault: the middleware does not
+translate it, so the route answers HTTP 500.
 """
 
 from __future__ import annotations
@@ -12,45 +14,46 @@ import logging
 
 from aiohttp import web
 
-from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
-from reef.artifact.snapshot_chain import SnapshotNotRestorable
+from reef.artifact.artifact import ArtifactConflictError, ArtifactError, ArtifactNotFoundError
+from reef.artifact.snapshot_chain import SnapshotNotRestorableError
 from reef.core.errors import (
-    CommitPending,
-    InferenceUnavailable,
+    CommitPendingError,
+    InferenceUnavailableError,
+    InternalError,
     ReefError,
-    ScenarioCapacityFull,
-    ScenarioLimitReached,
-    UnknownScenario,
+    ScenarioCapacityFullError,
+    ScenarioLimitReachedError,
+    ScenarioNotFoundError,
     UpstreamStatusError,
 )
-from reef.service.data import NoDataStore
-from reef.service.routed_inference import InferenceRetryTimeout
+from reef.service.data import DataStoreUnavailableError
+from reef.service.routed_inference import InferenceRetryTimeoutError
 from reef.service.routing import RoutingRequestError
 from reef.service.routing_preview import PREVIEW_BODY_LIMIT_BYTES
-from reef.storage.data import ItemConflict, ItemNotFound
-from reef.storage.evaluations import EvaluationStateConflict
-from reef.storage.records import RecordConflict
-from reef.storage.task_collections import CollectionNotFound
+from reef.storage.data import ItemConflictError, ItemNotFoundError
+from reef.storage.evaluations import EvaluationStateConflictError
+from reef.storage.records import RecordConflictError
+from reef.storage.task_collections import CollectionNotFoundError
 
 logger = logging.getLogger(__name__)
 
 #: Ordered most-specific first; the first isinstance match wins.
 ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
-    (ArtifactNotFound, web.HTTPNotFound),
-    (UnknownScenario, web.HTTPNotFound),
-    (ItemNotFound, web.HTTPNotFound),
-    (CollectionNotFound, web.HTTPNotFound),
-    (ItemConflict, web.HTTPConflict),
-    (NoDataStore, web.HTTPServiceUnavailable),
-    (ScenarioLimitReached, web.HTTPConflict),
-    (ScenarioCapacityFull, web.HTTPServiceUnavailable),
-    (ArtifactConflict, web.HTTPConflict),
-    (CommitPending, web.HTTPConflict),
-    (SnapshotNotRestorable, web.HTTPBadRequest),
-    (RecordConflict, web.HTTPConflict),
-    (EvaluationStateConflict, web.HTTPConflict),
-    (InferenceRetryTimeout, web.HTTPServiceUnavailable),
-    (InferenceUnavailable, web.HTTPServiceUnavailable),
+    (ArtifactNotFoundError, web.HTTPNotFound),
+    (ScenarioNotFoundError, web.HTTPNotFound),
+    (ItemNotFoundError, web.HTTPNotFound),
+    (CollectionNotFoundError, web.HTTPNotFound),
+    (ItemConflictError, web.HTTPConflict),
+    (DataStoreUnavailableError, web.HTTPServiceUnavailable),
+    (ScenarioLimitReachedError, web.HTTPConflict),
+    (ScenarioCapacityFullError, web.HTTPServiceUnavailable),
+    (ArtifactConflictError, web.HTTPConflict),
+    (CommitPendingError, web.HTTPConflict),
+    (SnapshotNotRestorableError, web.HTTPBadRequest),
+    (RecordConflictError, web.HTTPConflict),
+    (EvaluationStateConflictError, web.HTTPConflict),
+    (InferenceRetryTimeoutError, web.HTTPServiceUnavailable),
+    (InferenceUnavailableError, web.HTTPServiceUnavailable),
     (ArtifactError, web.HTTPServiceUnavailable),
     (ReefError, web.HTTPBadRequest),
     (ValueError, web.HTTPBadRequest),
@@ -99,7 +102,9 @@ def _translate_upstream(exc: UpstreamStatusError) -> web.HTTPError:
 
 
 def translate_error(exc: Exception) -> web.HTTPError | None:
-    """The HTTP error for a domain exception, or None when it is not mapped."""
+    """The HTTP error for a domain exception, or None when it is not mapped or is an ``InternalError``."""
+    if isinstance(exc, InternalError):
+        return None
     if isinstance(exc, RoutingRequestError):
         text = f"{exc.code}: {exc}"
         if exc.status == 413:
@@ -107,7 +112,7 @@ def translate_error(exc: Exception) -> web.HTTPError | None:
         return ROUTING_ERRORS[exc.status](text=text)
     if isinstance(exc, UpstreamStatusError):  # before the table: status is dynamic
         return _translate_upstream(exc)
-    if isinstance(exc, ScenarioCapacityFull):  # Before the table: the response tells when to retry.
+    if isinstance(exc, ScenarioCapacityFullError):  # Before the table: the response tells when to retry.
         return web.HTTPServiceUnavailable(text=str(exc), headers={"Retry-After": str(exc.retry_after_seconds)})
     for error_type, http_error in ERROR_STATUS_TABLE:
         if isinstance(exc, error_type):
@@ -120,6 +125,8 @@ async def translate_errors(request: web.Request, handler):
     """Translate domain errors into HTTP responses via ERROR_STATUS_TABLE."""
     try:
         return await handler(request)
+    except InternalError:
+        raise
     except tuple(error_type for error_type, _ in ERROR_STATUS_TABLE) as exc:
         translated = translate_error(exc)
         if translated is None:

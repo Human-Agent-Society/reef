@@ -1,4 +1,4 @@
-"""The named components one snapshot binds, stored as a manifest in release metadata.
+"""The named components one snapshot binds, stored as a manifest in snapshot metadata.
 
 A snapshot with one component keeps its files at the root. A snapshot with
 several components keeps each one in a directory named after it. The mapping
@@ -28,7 +28,7 @@ RECORDS_COMPONENT = "records"
 
 
 def validate_component_name(name: object) -> str:
-    """A component name doubles as its directory name in a multi-component release."""
+    """A component name doubles as its directory name in a multi-component snapshot."""
     if not isinstance(name, str) or not name:
         raise ValueError("component name must be a non-empty string")
     if name in (".", "..") or "/" in name or "\\" in name or name.startswith("."):
@@ -113,7 +113,7 @@ class SnapshotComponents:
     def relative_path(self, name: str) -> Path:
         """Where ``name``'s files live under the snapshot root."""
         if name not in self.entries:
-            raise KeyError(f"release binds no component {name!r}")
+            raise KeyError(f"snapshot binds no component {name!r}")
         return Path(".") if self.single else Path(name)
 
     def to_dict(self) -> dict[str, Any]:
@@ -144,7 +144,7 @@ class SnapshotComponents:
 
 
 def snapshot_components(metadata: Mapping[str, object] | None) -> SnapshotComponents | None:
-    """The manifest carried by release metadata, or ``None`` for a snapshot published without one."""
+    """The manifest carried by snapshot metadata, or ``None`` for a snapshot published without one."""
     if metadata is None:
         return None
     raw = metadata.get(COMPONENTS_METADATA_KEY)
