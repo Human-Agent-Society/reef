@@ -62,21 +62,29 @@ for you. When the manifest names no image, as the example does, the first
 labels it, and tags it `reef-semantic-router:<commit prefix>-<recipe>`. Later
 starts reuse that image; no Git checkout is needed.
 
-The first build needs network access to GitHub, Docker Hub and the package
-registries the upstream Dockerfile uses (Debian, PyPI, crates.io, Go modules
-and Hugging Face), plenty of disk space, and can take a long time;
-`reef.routing_deployment.image_build_timeout_seconds` (default 3600) bounds
-it. Its progress goes to `semantic-router-build.log` in the deployment's state
-directory, `${XDG_STATE_HOME:-~/.local/state}/reef/routing/<deployment_id>/`,
-readable only by you; treat the log as private, since Docker can report proxy
-or registry details there. Ctrl-C ends the build command and its process group;
-Docker may still keep or finish build cache, which Reef does not remove. The
-source commit is pinned,
-but the upstream build uses mutable base image tags and resolves system and
-Python packages when it runs, so two cold builds are not bit-identical, and a
-later cold build can fail where an earlier one passed. Reef refuses a cached
-image whose labels name another revision or recipe; remove it with
-`docker image rm` and start again.
+The first build has these requirements and limits:
+
+- It needs network access to GitHub, Docker Hub and the package registries the
+  upstream Dockerfile uses (Debian, PyPI, crates.io, Go modules and Hugging
+  Face). It also needs plenty of free disk space.
+- It can take a long time.
+  `reef.routing_deployment.image_build_timeout_seconds` (default 3600) bounds
+  it.
+- Its progress goes to `semantic-router-build.log` in the deployment's state
+  directory, `${XDG_STATE_HOME:-~/.local/state}/reef/routing/<deployment_id>/`.
+  Only you can read the log. Treat it as private: Docker can report proxy or
+  registry details there.
+- Ctrl-C ends the build command and its process group. Docker may still keep or
+  finish build cache, which Reef does not remove.
+- The source commit is pinned, but the upstream build uses mutable base image
+  tags and resolves system and Python packages when it runs. Two cold builds
+  are therefore not bit-identical, and a later cold build can fail where an
+  earlier one passed.
+
+Reef refuses a cached image whose labels name another revision or recipe;
+remove it with `docker image rm` and start again. Reef removes no image itself.
+After an upgrade to a Reef release that pins another commit, remove the old
+`reef-semantic-router` image when no deployment uses it.
 
 To run an image you built or pulled yourself, for example on a host without
 network access, name it in the manifest's `deployment.semantic_router_image`,

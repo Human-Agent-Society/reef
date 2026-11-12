@@ -107,7 +107,7 @@ The manifest (``schema_version: 2``) has three parts:
 * ``deployment`` may name the Semantic Router image (``semantic_router_image``)
   by repository digest (``repository@sha256:<hex>``) or local image ID
   (``sha256:<hex>``). Without it, a managed deployment builds the pinned image
-  (`Managed routing lifecycle`_). Optional ``domain_classifier`` names a local pretrained domain
+  (`Semantic Router image`_). Optional ``domain_classifier`` names a local pretrained domain
   classifier: ``model_directory`` (an absolute path without symlinks),
   ``threshold`` (a number from 0 to 1) and ``files``, the ``sha256:`` digest
   of each of exactly ``config.json``, ``tokenizer.json``, ``model.safetensors``
@@ -131,34 +131,8 @@ Managed routing lifecycle
 Setting ``reef.routing_manifest`` makes ``reef serve`` own the SR container
 and a routed Reef child; there is no separately launched mode. This requires
 Linux, a local Docker daemon with Compose, and the local ``uni`` service
-executor. External model services remain independently managed.
-
-When the manifest names no image, startup uses the image that Reef builds from
-the SR commit pinned by this release: it reuses the image tagged
-``reef-semantic-router:<commit prefix>-<recipe>`` when its labels name that
-commit and Reef's build recipe, and refuses one with other labels. Otherwise
-it builds the image with ``docker buildx build`` directly from the commit on
-GitHub, with no Git checkout and no router credentials, bounded by
-``image_build_timeout_seconds``. The first build needs network access and
-can take long; its plain progress goes to the private
-``semantic-router-build.log`` in the deployment's registry directory.
-SIGTERM or Ctrl-C ends the build command and its process group before Reef
-creates the generation's SR container; model containers, BuildKit and
-resources of an earlier generation may already exist. Docker may still keep or
-finish build cache, which Reef does not remove. The source commit is
-pinned, but the upstream build's base images and packages are resolved when it
-runs, so cold builds are not bit-reproducible. The resolved image ID is frozen
-in the generation: the ``prepared`` lifecycle event reports it with the
-generation's ``snapshot_version``, policy updates keep it, and recovery restarts
-it without rebuilding. Startup reads the manifest once, so an edit during a
-build reaches the deployment only as a later policy update. A manifest that
-names an image skips the automatic cache lookup and build; that image is still
-inspected as below. Before starting or recreating the container, Reef checks that
-the image's ``org.opencontainers.image.revision`` label matches the pinned
-commit. A missing or different label prevents container creation. This checks
-declared source metadata, not the binaries themselves. See the
-`Semantic Router image <../../tutorials/semantic-router/README.md#1-the-semantic-router-image>`__
-section of the tutorial.
+executor. External model services remain independently managed. Reef builds the
+SR image when the manifest names none; see `Semantic Router image`_.
 
 .. code-block:: yaml
 
@@ -317,6 +291,62 @@ was interrupted, its outstanding operation ID blocks the next start. Cleanup
 preserves this marker until the operator establishes that the daemon operation
 has finished and explicitly acknowledges it. See the tutorial for status,
 cleanup and configuration replacement commands.
+
+Semantic Router image
+^^^^^^^^^^^^^^^^^^^^^
+
+``deployment.semantic_router_image`` is optional for a managed deployment.
+
+* **The manifest names no image.** Startup uses the image that Reef builds from
+  the SR commit pinned by this release. Reef tags the image
+  ``reef-semantic-router:<commit prefix>-<recipe>`` and later starts reuse it.
+* **The manifest names an image.** Reef runs that image. It does not look for a
+  built image and does not build one.
+
+In both cases, Reef checks the image before it starts or recreates the
+container. The image's ``org.opencontainers.image.revision`` label must match
+the pinned commit. A missing or different label prevents container creation.
+This checks declared source metadata, not the binaries themselves.
+
+**The automatic build.** Reef builds the image only when no image has the tag.
+The build has these properties:
+
+* It runs ``docker buildx build`` directly from the commit on GitHub. It needs
+  Docker Buildx and network access, and no Git checkout. It receives no router
+  credentials.
+* It can take long. ``image_build_timeout_seconds`` bounds it. The Reef HTTP
+  port is not open until the image is ready.
+* Its progress goes to the private file ``semantic-router-build.log`` in the
+  deployment's registry directory.
+* The source commit is pinned, but the upstream build resolves its base images
+  and packages when it runs. Two builds of the same commit can therefore
+  produce different images.
+* Reef refuses an image that has the tag but other revision or build recipe
+  labels. Remove that image with ``docker image rm`` and start again.
+* Reef removes no image and no build cache. A later Reef release that pins
+  another commit builds an image with another tag; remove the old image when no
+  deployment uses it.
+
+**Stopping a build.** SIGTERM or Ctrl-C ends the build command and its process
+group before Reef creates the generation's SR container. Model containers,
+BuildKit and the resources of an earlier generation may still exist. Docker may
+keep or finish build cache.
+
+**The image of a generation.** Startup reads the manifest once and freezes the
+image for the generation. An edit during a build reaches the deployment only as
+a later policy update. Policy updates keep the image, and recovery restarts it
+without a build. The ``prepared`` lifecycle event reports the image with the
+generation's ``snapshot_version``.
+
+The ``snapshot_version`` covers the image. When the manifest names no image, the
+version therefore depends on the image that this host built: the same manifest
+gets another version on another host, or after the image is built again.
+``python -m reef.service.deploy.routing.cli validate`` prints
+``"snapshot_version": null`` for such a manifest. Name an image in the manifest
+when hosts with the same Reef release and settings must get the same version.
+
+See the `Semantic Router image <../../tutorials/semantic-router/README.md#1-the-semantic-router-image>`__
+section of the tutorial for an example.
 
 External router lifecycle
 ^^^^^^^^^^^^^^^^^^^^^^^^^

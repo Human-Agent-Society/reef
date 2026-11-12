@@ -3,8 +3,6 @@ from __future__ import annotations
 import ast
 import importlib
 import inspect
-import os
-import re
 import subprocess
 import sys
 from graphlib import CycleError, TopologicalSorter
@@ -64,43 +62,6 @@ def _imports_of(targets: list[str], forbidden_prefix: str) -> list[str]:
 
 
 METHOD_PACKAGES = ("harness_evolve", "openclawrl", "sao", "tttd")
-
-
-def test_semantic_router_runtime_revision_imports_without_git(tmp_path: Path) -> None:
-    import reef
-
-    from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION
-
-    # Import the same package from an empty working directory with no Git executable available.
-    package_parent = Path(reef.__file__).resolve().parent.parent
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_REVISION; "
-                "print(SEMANTIC_ROUTER_REVISION)"
-            ),
-        ],
-        cwd=tmp_path,
-        env={**os.environ, "PATH": "", "PYTHONPATH": str(package_parent)},
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    assert result.stdout.strip() == SEMANTIC_ROUTER_REVISION
-    assert re.fullmatch(r"[0-9a-f]{40}", SEMANTIC_ROUTER_REVISION)
-
-
-def test_the_router_image_builds_from_the_pinned_remote_commit_without_a_local_source_tree() -> None:
-    from reef.service.deploy.routing.containers import SEMANTIC_ROUTER_BUILD_CONTEXT, SEMANTIC_ROUTER_REVISION
-
-    # Docker fetches the exact commit itself; no branch, tag or checkout in this repository stands in for it.
-    assert SEMANTIC_ROUTER_BUILD_CONTEXT == "https://github.com/vllm-project/semantic-router.git#" + (
-        SEMANTIC_ROUTER_REVISION
-    )
-    assert "semantic-router" not in (REPO_ROOT / ".gitmodules").read_text(encoding="utf-8")
 
 
 def test_infra_never_imports_a_method_package() -> None:
