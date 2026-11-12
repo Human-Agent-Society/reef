@@ -24,6 +24,8 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any
 
+from reef.core.errors import ReefError
+
 
 class Format(StrEnum):
     """What Reef checks a part's file as, and which render step processes it.
@@ -64,7 +66,7 @@ EVOLVE_KEYS = frozenset({"renders", "format", "holds"})
 MERGE_MODES = ("file", "lines")
 
 
-class TreeLayoutError(ValueError):
+class TreeLayoutError(ReefError, ValueError):
     """An adapter's ``parts`` section is missing, malformed, or declares parts that conflict."""
 
 

@@ -552,11 +552,13 @@ def test_execution_jobs_depend_only_on_processes_and_lifecycle() -> None:
     )
 
 
-def test_processes_depend_only_on_the_standard_library_and_lifecycle() -> None:
+def test_processes_depend_only_on_the_standard_library_lifecycle_and_the_base_error() -> None:
     tree = ast.parse((REPO_ROOT / "reef/execution/processes.py").read_text(encoding="utf-8"))
     imports = _imported_modules(tree, package="reef.execution")
     assert all(
-        target.split(".")[0] in sys.stdlib_module_names or target.startswith("reef.execution.lifecycle.")
+        target.split(".")[0] in sys.stdlib_module_names
+        or target.startswith("reef.execution.lifecycle.")
+        or target == "reef.core.errors.InternalError"
         for target in imports
     )
     tree = ast.parse((REPO_ROOT / "reef/execution/lifecycle.py").read_text(encoding="utf-8"))

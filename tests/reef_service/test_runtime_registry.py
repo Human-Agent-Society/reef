@@ -11,7 +11,7 @@ from reef.core.errors import RuntimeConfigError
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
-from reef.inference.registry import RuntimeRegistry
+from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
 from reef.recipe.registry import build_named_recipe
 from reef.service.app import create_app
@@ -41,12 +41,14 @@ def test_runtime_repository_rejects_unknown_recipe_runtime() -> None:
 def test_runtime_repository_preserves_optional_recipe_context() -> None:
     contexts = []
 
-    def factory(config, model_path, recipe_config, environ):
-        del config, environ
-        contexts.append(recipe_config)
-        return InferenceProxyRuntime(model_path=model_path, base_url="http://provider")
+    class CaptureFactory(RuntimeFactory):
+        kind = "capture"
 
-    repository = RuntimeRegistry({"capture": factory})
+        def __call__(self, config, model_path, recipe_config, environ):
+            contexts.append(recipe_config)
+            return InferenceProxyRuntime(model_path=model_path, base_url="http://provider")
+
+    repository = RuntimeRegistry({"capture": CaptureFactory()})
     repository.build({"type": "capture"}, model_path="model", environ={})
     configured = {"data": {"temperature": 0.5}}
     repository.build({"type": "capture"}, model_path="model", recipe_config=configured, environ={})

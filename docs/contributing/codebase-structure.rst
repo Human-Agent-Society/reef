@@ -180,7 +180,8 @@ package's own submodules and third-party libraries):
 
 ``execution/lifecycle.py`` defines the shared ``Execution`` interface using
 only the standard library. ``execution/processes.py`` adds local process
-ownership and depends only on that interface and the standard library.
+ownership and depends only on that interface, the base error ``reef.core.errors.InternalError`` and the standard
+library.
 ``execution/jobs.py`` depends only on these two modules and the standard library. Sandbox executors and generator checks also use
 ``execution/processes.py`` for local child ownership. The shared worker must not import
 ``execution.sandbox`` or its providers and executor adapters.

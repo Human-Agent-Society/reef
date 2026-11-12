@@ -5,7 +5,7 @@ A loss family is a :class:`~reef.train.slime_backend.algorithm.SlimeAlgorithm`. 
 its family beside its objective, so the import of the objective's module registers the family too; the package's
 public half registers only the objective, by reference (``reef.train.slime_backend.objectives``). The built-in
 families are known by reference from the start. A family is also named as a dotted ``"package.module:SPEC"``
-reference wherever a loss family is named, where ``SPEC`` is a family class or instance.
+reference wherever a loss family is named, where ``SPEC`` is a family class with a zero-argument constructor.
 
 A worker process starts without the driver's registrations. The driver therefore stamps the family's reference on
 ``args.loss_family_ref`` (:func:`loss_family_reference`), and the worker imports it
@@ -19,10 +19,12 @@ import importlib
 from argparse import Namespace
 from typing import overload
 
+from reef.core.errors import InternalError
+from reef.core.plugins import PluginConfigError, import_plugin_class
 from reef.train.slime_backend.algorithm import WORKER_HOOKS, SlimeAlgorithm
 
 
-class UnknownLossFamilyError(RuntimeError):
+class UnknownLossFamilyError(InternalError, RuntimeError):
     """Raised when the driver is asked to boot an unsupported loss family."""
 
 
@@ -102,9 +104,10 @@ def loss_family_reference(loss_family: str) -> str | None:
 def resolve_loss_family(loss_family: str) -> SlimeAlgorithm:
     """The family of a registered name or of a dotted ``"package.module:SPEC"`` reference.
 
-    A reference is imported at its first resolution, and its family registers under its ``loss_family`` name with
-    that reference. ``UnknownLossFamilyError``: the name is unknown, the reference is malformed or does not
-    import, it names no ``SlimeAlgorithm``, or its family name holds another family.
+    A reference is imported at its first resolution (``reef.core.plugins.import_plugin_class``), and its family
+    registers under its ``loss_family`` name with that reference. ``UnknownLossFamilyError``: the name is unknown,
+    the reference is malformed or does not import, it names no concrete ``SlimeAlgorithm`` class, or its family
+    name holds another family.
     """
     spec = LOSS_FAMILIES.get(loss_family)
     if spec is not None:
@@ -118,21 +121,19 @@ def resolve_loss_family(loss_family: str) -> SlimeAlgorithm:
                 f"that its objective names, or is named as a dotted 'package.module:SPEC' reference."
             )
         reference = loss_family
-    module_name, _, attribute = reference.partition(":")
-    if not module_name or not attribute:
-        raise UnknownLossFamilyError(f"dotted loss family {reference!r} must be 'package.module:SPEC'")
     try:
-        candidate = getattr(importlib.import_module(module_name), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise UnknownLossFamilyError(f"cannot import loss family {reference!r}: {exc}") from exc
-    if isinstance(candidate, type) and issubclass(candidate, SlimeAlgorithm):
-        # The import of a decorated class already registered its instance. Use that one.
-        registered = LOSS_FAMILIES.get(candidate.loss_family)
-        candidate = registered if isinstance(registered, candidate) else candidate()
-    if not isinstance(candidate, SlimeAlgorithm):
-        raise UnknownLossFamilyError(
-            f"loss family {reference!r} is not a SlimeAlgorithm (got {type(candidate).__name__})"
+        family_class = import_plugin_class(
+            reference,
+            SlimeAlgorithm,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+            setting="loss family",
         )
+    except PluginConfigError as exc:
+        raise UnknownLossFamilyError(str(exc)) from exc
+    candidate = family_class()
+    # The import of a decorated class already registered its instance. Use that one.
+    registered = LOSS_FAMILIES.get(candidate.loss_family)
+    if type(registered) is family_class:
+        candidate = registered
     name = candidate.loss_family
     if LOSS_FAMILIES.get(name) is not candidate:
         if name in LOSS_FAMILIES or LOSS_FAMILY_REFERENCES.get(name, reference) != reference:

@@ -10,6 +10,7 @@ from tests.support.trajectories import policy_trajectory
 
 from recipes.tttd.objective import adaptive_entropic_advantages
 from recipes.tttd.tinker import TttdTinkerLoss, TttdTinkerObjective
+from reef.core.plugins import PluginConfigError
 from reef.train.tinker_backend.loss_families import (
     LOSS_FAMILIES,
     register_loss_family,
@@ -38,9 +39,6 @@ class ExampleObjective(TinkerObjective):
         return TrainingSignal("skip", {**state, "skipped": True}, metrics={"reason": "no signal"})
 
 
-OBJECTIVE_INSTANCE = ExampleObjective()
-
-
 class MisnamedObjective(ExampleObjective):
     name = "test-another-name"
 
@@ -54,7 +52,7 @@ def no_objectives(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("reef.train.tinker_backend.objectives.OBJECTIVES", {})
 
 
-def test_objective_resolution_accepts_names_classes_and_instances(no_objectives):
+def test_objective_resolution_accepts_names_and_class_references(no_objectives):
     objective = resolve_objective(f"{__name__}:ExampleObjective")
     assert resolve_objective(objective.name) is objective
     assert resolve_objective(f"{__name__}:ExampleObjective") is objective
@@ -62,7 +60,7 @@ def test_objective_resolution_accepts_names_classes_and_instances(no_objectives)
     with pytest.raises(ValueError, match="already registered"):
         register_objective(objective.name, ExampleObjective())
     unregister_objective(objective.name)
-    assert resolve_objective(f"{__name__}:OBJECTIVE_INSTANCE") is OBJECTIVE_INSTANCE
+    assert resolve_objective(f"{__name__}:ExampleObjective") is not objective
 
 
 def test_a_registered_reference_is_imported_at_its_first_resolution(no_objectives):
@@ -73,7 +71,7 @@ def test_a_registered_reference_is_imported_at_its_first_resolution(no_objective
     register_objective(ExampleObjective.name, reference)
     assert {ExampleObjective.name: reference} == objectives.OBJECTIVES
     with pytest.raises(ValueError, match="already registered"):
-        register_objective(ExampleObjective.name, f"{__name__}:OBJECTIVE_INSTANCE")
+        register_objective(ExampleObjective.name, f"{__name__}:MisnamedObjective")
 
     objective = resolve_objective(ExampleObjective.name)
     assert isinstance(objective, ExampleObjective)
@@ -88,20 +86,28 @@ def test_a_registered_reference_is_imported_at_its_first_resolution(no_objective
             resolve_objective("test-misnamed")
 
 
-@pytest.mark.parametrize("reference", ["plain_preparation", "MissingObjective", "TrainingSignal"])
-def test_dotted_objective_rejects_functions_missing_attributes_and_unrelated_classes(reference):
-    with pytest.raises(ValueError, match="TinkerObjective class or instance"):
+@pytest.mark.parametrize(
+    ("reference", "message"),
+    [
+        ("plain_preparation", "must name a class that inherits TinkerObjective"),
+        ("TrainingSignal", "must name a class that inherits TinkerObjective"),
+        ("MissingObjective", "cannot import Tinker objective"),
+        ("TinkerObjective", "names an abstract class"),
+    ],
+)
+def test_dotted_objective_rejects_functions_missing_attributes_and_other_classes(reference, message):
+    with pytest.raises(PluginConfigError, match=message):
         resolve_objective(f"{__name__}:{reference}")
 
 
 def test_objective_resolution_reports_unknown_and_malformed_references():
     with pytest.raises(ValueError, match=r"unknown Tinker objective.*available objectives"):
         resolve_objective("missing")
-    with pytest.raises(ValueError, match=r"must be 'package\.module:Objective'"):
+    with pytest.raises(PluginConfigError, match=r"must be 'package\.module:ClassName'"):
         resolve_objective(":ExampleObjective")
     with pytest.raises(ValueError, match=r"must be 'package\.module:Objective'"):
         register_objective("malformed", "no_colon")
-    with pytest.raises(ValueError, match="cannot import objective"):
+    with pytest.raises(PluginConfigError, match="cannot import Tinker objective"):
         resolve_objective("no_such_package.module:Objective")
     with pytest.raises(KeyError, match="not registered"):
         unregister_objective("missing")

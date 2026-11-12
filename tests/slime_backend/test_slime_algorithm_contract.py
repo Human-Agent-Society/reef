@@ -118,34 +118,49 @@ def test_a_family_registers_with_its_class_reference_or_without_one() -> None:
 
 @pytest.mark.unit
 def test_dotted_loss_family_reference_resolves_and_registers_the_spec(monkeypatch) -> None:
+    class DottedAlgorithm(_TestAlgorithm):
+        def __init__(self):
+            super().__init__(loss_family="toy_dotted")
+
     module = ModuleType("toy_loss_pkg")
-    module.ALGORITHM = _TestAlgorithm(loss_family="toy_dotted")  # type: ignore[attr-defined]
+    module.DottedAlgorithm = DottedAlgorithm  # type: ignore[attr-defined]
     module.NOT_A_SPEC = object()  # type: ignore[attr-defined]
+    module.AN_INSTANCE = DottedAlgorithm()  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "toy_loss_pkg", module)
     try:
-        spec = resolve_loss_family("toy_loss_pkg:ALGORITHM")
-        assert spec is module.ALGORITHM
-        # Import-registration: the wire payload names the canonical family.
+        spec = resolve_loss_family("toy_loss_pkg:DottedAlgorithm")
+        assert isinstance(spec, DottedAlgorithm)
+        assert resolve_loss_family("toy_loss_pkg:DottedAlgorithm") is spec
+        # Import-registration: the wire payload names the canonical family, and a worker imports the reference.
         assert resolve_loss_family("toy_dotted") is spec
+        assert loss_family_reference("toy_dotted") == "toy_loss_pkg:DottedAlgorithm"
     finally:
         unregister_loss_family("toy_dotted")
 
     with pytest.raises(UnknownLossFamilyError, match="cannot import loss family"):
         resolve_loss_family("no.such.module:ALGORITHM")
-    with pytest.raises(UnknownLossFamilyError, match="not a SlimeAlgorithm"):
-        resolve_loss_family("toy_loss_pkg:NOT_A_SPEC")
-    with pytest.raises(UnknownLossFamilyError, match=r"must be 'package\.module:SPEC'"):
+    # A reference names a class; an instance and the abstract base are refused.
+    for attribute in ("NOT_A_SPEC", "AN_INSTANCE"):
+        with pytest.raises(UnknownLossFamilyError, match="must name a class that inherits SlimeAlgorithm"):
+            resolve_loss_family(f"toy_loss_pkg:{attribute}")
+    with pytest.raises(UnknownLossFamilyError, match="names an abstract class"):
+        resolve_loss_family("reef.train.slime_backend.algorithm:SlimeAlgorithm")
+    with pytest.raises(UnknownLossFamilyError, match=r"must be 'package\.module:ClassName'"):
         resolve_loss_family(":ALGORITHM")
 
 
 @pytest.mark.unit
 def test_dotted_reference_cannot_shadow_a_registered_family(monkeypatch) -> None:
+    class ShadowAlgorithm(_TestAlgorithm):
+        def __init__(self):
+            super().__init__(loss_family="pg", loss_type="policy_loss")
+
     module = ModuleType("toy_loss_shadow")
-    module.ALGORITHM = _TestAlgorithm(loss_family="pg", loss_type="policy_loss")  # type: ignore[attr-defined]
+    module.ShadowAlgorithm = ShadowAlgorithm  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "toy_loss_shadow", module)
 
     with pytest.raises(UnknownLossFamilyError, match="already registered to a different spec"):
-        resolve_loss_family("toy_loss_shadow:ALGORITHM")
+        resolve_loss_family("toy_loss_shadow:ShadowAlgorithm")
     assert loss_family_names() == _ALL_FAMILIES
 
 

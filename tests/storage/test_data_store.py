@@ -24,7 +24,14 @@ from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceSettings
-from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
+from reef.storage.data import (
+    ItemConflictError,
+    ItemNotFoundError,
+    MemoryDataStore,
+    NewItem,
+    RecordLink,
+    ScenarioArchivedError,
+)
 from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
 from reef.storage.record_items import (
@@ -126,7 +133,7 @@ def test_only_the_create_that_stores_an_item_marks_it_inserted(store):
 def test_the_same_content_again_changes_nothing_and_other_content_is_a_conflict_that_stores_nothing(store):
     (first,) = store.create("acme", [trajectory("t1", "one")])
     assert store.create("acme", [trajectory("t1", "one")]) == (first,)
-    with pytest.raises(ItemConflict):
+    with pytest.raises(ItemConflictError):
         store.create("acme", [trajectory("t3", "three"), trajectory("t1", "changed")])
     assert [item.item_id for item in store.query("acme")] == ["t1"]
 
@@ -266,7 +273,7 @@ def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store
     ]:
         with pytest.raises(ValueError, match=reason):
             store.update("acme", ["t1"], patch)
-    with pytest.raises(ItemNotFound):
+    with pytest.raises(ItemNotFoundError):
         store.update("acme", ["t1", "missing"], {"scenarios": {"coding": "train"}})
     assert store.query("acme", scenario="coding") == ()
 
@@ -297,7 +304,7 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
     assert store.replace_task("acme", "fix-bug", second) == replaced
     assert store.scenario_items("acme", "coding", kinds=("task",))[0][0] == used_after
 
-    with pytest.raises(ItemNotFound):
+    with pytest.raises(ItemNotFoundError):
         store.replace_task("acme", "missing", second)
     with pytest.raises(ValueError, match="same name"):
         store.replace_task("acme", "fix-bug", first.parent)
@@ -569,7 +576,7 @@ def test_creates_that_wait_for_one_scenario_share_a_transaction(postgres_config,
         # A conflict in the shared transaction refuses only its own create.
         futures = held("e", "f", "a", "g")
         assert [future.exception(timeout=10) is None for future in futures] == [True, True, False, True]
-        assert isinstance(futures[2].exception(), ItemConflict)
+        assert isinstance(futures[2].exception(), ItemConflictError)
         assert {item.item_id for item in store.query("acme")} == set("abcdefg")
         # Two creates of one ID in one transaction: only the first stores it.
         futures = held("h", "i", "i")
@@ -602,11 +609,11 @@ def test_a_write_of_an_ended_generation_stores_nothing(store):
     assert store.scenario_generation("globex", "coding") != generation
     first, second = calls(1, 2)
     assert store.create("acme", [first], generation=generation)[0].inserted
-    with pytest.raises(ScenarioArchived, match="no longer current"):
+    with pytest.raises(ScenarioArchivedError, match="no longer current"):
         store.create("acme", [second], generation="other")
 
     store.delete_scenario("acme", "coding")
-    with pytest.raises(ScenarioArchived):
+    with pytest.raises(ScenarioArchivedError):
         store.create("acme", [second], generation=generation)
     assert store.read("acme", second.item_id) is None
     renewed = store.scenario_generation("acme", "coding")
@@ -875,7 +882,7 @@ def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_
             text = "changed" if index == 7 else "same"
             try:
                 stores[index % len(stores)].create("acme", [trajectory(f"t{n}", text) for n in range(10)])
-            except ItemConflict:
+            except ItemConflictError:
                 return "conflict"
             return "created"
 
@@ -898,7 +905,7 @@ def test_a_record_retry_with_a_new_time_matches(store):
     assert store.create("acme", [retry]) == (created,)
     stored = store.read("acme", item.item_id)
     changed = {**item.content, "references": ["other"]}
-    with pytest.raises(ItemConflict, match="other content"):
+    with pytest.raises(ItemConflictError, match="other content"):
         store.create("acme", [NewItem(item.item_id, changed, item.metadata)])
     assert store.read("acme", item.item_id) == stored
 

@@ -36,7 +36,7 @@ from reef.train.jobs import JobLoopState
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL = "Qwen/Qwen3-8B"
 REAL = os.environ.get("REEF_TEST_TINKER_REAL") == "1" and bool(os.environ.get("TINKER_API_KEY"))
-ENGINE = "tests.support.stub_engine:create_inference"
+ENGINE = "tests.support.stub_engine:StubEngineService"
 TOKENS = {"REEF_REMOTE_CONTROL_TOKEN": "control-secret", "REEF_REMOTE_INFERENCE_TOKEN": "inference-secret"}
 SCENARIO = "erdos"
 
@@ -248,7 +248,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
             "model-path": MODEL,
             "backend": ENGINE,
             "num-gpus": 2,
-            "handler-factory": "reef.inference.sglang.chat.SGLangInferenceHandler",
+            "handler-factory": "reef.inference.sglang.chat:SGLangInferenceHandler",
             "remote": {"url": url},
         },
         "training": {

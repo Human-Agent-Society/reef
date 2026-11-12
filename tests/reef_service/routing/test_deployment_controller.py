@@ -41,13 +41,13 @@ from reef.service.deploy.routing.deployment_controller import (
     IMAGE_BUILD_LOG,
     RoutingDeploymentController,
     RoutingDeploymentError,
-    RoutingReadinessTimeout,
+    RoutingReadinessTimeoutError,
 )
 from reef.service.deploy.routing.policy import PolicyState
 from reef.service.deploy.routing.reef_lifecycle_client import (
     LifecycleStatus,
     RoutingControlError,
-    RoutingControlTimeout,
+    RoutingControlTimeoutError,
 )
 from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
@@ -89,7 +89,7 @@ def test_no_opening_until_the_router_runtime_is_active_ready_and_consistent(
 ) -> None:
     for name, value in change.items():
         setattr(case.management, name, value)
-    with pytest.raises(RoutingReadinessTimeout):
+    with pytest.raises(RoutingReadinessTimeoutError):
         case.controller.wait_ready()
     assert "control:activate" not in case.actions and "control:open" not in case.actions
 
@@ -103,7 +103,7 @@ def test_a_router_running_another_document_is_fatal(case: ControllerCase) -> Non
 
 def test_a_failed_readiness_preview_is_retried_until_the_deadline(case: ControllerCase) -> None:
     case.control.open_error = RoutingControlError("REEF lifecycle returned HTTP 503", status_code=503)
-    with pytest.raises(RoutingReadinessTimeout):
+    with pytest.raises(RoutingReadinessTimeoutError):
         case.controller.wait_ready()
     assert case.actions.count("control:open") >= 1 and case.controller.state != "ready"
     case.control.open_error = None
@@ -260,13 +260,13 @@ def test_a_drain_read_that_outlasts_the_drain_phase_moves_on_to_the_forced_close
             timed_out.append(deadline)
             if not phase_left and deadline is not None:
                 time.sleep(max(0, deadline - time.monotonic()))
-            raise RoutingControlTimeout("REEF lifecycle request timed out")
+            raise RoutingControlTimeoutError("REEF lifecycle request timed out")
         return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
 
     monkeypatch.setattr(case.control, "request", request)
     if phase_left:
         # Three attempts failed while the drain had time: the child is not answering.
-        with pytest.raises(RoutingControlTimeout):
+        with pytest.raises(RoutingControlTimeoutError):
             case.controller.drain(recovery=False)
         assert case.actions.count("control:close") == 1
     else:
@@ -296,14 +296,14 @@ def test_a_recovery_status_read_cut_short_by_the_readiness_deadline_is_a_readine
             deadlines.append(deadline)
             if not phase_left and deadline is not None:
                 time.sleep(max(0, deadline - time.monotonic()))
-            raise RoutingControlTimeout("REEF lifecycle request timed out")
+            raise RoutingControlTimeoutError("REEF lifecycle request timed out")
         return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
 
     monkeypatch.setattr(case.control, "request", request)
     with pytest.raises(RoutingDeploymentError) as error:
         case.controller.wait_ready(initial=False)
     # Bounded recovery may try again after a readiness timeout, but not after the child stopped answering.
-    assert isinstance(error.value, RoutingReadinessTimeout) is not phase_left
+    assert isinstance(error.value, RoutingReadinessTimeoutError) is not phase_left
     assert deadlines == [case.controller.ready_deadline]
     assert "control:open" not in case.actions
 
@@ -479,7 +479,7 @@ def test_reconnect_readiness_keeps_the_configured_deadline(
         # Every open of the phase carries the configured deadline.
         assert open_deadlines == [started + 30, started + 30]
     else:
-        with pytest.raises(RoutingReadinessTimeout):
+        with pytest.raises(RoutingReadinessTimeoutError):
             case.controller.tick()
         assert open_deadlines == [started + 11]
     assert case.controller.restart_count == 0
@@ -529,7 +529,7 @@ def test_a_late_open_reply_is_drained_again_before_the_next_recovery_removes_sr(
             late_open[0] = False
             case.control.active_requests = 1
             clock.now = (deadline or clock.now) + 0.001
-            raise RoutingControlTimeout("REEF lifecycle replied after the caller's deadline")
+            raise RoutingControlTimeoutError("REEF lifecycle replied after the caller's deadline")
         return status
 
     def remove(ownership: DeploymentOwnership, stop_timeout_seconds: float) -> None:
@@ -575,7 +575,7 @@ def time_out_status_reads(case: ControllerCase, monkeypatch: pytest.MonkeyPatch,
         nonlocal remaining
         if action is None and remaining:
             remaining -= 1
-            raise RoutingControlTimeout("REEF lifecycle request timed out")
+            raise RoutingControlTimeoutError("REEF lifecycle request timed out")
         return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
 
     monkeypatch.setattr(case.control, "request", request)

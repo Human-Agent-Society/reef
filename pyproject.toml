@@ -181,8 +181,6 @@ ignore = [
     "E402",
     # E501: line too long - black handles wrapping; long strings and URLs stay readable
     "E501",
-    # N818: existing public exception names omit an Error suffix; renaming them would break callers
-    "N818",
     # UP046/UP047: PEP 695 type parameter syntax; the codebase declares TypeVars, and mypy reads both forms
     "UP046",
     "UP047",

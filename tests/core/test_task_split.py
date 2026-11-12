@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from reef.core.tasks import TaskSplit, TaskSplitError, manifest_task_paths, read_split_manifest, write_split_manifest
-from reef.core.tasks.split import TaskSplitConflict, extend_split_by_source
+from reef.core.tasks.split import TaskSplitConflictError, extend_split_by_source
 
 SPLIT = TaskSplit(train=("t1", "t2", "t6"), eval=("t3", "t4", "t5"), seed=11, eval_fraction=0.5)
 
@@ -35,7 +35,7 @@ def test_incremental_splits_keep_existing_placements_and_follow_shared_sources()
 def test_incremental_split_refuses_a_train_eval_bridge_without_changing_placements() -> None:
     previous = TaskSplit(train=("train-task",), eval=("eval-task",), seed=7, eval_fraction=0.5)
     previous_sources = {"train-task": ("train-source",), "eval-task": ("eval-source",)}
-    with pytest.raises(TaskSplitConflict, match="split conflict"):
+    with pytest.raises(TaskSplitConflictError, match="split conflict"):
         extend_split_by_source(
             previous=previous,
             previous_sources=previous_sources,
@@ -49,7 +49,7 @@ def test_incremental_split_refuses_a_train_eval_bridge_without_changing_placemen
 @pytest.mark.unit
 def test_incremental_split_detects_a_transitive_bridge() -> None:
     previous = TaskSplit(train=("train-task",), eval=("eval-task",), seed=7, eval_fraction=0.5)
-    with pytest.raises(TaskSplitConflict, match="split conflict"):
+    with pytest.raises(TaskSplitConflictError, match="split conflict"):
         extend_split_by_source(
             previous=previous,
             previous_sources={"train-task": ("train-source",), "eval-task": ("eval-source",)},

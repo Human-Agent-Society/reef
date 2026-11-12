@@ -18,7 +18,7 @@ from reef.service.assembly import build_dispatcher
 from reef.service.deploy.deployment_config import translate_layout
 from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
 from reef.service.task_import import DataScenarioStorage, TaskImport, TaskImportError
-from reef.storage.data import ItemConflict
+from reef.storage.data import ItemConflictError
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
@@ -98,7 +98,7 @@ def test_a_task_that_changed_or_cannot_load_stops_the_open(tmp_path: Path) -> No
         instruction = root / "a-task" / "instruction.md"
         original = instruction.read_text()
         instruction.write_text("Solve another problem.\n")
-        with pytest.raises(ItemConflict, match="other content"):
+        with pytest.raises(ItemConflictError, match="other content"):
             storage.open("math")
         instruction.write_text(original)
         # The split is the item's metadata, so a task that the manifest moves moves in the scenario.

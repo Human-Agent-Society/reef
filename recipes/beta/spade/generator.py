@@ -56,12 +56,12 @@ from reef.recipe.generated_tasks.generator import (
     TaskValidationResult,
 )
 from reef.record2sample.generator.client import (
-    DuplicateTask,
+    DuplicateTaskError,
     Generator,
     GeneratorError,
     HttpGenerator,
     ProposedTask,
-    TaskNameConflict,
+    TaskNameConflictError,
     WrittenTask,
 )
 from reef.record2sample.generator.designer import DIFFICULTIES, DesignerRequest
@@ -277,7 +277,7 @@ class SpadeTaskGenerator(TaskGenerator):
         """Harbor's oracle and nop agents on a written copy: the reference solution scores 1, doing nothing below 1."""
         try:
             written = await self.write(task)
-        except (DuplicateTask, TaskNameConflict) as exc:
+        except (DuplicateTaskError, TaskNameConflictError) as exc:
             return TaskValidationResult((f"refused: {exc}",))
         try:
             oracle = await self.service.check(written.path)
@@ -310,7 +310,7 @@ class SpadeTaskGenerator(TaskGenerator):
         """Write a task; only a description-based generation's rerun may replace a conflicting name."""
         try:
             return await self.service.write_task(task)
-        except TaskNameConflict:
+        except TaskNameConflictError:
             if "designer_record_id" in task.metadata:
                 raise
             # A reload cancelled this generation's earlier attempt; what it wrote under the name gives way.

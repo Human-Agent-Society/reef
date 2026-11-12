@@ -16,10 +16,10 @@ from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import (
     LocalExecutor,
     ProgramLaunchError,
-    ProgramTimeout,
+    ProgramTimeoutError,
     SandboxExecutor,
     SandboxLimits,
-    SandboxUnavailable,
+    SandboxUnavailableError,
 )
 
 
@@ -106,7 +106,7 @@ def test_local_executor_kills_the_tree_on_timeout(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "workspace").mkdir(parents=True)
     prog = _script(tmp_path, "import time; time.sleep(30)")
-    with pytest.raises(ProgramTimeout):
+    with pytest.raises(ProgramTimeoutError):
         LocalExecutor().launch(
             [sys.executable, str(prog)], root=root, workspace=root / "workspace", env={}, timeout=0.5
         )
@@ -124,7 +124,7 @@ def test_build_executor_rejects_an_unknown_kind() -> None:
 
 def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
-    with pytest.raises(SandboxUnavailable, match="bubblewrap"):
+    with pytest.raises(SandboxUnavailableError, match="bubblewrap"):
         SandboxExecutor().preflight()
     with pytest.raises(ReefError, match="bubblewrap"):
         build_executor({"executor": "sandbox"})
@@ -145,7 +145,7 @@ def _probe_result(monkeypatch, returncode: int, stderr: str = "") -> list[list[s
 def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     seen = _probe_result(monkeypatch, 1, "bwrap: No permissions to create a new namespace\n")
-    with pytest.raises(SandboxUnavailable, match=r"cannot nest a bubblewrap jail.*No permissions"):
+    with pytest.raises(SandboxUnavailableError, match=r"cannot nest a bubblewrap jail.*No permissions"):
         SandboxExecutor().preflight()
     # A run jail with a tool jail inside it around true: the shape every sandboxed tool call takes.
     argv = seen[0]
@@ -165,7 +165,7 @@ def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
         raise OSError("boom")
 
     monkeypatch.setattr("reef.execution.sandbox.process.subprocess.run", refuse)
-    with pytest.raises(SandboxUnavailable, match="cannot nest a bubblewrap jail on this host: boom"):
+    with pytest.raises(SandboxUnavailableError, match="cannot nest a bubblewrap jail on this host: boom"):
         SandboxExecutor().preflight()
 
 

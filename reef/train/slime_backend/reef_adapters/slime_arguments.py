@@ -23,7 +23,7 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
     parser.add_argument(
         "--reef-executor-backend",
         default="auto",
-        help="Training worker executor: auto (currently ray), ray, or a Slime-compatible Executor import path.",
+        help="Training worker executor: auto (currently ray), ray, or a Slime-compatible Executor as package.module:ClassName.",
     )
     parser.add_argument(
         "--megatron-to-hf-mode",

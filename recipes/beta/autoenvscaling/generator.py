@@ -58,7 +58,7 @@ from recipes.beta.autoenvscaling.author import (
     VariantDirection,
     workspace_reply,
 )
-from recipes.beta.autoenvscaling.author_credentials import CredentialHeld
+from recipes.beta.autoenvscaling.author_credentials import CredentialHeldError
 from recipes.beta.autoenvscaling.checks import (
     BAND_ABOVE,
     BAND_BELOW,
@@ -83,7 +83,7 @@ from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.execution.sandbox.config import remote_executor
-from reef.execution.sandbox.process import SandboxUnavailable
+from reef.execution.sandbox.process import SandboxUnavailableError
 from reef.execution.sandbox.remote import RemoteExecutor
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
@@ -95,11 +95,11 @@ from reef.recipe.generated_tasks.generator import (
     TaskValidationResult,
 )
 from reef.record2sample.generator.client import (
-    DuplicateTask,
+    DuplicateTaskError,
     Generator,
     GeneratorError,
     HttpGenerator,
-    TaskNameConflict,
+    TaskNameConflictError,
 )
 from reef.record2sample.generator.designer import parse_harbor_reply
 from reef.record2sample.generator.harbor import (
@@ -339,7 +339,7 @@ class GeneratorChecks(CandidateChecks):
         candidate = replace(task, name=f"{task.name}-check-{number}")
         try:
             result = asyncio.run_coroutine_threadsafe(self.oracle(candidate), self.loop).result()
-        except DuplicateTask as exc:
+        except DuplicateTaskError as exc:
             error = f"the task is the same as one the generator holds already: {exc}"
             return {"passed": False, "stage": "write", "errors": error[:ERROR_CHARS]}
         answer: dict[str, object] = {
@@ -381,7 +381,7 @@ class GeneratorChecks(CandidateChecks):
             self.is_closed = True
 
 
-class ProposalRefused(ValueError):
+class ProposalRefusedError(ValueError):
     """A session became no task: ``stage`` says where it stopped; ``record_id`` is the author's last recorded call."""
 
     def __init__(self, reason: str, *, stage: str, record_id: str = "") -> None:
@@ -943,7 +943,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 is_adaptive=is_adaptive,
                 variant_share=variant_share,
             )
-        except (OSError, ValueError, SandboxUnavailable) as exc:
+        except (OSError, ValueError, SandboxUnavailableError) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc
 
     def save_cursor(self, cursor: GenerationCursor) -> None:
@@ -1013,13 +1013,13 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 proposal = SessionProposal(index, position, source.record_id)
             try:
                 task = await self.rebuilt(source, index, variant=variant)
-            except ProposalRefused as exc:
+            except ProposalRefusedError as exc:
                 refused.append(replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc)))
             except AuthorError as exc:
                 # An outage must not pass for the author's failure: it ends the generation, and the report names it.
                 # So does a task that held the token, which may have left the sandbox.
                 error = f"the author could not rebuild {source.record_id}: {exc}"
-                stage = STAGE_CREDENTIAL if isinstance(exc, CredentialHeld) else STAGE_OUTAGE
+                stage = STAGE_CREDENTIAL if isinstance(exc, CredentialHeldError) else STAGE_OUTAGE
                 refused.append(replace(proposal, stage=stage, refusal=error))
             else:
                 pending[task.name] = replace(
@@ -1078,7 +1078,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
 
         The run has a directory of its own in the temporary directory, which is removed when the run ends.
 
-        Raises :class:`ProposalRefused` when the session becomes no task, and ``AuthorError`` when the author
+        Raises :class:`ProposalRefusedError` when the session becomes no task, and ``AuthorError`` when the author
         could not run.
         """
         checks = GeneratorChecks(
@@ -1112,14 +1112,14 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 stop.set()
                 raise
             except SourceError as exc:
-                raise ProposalRefused(
+                raise ProposalRefusedError(
                     f"the source {source.record_id} cannot be rebuilt: {exc}", stage=STAGE_SOURCE
                 ) from exc
             finally:
                 # A check the agent left running finishes, and deletes its candidate, before the task is written.
                 await asyncio.to_thread(checks.close)
             if not authored.record_ids and not authored.transcript:
-                raise ProposalRefused("the Designer made no model call that Reef recorded", stage=STAGE_AUTHORING)
+                raise ProposalRefusedError("the Designer made no model call that Reef recorded", stage=STAGE_AUTHORING)
             record_id = authored.record_ids[-1] if authored.record_ids else ""
             try:
                 task = admitted_task(
@@ -1130,7 +1130,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     checkout_path=source.repository.path,
                 )
             except (ValueError, HarborTaskError) as exc:
-                raise ProposalRefused(
+                raise ProposalRefusedError(
                     f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
                 ) from exc
             lineage = {} if variant is None else {"parent_task": variant.parent, "variant": variant.direction}
@@ -1163,7 +1163,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """
         try:
             written = await self.service.write_task(task)
-        except (DuplicateTask, TaskNameConflict) as exc:
+        except (DuplicateTaskError, TaskNameConflictError) as exc:
             self.save_validation(task.name, (), STAGE_CHECK, "")
             return TaskValidationResult((f"refused: {exc}",))
         results: list[CheckResult] = []

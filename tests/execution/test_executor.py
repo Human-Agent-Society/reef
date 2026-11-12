@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.core.plugins import PluginConfigError
 from reef.execution.executor import Executor, ExecutorFuture, ExecutorLaunch, WorkerSpec, resolve
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import ConcurrentExecutorFuture, UniProcExecutor
@@ -88,11 +89,11 @@ class FakeRef:
     error: Exception | None = None
 
 
-class FakeTimeout(Exception):
+class FakeTimeoutError(Exception):
     pass
 
 
-class FakeActorDeath(Exception):
+class FakeActorDeathError(Exception):
     pass
 
 
@@ -141,7 +142,7 @@ class FakeActorBuilder:
 
 
 class FakeRay:
-    exceptions = SimpleNamespace(GetTimeoutError=FakeTimeout, RayActorError=FakeActorDeath)
+    exceptions = SimpleNamespace(GetTimeoutError=FakeTimeoutError, RayActorError=FakeActorDeathError)
 
     def __init__(self):
         self.events = []
@@ -201,8 +202,8 @@ def test_factory_auto_launches_multiple_process_workers_and_dispatches_ranked_rp
         executor.shutdown()
 
 
-@pytest.mark.parametrize("backend", [CustomExecutor, f"{__name__}:CustomExecutor", f"{__name__}.CustomExecutor"])
-def test_factory_accepts_custom_executor_class_and_import_paths(backend):
+@pytest.mark.parametrize("backend", [CustomExecutor, f"{__name__}:CustomExecutor"])
+def test_factory_accepts_a_custom_executor_class_and_its_reference(backend):
     executor = Executor.create(ExecutorLaunch(backend=backend))
     assert isinstance(executor, CustomExecutor)
     executor.shutdown()
@@ -210,7 +211,14 @@ def test_factory_accepts_custom_executor_class_and_import_paths(backend):
 
 @pytest.mark.parametrize(
     ("backend", "error"),
-    [(int, TypeError), ("builtins:int", TypeError), ("missing", ValueError), (None, ValueError), ("", ValueError)],
+    [
+        (int, TypeError),
+        ("builtins:int", PluginConfigError),
+        ("missing", PluginConfigError),
+        (f"{__name__}.CustomExecutor", PluginConfigError),
+        (None, ValueError),
+        ("", ValueError),
+    ],
 )
 def test_factory_rejects_invalid_backends(backend, error):
     with pytest.raises(error):
@@ -408,7 +416,7 @@ def test_ray_errors_and_timeouts_are_exposed_without_retry(fake_ray):
     assert actor.worker.calls == 1
     with pytest.raises(AttributeError):
         executor.rpc(0, "missing")
-    actor.init_error = FakeTimeout()
+    actor.init_error = FakeTimeoutError()
     with pytest.raises(TimeoutError, match="may still be running"):
         executor.check_health(timeout=0)
     executor.shutdown()
@@ -421,7 +429,7 @@ def test_ray_failure_polling_preserves_total_timeout_budget(fake_ray, monkeypatc
     def get(refs, *, timeout):
         waits.append(timeout)
         now[0] += timeout
-        raise FakeTimeout
+        raise FakeTimeoutError
 
     monkeypatch.setattr("reef.execution.executor.ray.monotonic", lambda: now[0])
     monkeypatch.setattr(fake_ray, "get", get)
@@ -452,7 +460,7 @@ def test_ray_does_not_confuse_business_timeout_with_get_timeout(fake_ray):
 def test_ray_rpc_observed_death_records_failure_without_waiting_for_monitor(fake_ray):
     from reef.execution.executor import ExecutorFailedError
 
-    actor = FakeActor(fake_ray, Worker(0), init_error=FakeActorDeath())
+    actor = FakeActor(fake_ray, Worker(0), init_error=FakeActorDeathError())
     executor = RayExecutor.from_workers([actor])
     try:
         with pytest.raises(ExecutorFailedError):

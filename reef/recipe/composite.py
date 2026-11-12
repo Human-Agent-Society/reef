@@ -229,6 +229,8 @@ class CompositeRecipe(Recipe):
                 raise RecipeConfigError(str(exc)) from exc
         try:
             return cls(components=components, runtime=runtime, training_component=training_component, **values)
+        except RecipeConfigError:
+            raise
         except ValueError as exc:
             raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
 

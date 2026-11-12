@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, SnapshotRef
+from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFoundError, SnapshotRef
 from reef.artifact.snapshot_chain import ArtifactSnapshotChain
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import validate_component_name
@@ -402,8 +402,8 @@ class ScenarioSnapshots:
 
         The read-side counterpart of ``activate``: the same snapshot lookup,
         but no head moves and no commit is written; the caller only wants the
-        version's file tree. Every failure is ``ArtifactNotFound`` naming the
-        version (not ``SnapshotNotRestorable``, which answers a rejected
+        version's file tree. Every failure is ``ArtifactNotFoundError`` naming the
+        version (not ``SnapshotNotRestorableError``, which answers a rejected
         write): to a reader, a version whose bytes are gone and a version
         that was recorded but not kept are the same absent content.
         """
@@ -413,12 +413,14 @@ class ScenarioSnapshots:
         with self.publication_lock:
             found = self.find_snapshot(revision)
         if found is None:
-            raise ArtifactNotFound(f"scenario {self._name!r} has no snapshot {revision!r}")
+            raise ArtifactNotFoundError(f"scenario {self._name!r} has no snapshot {revision!r}")
         ref, _ = found
         try:
             return self._artifacts.resolve(ref)
         except ArtifactError as exc:
-            raise ArtifactNotFound(f"scenario {self._name!r} cannot restore snapshot {revision!r}: {exc}") from exc
+            raise ArtifactNotFoundError(
+                f"scenario {self._name!r} cannot restore snapshot {revision!r}: {exc}"
+            ) from exc
 
     @staticmethod
     def snapshot_row(

@@ -73,7 +73,7 @@ def extension(monkeypatch):
     module = ModuleType("reef_config_extension")
     module.Training = ExtensionRecipe
     module.Serving = ExtensionServingRecipe
-    module.runtime = ExtensionRuntimeFactory()
+    module.Runtime = ExtensionRuntimeFactory
     monkeypatch.setitem(sys.modules, module.__name__, module)
     return module
 
@@ -109,7 +109,7 @@ def test_extension_yaml_cli_and_runtime_values_are_equivalent(extension, field, 
     cli_config = resolve_deployment(base, [f"--recipe.config.{field}={cli}"])
     yaml_values = resolve_config_field_values(ExtensionRecipe, {field: yaml_config["reef"][field]}, {})
     cli_values = resolve_config_field_values(ExtensionRecipe, {field: cli_config["reef"][field]}, {})
-    backend = extension.runtime.parse_config({field: value}, {})
+    backend = extension.Runtime().parse_config({field: value}, {})
     assert yaml_values[field] == cli_values[field] == backend[field]
     assert type(yaml_values[field]) is type(cli_values[field]) is type(backend[field])
     restored = yaml.safe_load(yaml.safe_dump(cli_config))
@@ -126,8 +126,8 @@ def test_cli_overrides_yaml_then_environment_then_defaults(extension, monkeypatc
     assert resolve_config_field_values(ExtensionRecipe, {"count": "6"}, env)["count"] == 6
     assert resolve_config_field_values(ExtensionRecipe, {}, env)["count"] == 8
     assert resolve_config_field_values(ExtensionRecipe, {}, {})["count"] == 4
-    assert extension.runtime.parse_config({}, env)["count"] == 8
-    assert extension.runtime.parse_config({"count": 0}, env)["count"] == 0
+    assert extension.Runtime().parse_config({}, env)["count"] == 8
+    assert extension.Runtime().parse_config({"count": 0}, env)["count"] == 0
 
 
 def test_last_occurrence_wins_and_boolean_can_be_disabled(extension):
@@ -158,14 +158,14 @@ def test_recipe_and_runtime_reject_the_same_invalid_values(extension, field, val
     with pytest.raises(RecipeConfigError, match=field):
         resolve_config_field_values(ExtensionRecipe, {field: value}, {})
     with pytest.raises(RuntimeConfigError, match=field):
-        extension.runtime.parse_config({field: value}, {})
+        extension.Runtime().parse_config({field: value}, {})
 
 
 def test_recipe_and_runtime_errors_do_not_echo_values(extension):
     secret = "private-invalid-number"
     for resolve in (
         lambda: resolve_config_field_values(ExtensionRecipe, {"count": secret}, {}),
-        lambda: extension.runtime.parse_config({"count": secret}, {}),
+        lambda: extension.Runtime().parse_config({"count": secret}, {}),
     ):
         with pytest.raises((RecipeConfigError, RuntimeConfigError)) as caught:
             resolve()
@@ -174,13 +174,13 @@ def test_recipe_and_runtime_errors_do_not_echo_values(extension):
 
 def test_runtime_definition_is_loaded_from_selected_dotted_factory(extension):
     config = resolve_deployment(
-        {"reef": {"recipe": "reef_config_extension:Serving", "runtime": {"type": "reef_config_extension:runtime"}}},
+        {"reef": {"recipe": "reef_config_extension:Serving", "runtime": {"type": "reef_config_extension:Runtime"}}},
         ["--recipe.config.label", "001", "--recipe.runtime.label", "true", "--no-recipe.runtime.enabled"],
     )
     runtime = RuntimeRegistry().build(config["reef"]["runtime"], model_path="model", environ={})
     assert runtime.parsed_config["label"] == "true"
     assert runtime.parsed_config["enabled"] is False
-    assert runtime.parsed_config["type"] == "reef_config_extension:runtime"
+    assert runtime.parsed_config["type"] == "reef_config_extension:Runtime"
     recipe = ExtensionServingRecipe.from_environment({}, config=config["reef"], **runtime_bindings(runtime))
     assert recipe.label == "001"
 
@@ -189,7 +189,7 @@ def test_unknown_declared_recipe_and_runtime_fields_are_rejected(extension):
     with pytest.raises(RecipeConfigError, match=r"reef\.typo"):
         resolve_deployment({"reef": {"recipe": "reef_config_extension:Training", "typo": 4}})
     with pytest.raises(RuntimeConfigError, match=r"unknown config fields.*typo"):
-        RuntimeRegistry().build({"type": "reef_config_extension:runtime", "typo": 1}, model_path="model")
+        RuntimeRegistry().build({"type": "reef_config_extension:Runtime", "typo": 1}, model_path="model")
 
 
 def test_executor_aliases_preserve_profile_and_parse_resources(extension):
@@ -315,10 +315,9 @@ def test_training_and_serving_runtimes_share_typed_fields_without_allocating_res
     from reef.inference.registry import runtime_factory_for
     from reef.train.component import training_component_factory_for
 
-    factory: ConfiguredFactory | None = (
+    factory: ConfiguredFactory = (
         training_component_factory_for(runtime_type) if ":" in runtime_type else runtime_factory_for(runtime_type)
     )
-    assert factory is not None
     parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5", **required}, {})
     assert parsed["inference_timeout_s"] == 5.5
     # The staleness window is the record-to-record stage's setting; a runtime refuses it.

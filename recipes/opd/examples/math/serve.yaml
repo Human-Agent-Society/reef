@@ -26,7 +26,7 @@ inference:
     mem-fraction-static: 0.80
     disable-cuda-graph: true
     enable-deterministic-inference: true
-  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-factory: reef.inference.sglang.chat:SGLangInferenceHandler
   handler-config:
     sampling_defaults:
       top_p: 1.0

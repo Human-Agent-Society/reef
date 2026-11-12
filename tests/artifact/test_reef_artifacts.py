@@ -6,7 +6,7 @@ import pytest
 
 from reef.artifact import (
     Artifact,
-    ArtifactConflict,
+    ArtifactConflictError,
     ArtifactSnapshotChain,
     CachedRepositoryBackendFactory,
     HuggingFaceSource,
@@ -106,7 +106,7 @@ def test_in_memory_repository_registers_materializes_and_publishes(tmp_path: Pat
     # Each scenario keeps its own head; math's publish does not leak into code.
     assert code_backend.current() == code
 
-    with pytest.raises(ArtifactConflict):
+    with pytest.raises(ArtifactConflictError):
         math_backend.publish(
             Artifact.local(candidate_dir),
             expected_parent=math,

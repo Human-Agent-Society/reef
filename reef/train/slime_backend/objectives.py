@@ -12,12 +12,12 @@ service validates a job without the GPU stack.
 
 from __future__ import annotations
 
-import importlib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
 from reef.core.job_data import JobData, trajectories
+from reef.core.plugins import import_plugin_class
 from reef.train.slime_backend.schedule import RolloutUnit, StepScheduling, next_steps
 from reef.train.slime_backend.signals import TrainingSignal
 
@@ -101,11 +101,13 @@ def unregister_objective(name: str) -> None:
 
 
 def resolve_objective(reference: str) -> SlimeObjective:
-    """The objective of a registered name, or of a dotted ``package.module:Objective`` class or instance reference.
+    """The objective of a registered name, or of a dotted ``package.module:Objective`` class reference.
 
-    The first resolution of a name that holds a reference imports the reference. An unregistered dotted reference
-    registers its objective under the objective's name. ``ValueError``: the name is unknown, the reference is
-    malformed, its module does not import, it names anything else, or the objective's name holds another objective.
+    The first resolution of a name that holds a reference imports the reference
+    (``reef.core.plugins.import_plugin_class``) and builds the class without arguments. An unregistered dotted
+    reference registers its objective under the objective's name. ``ValueError``: the name is unknown, or the
+    objective's name holds another objective. ``PluginConfigError``, a ``ValueError``: the reference is malformed,
+    its module does not import, or it names no concrete ``SlimeObjective`` class.
     """
     registered = OBJECTIVES.get(reference)
     if isinstance(registered, SlimeObjective):
@@ -115,17 +117,12 @@ def resolve_objective(reference: str) -> SlimeObjective:
             f"unknown Slime objective {reference!r}; available objectives: {', '.join(sorted(OBJECTIVES))}"
         )
     dotted = reference if registered is None else registered
-    module_name, _, attribute = dotted.partition(":")
-    if not module_name or not attribute:
-        raise ValueError(f"objective reference {reference!r} must be 'package.module:Objective'")
-    try:
-        candidate = vars(importlib.import_module(module_name)).get(attribute)
-    except ImportError as exc:
-        raise ValueError(f"cannot import objective {dotted!r}: {exc}") from exc
-    if isinstance(candidate, type) and issubclass(candidate, SlimeObjective):
-        candidate = candidate()
-    if not isinstance(candidate, SlimeObjective):
-        raise ValueError(f"objective {reference!r} must name a SlimeObjective class or instance")
+    objective_class = import_plugin_class(
+        dotted,
+        SlimeObjective,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+        setting="Slime objective",
+    )
+    candidate = objective_class()
     if registered is None:
         # A job named the objective by its reference: the name may already hold this class.
         named = resolve_objective(candidate.name) if candidate.name in OBJECTIVES else None
