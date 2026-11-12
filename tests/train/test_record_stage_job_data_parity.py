@@ -45,6 +45,7 @@ from reef.record2sample import (
     ReportContext,
     ReportGrouping,
     ReportSamples,
+    SkippedReport,
 )
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2sample.distill import DistillSamples
@@ -294,7 +295,7 @@ class AssembledSamples(ReportSamples):
         super().__init__(context, grouping, exclusive_sources=True, max_staleness=max_staleness)
         self.assembly = SampleAssembly(SampleAssemblySettings())
 
-    def make_sample(self, context: ReportContext) -> TrajectorySample:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         return self.assembly.build(context, context.require_score())
 
 

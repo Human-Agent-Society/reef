@@ -8,9 +8,10 @@ import pytest
 from tests.support.conversations import conversation
 
 from reef.core import AgentRecord, RequestType
-from reef.record2sample import ReportContext, ReportSamples, TrajectorySamples
+from reef.record2sample import ReportContext, ReportSamples, SkippedReport, TrajectorySamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.train import PipelineContext
+from reef.train.types import TrajectorySample
 
 
 def test_a_trajectory_becomes_one_atif_sample_of_its_calls(monkeypatch) -> None:
@@ -51,14 +52,17 @@ def test_a_scored_trajectory_carries_the_report_and_its_score() -> None:
 
 @pytest.mark.parametrize("multi_turn", [False, True])
 def test_a_policy_report_trains_its_last_call_or_its_whole_trajectory(multi_turn: bool) -> None:
-    first = conversation("call-1", 1)
+    policy_tensors = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
+    first_call = conversation("call-1", 1)
+    first = replace(first_call, payload={**first_call.payload, **policy_tensors})
     recorded = conversation("call-3", 3)
-    last = replace(recorded, payload={**recorded.payload, "artifact_id": "a1"})
+    last = replace(recorded, payload={**recorded.payload, **policy_tensors, "artifact_id": "a1"})
     scored = AgentRecord.create(
         agent_record_id="r1", scenario="math", request_type=RequestType.REPORT, payload={"references": ["call-3"]}
     )
     assembly = SampleAssembly(SampleAssemblySettings(accept_multi_turn_policy_samples=multi_turn))
     sample = assembly.build(ReportContext(scored, 1.0, (first, last)), 1.0)
+    assert isinstance(sample, TrajectorySample)
     agent_steps = [step for step in sample.trajectory["steps"] if step["source"] == "agent"]
     # The last call alone resends the first reply as context; the whole trajectory trains both replies.
     assert [step.get("is_copied_context", False) for step in agent_steps] == [not multi_turn, False]
@@ -68,8 +72,56 @@ def test_a_policy_report_trains_its_last_call_or_its_whole_trajectory(multi_turn
     assert "tokens" not in sample.training
 
 
+@pytest.mark.parametrize(
+    "mask_fields",
+    (
+        pytest.param({}, id="missing"),
+        pytest.param({"loss_mask": None}, id="none"),
+        pytest.param({"loss_mask": []}, id="empty"),
+        pytest.param({"loss_mask": [0, 0]}, id="all-zero"),
+    ),
+)
+def test_a_policy_report_without_trainable_tokens_is_skipped(mask_fields: dict[str, object]) -> None:
+    record = conversation("call-1", 1)
+    record = replace(
+        record,
+        payload={**record.payload, "tokens": [1, 2], "rollout_log_probs": [-0.2], **mask_fields},
+    )
+    scored = AgentRecord.create(
+        agent_record_id="r1", scenario="math", request_type=RequestType.REPORT, payload={"references": ["call-1"]}
+    )
+
+    sample = SampleAssembly(SampleAssemblySettings()).build(ReportContext(scored, 1.0, (record,)), 1.0)
+
+    assert isinstance(sample, SkippedReport)
+    assert "call-1" in sample.reason
+
+
+@pytest.mark.parametrize(
+    ("loss_mask", "message"),
+    (
+        pytest.param(1, "must be a sequence", id="non-sequence"),
+        pytest.param("invalid", "must be a sequence", id="string"),
+        pytest.param([None], "only 0 or 1", id="invalid-value"),
+        pytest.param([0, 2], "only 0 or 1", id="out-of-range"),
+    ),
+)
+def test_a_policy_report_rejects_a_malformed_loss_mask(loss_mask: object, message: str) -> None:
+    record = conversation("call-1", 1)
+    record = replace(record, payload={**record.payload, "loss_mask": loss_mask})
+    scored = AgentRecord.create(
+        agent_record_id="r1", scenario="math", request_type=RequestType.REPORT, payload={"references": ["call-1"]}
+    )
+
+    with pytest.raises(ValueError, match=message):
+        SampleAssembly(SampleAssemblySettings()).build(ReportContext(scored, 1.0, (record,)), 1.0)
+
+
 def test_a_policy_report_of_several_trajectories_requires_multi_turn_samples() -> None:
     first, second = conversation("call-a", 1), conversation("call-b", 1)
+    policy_tensors = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
+    first = replace(first, payload={**first.payload, **policy_tensors})
+    second = replace(second, payload={**second.payload, **policy_tensors})
     scored = AgentRecord.create(
         agent_record_id="r1",
         scenario="math",

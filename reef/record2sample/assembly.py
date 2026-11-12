@@ -8,7 +8,7 @@ is the shared assembly that those recipes use in ``make_sample``.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,8 +17,8 @@ from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
 from reef.record2sample.base import Record2SampleSettings
-from reef.record2sample.reports import ReportContext
-from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
+from reef.record2sample.reports import ReportContext, SkippedReport
+from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory, recorded_training
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +71,9 @@ class SampleAssembly:
     """Shape a resolved report into a policy sample, without recipe policy.
 
     ``build`` makes the ATIF sample of a report that serving recorded, which the training component renders: the
-    trajectory's last call, or with ``accept_multi_turn_policy_samples`` every call. ``assemble`` builds the tensor
-    sample of the calls of a training component's own task rollout, which carry the tokens that its engine sampled:
+    trajectory's last call, or with ``accept_multi_turn_policy_samples`` every call. A selected call with no policy
+    loss tokens returns ``SkippedReport``. ``assemble`` builds the tensor sample of the calls of a training
+    component's own task rollout, which carry the tokens that its engine sampled:
     one call becomes one sample (``single_sample``), and the ordered calls of a trajectory one multi-turn sample,
     realigned within ``realign_threshold`` and ``scaffold_tolerance``. An unassemblable trajectory raises a training
     data error. A recipe whose single sample carries more fields overrides ``single_sample``.
@@ -107,7 +108,7 @@ class SampleAssembly:
         """One model call as one sample: the shared tensor reader."""
         return make_policy_trajectory(record, score)
 
-    def build(self, context: ReportContext, score: float) -> TrajectorySample:
+    def build(self, context: ReportContext, score: float) -> TrajectorySample | SkippedReport:
         """The report's trajectory as one ATIF sample with the reward ``score``, which the training component renders.
 
         Without ``accept_multi_turn_policy_samples``, the sample is the trajectory's last call: its earlier turns are
@@ -115,11 +116,19 @@ class SampleAssembly:
         trajectories, and every reply trains. ``ValueError``: a report of several trajectories without
         ``accept_multi_turn_policy_samples``.
         """
-        if self.settings.accept_multi_turn_policy_samples:
-            calls = context.inferences
-        elif len(context.ends) == 1:
-            calls = context.ends
-        else:
+        calls = context.inferences if self.settings.accept_multi_turn_policy_samples else context.ends
+        for inference in calls:
+            training = recorded_training(inference.payload)
+            loss_mask = training.get("loss_mask", inference.payload.get("loss_mask", ()))
+            if loss_mask is None:
+                return SkippedReport(f"inference record {inference.agent_record_id!r} has no trainable loss tokens")
+            if not isinstance(loss_mask, Sequence) or isinstance(loss_mask, str | bytes):
+                raise ValueError(f"inference record {inference.agent_record_id!r} loss_mask must be a sequence")
+            if any(value not in (0, 1) or isinstance(value, bool) for value in loss_mask):
+                raise ValueError(f"inference record {inference.agent_record_id!r} loss_mask must contain only 0 or 1")
+            if not any(loss_mask):
+                return SkippedReport(f"inference record {inference.agent_record_id!r} has no trainable loss tokens")
+        if not self.settings.accept_multi_turn_policy_samples and len(context.ends) != 1:
             raise ValueError(
                 "training data requires accept_multi_turn_policy_samples for a report of several trajectories"
             )

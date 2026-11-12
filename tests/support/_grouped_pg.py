@@ -22,7 +22,7 @@ from typing import Any
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, ReportSamples, SkippedReport
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job
 from reef.train.algos.helpers import next_steps
@@ -74,11 +74,12 @@ class ComparisonSetSamples(ReportSamples):
         super().__init__(context, ComparisonSetGrouping())
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
-    def make_sample(self, context: ReportContext) -> TrajectorySample:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         set_id = _comparison_set_id(context.report)
         if set_id is None:
             raise ValueError("grouped training requires metadata.comparison_set")
-        return replace(self.assembly.build(context, context.require_score()), group_id=set_id)
+        sample = self.assembly.build(context, context.require_score())
+        return sample if isinstance(sample, SkippedReport) else replace(sample, group_id=set_id)
 
 
 class GroupedPolicyJobData(Sample2Job):
