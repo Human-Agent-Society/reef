@@ -33,7 +33,7 @@ from reef.storage.data import (
     ScenarioArchivedError,
 )
 from reef.storage.item_kinds import json_digest
-from reef.storage.job_data import job_data_key, read_job_data
+from reef.storage.job_data import job_data_key
 from reef.storage.record_items import (
     evaluation_call_item,
     evaluation_call_items,
@@ -916,7 +916,7 @@ def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_jo
     # A job of the same samples, under another data ID, uses the same directory.
     again = store.write_job_directory(JobData("s:request:r1", (sample,)))
     assert (again.uri, again.data_id, again.sample_count, again.kind) == (first.uri, "s:request:r1", 1, "trajectory")
-    assert read_job_data(store.open_job_directory(again.to_dict()).path).samples == (sample,)
+    assert store.open_job_directory(again.to_dict()).read().samples == (sample,)
     other = store.write_job_directory(JobData("s:data:2", (sample, sample)))
     assert other.uri != first.uri
     # A directory that no job used since the time goes; a used one stays.
@@ -924,10 +924,10 @@ def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_jo
     assert store.delete_unused_job_directories(100.0) == 1
     with pytest.raises(FileNotFoundError):
         store.open_job_directory(first.to_dict())
-    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+    assert store.open_job_directory(other.to_dict()).read().samples == (sample, sample)
     # The periodic work keeps a directory that a job used within the time to live.
     store.maintain()
-    assert read_job_data(store.open_job_directory(other.to_dict()).path).samples == (sample, sample)
+    assert store.open_job_directory(other.to_dict()).read().samples == (sample, sample)
 
 
 def evaluation_call(turns: int, attempt: int, index: int, status: int = 200, response: object = "reply"):

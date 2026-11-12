@@ -44,7 +44,6 @@ from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
-from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
@@ -374,7 +373,7 @@ class _SAOComponent(StubTrainingComponent):
         self.payloads: list[dict[str, Any]] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        data, left_out = rendered_job_data(read_job_data(job.data_dir), CharTemplate())
+        data, left_out = rendered_job_data(job.read_data(), CharTemplate())
         assert left_out == ()
         prepared = prepare_slime_job(
             data,
@@ -457,12 +456,12 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
         _wait_for_finished_jobs(dispatcher, 1)
 
         [job] = component.submitted
-        assert [source_record_id(item) for item in read_job_data(job.data_dir).samples] == ["i1"]
+        assert [source_record_id(item) for item in job.read_data().samples] == ["i1"]
         [payload] = component.payloads
         assert payload["loss"] == "sao"
         # SAO defers advantages to the critic in the backend; reef ships none.
         assert "advantages" not in payload
-        assert trajectory_reward(read_job_data(job.data_dir).samples[0]) == pytest.approx(0.9)
+        assert trajectory_reward(job.read_data().samples[0]) == pytest.approx(0.9)
     finally:
         dispatcher.close()
 
@@ -581,7 +580,7 @@ def test_sao_recovers_its_job_state_from_the_commit_log_after_restart(tmp_path) 
             component.base_start,
             str(tmp_path / "checkpoints" / "1"),
         ]
-        assert source_record_id(read_job_data(component.submitted[-1].data_dir).samples[0]) == "i2"
+        assert source_record_id(component.submitted[-1].read_data().samples[0]) == "i2"
     finally:
         second.close()
 
@@ -652,7 +651,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         make_samples(second)
         assert JobLoopState.from_dict(second.state).finished_jobs == 1
         assert second.advance_job() is not None
-        assert [source_record_id(read_job_data(job.data_dir).samples[0]) for job in component.submitted] == [
+        assert [source_record_id(job.read_data().samples[0]) for job in component.submitted] == [
             "i1",
             "i2",
         ]

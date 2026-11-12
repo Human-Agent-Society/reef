@@ -14,7 +14,7 @@ from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtim
 from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import policy_trajectory
 
-from reef.core.job_data import JobOutcome, TaskSample
+from reef.core.job_data import JobOutcome, TaskFiles, TaskSample
 from reef.storage.samples import SampleKind
 from reef.train.component import job_id_for
 from reef.train.jobs import JobLoop, JobLoopState
@@ -156,7 +156,9 @@ def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default
     loop.submit(JobLoopState(component.base_start), batch("first"), stage.job_parameters(batch("first")))
     finished = JobLoopState(component.base_start, finished_jobs=1, last_job=JobOutcome("j", "stub", "finished"))
     (tmp_path / "second").mkdir()
-    second = JobData("second", (TaskSample(tmp_path / "second"),))
+    task_files = loop.data_store.task_files
+    digest = task_files.write("scenario", tmp_path / "second")
+    second = JobData("second", (TaskSample(task_files.path("scenario", digest), files=TaskFiles("scenario", digest)),))
     loop.submit(finished, second, stage.job_parameters(second))
     assert [job.parameters for job in component.submitted] == [
         {"objective": "sft", "learning_rate_schedule": SFT.to_dict()},

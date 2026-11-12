@@ -1522,6 +1522,9 @@ A ``TaskSample`` names a `Harbor task directory <https://www.harborframework.com
 with ``task_path: Path``: the directory contains the instruction, environment
 and verifier configuration/files. The path is interpreted in the consuming
 algorithm's execution environment. The value also accepts optional ``metadata``.
+``files`` is a ``TaskFiles(partition, digest)`` that names the directory in the
+task file store, or ``None``. Only a task with ``files`` can go into a training
+job (see `The job data directory <../developer-guide/processors.rst#the-job-data-directory>`__).
 It performs no file I/O or rollout. Algorithms supporting tasks own validation,
 environment execution and conversion to trajectories. The Tinker component,
 and the Slime component with its own rollout engines, roll task samples out in
@@ -2131,7 +2134,7 @@ these fields:
 
 - ``job_id`` and ``backend``, the name of the training component.
 - ``data``, a ``JobDataRef``: the job data directory that the job trains.
-  ``data_dir`` is its local path, which ``read_job_data`` reads, and
+  ``read_data()`` returns its samples, ``data_dir`` is its local path, and
   ``data_uri`` its URI. ``data_id``, ``sample_count`` and ``kind`` describe
   the data.
 - ``request_id``: the ID of the training request that the job trains, or

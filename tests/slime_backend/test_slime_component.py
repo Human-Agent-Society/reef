@@ -187,9 +187,10 @@ def batch_for(step: int, *, rewards: tuple[float, ...] = (1.0, 1.0)) -> JobData:
 
 
 def submitted_data(data: JobData) -> dict[str, Any]:
-    """The data of a job file that ``LocalJobComponent.submit`` wrote: the job data reference with its local path."""
+    """The data of a job file that ``LocalJobComponent.submit`` wrote: the job data reference with its local path and
+    the local paths of its tasks."""
     ref = job_data_ref(data)
-    return {**ref.to_dict(), "path": str(ref.path)}
+    return {**ref.to_dict(), "path": str(ref.path), "task_paths": [str(path) for path in ref.task_paths]}
 
 
 def parameters(objective: str, schedule: LearningRateSchedule | None = None) -> dict[str, Any]:

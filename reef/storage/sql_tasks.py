@@ -17,6 +17,7 @@ from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
+from reef.core.job_data import TaskFiles
 from reef.storage.sql_records import SQLScenarioDatabase
 from reef.storage.tasks import (
     SPLIT_NAMES,
@@ -247,6 +248,9 @@ class SQLTaskStore(TaskStore):
 
     def path(self, files_digest: str) -> Path:
         return self.files.path(self.scenario, files_digest)
+
+    def task_files(self, files_digest: str) -> TaskFiles:
+        return TaskFiles(self.scenario, files_digest)
 
     def write_document(self, *, key: str, document: str) -> None:
         if not key:
