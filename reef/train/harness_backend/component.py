@@ -39,8 +39,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Self
 
-from reef.artifact.artifact import Artifact
-from reef.artifact.components import TextFileTree
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError, InternalError, ReefError
@@ -60,25 +58,24 @@ from reef.evaluation.harness import (
 )
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
-from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
+from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tasks.harness_models import HarnessModels
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
-from reef.harness.tree import HarnessTree, validate_tree
+from reef.harness.tree import HarnessTree
 from reef.storage.durable_files import read_json, write_json
+from reef.storage.job_data import JobDataKind
 from reef.train.backend import ArtifactTextFiles
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, JobLimits, JobProgress
 from reef.train.harness_backend.contract import Method
+from reef.train.harness_backend.facts import HARNESS_COMPONENT, HarnessFacts
 from reef.train.harness_backend.records import JobRecord
 from reef.train.harness_backend.settings import HarnessSettings, configured_tasks, plugin_name
 from reef.train.harness_backend.state import HarnessState
 from reef.train.local_jobs import JOB_FILE, LocalJobComponent
 
-#: The name of the component, which its jobs carry.
-HARNESS_COMPONENT = "harness"
 #: The backend's history and job records under the state directory of a scenario component.
 HISTORY_DIR = "history"
 JOB_RECORDS_DIR = "steps"
@@ -157,7 +154,9 @@ class HarnessTrainingComponent(LocalJobComponent):
     jobs are not offline. ``collector`` picks the prompts that collection adds, ``None`` for the default.
     ``executor`` runs the runs, not yet bound to the adapter's program. ``agent`` is ``evolution.agent`` read,
     ``None`` when no coding agent runs; a method that ``runs_agent`` needs one unless it ``runs_without_agent``.
-    ``descriptor`` is the adapter that ``settings.evolution.adapter`` names. The component's root is
+    ``facts`` are the ``HarnessFacts`` of ``settings``: the name, the artifact format, the sharing of scenarios, the
+    default start's inputs and the tree checks are its answers. ``descriptor`` is ``facts.descriptor``, the adapter
+    that ``settings.evolution.adapter`` names. The component's root is
     ``settings.evolution.training_dir()``: it holds ``jobs/``, one directory per job (``LocalJobComponent``), and
     ``starts/``, the trees that ``import_start`` took. A job's weights never exist: its snapshots are trees, so
     ``artifact_format`` is ``None``. A job depends only on its start, data and parameters, and on the state of its
@@ -195,10 +194,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         if scorer is None and settings.runs_offline:
             # An offline job plays the imported train tasks and scores each run.
             raise ConfigError("offline runs score each train task, so they need evaluation.scorer")
-        try:
-            descriptor = get_adapter(settings.evolution.adapter)
-        except DescriptorError as exc:
-            raise ConfigError(str(exc)) from exc
+        facts = HarnessFacts.from_settings(settings)
         if scorer is not None:
             evaluation_selection(scorer, settings.worker_executor)
         root = settings.evolution.training_dir()
@@ -210,7 +206,8 @@ class HarnessTrainingComponent(LocalJobComponent):
         self.collector = collector
         self.executor = executor
         self.agent = agent
-        self.descriptor = descriptor
+        self.facts = facts
+        self.descriptor = facts.descriptor
         self.starts_root = root / "starts"
         #: Each scenario component's backend, made at its first job.
         self.backends: dict[tuple[str, str], HarnessBackend] = {}
@@ -252,20 +249,26 @@ class HarnessTrainingComponent(LocalJobComponent):
 
     @property
     def name(self) -> str:
-        return HARNESS_COMPONENT
+        return self.facts.name
 
     @property
     def artifact_format(self) -> ArtifactFormat | None:
-        return None
+        return self.facts.artifact_format
 
     @property
     def shares_scenarios(self) -> bool:
-        return True
+        return self.facts.shares_scenarios
+
+    @property
+    def concurrent_jobs(self) -> bool:
+        return self.facts.concurrent_jobs
+
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
+        return self.facts.parameters_schema(kind)
 
     def default_start(self) -> DefaultStart:
         """The seed tree, as ``HarnessEvolutionRecipe.default_start`` gives it."""
-        seed = self.settings.seed
-        return DefaultStart(files=dict(seed.files), inputs={"seed": seed.checksum()})
+        return DefaultStart(files=dict(self.facts.seed.files), inputs=self.facts.default_start_inputs)
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Accept: an offline job runs the head tree on its train tasks."""
@@ -294,8 +297,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         The tree is the snapshot's text files without the repository's own files (``TextFileTree``), as a client
         pulls it: a Git LFS release directory also holds ``.gitattributes``.
         """
-        tree = HarnessTree(dict(TextFileTree().read_files(Artifact.local(artifact_dir)) or {}))
-        self.check_tree(tree)
+        tree = self.facts.tree_in(artifact_dir)
         directory = self.starts_root / tree.checksum()
         if not directory.is_dir():
             staging = self.starts_root / f".{tree.checksum()}.partial"
@@ -323,9 +325,7 @@ class HarnessTrainingComponent(LocalJobComponent):
 
     def check_tree(self, tree: HarnessTree) -> None:
         """Raise ``ValueError`` for a tree that fails validation for the deployment's adapter."""
-        validation = validate_tree(tree, self.descriptor)
-        if not validation.passed:
-            raise ValueError(f"the harness tree fails validation: {validation.message()}")
+        self.facts.check_tree(tree)
 
     def build_policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin:
         """The selection policy that ``evolution.evaluation.policy`` names, measuring through ``backend``."""

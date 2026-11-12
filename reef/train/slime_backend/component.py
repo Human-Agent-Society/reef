@@ -77,6 +77,7 @@ from reef.train.slime_backend.checkpoints import (
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings, save_root
 from reef.train.slime_backend.distill import DistillAlgorithm
+from reef.train.slime_backend.facts import SLIME_COMPONENT, SlimeFacts
 from reef.train.slime_backend.harbor_rollouts import (
     TaskJobSource,
     check_rollout_can_train,
@@ -87,7 +88,7 @@ from reef.train.slime_backend.harbor_rollouts import (
 )
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
 from reef.train.slime_backend.objectives import resolve_objective
-from reef.train.slime_backend.parameters import SlimeJobParameters, slime_parameters_schema
+from reef.train.slime_backend.parameters import SlimeJobParameters
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
@@ -162,7 +163,9 @@ class SlimeJobs(LocalJobComponent):
     start of the untrained weights. ``SlimeTrainingComponent`` (the component
     Reef calls) and ``SlimeJobRunner`` (the driver that trains a job) are the
     two subclasses, over the same directories. A subclass names the rollout
-    whose weights the next job continues, ``held_rollout_id``.
+    whose weights the next job continues, ``held_rollout_id``. ``facts`` are the ``SlimeFacts`` of ``args``: the
+    artifact format, the default start's inputs, the parameters schema and the root start check are its answers.
+    The name is ``SLIME_COMPONENT``, as the facts' is; a driver reads it before it reads any LoRA argument.
     """
 
     def __init__(self, args: SlimeArguments, *, lora: bool) -> None:
@@ -188,34 +191,23 @@ class SlimeJobs(LocalJobComponent):
         """The rollout whose weights the next job continues, or ``None`` for the untrained weights."""
 
     @property
+    def facts(self) -> SlimeFacts:
+        """The facts of the arguments that the workers started with."""
+        return SlimeFacts.from_parsed(self.args, lora=self.lora)
+
+    @property
     def name(self) -> str:
-        return "slime"
+        return SLIME_COMPONENT
 
     @property
     def artifact_format(self) -> ArtifactFormat:
         """Full weights (the rollout's Hugging Face export), or with LoRA the PEFT adapter of the workers' rank."""
-        if not self.lora:
-            return ArtifactFormat("full")
-        from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
-
-        return ArtifactFormat(
-            "adapter", int(self.args.megatron_lora_rank), tuple(sglang_lora_target_modules(self.args))
-        )
+        return self.facts.artifact_format
 
     @property
     def default_start_inputs(self) -> dict[str, str]:
         """The configuration that decides the startup weights: the model, and with LoRA the adapter's settings."""
-        model = Path(self.args.hf_checkpoint).expanduser().resolve()
-        if not self.lora:
-            return {"model": str(model)}
-        from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
-
-        return {
-            "model": str(model),
-            "lora_rank": str(self.args.megatron_lora_rank),
-            "lora_alpha": str(self.args.megatron_lora_alpha),
-            "lora_target_modules": ",".join(sorted(sglang_lora_target_modules(self.args))),
-        }
+        return dict(self.facts.default_start_inputs)
 
     def default_start(self) -> DefaultStart:
         """The startup weights as a snapshot: the model directory, or with LoRA an adapter whose weights are zero.
@@ -246,17 +238,7 @@ class SlimeJobs(LocalJobComponent):
         Slime's workers load ``hf_checkpoint`` when they start and cannot load a snapshot, so they train a scenario
         only when its root came from the same configured inputs.
         """
-        configured = self.default_start_inputs
-        if root.source.kind != "default" or dict(root.source.inputs) != configured:
-            started = (
-                f"the item {root.source.item!r}"
-                if root.source.kind == "item"
-                else f"the inputs {dict(root.source.inputs)!r}"
-            )
-            raise ValueError(
-                f"Slime trains the weights that it starts with, from the inputs {configured!r}, but the scenario's root "
-                f"release came from {started}; create the scenario again with this configuration"
-            )
+        self.facts.check_root_start(root)
         return self.base_start
 
     def import_start(self, artifact_dir: Path) -> str:
@@ -266,7 +248,7 @@ class SlimeJobs(LocalJobComponent):
         )
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
-        return slime_parameters_schema(kind)
+        return self.facts.parameters_schema(kind)
 
     def check_job(self, job: TrainingJob) -> None:
         parameters = SlimeJobParameters.from_parameters(job.parameters)
@@ -859,7 +841,9 @@ class SlimeTrainingComponent(SlimeJobs):
 
     ``settings`` are the deployment's Slime settings. Building the component
     parses the Slime arguments once, without starting anything, so a
-    malformed option fails at deployment, and checks the checkpoint storage.
+    malformed option fails at deployment, and checks the checkpoint storage. It refuses to start when the options
+    as written state other facts than the parsed arguments (``SlimeFacts``): then a service that reads the facts
+    without the component would describe other snapshots than the workers save.
     ``run`` writes the settings to the job's ``driver.json`` and starts
     ``python -m reef.train.slime_backend.driver`` on the job's directory,
     with its output in ``driver.log``; the driver records the job's
@@ -881,7 +865,14 @@ class SlimeTrainingComponent(SlimeJobs):
         # Imported here: the LoRA module loads Megatron's LoRA stack.
         from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
 
-        super().__init__(args, lora=megatron_lora_enabled(args))
+        lora = megatron_lora_enabled(args)
+        written, parsed = SlimeFacts.from_arguments(settings.arguments), SlimeFacts.from_parsed(args, lora=lora)
+        if written != parsed:
+            raise RuntimeError(
+                f"Slime's options as written state {written}, but Slime parsed {parsed}: write --hf-checkpoint and "
+                "the --megatron-lora-* options with their full names"
+            )
+        super().__init__(args, lora=lora)
 
     @property
     def held_rollout_id(self) -> int | None:

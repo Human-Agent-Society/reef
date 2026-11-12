@@ -25,9 +25,10 @@ from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import DeployConfigError
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor.arguments import normalize_native_options
-from reef.train.component import TrainingComponent, TrainingComponentFactory
+from reef.train.component import TrainingBackendFacts, TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import EngineWeights, InProcessTrainingDeployment
 from reef.train.tinker_backend.config import SpindleFullSettings, TinkerServiceSettings, TinkerSettings
+from reef.train.tinker_backend.facts import SpindleFullFacts, TinkerFacts
 
 
 def service_settings[T: TinkerServiceSettings](options: Mapping[str, Any], config_type: type[T]) -> T:
@@ -95,6 +96,14 @@ class TinkerComponentFactory(TrainingComponentFactory):
 
     def config_type(self) -> type:
         return TinkerSettings
+
+    def facts(
+        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
+    ) -> TrainingBackendFacts | None:
+        """The ``TinkerFacts`` of the config's settings: no SDK client, sampler or API key."""
+        return TinkerFacts.of(
+            model_path, TinkerSettings(**{key: value for key, value in config.items() if key != "type"})
+        )
 
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         from reef.tinker.sampling import TinkerSDKSampler
@@ -169,6 +178,14 @@ class SpindleFullComponentFactory(TrainingComponentFactory):
 
     def config_type(self) -> type:
         return SpindleFullSettings
+
+    def facts(
+        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
+    ) -> TrainingBackendFacts | None:
+        """The ``SpindleFullFacts`` of the config's settings: no SDK client, sampler, exporter or API key."""
+        return SpindleFullFacts.of(
+            model_path, SpindleFullSettings(**{key: value for key, value in config.items() if key != "type"})
+        )
 
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         from reef.tinker.sampling import TinkerSDKSampler

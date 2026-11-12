@@ -137,7 +137,7 @@ Implementation
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
 - Implement ``TrainingDeployment`` in the integration to describe process
-  preparation, and a ``RuntimeFactory`` that returns the
+  preparation, and a ``TrainingComponentFactory`` that returns the
   ``TrainingComponent``. Declare the component's ``artifact_format``; the
   ``inference`` section builds the serving from it, so the integration builds
   no serving runtime. A backend with its own serving returns its runtime
@@ -147,6 +147,15 @@ Implementation
   entry-point group; see
   `Training backend deployment
   <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
+- Implement ``facts(config, model_path, environ)`` on the factory. It returns
+  the backend's ``TrainingBackendFacts`` from the same config, without
+  building or starting the component, and it imports no training framework or
+  service SDK. Define the facts type in the integration's own package, from
+  its own settings, and let the component answer the same members from a value
+  of it, so the two cannot differ. Share no facts code with another backend.
+  Add a test that compares the facts with the component for two configs, and
+  one that builds the facts without the framework. See `Facts without a
+  component <../developer-guide/executors.rst#facts-without-a-component>`__.
 - Keep the signal that an objective returns inside the integration
   (``signals.py``), and translate it into framework payloads there.
 - Declare Python dependencies and source pins in ``pyproject.toml``. Add

@@ -604,7 +604,7 @@ def test_recipe_without_a_runtime_refuses_to_build(tmp_path: Path) -> None:
 def test_adapter_without_model_binding_refuses_boot(tmp_path: Path, monkeypatch) -> None:
     built = harness_recipe(tmp_path, lambda workspace, services: None)
     unbound = dataclasses.replace(get_adapter("pi"), model_binding={})
-    monkeypatch.setattr("reef.train.harness_backend.component.get_adapter", lambda name: unbound)
+    monkeypatch.setattr("reef.train.harness_backend.facts.get_adapter", lambda name: unbound)
     with pytest.raises(ModelBindingError, match="declares no model_binding"):
         backend_of(rebuilt_recipe(built))
 

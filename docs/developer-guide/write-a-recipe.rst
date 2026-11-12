@@ -394,6 +394,9 @@ The ``TrainingComponentFactory`` that the config's ``type`` names returns the
 passes it to the recipe as ``training_component``. The backend does not build
 serving: the ``inference`` section selects it, and the component's
 ``artifact_format`` tells the serving runtime what each snapshot holds.
+The factory's ``facts(config, model_path, environ)`` states the backend's
+``TrainingBackendFacts`` from the same config without building the component;
+see `Facts without a component <executors.rst#facts-without-a-component>`__.
 `Training components <executors.rst#training-components>`__ defines the
 component contract, and `Serving saved weights
 <executors.rst#serving-saved-weights>`__ defines how published weights reach

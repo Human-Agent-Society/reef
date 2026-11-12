@@ -10,7 +10,9 @@ such as an objective's counters or an optimizer's search state, inside the
 checkpoints it saves, so a job that starts from a checkpoint continues it.
 
 A ``TrainingComponentFactory`` builds a component from the component config
-of a training deployment (``build_training_component``).
+of a training deployment (``build_training_component``). The same factory states the backend's
+``TrainingBackendFacts`` from that config, without a component (``training_backend_facts``): a service that does not
+run the component reads them.
 """
 
 from __future__ import annotations
@@ -223,6 +225,14 @@ class ScenarioRoot:
         if not isinstance(self.artifact, Artifact) or not isinstance(self.source, RootSource):
             raise TypeError("a scenario root is an Artifact and a RootSource")
 
+    def local_directory(self) -> Path:
+        """The directory of the root's files, made local (``Artifact.materialize``); ``ValueError`` when the
+        artifact has no local files."""
+        local_path = self.artifact.materialize().local_path
+        if local_path is None:
+            raise ValueError(f"the root snapshot {self.artifact.ref.revision} has no local files to train from")
+        return local_path
+
 
 def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
     """``component``'s view of the composite's root ``root``: the component's directory of the root snapshot, and,
@@ -238,6 +248,73 @@ def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
             },
         )
     return ScenarioRoot(root.artifact.component(component), source)
+
+
+class TrainingBackendFacts(ABC):
+    """What a training backend states about itself from its configuration alone, without a training component.
+
+    Values: a backend defines one concrete type in its own package and makes a value from its own settings
+    (``TrainingComponentFactory.facts``). Making a value starts no process, opens no connection and imports no
+    training framework or service SDK. Each concrete type checks its fields when a value is made.
+
+    Relation to the component: let ``component`` be the backend's ``TrainingComponent`` of the same settings. Then
+    ``name``, ``artifact_format``, ``shares_scenarios`` and ``concurrent_jobs`` equal the component's,
+    ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``default_start_inputs`` equals
+    ``component.default_start().inputs``, and ``check_root_start(root)`` raises exactly when
+    ``component.root_start(root)`` raises, with the same message. The component holds a value and answers these
+    members from it, so the two cannot differ.
+
+    A member reads at most the settings, the files that a caller hands it (``check_root_start`` reads the root
+    snapshot's files), and local paths that the settings name. No member calls the training service or a running
+    component. What needs one stays on ``TrainingComponent``: the files of the default start (``default_start``),
+    the start of a job (``root_start``, ``import_start``), ``check_artifact``, ``check_task_jobs``, ``check_job``,
+    ``changed_parts`` and the jobs themselves.
+
+    Purpose: a service that does not run the backend's component, such as control or inference in a split
+    deployment, reads these members instead of building the component.
+    """
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """The backend name that jobs for the component carry (``TrainingComponent.name``)."""
+
+    @property
+    @abstractmethod
+    def artifact_format(self) -> ArtifactFormat | None:
+        """The weight files that each saved checkpoint's snapshot holds, or None when an engine loads none
+        (``TrainingComponent.artifact_format``)."""
+
+    @property
+    @abstractmethod
+    def shares_scenarios(self) -> bool:
+        """Whether jobs of several scenarios can run on the component (``TrainingComponent.shares_scenarios``)."""
+
+    @property
+    @abstractmethod
+    def concurrent_jobs(self) -> bool:
+        """Whether several jobs of one scenario can run at the same time (``TrainingComponent.concurrent_jobs``)."""
+
+    @property
+    @abstractmethod
+    def default_start_inputs(self) -> Mapping[str, str]:
+        """The ``inputs`` of the component's default start: the model and the settings that decide its content.
+
+        A new scenario without an artifact item records them in its ``RootSource``.
+        """
+
+    @abstractmethod
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
+        """The JSON Schema of the complete parameters of a job of ``kind`` samples, or None when the backend
+        declares none (``TrainingComponent.parameters_schema``)."""
+
+    @abstractmethod
+    def check_root_start(self, root: ScenarioRoot) -> None:
+        """Raise ``ValueError`` unless a trainer of the backend can start from the scenario root ``root``.
+
+        It refuses exactly the roots that ``TrainingComponent.root_start`` refuses. It writes nothing: the
+        component makes the start itself when the first job needs it.
+        """
 
 
 class TrainingComponent(ABC):
@@ -283,10 +360,7 @@ class TrainingComponent(ABC):
         overrides it, and raises ``ValueError`` for a root that it cannot start
         from.
         """
-        local_path = root.artifact.materialize().local_path
-        if local_path is None:
-            raise ValueError(f"the root snapshot {root.artifact.ref.revision} has no local files to train from")
-        return self.import_start(local_path)
+        return self.import_start(root.local_directory())
 
     @property
     def shares_scenarios(self) -> bool:
@@ -446,12 +520,25 @@ class TrainingComponentFactory(ConfiguredFactory):
     ``kind`` is the dotted reference ``package.module:factory`` that the
     config's ``type`` holds (``TrainingDeployment.component_type``).
     ``__call__`` receives ``(config, model_path, environ)`` and returns a
-    :class:`TrainingComponent`; ``build_training_component`` calls it.
+    :class:`TrainingComponent`; ``build_training_component`` calls it. ``facts`` receives the same arguments and
+    returns the backend's :class:`TrainingBackendFacts` without building a component; ``training_backend_facts``
+    calls it.
     """
 
     @abstractmethod
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         """Build the training component that ``config`` describes."""
+
+    def facts(
+        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
+    ) -> TrainingBackendFacts | None:
+        """The facts of the component that ``__call__`` builds from the same arguments, without building it.
+
+        It starts nothing and imports no training framework. The default returns None, which means that the
+        backend states no facts from its configuration: a caller that needs them builds the component and reads
+        the members there. A backend whose component runs in another service than its readers overrides it.
+        """
+        return None
 
 
 def training_component_factory_for(reference: str) -> TrainingComponentFactory:
@@ -472,6 +559,26 @@ def training_component_factory_for(reference: str) -> TrainingComponentFactory:
     if not isinstance(candidate, TrainingComponentFactory):
         raise RuntimeConfigError(f"training component type {reference!r} is not a TrainingComponentFactory")
     return candidate
+
+
+def training_backend_facts(
+    config: Mapping[str, Any], *, model_path: str, environ: Mapping[str, str] | None = None
+) -> TrainingBackendFacts | None:
+    """The facts of the training component of ``config``, without the component, or None when the backend states none.
+
+    ``config`` is a component config as ``build_training_component`` takes it: its ``type`` names the factory, whose
+    ``facts`` gets the parsed config. ``TypeError`` when the factory returns anything but a ``TrainingBackendFacts``
+    or None.
+    """
+    reference = config.get("type")
+    if not isinstance(reference, str) or not reference:
+        raise RuntimeConfigError("a training component config needs its factory's dotted reference as type")
+    factory = training_component_factory_for(reference)
+    values = os.environ if environ is None else environ
+    facts = factory.facts(factory.parse_config(config, values), model_path, values)
+    if facts is not None and not isinstance(facts, TrainingBackendFacts):
+        raise TypeError(f"training component type {reference!r} must state TrainingBackendFacts or None")
+    return facts
 
 
 def build_training_component(

@@ -162,6 +162,7 @@ def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
         "num_steps_per_rollout": 1,
         "attention_dropout": 0.0,
         "hidden_dropout": 0.0,
+        "hf_checkpoint": str(tmp_path / "model"),
         "save_hf": str(tmp_path / "hf" / "{rollout_id}"),
         "start_rollout_id": 0,
         "critic_save": None,
@@ -635,12 +636,18 @@ def test_the_release_format_names_full_weights_or_the_lora_adapter_in_the_engine
     tmp_path, stacks
 ) -> None:
     assert stacks(tmp_path / "full").component.artifact_format == ArtifactFormat("full")
-    lora = stacks(tmp_path / "lora", lora=True, megatron_lora_rank=8, megatron_lora_target_modules=None)
+    lora = stacks(
+        tmp_path / "lora", lora=True, megatron_lora_rank=8, megatron_lora_alpha=8, megatron_lora_target_modules=None
+    )
     assert lora.component.artifact_format == ArtifactFormat(
         "adapter", 8, ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     )
     attention = stacks(
-        tmp_path / "attention", lora=True, megatron_lora_rank=4, megatron_lora_target_modules=["linear_qkv"]
+        tmp_path / "attention",
+        lora=True,
+        megatron_lora_rank=4,
+        megatron_lora_alpha=4,
+        megatron_lora_target_modules=["linear_qkv"],
     )
     assert attention.component.artifact_format == ArtifactFormat("adapter", 4, ("q_proj", "k_proj", "v_proj"))
 

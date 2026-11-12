@@ -45,7 +45,8 @@ from reef.train.task_rollouts import RolloutSettings, RolloutTokens, TaskJobRoll
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerServiceSettings, TinkerSettings
-from reef.train.tinker_backend.parameters import TinkerJobParameters, rollout_settings, tinker_parameters_schema
+from reef.train.tinker_backend.facts import SpindleFullFacts, TinkerFacts
+from reef.train.tinker_backend.parameters import TinkerJobParameters, rollout_settings
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
 
@@ -101,8 +102,12 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
     directory is both the start of a later job and the snapshot Reef publishes.
     The weights stay on the service. A subclass decides the parameterization:
-    which checkpoints it trains (``validated``), what its base is
+    which checkpoints it trains (``facts.validated``), what its base is
     (``prepare_base``, ``start_at``), and which snapshots it imports.
+
+    ``facts`` are the backend's facts of the same model and settings (``TinkerFacts`` or ``SpindleFullFacts``):
+    the name, the artifact format, the sharing of scenarios and jobs, the parameters schema and ``validated`` are
+    its answers.
     """
 
     def __init__(
@@ -111,9 +116,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         config: TinkerServiceSettings,
         client: TinkerClient,
         *,
+        facts: TinkerFacts | SpindleFullFacts,
         sampler: TinkerSampler | None = None,
         score_centering: ScoreCentering | None = None,
     ) -> None:
+        self.facts = facts
         self._model = base_model
         #: The score centering of this component's policy-gradient jobs, or None for none.
         self.score_centering = score_centering
@@ -168,9 +175,9 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         """Write the base start into ``base/`` when it is not there, or when it is a function of the configuration and
         ``base/`` holds the start of another configuration; ``prepared_base`` then checks it with ``start_at``."""
 
-    @abstractmethod
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
         """``checkpoint`` when this component trains it: of its model, service and parameterization; else ``ValueError``."""
+        return self.facts.validated(checkpoint)
 
     def start_at(self, directory: Path) -> TinkerCheckpoint | FreshStart:
         """The start that ``directory`` holds: a checkpoint manifest that ``validated`` takes; else ``ValueError``."""
@@ -199,9 +206,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     def import_manifest(self, artifact_dir: Path) -> str:
         """Take the manifest in ``release`` as a start: copy it into ``imported/<digest>/``; return that directory."""
-        if not (artifact_dir / MANIFEST).exists():
-            raise ValueError(f"artifact is missing {MANIFEST}")
-        checkpoint = self.validated(TinkerCheckpoint.read(artifact_dir))
+        checkpoint = self.facts.checkpoint_in(artifact_dir)
         digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
         imported = self._root / "imported" / digest
         if not imported.exists():
@@ -210,9 +215,12 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return str(imported)
 
     @property
+    def name(self) -> str:
+        return self.facts.name
+
+    @property
     def artifact_format(self) -> ArtifactFormat | None:
-        """``None`` by default: a snapshot holds only its manifest, and the weights stay on the service."""
-        return None
+        return self.facts.artifact_format
 
     @property
     def state_dir(self) -> Path:
@@ -220,11 +228,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     @property
     def shares_scenarios(self) -> bool:
-        return True
+        return self.facts.shares_scenarios
 
     @property
     def concurrent_jobs(self) -> bool:
-        return True
+        return self.facts.concurrent_jobs
 
     @property
     def base_start(self) -> str:
@@ -236,7 +244,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return TinkerJobParameters.from_parameters(parameters, self._config)
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
-        return tinker_parameters_schema(kind)
+        return self.facts.parameters_schema(kind)
 
     def check_job(self, job: TrainingJob) -> None:
         parameters = self.job_parameters(job.parameters)
@@ -465,33 +473,16 @@ class TinkerTrainingComponent(TinkerJobComponent):
     def __init__(
         self, base_model: str, config: TinkerSettings, client: TinkerClient, *, sampler: TinkerSampler | None = None
     ) -> None:
-        self._lora_rank = config.lora_rank
-        super().__init__(base_model, config, client, sampler=sampler)
-
-    @property
-    def name(self) -> str:
-        return "tinker"
+        super().__init__(base_model, config, client, facts=TinkerFacts.of(base_model, config), sampler=sampler)
 
     def prepare_base(self) -> None:
         if not (self._base / MANIFEST).exists():
             # The untrained adapter is the base checkpoint: the default start holds it as a snapshot.
             self._client.initialize().write(self._base)
 
-    def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
-        checkpoint.check_compatible(self._model, service=self._config.base_url)
-        if checkpoint.lora_rank != self._lora_rank:
-            raise ValueError(
-                f"the Tinker checkpoint is no rank {self._lora_rank} LoRA of {self._model}: "
-                f"its rank is {checkpoint.lora_rank}"
-            )
-        return checkpoint
-
     def default_start(self) -> DefaultStart:
         """The untrained adapter's release: its manifest."""
-        inputs = {"model": self._model, "lora_rank": str(self._lora_rank)}
-        if self._config.base_url is not None:
-            inputs["service"] = self._config.base_url
-        return DefaultStart(model_files=TinkerBaseFiles(self), inputs=inputs)
+        return DefaultStart(model_files=TinkerBaseFiles(self), inputs=self.facts.default_start_inputs)
 
     def check_artifact(self, files: ArtifactFiles) -> None:
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
