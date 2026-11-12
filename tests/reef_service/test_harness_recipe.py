@@ -204,8 +204,6 @@ INVALID_SETTINGS = {
     "run-budget": ({"max_runs_per_step": -1}, r"evolution\.max_runs_per_step must be at least 0"),
     "state-dir": ({"state_dir": " "}, r"evolution\.state_dir must be a non-empty path"),
     # The activation section decides whether a kept tree serves; these evolution settings are gone.
-    "publish": ({"publish": "auto"}, r"evolution\.publish is gone: the activation section"),
-    "review-kinds": ({"review_kinds": ["extension"]}, r"evolution\.review_kinds is gone: the activation section"),
     "served-model": ({"models": {"served": {"url": "http://x", "model": "m"}}}, "may not name a model 'served'"),
     "policy": ({"evaluation": {"policy": "best"}}, r"evaluation\.policy must be one of compare, floor, none"),
     "statistic": ({"evaluation": {"statistic": "median"}}, r"evaluation\.statistic must be one of wins, mean"),
@@ -235,8 +233,7 @@ def test_an_invalid_setting_refuses_boot_naming_it(section: dict, message: str) 
 
 
 def test_the_activation_section_names_the_rule_that_decides_whether_a_kept_tree_serves() -> None:
-    """Whether a kept tree serves is the top-level ``activation`` section's rule, not an ``evolution`` setting
-    (``INVALID_SETTINGS`` refuses the retired ``publish`` and ``review_kinds``)."""
+    """Whether a kept tree serves is the top-level ``activation`` section's rule, not an ``evolution`` setting."""
 
     def config(activation: dict | None = None, **evolution: Any) -> dict:
         built = evolution_config(**evolution)
@@ -457,9 +454,6 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
         with pytest.raises(RecipeConfigError, match="needs the samples of a scenario session"):
             built.build("s", memory_records("s"), artifacts=artifacts_for(built), root=seed_root(built))
-    retired = {"tasks": [], "task_store": "imported-tasks"}
-    with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):
-        from_config(evolution_config(evaluation=retired), runtime=runtime())
 
 
 def test_offline_runs_need_task_directories_to_evaluate_on_and_a_scorer() -> None:

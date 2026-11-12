@@ -43,9 +43,7 @@ from reef.record2sample.generator import (
     GeneratorRollouts,
     GeneratorService,
     HarborChecks,
-    HarborRuns,
     HttpGenerator,
-    JobRunner,
     OracleResult,
     OracleUnavailable,
     ReadinessProbe,
@@ -56,7 +54,7 @@ from reef.record2sample.generator import (
     readiness_probes,
 )
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.record2sample.generator.service import CLOSE_GRACE_S, HarborProbe
+from reef.record2sample.generator.service import HarborProbe
 from reef.record2sample.generator.wire import (
     WireError,
     designer_request_document,
@@ -215,7 +213,9 @@ def run_with(built: GeneratorService, body: Callable[[HttpGenerator], Awaitable[
 
 
 def request() -> DesignerRequest:
-    return DesignerRequest(target="shell tasks with hidden state", skill="inspection", experience_text="LAST TIME: ok")
+    return DesignerRequest(
+        TaskGenerationRequest((), "shell tasks with hidden state"), skill="inspection", experience_text="LAST TIME: ok"
+    )
 
 
 async def propose_and_write(generator: HttpGenerator) -> tuple[HarborTask, WrittenTask]:
@@ -369,34 +369,6 @@ def test_a_check_that_could_not_run_is_a_failed_job_the_client_raises(tmp_path: 
     assert len(checks.calls) == 2, "the runner went on to the next job after the failed one"
 
 
-def test_closing_the_service_stops_the_harbor_run_of_the_job_in_flight(tmp_path: Path) -> None:
-    harbor = tmp_path / "harbor"
-    harbor.write_text(f"#!{sys.executable}\nimport time\ntime.sleep(60)\n")
-    harbor.chmod(0o755)
-    runs = HarborRuns()
-    built, _, _, _ = service(tmp_path, checks=HarborChecks(harbor=str(harbor), runs=runs), jobs=JobRunner(runs))
-
-    async def body(generator: HttpGenerator) -> object:
-        _, written = await propose_and_write(generator)
-        submitted = await generator.call("POST", "/checks", body={"path": str(written.path)})
-        deadline = time.monotonic() + 10.0
-        while not runs.pids() and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        return submitted["job"], runs.pids()
-
-    started = time.monotonic()
-    job_id, pids = run_with(built, body)  # type: ignore[misc]
-    assert time.monotonic() - started < CLOSE_GRACE_S, "the child honours the term, so the close never waits it out"
-    (pid,) = pids
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-    job = built.jobs.get(job_id)
-    # A check the generator stopped could not run: the job fails with the reason, never a refused task.
-    assert job is not None and job.state == "failed" and job.result is None
-    assert job.error == "OracleUnavailable: harbor run -a oracle was stopped with the generator"
-    assert runs.is_closed and runs.pids() == ()
-
-
 def test_a_job_that_never_finishes_is_given_up_after_the_job_timeout(tmp_path: Path) -> None:
     gate = threading.Event()
     built, _, checks, _ = service(tmp_path, checks=StandInChecks(gate=gate))
@@ -531,12 +503,14 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
     assert build_environments == [{"type": "e2b"}], "Docker builds one image at a time, so it gets no build first"
     assert HarborChecks(environment="e2b").environment == "e2b"
     # An environment the generator cannot probe is refused.
-    for environment in ("", "modal"):
-        with pytest.raises(ValueError, match=f"the Harbor environment must be docker or e2b, not '{environment}'"):
+    for environment in ("", "podman"):
+        with pytest.raises(
+            ValueError, match=f"the Harbor environment must be docker or e2b or modal, not '{environment}'"
+        ):
             HarborChecks(environment=environment)
     for fields, message in (
         ({"environment": ""}, "the Harbor environment must be docker or e2b"),
-        ({"environment": "modal"}, "the Harbor environment must be docker or e2b, not 'modal'"),
+        ({"environment": "podman"}, "the Harbor environment must be docker or e2b or modal, not 'podman'"),
         ({"concurrency": 0}, "concurrency must be a positive int"),
     ):
         with pytest.raises(ValueError, match=message):
@@ -742,8 +716,8 @@ def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
     reason = parser.missing()
     assert reason.startswith(f"dockerfile_parse does not import under {sys.executable}"), reason
     assert "install reef-infra[e2b]" in reason
-    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
-        readiness_probes(environment="modal")
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b or modal, not 'podman'"):
+        readiness_probes(environment="podman")
     with pytest.raises(ValueError, match="non-empty environment variable name"):
         EnvironmentVariableProbe("")
 
@@ -833,7 +807,7 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         ({"tasks-root": "/tmp/t", "port": 0}, "port must be"),
         ({"tasks-root": "/tmp/t", "tasks_root": "/tmp/u"}, "twice"),
         ({"tasks-root": "/tmp/t", "designer-api": "anthropic"}, "designer-api must be openai or responses"),
-        ({"tasks-root": "/tmp/t", "environment": "modal"}, r"generator\.environment must be docker or e2b"),
+        ({"tasks-root": "/tmp/t", "environment": "podman"}, r"generator\.environment must be docker or e2b or modal"),
         ({"tasks-root": "/tmp/t", "environment": "Docker"}, r"generator\.environment must be docker or e2b"),
     ):
         with pytest.raises(ValueError, match=message):

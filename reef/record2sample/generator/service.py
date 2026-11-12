@@ -65,7 +65,6 @@ from reef.record2sample.generator.designer import (
 )
 from reef.record2sample.generator.harbor import (
     GeneratedHarborTask,
-    HarborRuns,
     OracleResult,
     content_hash,
     harbor_task,
@@ -138,21 +137,17 @@ class HarborChecks(TaskChecks):
     """The checks through the harbor command line, in one Harbor environment.
 
     Values: ``harbor`` is the harbor command line, or None for ``harbor`` on PATH. ``environment`` is one of
-    ``reef.execution.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``. ``runs`` is an explicit caller-owned HarborRuns,
-    or None to use the worker's job scope (a fresh scope outside a worker).
+    ``reef.execution.sandbox.task_environment.PROBED_TASK_ENVIRONMENTS``.
     Purpose: ``CheckJob`` calls ``oracle``, which runs both checks in ``environment``. The default generator
     delegates process ownership and shutdown to its worker.
     """
 
-    def __init__(
-        self, *, harbor: str | None = None, environment: str = "docker", runs: HarborRuns | None = None
-    ) -> None:
+    def __init__(self, *, harbor: str | None = None, environment: str = "docker") -> None:
         self.harbor = harbor
         self.environment = checked_task_environment(environment)
-        self.runs = runs
 
     def oracle(self, task_path: Path) -> OracleResult:
-        return oracle_check(task_path, harbor=self.harbor, environment=self.environment, runs=self.runs)
+        return oracle_check(task_path, harbor=self.harbor, environment=self.environment)
 
 
 class GeneratorRollouts(ABC):
@@ -403,18 +398,14 @@ class JobRunner(BackgroundJobRunner):
     """The generator's job registry and runner, with one BackgroundJobWorker.
 
     jobs maps each submitted Job.id to that Job, initially empty; lock protects
-    registry access. runs is None for worker-owned processes or an explicit
-    HarborRuns also stopped at close. worker executes at most MAX_JOBS_IN_FLIGHT
+    registry access. worker executes at most MAX_JOBS_IN_FLIGHT
     jobs. submit returns the registered job or raises after removing a refused
     submission. run stores its result or error. get returns the matching job or
     None, translating worker cancellation into failed state. close stops
     admission and waits for cleanup, propagating an incomplete-close error.
     """
 
-    def __init__(self, runs: HarborRuns | None = None) -> None:
-        if runs is not None and not isinstance(runs, HarborRuns):
-            raise ValueError("runs must be HarborRuns or None")
-        self.runs = runs
+    def __init__(self) -> None:
         self.jobs: dict[str, Job] = {}
         self.lock = threading.Lock()
         # A rollout job waits for rollout slots, not for job slots; the limit only bounds what one client can queue.
@@ -442,8 +433,6 @@ class JobRunner(BackgroundJobRunner):
 
     def close(self) -> None:
         self.worker.request_stop()
-        if self.runs is not None:
-            self.runs.terminate_all(grace_s=CLOSE_GRACE_S)
         self.worker.close()
 
     async def run(self, job: SupportsReceipt) -> SupportsReceipt:

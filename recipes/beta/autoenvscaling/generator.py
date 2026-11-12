@@ -893,11 +893,6 @@ class AutoEnvScalingGenerator(TaskGenerator):
     def from_config(
         cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
     ) -> Self:
-        if "state_dir" in config:
-            raise PluginConfigError(
-                "AutoEnvScalingGenerator does not take state_dir: the generator keeps its state in the scenario's "
-                "task store (RFC #1370). Remove the key; state under an old state_dir is not read."
-            )
         unknown = sorted(str(key) for key in config if key not in CONFIG_KEYS)
         if unknown:
             raise PluginConfigError(f"AutoEnvScalingGenerator does not take {', '.join(unknown)}")

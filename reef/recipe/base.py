@@ -376,37 +376,6 @@ class Recipe:
         """
         return ScenarioComponents()
 
-    def build_artifact_validator(self) -> ArtifactValidator:
-        """An admission check run beside the component's own before the recipe's snapshot is published or restored.
-
-        Kept for recipes written before admission moved onto the component
-        (``ComponentSpec.validator``, where a new recipe binds it):
-        it joins the check of the one component the recipe serves, and on a
-        recipe that serves none it admits the snapshot as a whole; inside a
-        composite that recipe's snapshot is its component, so the check joins
-        that component's. A recipe that overrides it while serving several
-        components is refused at build, since the check could not say which
-        component it admits.
-        """
-        return AcceptAnyArtifact()
-
-    def scenario_components(self, scenario: str) -> ScenarioComponents:
-        """``build_components`` with ``build_artifact_validator`` joined to the served component's check."""
-        components = self.build_components(scenario)
-        if type(self).build_artifact_validator is Recipe.build_artifact_validator:
-            return components
-        if not components.components:
-            # A snapshot with no component is admitted as a whole, as it was before components existed.
-            return replace(components, validator=every_check(components.validator, self.build_artifact_validator()))
-        if len(components.components) != 1:
-            raise RecipeConfigError(
-                f"{type(self).__name__} overrides build_artifact_validator but serves components "
-                f"{list(components.names)}: bind the check on each component's ComponentSpec.validator instead"
-            )
-        ((name, component),) = components.components.items()
-        checks = every_check(component.validator, self.build_artifact_validator())
-        return replace(components, components={name: replace(component, validator=checks)})
-
     def check_root_start(self, root: ScenarioRoot) -> None:
         """Check that training can start from ``root`` before an item start is registered.
 

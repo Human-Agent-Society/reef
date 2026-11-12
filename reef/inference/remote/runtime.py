@@ -84,8 +84,6 @@ def serving_engine_config(
     router_options = {
         name.removeprefix("router_"): values.pop(name) for name in list(values) if name.startswith("router_")
     }
-    if "ip" in router_options:
-        raise ValueError("inference.options.router-ip names an external router, which serving engines do not use")
     placement.update(router_port=router_options.pop("port", None), router_options=router_options)
     values.update(
         model_path=model_path,

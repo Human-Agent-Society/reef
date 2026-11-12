@@ -51,7 +51,7 @@ class ServiceConfig:
 
     recipe: str = config_option(
         public_path=("recipe", "implementation"),
-        help="Recipe implementation or named deployment preset (the launcher reserves --recipe).",
+        help="Recipe implementation or named deployment preset.",
     )
     host: str = config_option("0.0.0.0", public_path=("reef", "host"), help="HTTP bind address.")
     port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")
@@ -607,7 +607,7 @@ def service_config_arguments() -> tuple[ConfigArgument, ...]:
 
 
 def service_override(key: str, value: str) -> tuple[ConfigArgument, str] | None:
-    """Identify a declared option, retaining legacy names and dotted paths."""
+    """Identify a declared option by its flag."""
     flag = f"--{key}"
     for argument in service_config_arguments():
         if flag in argument.flags:

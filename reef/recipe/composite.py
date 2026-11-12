@@ -337,7 +337,7 @@ class CompositeRecipe(Recipe):
         """Each recipe's one component under the name the composite binds it to."""
         specs: dict[str, ComponentSpec] = {}
         for component, recipe in self.components.items():
-            declared = recipe.scenario_components(scenario)
+            declared = recipe.build_components(scenario)
             if len(declared.components) > 1:
                 raise RecipeConfigError(f"component {component!r} serves several components of its own")
             served = next(iter(declared.components.values()), ComponentSpec())

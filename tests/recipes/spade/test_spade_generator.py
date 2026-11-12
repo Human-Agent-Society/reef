@@ -75,7 +75,7 @@ def test_a_generation_asks_the_designer_count_times_across_the_skills(tmp_path: 
     assert service.proposals[0]["tags"] == {"role": "designer", "generation": "0", "skill": "inspection"}
     assert service.proposals[0]["scenario"] == "spade" and service.proposals[0]["model"] == "Qwen/Qwen3-8B"
     assert "nothing recorded yet" in service.proposals[0]["request"].experience_text
-    assert service.proposals[0]["request"].target == DESCRIPTION
+    assert service.proposals[0]["request"].inputs.description == DESCRIPTION
     assert [task.name for task in tasks] == [
         "harbor-00000-000-inspection",
         "harbor-00000-001-repair",
@@ -278,7 +278,6 @@ def test_from_config_reads_its_section_and_takes_the_state_of_its_scenario(tmp_p
     for config, message in (
         ({}, "generator_url"),
         ({"generator_url": "${endpoints.generator}"}, "generator_url"),
-        ({"generator_url": "http://g", "state_dir": "s"}, r"does not take state_dir: .* \(RFC #1370\)"),
         ({"generator_url": "http://g", "rollouts": 2}, "does not take rollouts"),
         ({"generator_url": "http://g", "count": 0}, "count must be positive"),
     ):

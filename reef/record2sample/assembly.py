@@ -56,7 +56,11 @@ class SampleAssemblySettings(Record2SampleSettings):
         1024, help="Tokens a multi-turn sample may realign where a later prompt rewrote an earlier response."
     )
     scaffold_tolerance: int = config_option(
-        0, help="Masked tokens the assembly may realign before a response, for a thinking template's scaffold."
+        0,
+        help=(
+            "Tokens at the end of a prompt that the next prompt's history may drop, such as a thinking template's "
+            "scaffold; the sample keeps them, and the response after them trains."
+        ),
     )
 
     def __post_init__(self) -> None:
@@ -73,9 +77,10 @@ class SampleAssembly:
     ``build`` makes the ATIF sample of a report that serving recorded, which the training component renders: the
     trajectory's last call, or with ``accept_multi_turn_policy_samples`` every call. ``assemble`` builds the tensor
     sample of the calls of a training component's own task rollout, which carry the tokens that its engine sampled:
-    one call becomes one sample (``single_sample``), and the ordered calls of a trajectory one multi-turn sample,
-    realigned within ``realign_threshold`` and ``scaffold_tolerance``. An unassemblable trajectory raises a training
-    data error. A recipe whose single sample carries more fields overrides ``single_sample``.
+    one call becomes one sample (``single_sample``), and the ordered calls of a trajectory one multi-turn sample
+    (``make_multi_turn_policy_trajectory`` with ``realign_threshold`` and ``scaffold_tolerance``). An unassemblable
+    trajectory raises a training data error. A recipe whose single sample carries more fields overrides
+    ``single_sample``.
     """
 
     def __init__(self, settings: SampleAssemblySettings) -> None:

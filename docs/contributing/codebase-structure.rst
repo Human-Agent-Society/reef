@@ -206,9 +206,8 @@ Training and inference meet only through contracts that neither side owns.
   ``InferenceService`` component and selects its implementation.
   ``registry.py`` owns the runtime factories and ``RuntimeRegistry``.
   ``serving.py`` loads saved weights into serving engines that the control
-  plane controls directly. ``recovery.py`` owns ``InferenceControl`` and
-  ``EngineHealthMonitor``, and ``residency.py`` holds the
-  ``AdapterResidencyManager``. These modules import no concrete integration.
+  plane controls directly. ``recovery.py`` owns ``InferenceControl``, and
+  ``residency.py`` holds the ``AdapterResidencyManager``. These modules import no concrete integration.
 - ``train/component.py`` defines bounded training jobs, the
   ``TrainingComponent`` interface, and its factories. Each backend package owns
   its job parameters and objectives. ``train/learning_rate.py`` holds the
@@ -247,7 +246,11 @@ over a token-native generate route: it renders the prompt, builds the provider
 response from a ``CapturedGeneration`` and streams protocol frames. The
 response carries no training tensors. Each engine
 supplies a ``NativeGenerateClient`` that shapes its request, parses its response
-and builds its tool-call parser. ``inference/engine_control.py`` holds the
+and builds its tool-call parser. The facade and Tinker's sampler in
+``tinker/sampling.py`` split a reply into its reasoning and its answer with
+``core/reasoning.py``, whole or while it streams. The split is in ``reef/core/``
+because ``tinker/`` also serves training, and training never imports
+``inference/``. ``inference/engine_control.py`` holds the
 control classes that SGLang and vLLM share: the inference backend, the
 inference service, the control actor and its default serving executor.
 ``inference/sglang/`` owns SGLang engine launch, response parsing and control
@@ -326,8 +329,7 @@ The extension points those packages expose are in `Python API
   maintenance. ``postgres.py`` supplies PostgreSQL tables and pooled
   transactions. ``commit_history.py`` owns the ``CommitHistory`` base and
   ``CommitHistoryScenarioStore``, which accepts any ``RecordStore``,
-  ``TaskStorage`` and ``CommitHistory``. ``migrations.py`` holds one-time
-  upgrades of older schemas and files. ``sqlite.py`` and ``postgres.py`` assemble their respective
+  ``TaskStorage`` and ``CommitHistory``. ``sqlite.py`` and ``postgres.py`` assemble their respective
   scenario storage services against the interfaces in ``scenario.py``.
   Storage implementations depend on domain contracts, never the reverse.
 - Does it persist or materialize versioned bytes, or declare a snapshot

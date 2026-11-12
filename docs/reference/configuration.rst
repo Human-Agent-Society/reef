@@ -626,10 +626,9 @@ CLI overrides use the same parser, for example
 ``--inference.options.mem-fraction-static 0.7``. Native engine options use
 SGLang's names without a ``sglang-`` prefix. Reef builds the engines' input
 from the ``inference`` section and the artifact format; Slime starts no serving
-engine. ``router-port`` binds the first router's HTTP
+engine. ``router-port`` binds the router's HTTP
 port, and other supported router flags keep their native ``router-*`` names.
-``router-ip`` is refused, because the serving engines use no external
-router. The standalone engine launcher does not include a router.
+The standalone engine launcher does not include a router.
 
 For the SGLang engines of a training stack, each engine probes free ports on
 its host at startup. A probe reserves nothing, so another process, such as
@@ -638,22 +637,17 @@ engine then fails to start and another process holds one of its ports, Reef
 stops the engine and starts it again on new ports. Reef does the same when
 another process listens on the engine's HTTP port and answers the readiness
 check. Reef makes at most three startup attempts per engine. Other startup
-failures, and any failure of an encoder engine, stop the launch.
+failures stop the launch.
 
 When Reef starts a router, it probes a free metrics port on the host, from
 port 4000 up. It also probes a free HTTP port, unless the router uses
-``router-port``. Only the first model's router uses ``router-port``. The
-router serves both ports on the host's address. If the router then fails to
+``router-port``. The router serves both ports on the host's address. If the router then fails to
 start and another process holds one of these ports, Reef stops the router and
 starts it again on new ports. Reef does the same when another process listens
 on the router's HTTP port and answers the readiness check. Reef makes at most
 three attempts. A configured ``router-port`` does not change, so a conflict on
 it stops the launch. Another stack's metrics port can take a ``router-port``
 near 4000, so use a port outside that range.
-
-Encoder engines keep the weights they started with. Published weights load
-only into the other engines of the model. When a model with an encoder group
-trains, keep its vision encoder frozen.
 
 Slime's own engine and placement options in ``training.options``
 (``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*`` and the rest)
@@ -663,9 +657,9 @@ Slime`_), never the serving engines; before that session runs, a driver of any
 other job starts no rollout engines. Reef's serving
 never shares GPUs with training, so ``training.colocate`` is refused. Native
 options cannot override
-managed model, placement or parallelism settings. Pipeline/data parallel and
-prefill/decode-disaggregated inference topologies are not supported by this
-managed path yet. Reef binds ``training.options.hf-checkpoint`` to
+managed model, placement or parallelism settings. Each serving engine runs on
+one node. Pipeline/data parallel and prefill/decode-disaggregated inference
+topologies are not supported by this managed path. Reef binds ``training.options.hf-checkpoint`` to
 ``inference.model-path``; an explicit value must agree. Slime also needs an
 explicit ``training.options.global-batch-size``, the samples in one optimizer
 step: Slime cuts each job's data into optimizer batches of that size.
@@ -695,8 +689,7 @@ handled by the inference component (see `Engine supervision
 
 ``inference.backend: vllm`` selects the vLLM engine integration. The
 inference component launches one vLLM server per engine on its GPUs with
-``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
-``--logprobs-mode processed_logprobs``. It loads each published snapshot
+``VLLM_SERVER_DEV_MODE=1`` and ``--logprobs-mode processed_logprobs``. It loads each published snapshot
 through vLLM's control routes: ``/pause?mode=keep`` (a retracting pause adds
 ``/reset_prefix_cache?reset_running_requests=true``),
 ``/update_weight_version``, ``/collective_rpc reload_weights`` and the
@@ -714,9 +707,8 @@ Engine options use vLLM's engine-argument names. Reef sets ``model``,
 ``host``, ``port`` and ``tensor_parallel_size`` itself and refuses
 ``enable_sleep_mode``. It defaults
 ``generation_config`` to ``vllm``, so the model's own generation defaults
-cannot add truncation or a temperature the trainer never sees. It rejects
-``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
-instead) and enables prefix caching only under a retracting pause.
+cannot add truncation or a temperature the trainer never sees. It enables
+prefix caching only under a retracting pause.
 
 vLLM engines serve full-weight artifacts only. The HTTP service refuses
 adapter artifacts, such as Slime's with ``training.options.megatron-lora-rank``
@@ -887,20 +879,6 @@ Anthropic messages requests.
 ``{enable_thinking: false}`` for a hybrid-thinking model served without
 reasoning; a request's own ``chat_template_kwargs`` win key by key.
 
-A vLLM engine serving a training stack also needs Reef's connector, which
-stamps every sampled token with the weight version that produced it::
-
-   --kv-transfer-config '{"kv_connector": "ReefConnector", "kv_connector_module_path": "reef.inference.vllm.connector", "kv_role": "kv_both"}'
-
-The connector moves no KV and composes with another connector under vLLM's
-``MultiConnector``. To combine it with vLLM's native CPU offloading, list
-``OffloadingConnector`` and ``ReefConnector`` as ``MultiConnector`` children
-in ``--kv-transfer-config``; the ``--kv-offloading-size`` flag replaces the
-configured connector, so it cannot be combined with this one. Without the
-connector the engine reports no runtime load ID: a scenario that trains rejects
-the response, and a scenario that does not train serves it under its release
-id.
-
 ``rollout_log_probs`` are the sampled tokens' log probabilities that a
 training component's own task rollouts record; serving records none. They
 must mean the same thing as the trainer's. Sampling runs through::
@@ -915,7 +893,8 @@ client rejects a request whose effective ``top_p`` is below 1, ``top_k``
 above 0 or ``min_p`` above 0. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
-Both handlers split each reply into ``content`` and ``reasoning_content`` with
+Both handlers, and the Tinker sampler that serves a Tinker deployment and its
+task rollouts, split each reply into ``content`` and ``reasoning_content`` with
 the rules of SGLang's Qwen3 reasoning parser: ``<think>`` starts reasoning, and
 the first ``</think>`` or ``<tool_call>`` ends it. A reply that ends inside
 reasoning has an empty ``content``.
@@ -926,7 +905,8 @@ handler checks whether each request's rendered prompt ends with ``<think>``.
 The check follows the request's ``chat_template_kwargs``: a Qwen3.5 template
 pre-opens ``<think>`` by default but closes it for ``enable_thinking: false``,
 so such a request keeps its reply in ``content``. An explicit value bypasses
-this check.
+this check. The Tinker sampler takes no ``force_reasoning`` and always checks
+the prompt.
 
 Chat template arguments
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1023,12 +1003,9 @@ config, removed when the launcher exits. No user YAML file is created.
 Public service settings use the same argument parser for YAML and CLI values.
 Their types, defaults, and help are declared on ``ServiceConfig``. Explicit
 CLI values override YAML values; omitted values use the setting's default.
-Run ``reef serve --help`` to see these options. Use ``--inference.upstream-model``
-as the canonical spelling. Compatibility aliases include ``--upstream-model``,
-``--upstream_model`` and ``--reef.upstream_model``. The last
-explicit CLI spelling of a setting wins. ``--recipe.implementation`` overrides
-the deployment's recipe setting; a bare ``--recipe <name>`` is refused because
-built-in profiles were removed.
+Run ``reef serve --help`` to see these options. A flag is the setting's YAML
+path, for example ``--inference.upstream-model``. The last occurrence of a
+flag wins. ``--recipe.implementation`` overrides the deployment's recipe setting.
 
 String settings retain their text: ``--inference.upstream-model 00123`` remains ``00123``.
 Numeric and boolean settings are parsed according to their declared type;
@@ -2203,7 +2180,19 @@ samples train.
        the reward of a rollout whose verifier timed out; ``null`` leaves it unscored
 
    ``rollout.scaffold_tolerance`` : 8
-       masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+       tokens at the end of a prompt that the next prompt's history may drop, such as the empty think block of a thinking template with thinking off; the sample keeps them, and the response after them trains
+
+The job's metrics report each task's rewards of the rollouts that ran
+(``rollout_rewards``), the samples that train (``rollout_samples``), and the
+rollouts that give no sample because they fail in the infrastructure or their
+model calls do not assemble into one (``removed_rollouts``). A sample alone in
+its group trains with advantage 0 on Slime and counts in ``rollout_samples``;
+on Tinker it does not train, and it is in neither count. A Tinker task job
+also reports each rollout's response tokens and the tokens of them that train
+(``rollout_tokens``), and their sums (``rollout_response_tokens`` and
+``rollout_trained_tokens``). On Tinker, a sample longer than the model's context
+window is left out before its group forms: ``unrenderable_samples`` counts it,
+and it is in neither ``rollout_samples`` nor the trained tokens.
 
 Task jobs on Slime
 ~~~~~~~~~~~~~~~~~~
@@ -2290,8 +2279,8 @@ its reward out of its group's mean and deviation, so the group's other rollouts
 train against each other. A group with one sample left has advantage 0. When
 no group of a Slime rollout can train, the job fails before the workers train it,
 with the first rollout's error. Slime's metrics such as ``rollout/raw_reward``
-count a removed sample with reward 0. The job's metrics report
-``rollout_rewards``, by task, ``rollout_samples`` and ``removed_rollouts``.
+count a removed sample with reward 0. The job's metrics are the task job
+metrics above: ``rollout_rewards``, ``rollout_samples`` and ``removed_rollouts``.
 
 The driver refuses a task job, when it is submitted, in these cases:
 
@@ -2408,7 +2397,9 @@ check looks there, so ``generator.harbor`` must come from the same Python
 environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
 compose services), an agent inside the sandbox cannot reach a
 ``generator.agent-host`` on a private host, and E2B builds a template for each
-new task image. ``execution.generator`` selects the generator's executor, so a
+new task image. ``modal`` runs each task in a Modal sandbox. It needs
+``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve``
+starts, and ``reef-infra[modal]`` in the generator's interpreter. ``execution.generator`` selects the generator's executor, so a
 deployment can place it on another host. The generator runs its proposals,
 checks and rollouts at the same time.
 ``generator.concurrency`` limits only the rollouts in flight, so a proposal or a check never waits behind rollouts.
@@ -2437,7 +2428,7 @@ checks and rollouts at the same time.
        the harbor command line for the oracle check
 
    ``generator.environment`` : docker
-       the Harbor environment of the oracle and nop checks and of the rollouts: ``docker`` or ``e2b``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker
+       the Harbor environment of the oracle and nop checks and of the rollouts: ``docker``, ``e2b`` or ``modal``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker. With ``modal``, it waits for ``MODAL_TOKEN_ID``, ``MODAL_TOKEN_SECRET`` and the modal package
 
    ``generator.concurrency`` : 2
        rollouts in flight across all rollout requests of the generator service

@@ -198,9 +198,6 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     assert claude is not None and (claude.adapter, claude.binary) == ("claude", "/opt/claude")
     unset = agent_settings({}, {"REEF_AGENT_SANDBOX": "none"}, state_dir=state_dir)
     assert unset is not None and isinstance(unset.executor, LocalExecutor)
-    # The variable's old name would be ignored, and the agent run with another isolation: it is refused.
-    with pytest.raises(ValueError, match="set REEF_AGENT_SANDBOX instead"):
-        agent_settings({}, {"REEF_PROPOSER_SANDBOX": "none"}, state_dir=state_dir)
     with pytest.raises(ValueError, match="one of 'bwrap', 'e2b', 'modal', 'none'"):
         agent_settings({"sandbox": "docker"}, {}, state_dir=state_dir)
     with pytest.raises(ValueError, match="positive number"):

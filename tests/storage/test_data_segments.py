@@ -210,22 +210,6 @@ def test_a_store_without_segments_refuses_to_guess_moved_content(open_store):
             store.read("acme", "t1")
 
 
-def test_an_upgrade_adds_the_segment_columns(open_store):
-    with closing(open_store(segments=False)) as store:
-        store.create("acme", [*calls(1, 2), trajectory("t1", "one")])
-        with store.transaction() as connection:
-            # Remove the columns, as the earlier version kept the tables.
-            for table in (store.items_table, store.nodes_table):
-                index = next(index for index in table.indexes if "segment_id" in index.columns)
-                index.drop(connection)
-                for name in ("segment_id", "segment_offset", "segment_length"):
-                    connection.exec_driver_sql(f"ALTER TABLE {table.fullname} DROP COLUMN {name}")
-    with closing(open_store()) as store:
-        assert store.read("acme", "coding/call-2").content == calls(2)[0].content
-        store.create("acme", [trajectory("t2", "two")])
-        assert store.read("acme", "t2").content["steps"][0]["message"] == "two"
-
-
 def test_the_deployment_gives_its_segment_store_to_the_data_store(tmp_path):
     settings = ServiceConfig(
         recipe="recipe",

@@ -42,8 +42,6 @@ async def relay_routed_stream(
             not in (
                 RECORD_HEADER,
                 ARTIFACT_HEADER,
-                "x-reef-release-id",
-                "x-reef-artifact-version",
                 "content-length",
                 "transfer-encoding",
             )

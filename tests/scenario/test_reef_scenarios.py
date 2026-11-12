@@ -286,8 +286,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
         "record_progress": {
             "high_water_sequence": 7,
             "high_water_offset": 5,
-            "compacted_ids": ["old-record"],
-            "consumed_ids": ["trained-record"],
+            "consumed_ids": ["old-record", "trained-record"],
         },
         "metrics": {"loss": 0.25},
     }

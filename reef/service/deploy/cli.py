@@ -173,8 +173,9 @@ def _apply_overrides(
 ) -> dict[str, Any]:
     """Merge CLI overrides into a copy of the config dict.
 
-    Bare keys (no dot) target the ``reef`` section; dotted keys traverse
-    nested sections (e.g. ``training.checkpoint_dir``).
+    A declared flag sets its setting. Another dotted key traverses nested
+    sections (e.g. ``training.checkpoint_dir``). The caller refuses a key that
+    no selected schema declares.
     """
     config = copy.deepcopy(config)
     for key, raw_value in overrides.items():
@@ -247,7 +248,7 @@ def build_serve_parser(
 ) -> argparse.ArgumentParser:
     """``reef serve``'s own arguments: the service child's parser plus the model flags.
 
-    Only the launcher takes them. ``--recipe`` stays reserved so that a removed profile name fails clearly."""
+    Only the launcher takes them."""
     parser = build_parser(service_arguments=service_arguments)
     if config is not None:
         for argument in component_config_arguments(config):
@@ -255,12 +256,6 @@ def build_serve_parser(
     elif service_arguments:
         for argument in deployment_config_arguments():
             argument.add_to(parser)
-    parser.add_argument(
-        "--recipe",
-        default=None,
-        metavar="NAME",
-        help=argparse.SUPPRESS,
-    )
     parser.add_argument(
         "--model",
         default=None,

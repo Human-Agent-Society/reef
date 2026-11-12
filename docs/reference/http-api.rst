@@ -293,7 +293,7 @@ request. These checks precede Scenario creation and provider execution:
 * A missing Scenario or model, an unknown target, a private router entrypoint
   as ``model``, a repeated ``x-reef-*`` header, a client-supplied
   ``x-reef-routing-*``, ``x-reef-sr-decision`` or ``x-selected-model`` header,
-  and a nonempty ``x-reef-artifact-id`` or legacy ``x-reef-release-id`` return 400.
+  and a nonempty ``x-reef-artifact-id`` return 400.
 * A disabled target returns 503.
 * A managed deployment returns 408 when the request body does not finish
   uploading within 30 seconds.
@@ -2666,9 +2666,6 @@ An artifact that training makes names its training starts in its own metadata,
 own training starts. A runtime uses them, so that a training artifact is served
 as its start is, unless it has its own setting.
 
-Items that RFC #1233 made can have ``serving_profile`` in their metadata. Reef
-ignores it, and a metadata patch can remove it.
-
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
 
@@ -3264,9 +3261,11 @@ Status codes
 |        | Authorization header is sent; the two harness pages also    |
 |        | read ``?key=`` (see Request page)                           |
 +--------+-------------------------------------------------------------+
-| 403    | never issued by Reef: an unaccepted token is 401, and       |
+| 403    | a routed request for an unconfigured Scenario or a pin to a |
+|        | target outside it (see Routed external-model requests), or  |
+|        | an engine's own 403; an unaccepted token is 401, and        |
 |        | per-scenario authorization belongs to the gateway in front  |
-|        | of Reef.                                                    |
+|        | of Reef                                                     |
 +--------+-------------------------------------------------------------+
 | 404    | unknown scenario (on inference, on ``POST /reef/train``,    |
 |        | or with implicit creation off), a scenario that serves no   |
@@ -3280,8 +3279,15 @@ Status codes
 |        | or an engine that answered under another model name or      |
 |        | aborted the request on both attempts                        |
 +--------+-------------------------------------------------------------+
-| 502    | the engine failed or could not be reached; the body carries |
-|        | the engine's status and message                             |
+| 4xx    | an engine's own 4xx, with its message, such as for a prompt |
+|        | that fills the model's context window: an engine's 400,     |
+|        | 401, 403, 404, 408, 409, 422 or 429 passes through as sent, |
+|        | and any other engine 4xx becomes 400                        |
++--------+-------------------------------------------------------------+
+| 502    | the engine failed with a 5xx, answered with no JSON object, |
+|        | or could not be reached; the body carries the engine's      |
+|        | status and message for a 5xx, and the engine's URL and the  |
+|        | connection error for an engine that could not be reached    |
 +--------+-------------------------------------------------------------+
 | 503    | the artifact store is unreachable, no loaded scenario is    |
 |        | idle at ``reef.max_loaded_scenarios`` (with                 |
@@ -3315,8 +3321,7 @@ requests may use GET, POST or DELETE with Authorization, Content-Type and
 x-reef-scenario headers. Cookies are not enabled through CORS.
 
 CORS headers also cover errors and streamed responses, exposing
-``x-reef-agent-record-id``, ``x-reef-artifact-id`` and ``x-reef-artifact-version``
-to the browser. Clients without an Origin header keep their existing behavior.
+``x-reef-agent-record-id`` and ``x-reef-artifact-id`` to the browser. Clients without an Origin header keep their existing behavior.
 A browser can also require local network permission or HTTPS. An origin that
 Reef allows does not override browser policy.
 

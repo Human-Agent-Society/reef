@@ -130,7 +130,6 @@ def test_record_contracts_and_retention_policy_do_not_import_database_adapters()
         "reef.artifact",
         "sqlite3",
         "sqlalchemy",
-        "alembic",
     ):
         assert _imports_of(imported, dependency) == []
 
@@ -265,7 +264,7 @@ def test_scenario_state_enters_only_through_injected_storage() -> None:
             + ["reef.storage.served_models.ServedModels"]
         )
         assert storage_imports == set(), str(path.relative_to(REPO_ROOT))
-        for dependency in ("sqlite3", "sqlalchemy", "alembic"):
+        for dependency in ("sqlite3", "sqlalchemy"):
             assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
 
 
@@ -442,8 +441,7 @@ def test_inference_recovery_requires_no_model_framework() -> None:
     _assert_isolated_import(
         "import sys; "
         "sys.modules.update(dict.fromkeys(('ray', 'torch', 'slime', 'sglang', 'megatron'))); "
-        "from reef.inference.recovery import InferenceControl; "
-        "from reef.inference.recovery import EngineHealthMonitor"
+        "from reef.inference.recovery import InferenceControl"
     )
 
 
@@ -499,6 +497,16 @@ def test_training_backends_never_import_inference_implementations() -> None:
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
         assert _imports_of(imported, "reef.inference") == [], str(path.relative_to(REPO_ROOT))
+
+
+def test_the_tinker_pieces_that_training_shares_never_import_inference_or_training() -> None:
+    # Training imports reef.tinker, so what Tinker's sampler and the inference handlers share, such as the reasoning
+    # split, is in reef.core.
+    for path in sorted((REPO_ROOT / "reef/tinker").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        for dependency in ("reef.inference", "reef.train"):
+            assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
 
 
 def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:

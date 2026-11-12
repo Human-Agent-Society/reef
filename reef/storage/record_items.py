@@ -35,15 +35,7 @@ from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, Evaluati
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
 from reef.core.values import JsonValue
-from reef.storage.data import (
-    MAX_QUERY_LIMIT,
-    DataStore,
-    ItemConflict,
-    NewItem,
-    StoredItem,
-    item_digest_matches,
-    record_source,
-)
+from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflict, NewItem, StoredItem, record_source
 from reef.storage.item_kinds import (
     copied_record,
     evaluation_call_id,
@@ -208,16 +200,6 @@ def origin_of(item: StoredItem) -> str:
     return item.metadata["origin"]["scenario"]
 
 
-def old_record_copied(data: DataStore, owner: str, scenario: str, record_id: str) -> bool:
-    """Whether the record ``record_id`` of the old record store of ``scenario`` is in ``data``: as its own record item,
-    or, for a copy of another scenario's record item from before RFC #1219, as that item."""
-    for item_id in (f"{scenario}/{record_id}", record_id):
-        item = data.read(owner, item_id)
-        if item is not None and item.kind == "record":
-            return True
-    return False
-
-
 def used_records(
     data: DataStore, owner: str, scenario: str, *, after_sequence: int = 0, limit: int = RECORD_PAGE_SIZE
 ) -> tuple[int, tuple[AgentRecord, ...]]:
@@ -347,7 +329,7 @@ class ItemRecordStore(RecordStore):
         stored = self.stored(item.scenario, item.agent_record_id)
         if stored is None:
             return None
-        if not item_digest_matches(stored, record_digest(record_content(item))):
+        if stored.digest != record_digest(record_content(item)):
             raise RecordConflict(f"record {item.agent_record_id!r} is stored with other content")
         return self.record(stored)
 
@@ -438,7 +420,6 @@ __all__ = [
     "evaluation_call_summary",
     "evaluation_trajectory_item",
     "evaluation_trajectory_items",
-    "old_record_copied",
     "record_content",
     "record_item",
     "stored_evaluation_call",

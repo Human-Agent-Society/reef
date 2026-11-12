@@ -24,7 +24,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -41,7 +41,7 @@ from reef.tinker.sampling import TinkerSampler
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.learning_rate import learning_rate_metrics, resolve_learning_rate_schedule_state
 from reef.train.local_jobs import LocalJobComponent
-from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.task_rollouts import RolloutSettings, RolloutTokens, TaskJobRollouts, run_train_tasks, task_name
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
@@ -74,8 +74,12 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     groups. The tasks of a job have distinct names (``task_name``), each of
     which names its group. The component keeps the rollouts in
     ``rollouts.json`` in the job's directory, so a resumed job trains the same
-    samples, and reports in the job's metrics each task's rewards of the
-    rollouts that ran (``rollout_rewards``, by task name).
+    samples, and reports the rollouts' metrics (``TaskJobRollouts.metrics``)
+    in the job's metrics.
+
+    A sample that cannot render, or whose tokens after the first are more than
+    the model's context window (``TinkerClient.context_window``), does not
+    train; the job metric ``unrenderable_samples`` counts these samples.
 
     With a ``score_centering``, a policy-gradient job trains as score-centered
     ``cispo`` (``prepare_tinker_job``), and a task job's rollouts record the
@@ -274,7 +278,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data_id, samples)), RolloutScores.from_json(kept["scores"])
+                trajectories(JobData(job.data_id, samples)),
+                RolloutScores.from_json(kept["scores"]),
+                tuple(RolloutTokens(**item) for item in kept["tokens"]),
+                kept["left_out"],
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
@@ -298,12 +305,15 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             work_dir=directory / "rollouts",
             start=job.start,
             model_adapter=start.sampler_path,
+            max_tokens=self._client.context_window(),
         )
         write_json(
             record,
             {
                 "samples": JobData(job.data_id, rollouts.samples).to_dict(),
                 "scores": rollouts.scores.to_json(),
+                "tokens": [asdict(item) for item in rollouts.tokens],
+                "left_out": rollouts.left_out,
             },
         )
         return rollouts
@@ -334,24 +344,30 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         rollout_metrics: dict[str, Any] = {}
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)
-            rollout_metrics = {
-                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
-                "rollout_samples": len(rollouts.samples),
-            }
+            rollout_metrics = rollouts.metrics()
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.
                 return rollout_metrics
             data = JobData(data.data_id, rollouts.samples)
         # A trajectory that serving recorded carries no tokens: the component renders it with the base model's chat
         # template, and the client computes its log probabilities with the weights of the job's start.
+        left_out = 0
         if needs_rendering(data):
-            data, left_out = rendered_job_data(
+            data, unrenderable = rendered_job_data(
                 data, self._client.chat_template(self._config.chat_template_kwargs or {})
             )
-            if left_out:
-                rollout_metrics["unrenderable_samples"] = len(left_out)
-                if not data.samples:
-                    return rollout_metrics
+            left_out += len(unrenderable)
+        # Tinker refuses a whole optimizer step for one row whose targets, every token but the first, are longer than
+        # the model's context window, so such a sample is left out as one that cannot render.
+        window = self._client.context_window()
+        if window is not None:
+            fitting = tuple(sample for sample in trajectories(data) if len(sample.training["tokens"]) - 1 <= window)
+            left_out += len(data.samples) - len(fitting)
+            data = JobData(data.data_id, fitting, request=data.request)
+        if left_out:
+            rollout_metrics["unrenderable_samples"] = left_out
+            if not data.samples:
+                return rollout_metrics
         prepared = prepare_tinker_job(
             data,
             parameters.objective,

@@ -61,6 +61,9 @@ class RemoteClient:
             checkpoint.base_model, 16, f"tinker://update-{number}/state", f"tinker://update-{number}/sampler"
         ), {"loss": -1.0}
 
+    def context_window(self):
+        return None
+
     def close(self):
         self.closed = True
 

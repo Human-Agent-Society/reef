@@ -567,7 +567,6 @@ def test_from_config_builds_the_author_and_keeps_its_snapshots_in_a_temporary_di
     [
         ({"rollouts": 2}, "does not take rollouts"),
         ({"generator_url": "${endpoints.generator}"}, "generator_url"),
-        ({"state_dir": "state"}, r"does not take state_dir: .* \(RFC #1370\)"),
         ({"sources_path": ""}, "needs a sources_path"),
         ({"sources_path": "/no/such/sources.json"}, "No such file"),
         ({"author": "human"}, "author must be one of"),
