@@ -104,6 +104,10 @@ class Service(InferenceService):
     def __init__(self) -> None:
         self.closed = 0
 
+    @classmethod
+    def from_config(cls, config):
+        raise AssertionError("unused")
+
     def start(self, resources):
         raise AssertionError("unused")
 

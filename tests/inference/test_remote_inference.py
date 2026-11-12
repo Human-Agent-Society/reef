@@ -124,6 +124,10 @@ class FakeService(InferenceService):
         self.events = events
         self.engines = FakeEngines(engine_url, events)
 
+    @classmethod
+    def from_config(cls, config):
+        raise AssertionError("unused")
+
     def start(self, resources):
         self.events.append(("start", dict(self.config), resources.inference_placement))
         return InferenceConnection(None)

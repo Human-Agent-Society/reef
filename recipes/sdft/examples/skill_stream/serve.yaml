@@ -33,7 +33,7 @@ inference:
     router-port: "23002"
     context-length: "8192"
     mem-fraction-static: "0.6"
-  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-factory: reef.inference.sglang.chat:SGLangInferenceHandler
   handler-config:
     # The reference samples through vLLM at temperature 1 with no nucleus,
     # top-k or repetition penalty; the requests set temperature and the

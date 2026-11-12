@@ -1,6 +1,6 @@
 """A CPU stand-in for the SGLang engines: the control surface Reef drives, as Ray actors.
 
-Selected with ``inference.backend: tests.support.stub_engine:create_inference``.
+Selected with ``inference.backend: tests.support.stub_engine:StubEngineService``.
 It borrows the deployment's reservation like SGLang does, accepts Reef's
 adapter files, and records every adapter it was asked to load so a test can
 check what Reef served.
@@ -126,6 +126,10 @@ class StubEngineService(InferenceService):
         self._control: RayExecutor | None = None
         self._closed = False
 
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> StubEngineService:
+        return cls(config)
+
     def start(self, resources: InferenceResources) -> InferenceConnection:
         placement = resources.inference_placement
         if placement is None:
@@ -165,7 +169,3 @@ class StubEngineService(InferenceService):
         self._closed = True
         if self._control is not None:
             self._control.shutdown()
-
-
-def create_inference(config: Mapping[str, Any]) -> StubEngineService:
-    return StubEngineService(config)

@@ -594,7 +594,8 @@ Connect a new agent
       session log has a new format (`trajectory.py
       <../../reef/harness/tasks/trajectory.py>`__). Give it ``to_atif``, so
       that a task's verifier can read the run. Wrap Harbor's converter for
-      the agent when Harbor has one.
+      the agent when Harbor has one. An adapter outside Reef names its reader
+      class in ``sessions.format`` as ``package.module:ClassName``.
    #. Add the name to ``BUILTIN_ADAPTERS``, or register through the
       ``reef.harness_adapters`` entry point.
    #. Add ``render.py`` only for what the file cannot state.

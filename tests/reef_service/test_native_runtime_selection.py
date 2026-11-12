@@ -7,7 +7,7 @@ from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.core.errors import RuntimeConfigError
 from reef.inference.null import NullInferenceRuntime
-from reef.inference.registry import RuntimeFactory
+from reef.inference.registry import BUILTIN_FACTORIES, RuntimeFactory
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.service_config import ServiceSettings
 
@@ -101,7 +101,7 @@ def test_a_serving_factory_that_builds_no_inference_runtime_releases_the_trainin
             built.append(ClosingComponent())
             return built[-1]
 
-    monkeypatch.setattr("reef.inference.registry._runtime_kinds", {"none": WrongServingFactory()})
+    monkeypatch.setitem(BUILTIN_FACTORIES, "none", WrongServingFactory)
     with pytest.raises(TypeError, match="must build an InferenceRuntime, not ClosingComponent: a runtime serves"):
         connect_training_component(training_settings(), model_path="model", default_parameters=SAO_PARAMETERS)
     [(_, component)] = created

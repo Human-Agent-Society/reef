@@ -286,8 +286,6 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
     runtime = config.get("reef", {}).get("runtime", {})
     if isinstance(runtime, Mapping) and isinstance(runtime.get("type"), str):
         factory = runtime_factory_for(runtime["type"])
-        if factory is None:
-            raise ValueError(f"unknown runtime type {runtime['type']!r}")
         settings_type = factory.config_type()
         if settings_type is not None:
             arguments.extend(
@@ -348,8 +346,6 @@ def normalize_component_config(config: Mapping[str, Any], arguments: tuple[Confi
         runtime = dict(runtime)
         runtime["type"] = interpolate_config(normalized, runtime["type"])
         factory = runtime_factory_for(runtime["type"])
-        if factory is None:
-            raise ValueError(f"unknown runtime type {runtime['type']!r}")
         factory.parse_config(runtime, os.environ)
     execution = normalized.get("execution", {})
     if not isinstance(execution, Mapping) or set(execution) - set(_EXECUTION_ROLES):

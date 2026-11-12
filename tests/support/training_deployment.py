@@ -7,6 +7,7 @@ from pathlib import Path
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
 from reef.core.config import config_option
+from reef.inference.registry import RuntimeFactory
 from reef.train.component import TrainingComponentFactory
 from reef.train.deployment import InProcessTrainingDeployment
 
@@ -55,9 +56,13 @@ class LocalFactory(TrainingComponentFactory):
 component_factory = LocalFactory()
 
 
-def build_local_serving(config, model_path, recipe_config, environ):
-    """The deployment's own serving runtime (``inference.serving: trainer``)."""
-    return StubInferenceRuntime(model_path=model_path)
+class LocalServingFactory(RuntimeFactory):
+    """Build the deployment's own serving runtime (``inference.serving: trainer``)."""
+
+    kind = "tests.support.training_deployment:LocalServingFactory"
+
+    def __call__(self, config, model_path, recipe_config, environ):
+        return StubInferenceRuntime(model_path=model_path)
 
 
 class LocalDeployment(InProcessTrainingDeployment):
@@ -67,4 +72,4 @@ class LocalDeployment(InProcessTrainingDeployment):
     default_serving = "trainer"
 
     def trainer_serving_config(self, settings):
-        return {"type": "tests.support.training_deployment:build_local_serving"}
+        return {"type": LocalServingFactory.kind}

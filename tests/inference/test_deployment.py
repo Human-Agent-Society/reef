@@ -1,9 +1,10 @@
-"""Inference factory discovery stays independent of trainer construction."""
+"""Inference service discovery stays independent of trainer construction."""
 
 from types import SimpleNamespace
 
 import pytest
 
+from reef.core import plugins
 from reef.core.errors import DeployConfigError
 from reef.inference import deployment
 from reef.inference.deployment import InferenceService
@@ -12,6 +13,10 @@ from reef.inference.deployment import InferenceService
 class Receiver(InferenceService):
     def __init__(self, config):
         self.config = config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(config)
 
     def start(self, resources):
         raise RuntimeError("factory construction must not allocate")
@@ -40,16 +45,21 @@ class UnregisteredReceiver:
         return getattr(self.receiver, name)
 
 
-def test_dotted_receiver_factory_receives_native_options_without_allocating():
+def create_receiver(config):
+    return Receiver(config)
+
+
+def test_a_referenced_receiver_class_receives_native_options_without_allocating():
     options = {"model": "small", "tensor_parallel_size": 2}
     receiver = deployment.inference_service_for(f"{__name__}:Receiver", options)
     assert isinstance(receiver, Receiver)
     assert receiver.config is options
 
 
-def test_receiver_factory_requires_explicit_service_inheritance():
-    with pytest.raises(DeployConfigError, match="must return an InferenceService"):
-        deployment.inference_service_for(f"{__name__}:UnregisteredReceiver", {})
+@pytest.mark.parametrize("attribute", ["UnregisteredReceiver", "create_receiver"])
+def test_a_receiver_reference_names_a_class_that_inherits_the_service(attribute):
+    with pytest.raises(DeployConfigError, match="must name a class that inherits InferenceService"):
+        deployment.inference_service_for(f"{__name__}:{attribute}", {})
 
 
 def test_installed_receiver_definition_is_selected_by_name(monkeypatch):
@@ -58,7 +68,7 @@ def test_installed_receiver_definition_is_selected_by_name(monkeypatch):
         assert name == "custom"
         return (SimpleNamespace(value=f"{__name__}:Receiver"),)
 
-    monkeypatch.setattr(deployment, "entry_points", installed)
+    monkeypatch.setattr(plugins, "entry_points", installed)
     assert isinstance(deployment.inference_service_for("custom", {}), Receiver)
 
 
@@ -71,7 +81,7 @@ def test_invalid_receiver_definition_fails_before_allocation(reference):
 @pytest.mark.parametrize("count, reason", [(0, "unknown"), (2, "ambiguous")])
 def test_receiver_name_must_resolve_exactly_once(monkeypatch, count, reason):
     monkeypatch.setattr(
-        deployment, "entry_points", lambda **kwargs: (SimpleNamespace(value=f"{__name__}:Receiver"),) * count
+        plugins, "entry_points", lambda **kwargs: (SimpleNamespace(value=f"{__name__}:Receiver"),) * count
     )
     with pytest.raises(DeployConfigError, match=reason):
         deployment.inference_service_for("custom", {})
