@@ -36,6 +36,8 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     source_of,
     sources,
     stand_in_e2b_package,
+    state,
+    state_document,
     write_workspace_task,
 )
 from tests.support.task_service_stubs import task_for
@@ -483,10 +485,11 @@ def test_claude_task_names_session_and_transcript_not_a_record(tmp_path: Path, r
     assert "all 1 checks are used" in spent, "max_checks holds on the host"
     assert isinstance(result, RolledOutTask)
     task = result.task
-    transcript = f"runs/00000-000/claude/projects/-home-user-reef-00000-000-workspace/{SESSION_ID}.jsonl"
+    transcript = f"{SESSION_ID}.jsonl"
     assert task.source_agent_record_ids == ("session-1",) and "designer_record_id" not in task.metadata
     assert task.metadata["designer_transcript"] == transcript and task.metadata["designer_harness"] == "claude-code"
-    assert (tmp_path / "state" / transcript).is_file()
+    # The run's directory is gone; the state keeps the transcript as saved files.
+    assert (state(tmp_path).files(task.metadata["designer_transcript_files"]) / transcript).is_file()
     [proposal] = report(tmp_path)["proposals"]
     assert proposal["designer_record_id"] == "" and proposal["task_name"] == task.name
 
@@ -547,6 +550,7 @@ def test_adaptive_config_builds_claude_code_as_a_variant_designer(tmp_path: Path
         generating_config(tmp_path, designer_harness="claude-code", adaptive=True, count=2),
         scenario="one",
         environ={"E2B_API_KEY": "e2b-test", "CLAUDE_CODE_OAUTH_TOKEN": TOKEN},
+        state=state(tmp_path),
     )
     assert generator.is_adaptive and isinstance(generator.designer, ClaudeCodeDesigner)
     assert generator.variant_designer is generator.designer
@@ -677,10 +681,10 @@ def test_a_refused_variant_takes_its_parents_slot_and_a_lost_sign_in_leaves_it(
     else:
         with pytest.raises(DesignerOutage, match="Please run /login"):
             asyncio.run(generator.generate(REQUEST))
-    [variant] = json.loads(generator.open_path(REQUEST.generation).read_text())["refused"]
+    [variant] = state_document(tmp_path, f"open/{REQUEST.generation:05d}")["refused"]
     assert (variant["parent_task"], variant["stage"]) == (NAMES[0], "authoring" if is_refused else "outage")
     assert ("safeguards flagged this message" in variant["refusal"]) is is_refused
-    [parent] = json.loads((tmp_path / "state" / "adaptive.json").read_text())
+    [parent] = state_document(tmp_path, "adaptive")
     assert parent["varied"] is is_refused
     stand_in = StandInDesigner()
     again = autoenvscaling(tmp_path, stand_in, count=2, is_adaptive=True, variant_share=0.5)
@@ -877,7 +881,10 @@ def test_claude_config_refusals(
 ) -> None:
     with pytest.raises(PluginConfigError, match=message) as raised:
         AutoEnvScalingGenerator.from_config(
-            generating_config(tmp_path, **fields), scenario="one", environ={"E2B_API_KEY": "e2b-test", **environ}
+            generating_config(tmp_path, **fields),
+            scenario="one",
+            environ={"E2B_API_KEY": "e2b-test", **environ},
+            state=state(tmp_path),
         )
     assert TOKEN not in str(raised.value) and "leak-me" not in str(raised.value)
 
@@ -896,11 +903,12 @@ def test_env_from_refuses_every_variable_the_run_sets(tmp_path: Path, reef_url: 
                 generating_config(tmp_path, **fields),
                 scenario="one",
                 environ={**environ, name: TOKEN if name == "CLAUDE_CODE_OAUTH_TOKEN" else "0"},
+                state=state(tmp_path),
             )
     # A variable of the deployment's own still reaches the sandbox.
     fields = {"designer_harness": "claude-code", "agent_sandbox_options": {"env_from": ["OWNER_SETTING"]}}
     generator = AutoEnvScalingGenerator.from_config(
-        generating_config(tmp_path, **fields), scenario="one", environ=environ
+        generating_config(tmp_path, **fields), scenario="one", environ=environ, state=state(tmp_path)
     )
     assert isinstance(generator.designer, ClaudeCodeDesigner)
     assert dict(generator.designer.executor.env) == {"OWNER_SETTING": "1"}
@@ -914,11 +922,14 @@ def test_claude_config_builds_claude_code_on_the_agent_settings(tmp_path: Path) 
         ),
         scenario="one",
         environ={"E2B_API_KEY": "e2b-test", "OWNER_TOKEN": f"{TOKEN}\n", "REEF_TOKEN": "reef-token"},
+        state=state(tmp_path),
     )
     designer = generator.designer
     assert isinstance(designer, ClaudeCodeDesigner)
     assert (designer.claude_token, designer.model, designer.max_turns) == (TOKEN, "opus", 80)
-    assert designer.reef.token == "reef-token" and designer.cache_dir == tmp_path / "state" / "one" / "repositories"
+    assert (
+        designer.reef.token == "reef-token" and designer.cache_dir == Path(generator.temporary.name) / "repositories"
+    )
 
 
 @pytest.mark.unit

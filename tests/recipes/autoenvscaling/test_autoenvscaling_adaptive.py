@@ -24,6 +24,8 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     report,
     run_tasks,
     stand_in_e2b_package,
+    state,
+    state_document,
 )
 
 from recipes.beta.autoenvscaling import (
@@ -52,7 +54,7 @@ def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def parents(tmp_path: Path) -> list[dict[str, object]]:
-    kept: list[dict[str, object]] = json.loads((tmp_path / "state" / "adaptive.json").read_text())
+    kept: list[dict[str, object]] = state_document(tmp_path, "adaptive")
     return kept
 
 
@@ -61,8 +63,7 @@ def test_without_adaptive_the_generator_keeps_no_parents_and_its_report_is_uncha
     designer = StandInDesigner()
     generator = autoenvscaling(tmp_path, designer, count=2)
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0)), generation=0))
-    assert not (tmp_path / "state" / "adaptive.json").exists()
-    assert not (tmp_path / "state" / "parents").exists()
+    assert state(tmp_path).keys() == ("cursor", "report/00000")
     assert all(set(proposal) >= {"index", "position"} for proposal in report(tmp_path)["proposals"])
     assert not any("parent_task" in proposal for proposal in report(tmp_path)["proposals"])
     asyncio.run(generator.generate(REQUEST))
@@ -85,13 +86,14 @@ def test_a_task_outside_the_band_gets_a_variant_from_its_own_session(
         2,
     )
     assert (parent["source_record_id"], parent["varied"]) == ("session-1", False)
-    assert (tmp_path / "state" / "parents" / NAMES[0] / "instruction.md").is_file()
+    parent_dir = state(tmp_path).files(str(parent["files_digest"]))
+    assert parent_dir.name == NAMES[0] and (parent_dir / "instruction.md").is_file()
 
     tasks = asyncio.run(generator.generate(REQUEST))
     variant = designer.calls[2]["variant"]
     assert isinstance(variant, TaskVariant)
     assert (variant.parent, variant.direction, variant.rollouts) == (NAMES[0], direction, 2)
-    assert variant.parent_dir == tmp_path / "state" / "parents" / NAMES[0]
+    assert variant.parent_dir == parent_dir
     assert designer.calls[2]["source"] == "session-1", "a variant comes from its parent's session"
     assert designer.calls[3]["variant"] is None, "the other slot rebuilds the next session"
     # The variant keeps its parent's session as its source, so the split places it with its parent.
@@ -121,21 +123,21 @@ def test_eval_tasks_and_outages_never_become_parents(tmp_path: Path) -> None:
     outage = FailedTask(second, "the sandbox did not start", infrastructure_failure=True)
     asyncio.run(generator.record_results((HeldOutTask(first), outage), generation=0))
     assert parents(tmp_path) == []
-    assert not (tmp_path / "state" / "parents").exists()
 
 
 @pytest.mark.unit
 def test_a_generation_closed_again_after_a_crash_adds_its_parent_once(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
     results = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
-    open_file = generator.open_path(0).read_bytes()
+    open_document = state(tmp_path).read("open/00000")
+    assert open_document is not None
     asyncio.run(generator.record_results(results, generation=0))
     # A crash after the parents were saved and before the open generation was removed: a restart closes it again.
-    generator.open_path(0).write_bytes(open_file)
+    state(tmp_path).write("open/00000", open_document)
     restarted = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
     asyncio.run(restarted.record_results(results, generation=0))
     assert [parent["name"] for parent in parents(tmp_path)] == [NAMES[0]]
-    assert not restarted.open_path(0).exists()
+    assert state(tmp_path).read("open/00000") is None
 
 
 class TokenHoldingStandIn(StandInDesigner):
@@ -199,14 +201,14 @@ def test_a_restart_keeps_the_parents_and_a_parent_is_varied_once(tmp_path: Path)
 
 
 @pytest.mark.unit
-def test_a_generation_varies_the_newest_unvaried_parents_that_still_have_a_session_and_files(tmp_path: Path) -> None:
+def test_a_generation_varies_the_newest_unvaried_parents_that_still_have_a_session(tmp_path: Path) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=4, is_adaptive=True, variant_share=0.5)
-    generator.parents = [ParentTask(f"t-{number}", "session-1", number, 1.0, 2, "harder") for number in range(6)]
+    generator.parents = [
+        ParentTask(f"t-{number}", "session-1", number, 1.0, 2, "harder", "digest") for number in range(5)
+    ]
     generator.parents[4] = replace(generator.parents[4], varied=True)
     generator.parents[3] = replace(generator.parents[3], source_record_id="session-9")
-    for parent in generator.parents[:5]:
-        (tmp_path / "state" / "parents" / parent.name).mkdir(parents=True)
-    # t-5 has no files, t-4 was varied and t-3's session left the sources: two slots go to t-2 and t-1.
+    # t-4 was varied and t-3's session left the sources: two slots go to t-2 and t-1.
     assert [parent.name for parent, _ in generator.variants()] == ["t-2", "t-1"]
 
 
@@ -226,20 +228,15 @@ def test_a_task_whose_mean_reward_is_outside_zero_to_one_becomes_no_parent_and_t
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
     asyncio.run(generator.record_results(run_tasks(generator, (2.0, 2.0), (-1.0, -1.0)), generation=0))
     assert parents(tmp_path) == []
-    assert not (tmp_path / "state" / "parents").exists()
-    assert report(tmp_path)["tasks"] and not generator.open_path(0).exists()
+    assert report(tmp_path)["tasks"] and state(tmp_path).read("open/00000") is None
 
 
 @pytest.mark.unit
-def test_the_oldest_parents_and_their_files_go_beyond_the_bound(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_oldest_parents_go_beyond_the_bound(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(generator_module, "MAX_PARENTS", 1)
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.0, 0.0)), generation=0))
     assert [parent["name"] for parent in parents(tmp_path)] == [NAMES[1]]
-    kept = sorted(path.name for path in (tmp_path / "state" / "parents").iterdir() if not path.name.startswith("."))
-    assert kept == [NAMES[1]]
 
 
 @pytest.mark.unit
@@ -260,7 +257,10 @@ def test_from_config_refuses_an_adaptive_config_that_cannot_run(
 ) -> None:
     with pytest.raises(PluginConfigError, match=message):
         AutoEnvScalingGenerator.from_config(
-            generating_config(tmp_path, **fields), scenario="autoenvscaling", environ={"E2B_API_KEY": "key"}
+            generating_config(tmp_path, **fields),
+            scenario="autoenvscaling",
+            environ={"E2B_API_KEY": "key"},
+            state=state(tmp_path),
         )
 
 
@@ -344,7 +344,7 @@ def test_a_variant_refuses_fields_outside_its_definition(
 @pytest.mark.parametrize("name", ["", "../escape", "Upper", "a/b"])
 def test_a_parent_refuses_a_name_that_is_not_a_task_name(name: str) -> None:
     with pytest.raises(ValueError, match="a parent's name"):
-        ParentTask(name, "session-1", 0, 1.0, 2, "harder")
+        ParentTask(name, "session-1", 0, 1.0, 2, "harder", "digest")
 
 
 @pytest.mark.unit
@@ -464,47 +464,46 @@ def test_proposal_rejects_inconsistent_variant_fields(changes: dict[str, object]
         {"pass_rate": True},
         {"pass_rate": float("nan")},
         {"direction": "sideways"},
+        {"files_digest": ""},
         {"varied": "yes"},
     ],
 )
 def test_parent_rejects_invalid_metadata(changes: dict[str, object]) -> None:
-    fields = asdict(ParentTask("parent", "session", 0, 1.0, 2, "harder"))
+    fields = asdict(ParentTask("parent", "session", 0, 1.0, 2, "harder", "digest"))
     with pytest.raises(ValueError):
         ParentTask(**{**fields, **changes})
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("duplicate", [True, False])
-def test_restart_rejects_duplicate_or_oversized_parent_files(tmp_path: Path, duplicate: bool) -> None:
-    generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
-    entry = asdict(ParentTask("parent", "session", 0, 1.0, 2, "harder"))
+def test_restart_rejects_duplicate_or_too_many_parents(tmp_path: Path, duplicate: bool) -> None:
+    entry = asdict(ParentTask("parent", "session", 0, 1.0, 2, "harder", "digest"))
     entries = (
         [entry, entry]
         if duplicate
         else [{**entry, "name": f"parent-{index}"} for index in range(generator_module.MAX_PARENTS + 1)]
     )
-    generator.state_dir.mkdir(parents=True, exist_ok=True)
-    (generator.state_dir / "adaptive.json").write_text(json.dumps(entries))
+    state(tmp_path).write("adaptive", json.dumps(entries))
     with pytest.raises(ValueError, match="parents with unique names"):
         autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
 
 
 @pytest.mark.unit
-def test_restart_recovers_a_parent_written_before_its_metadata(
+def test_restart_recovers_a_parent_whose_files_were_saved_before_its_entry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     generator = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
     results = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
 
     def interrupted_save() -> None:
-        raise OSError("interrupted before metadata was saved")
+        raise OSError("interrupted before the parents were saved")
 
     monkeypatch.setattr(generator, "save_parents", interrupted_save)
     with pytest.raises(OSError, match="interrupted"):
         asyncio.run(generator.record_results(results, generation=0))
-    parent_dir = generator.state_dir / "parents" / NAMES[0]
-    assert parent_dir.is_dir() and not (generator.state_dir / "adaptive.json").exists()
+    assert state(tmp_path).read("adaptive") is None
     restarted = autoenvscaling(tmp_path, StandInDesigner(), count=2, is_adaptive=True)
     asyncio.run(restarted.record_results(results, generation=0))
-    assert [parent["name"] for parent in parents(tmp_path)] == [NAMES[0]]
-    assert parent_dir.is_dir() and not restarted.open_path(0).exists()
+    [parent] = parents(tmp_path)
+    assert parent["name"] == NAMES[0] and state(tmp_path).files(str(parent["files_digest"])).is_dir()
+    assert state(tmp_path).read("open/00000") is None

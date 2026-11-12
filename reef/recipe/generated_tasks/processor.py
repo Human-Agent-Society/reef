@@ -54,7 +54,13 @@ from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult, HeldOutTask, RejectedTask, TaskGenerator
+from reef.recipe.generated_tasks.generator import (
+    GeneratedTaskResult,
+    GeneratorState,
+    HeldOutTask,
+    RejectedTask,
+    TaskGenerator,
+)
 from reef.recipe.generated_tasks.pool import (
     ReviewSettings,
     TaskUse,
@@ -564,6 +570,41 @@ class GeneratedTaskSettings(Record2SampleSettings):
         return TrainingPoolSettings(capacity=self.pool_capacity, review=self.review_settings())
 
 
+class StoredGeneratorState(GeneratorState):
+    """The generator state ``(S, F)`` of one scenario in the task store of the generated-task stage.
+
+    Values: ``store`` is a ``TaskStore``. ``S`` is the state documents of the
+    store, and ``F`` is the directories that the store saved in the task
+    files of the scenario.
+    Purpose: ``GeneratedTaskSamples.from_config`` makes it for the generator of
+    the scenario. The stage's own generations and documents are not in
+    ``S``, so the generator does not read or change them.
+    """
+
+    def __init__(self, store: TaskStore) -> None:
+        if not isinstance(store, TaskStore):
+            raise TypeError("store must be a TaskStore")
+        self.store = store
+
+    def read(self, key: str) -> str | None:
+        return self.store.state_document(key)
+
+    def write(self, key: str, document: str) -> None:
+        self.store.write_state_document(key=key, document=document)
+
+    def remove(self, key: str) -> None:
+        self.store.remove_state_document(key=key)
+
+    def keys(self, prefix: str = "") -> tuple[str, ...]:
+        return self.store.state_document_keys(prefix=prefix)
+
+    def save_files(self, directory: Path) -> str:
+        return self.store.save_files(directory)
+
+    def files(self, digest: str) -> Path:
+        return self.store.path(digest)
+
+
 class GenerationRunner(BackgroundJobRunner):
     """Generate and publish tasks, save training results, and deliver completed generations.
 
@@ -982,13 +1023,26 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         context: PipelineContext,
         environ: Mapping[str, str],
     ) -> Self:
-        """Build the rounds of one scenario, with the ``TaskGenerator`` that ``generator`` names."""
+        """Build the rounds of one scenario, with the ``TaskGenerator`` that ``generator`` names.
+
+        The generator gets its state in the stage's task store. Raises ``PluginConfigError`` if the config names
+        a generator and the context has no task storage.
+        """
         settings = GeneratedTaskSettings.parse(config, plugin_class=cls)
         task_generator = None
         if settings.generator is not None:
             generator = TaskGenerator.reference(settings.generator, setting="pipeline.record2sample.config.generator")
-            task_generator = TaskGenerator.referenced_class(generator).from_config(
-                generator.config, scenario=context.scenario, environ=environ
+            generator_class = TaskGenerator.referenced_class(generator)
+            if context.task_storage is None:
+                raise PluginConfigError(
+                    "pipeline.record2sample.config.generator needs the task storage of a scenario session: "
+                    "the generator keeps its state in the task store"
+                )
+            task_generator = generator_class.from_config(
+                generator.config,
+                scenario=context.scenario,
+                environ=environ,
+                state=StoredGeneratorState(context.task_storage.open(TASK_STORE_NAME)),
             )
         return cls(context, settings, task_generator=task_generator)
 

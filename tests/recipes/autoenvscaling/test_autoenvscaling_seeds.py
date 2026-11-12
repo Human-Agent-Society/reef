@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import tempfile
 import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -28,6 +29,8 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     serving_reef,
     sources_file,
     stand_in_e2b_package,
+    state,
+    state_document,
     write_workspace_task,
 )
 from tests.recipes.autoenvscaling.test_autoenvscaling_claude_designer import (
@@ -204,7 +207,8 @@ def seeded(
         service=service if service is not None else StandInGenerator(tmp_path / "tasks"),
         designer=designer,
         sources=load_sources(sources_file(tmp_path, source_count)) if source_count else (),
-        state_dir=tmp_path / "state",
+        state=state(tmp_path),
+        temporary=tempfile.TemporaryDirectory(dir=tmp_path),
         count=count,
         task_checks=tuple(task_checks),
         calibration=calibration,
@@ -214,7 +218,7 @@ def seeded(
 
 
 def parents(tmp_path: Path) -> list[dict[str, object]]:
-    kept: list[dict[str, object]] = json.loads((tmp_path / "state" / "adaptive.json").read_text())
+    kept: list[dict[str, object]] = state_document(tmp_path, "adaptive")
     return kept
 
 
@@ -710,7 +714,7 @@ def test_a_restart_continues_with_the_next_seed(tmp_path: Path) -> None:
         ({"adaptive": True, "seed_tasks_path": "missing"}, "is not a directory"),
         ({"adaptive": True, "seed_tasks_path": "empty"}, "holds no seed task"),
         ({"adaptive": True, "seed_tasks_path": 7}, "seed_tasks_path must be a directory path or null"),
-        ({"adaptive": True, "sources_path": None}, "needs a state_dir and a sources_path or a seed_tasks_path"),
+        ({"adaptive": True, "sources_path": None}, "needs a sources_path or a seed_tasks_path"),
     ],
 )
 def test_from_config_refuses_seeds_without_adaptive_or_with_an_unreadable_seed(
@@ -727,13 +731,14 @@ def test_from_config_refuses_seeds_without_adaptive_or_with_an_unreadable_seed(
     environ = {"E2B_API_KEY": "e2b-test"}
     with pytest.raises(PluginConfigError, match=message):
         AutoEnvScalingGenerator.from_config(
-            generating_config(tmp_path, **fields), scenario="autoenvscaling", environ=environ
+            generating_config(tmp_path, **fields), scenario="autoenvscaling", environ=environ, state=state(tmp_path)
         )
     # Seeds alone, without a sources file, make a generator.
     generator = AutoEnvScalingGenerator.from_config(
         generating_config(tmp_path, adaptive=True, sources_path=None, seed_tasks_path=str(tmp_path / "seeds")),
         scenario="autoenvscaling",
         environ=environ,
+        state=state(tmp_path),
     )
     assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
 
@@ -761,7 +766,9 @@ def test_the_seed_task_examples_build_claude_code_on_the_seeds_with_a_refusing_c
     section = settings.pipeline_settings["record2sample"]["config"]["generator"]
     # reef serve publishes the generator's endpoint when it starts the services.
     config = {**section["config"], "generator_url": "http://127.0.0.1:8910"}
-    generator = AutoEnvScalingGenerator.from_config(config, scenario="autoenvscaling", environ=os.environ)
+    generator = AutoEnvScalingGenerator.from_config(
+        config, scenario="autoenvscaling", environ=os.environ, state=state(tmp_path)
+    )
     assert isinstance(generator.designer, ClaudeCodeDesigner) and generator.concurrency == concurrency
     assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
     [calibration] = [check for check in generator.task_checks if isinstance(check, CalibrationCheck)]
@@ -809,7 +816,7 @@ def test_a_seed_proposal_is_neither_a_variant_nor_a_session_proposal(changes: di
 )
 def test_a_seeded_parent_names_a_seed_task_and_has_the_seeds_id(source_record_id: str, seed_task: object) -> None:
     with pytest.raises(ValueError, match="a parent's seed_task"):
-        ParentTask("t-0", source_record_id, 0, 1.0, 2, "harder", seed_task=seed_task)  # type: ignore[arg-type]
+        ParentTask("t-0", source_record_id, 0, 1.0, 2, "harder", "digest", seed_task=seed_task)  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
@@ -840,7 +847,8 @@ def test_seeds_and_seeded_parents_need_a_designer_that_varies_seeds(tmp_path: Pa
             service=StandInGenerator(tmp_path / "tasks"),
             designer=StandInDesigner(),
             sources=load_sources(sources_file(tmp_path, 1)),
-            state_dir=tmp_path / "state",
+            state=state(tmp_path),
+            temporary=tempfile.TemporaryDirectory(dir=tmp_path),
             count=2,
             is_adaptive=True,
         )

@@ -90,7 +90,6 @@ pipeline:
         module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
         config:
           generator_url: ${endpoints.generator}
-          state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/generations
           # The seed tasks. Uploaded as train tasks instead, the seeds would train ahead of every generated task.
           seed_tasks_path: ${REEF_AUTOENVSCALING_SEEDS_PATH}
           count: 8

@@ -93,7 +93,6 @@ pipeline:
         module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
         config:
           generator_url: ${endpoints.generator}
-          state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/generations
           sources_path: ${REEF_AUTOENVSCALING_SOURCES_PATH}
           count: 8
           # Four agent runs at once, each in its own sandbox; the calibration checks one candidate at a time.

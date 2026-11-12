@@ -20,6 +20,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskJobData
 from reef.recipe.generated_tasks.generator import (
     GeneratedTaskResult,
+    GeneratorState,
     RolledOutTask,
     TaskGenerator,
     TaskValidationResult,
@@ -53,7 +54,9 @@ class FixedTasks(TaskGenerator):
         self.results: list[tuple[GeneratedTaskResult, ...]] = []
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
+    ) -> Self:
         return cls()
 
     async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:

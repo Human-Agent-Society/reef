@@ -6,7 +6,7 @@ the Environment Designer's adversarial experience section, the hint arm each tas
 based regret as the Designer's signal.
 
 - ``generation``: the experience section (results sorted by regret into the frontier, the mastered and the
-  out of reach), a generation's records and its report file.
+  out of reach), a generation's records and its report document.
 - ``generator``: ``SpadeTaskGenerator``, the Designer's generations through the generator service.
 
 The Designer's own training follows.

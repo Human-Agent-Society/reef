@@ -708,7 +708,7 @@ a new recipe. SPADE (``recipes/beta/spade``) is one generator.
 
 ``TaskGenerator`` is in ``reef.recipe.generated_tasks``, and
 ``TaskGenerationRequest`` in ``reef.record2sample.generator``. Reef calls its class method
-``from_config(config, *, scenario, environ)`` once for each scenario. The
+``from_config(config, *, scenario, environ, state)`` once for each scenario. The
 generator gets what it needs from its ``config`` and from these calls only:
 
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``
@@ -725,6 +725,32 @@ generator gets what it needs from its ``config`` and from these calls only:
   before, and the process may have restarted since. A generator keeps what it
   needs for each open generation across a restart, and ignores a second call
   for a generation that it already closed. The default keeps nothing.
+
+``state`` is the ``GeneratorState`` of the scenario's generator
+(``reef.recipe.generated_tasks``). A generator keeps there what it must read
+again after a restart, such as its open generations, and keeps no file of its
+own. The state holds text documents by key, and saved directories:
+
+- ``read(key)`` returns the document of ``key``, or ``None``.
+- ``write(key, document)`` saves the document. It replaces an earlier document
+  of the key.
+- ``remove(key)`` removes the document. An unknown key changes nothing.
+- ``keys(prefix="")`` returns the keys that start with ``prefix``, in
+  increasing string order.
+- ``save_files(directory)`` saves a copy of a directory and returns the digest
+  of its files.
+- ``files(digest)`` returns a local directory with the saved files. Do not
+  change it.
+
+Each write is durable and atomic when it returns. The record-to-sample stage
+builds the state from its task store, so the documents are in the deployment's
+database and the saved directories are in the task file store. A restart on
+another machine reads the same state, and an archive of the scenario retires
+it. The generator gets no other part of the task store: it cannot publish a
+task or read the stage's own documents. For work that needs a directory for a
+short time, such as a task under validation, use a temporary directory. A
+config that names a generator is refused when the scenario has no task
+storage.
 
 Each ``GeneratedTaskResult`` is one of four cases, by the candidate's outcome:
 
@@ -865,7 +891,8 @@ publication or rejection, so a retry of a generation uses the saved candidates
 and does not generate the tasks again. Tasks that share a source record get the
 same split, and a published task keeps its split. A task whose sources join
 tasks of both splits is rejected. The store also keeps each train task's first
-rollout result and the generations whose results the generator received. The
+rollout result and the generations whose results the generator received, and,
+as state documents, the generator's own state. The
 scenario's training state counts the tasks that trained.
 
 After a restart, the record-to-sample stage continues with the next generation number.
