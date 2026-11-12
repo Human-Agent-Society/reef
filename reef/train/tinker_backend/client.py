@@ -13,7 +13,7 @@ from dataclasses import replace
 from typing import Any
 
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate
-from reef.tinker.service import close_service, tinker_sdk
+from reef.tinker.service import close_service, served_context_windows, tinker_sdk
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.config import TinkerServiceConfig
 from reef.train.tinker_backend.losses import MatrixInput, TinkerCustomLoss, TinkerLoss, TokenRow
@@ -82,6 +82,11 @@ class TinkerClient(ABC):
     def chat_template(self, template_kwargs: Mapping[str, Any]) -> ChatTemplate:
         """The chat template of the configured base model with ``template_kwargs``, which renders a trajectory
         that carries no tokens (``reef.core.chat_rendering``)."""
+
+    def context_window(self) -> int | None:
+        """The configured base model's context window in tokens, or None when the client does not know it. Tinker
+        refuses an optimizer step with a row whose targets, every token but the first, are longer."""
+        return None
 
     @abstractmethod
     def check_remote(self, checkpoint: TinkerCheckpoint) -> None:
@@ -160,6 +165,8 @@ class TinkerSDKClient(TinkerClient):
     _service: Any
     #: The frozen base model's sampling client, made at the first KL term.
     base_client: Any | None
+    #: The context window of each model that the service serves, read at the first need.
+    context_windows: dict[str, int]
 
     def __init__(
         self,
@@ -180,6 +187,7 @@ class TinkerSDKClient(TinkerClient):
         # On a service such as Spindle, a sampling client starts a sampler pool, so the frozen base's client is
         # made at the first KL term. Sampling for requests is the inference runtime's.
         self.base_client = None
+        self.context_windows = {}
 
     def _new_service(self) -> Any:
         # The SDK takes no client-wide timeout: each call is bounded with .result(timeout=train_timeout_s).
@@ -335,6 +343,11 @@ class TinkerSDKClient(TinkerClient):
                 tuple(replace(row, logprobs=computed[id(row)]) if id(row) in computed else row for row in rows)
             )
         return result
+
+    def context_window(self) -> int | None:
+        if not self.context_windows:
+            self.context_windows = served_context_windows(self._service)
+        return self.context_windows.get(self._model)
 
     def chat_template(self, template_kwargs: Mapping[str, Any]) -> ChatTemplate:
         if self.base_client is None:

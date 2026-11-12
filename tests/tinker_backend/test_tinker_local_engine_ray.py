@@ -118,6 +118,7 @@ FAKE_SDK = textwrap.dedent(
         def __init__(self, **kwargs): _log({"event": "session", "keys": sorted(kwargs)})
         def create_sampling_client(self, base_model=None, model_path=None): return _Sampler()
         def create_rest_client(self): return _Rest()
+        def get_server_capabilities(self): return SimpleNamespace(supported_models=[])
         def create_lora_training_client(self, base_model, rank, seed):
             _log({"event": "initialize", "base_model": base_model, "rank": rank}); return _Trainer("seed")
         def create_training_client_from_state_with_optimizer(self, path):

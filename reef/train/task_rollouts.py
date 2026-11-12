@@ -29,6 +29,7 @@ from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.harness.harbor.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.samples import recorded_training
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,9 @@ class HarborSettings:
     ``docker``, ``e2b`` or ``modal``. ``agent_host`` is the host at which an agent in the sandbox reaches the host that
     runs the rollouts, or None for an agent on that host. ``concurrency`` is a positive int, the rollouts in flight.
     ``verifier_timeout_reward`` is the reward of a rollout whose verifier timed out, or None to leave it unscored.
-    ``scaffold_tolerance`` is a non-negative int, the masked tokens that the assembly may realign before a response
-    (for a thinking template's scaffold). Purpose: a training component makes it from its own job parameters, and
-    reads it where it runs the rollouts.
+    ``scaffold_tolerance`` is a non-negative int, the most tokens at the end of a prompt that the next prompt's history
+    may drop (a thinking template's scaffold) while the response after them still trains. Purpose: a training
+    component makes it from its own job parameters, and reads it where it runs the rollouts.
     """
 
     agent: Mapping[str, Any] | None = None
@@ -80,6 +81,39 @@ class HarborSettings:
 
 
 @dataclass(frozen=True)
+class RolloutTokens:
+    """The response tokens of one task rollout that ran, and how many of them train.
+
+    Values: ``task`` is the name of the rollout's task. ``response_tokens`` is a non-negative int, the tokens that the
+    rollout's calls sampled (the length of each call's loss mask). ``trained_tokens`` is an int from 0 to
+    ``response_tokens``, the tokens of them that the job trains (the sum of the loss mask of the rollout's sample):
+    fewer when the assembly masks a response that a later prompt rewrote, and 0 when the rollout has no sample or its
+    task's group does not train. ``assembled`` holds exactly when the rollout's calls assemble into a sample
+    (``rollout_sample``); ``trained_tokens`` is 0 when it does not. Purpose: ``run_train_tasks`` makes one for each
+    rollout that ran; ``TaskJobRollouts.metrics`` reports them in the job's metrics, and a training component keeps
+    them with the job's rollouts.
+    """
+
+    task: str
+    response_tokens: int
+    trained_tokens: int
+    assembled: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task, str) or not self.task:
+            raise ValueError("RolloutTokens.task must be a non-empty task name")
+        counts = (self.response_tokens, self.trained_tokens)
+        if any(isinstance(count, bool) or not isinstance(count, int) for count in counts):
+            raise TypeError("RolloutTokens counts tokens as ints")
+        if not isinstance(self.assembled, bool):
+            raise TypeError("RolloutTokens.assembled is a bool")
+        if not 0 <= self.trained_tokens <= self.response_tokens:
+            raise ValueError("RolloutTokens.trained_tokens must be from 0 to response_tokens")
+        if not self.assembled and self.trained_tokens:
+            raise ValueError("a rollout that does not assemble trains no tokens")
+
+
+@dataclass(frozen=True)
 class RolloutSettings(HarborSettings):
     """``HarborSettings`` of a component that runs a fixed number of rollouts of each task before it trains.
 
@@ -100,20 +134,31 @@ class RolloutSettings(HarborSettings):
 class TaskJobRollouts:
     """The rollouts of one task job.
 
-    Values: ``samples`` holds the samples of the groups that train, each group contiguous, every sample with
-    the ``group_id`` of its task. ``scores`` holds the score of each rollout, by task name, in run order; each
-    group names a task of ``scores``. Purpose: ``run_train_tasks`` makes it; the component trains ``samples`` and
-    reports the scores in the job's metrics.
+    Values: ``samples`` holds the samples of the groups that train, each group contiguous, every sample with the
+    ``group_id`` of its task. ``scores`` holds the score of each rollout, by task name, in run order; each group names
+    a task of ``scores``. ``tokens`` holds the ``RolloutTokens`` of each rollout that ran, in the order of ``scores``.
+    ``left_out`` is a non-negative int, the samples left out because they are longer than the job's ``max_tokens``.
+    Purpose: ``run_train_tasks`` makes it; the component trains ``samples`` and reports ``metrics`` in the job's
+    metrics.
     """
 
     samples: tuple[TrajectorySample, ...]
     scores: RolloutScores
+    tokens: tuple[RolloutTokens, ...]
+    left_out: int = 0
 
     def __post_init__(self) -> None:
+        if isinstance(self.left_out, bool) or not isinstance(self.left_out, int) or self.left_out < 0:
+            raise ValueError("TaskJobRollouts.left_out must be a non-negative int")
         if any(not isinstance(sample, TrajectorySample) for sample in self.samples):
             raise TypeError("task rollouts train trajectories")
         if not isinstance(self.scores, RolloutScores):
             raise TypeError("TaskJobRollouts.scores must be RolloutScores")
+        if any(not isinstance(item, RolloutTokens) for item in self.tokens):
+            raise TypeError("TaskJobRollouts.tokens must hold RolloutTokens")
+        ran = [task for task, scores in self.scores.tasks for score in scores if not score.is_failed]
+        if [item.task for item in self.tokens] != ran:
+            raise ValueError("TaskJobRollouts.tokens holds the tokens of each rollout that ran, in run order")
         names = {task for task, _ in self.scores.tasks}
         groups = [sample.group_id for sample in self.samples]
         seen: list[str | None] = []
@@ -130,6 +175,34 @@ class TaskJobRollouts:
         return {
             task: tuple(score.value for score in scores if score.value is not None)
             for task, scores in self.scores.tasks
+        }
+
+    def metrics(self) -> dict[str, object]:
+        """The job metrics of these rollouts.
+
+        ``rollout_rewards`` maps each task to its rewards (``rewards``), ``rollout_samples`` counts the samples that
+        train, and ``removed_rollouts`` the rollouts that give no sample: those that failed in the infrastructure and
+        those whose calls do not assemble into a sample, as on Slime. ``rollout_tokens`` maps each task to the
+        ``response_tokens`` and ``trained_tokens`` of each of its rollouts that ran, in run order, and
+        ``rollout_response_tokens`` and ``rollout_trained_tokens`` are their sums over the job.
+        ``unrenderable_samples`` counts the samples left out for their length (``left_out``), when there are any.
+        """
+        rollouts = sum(len(scores) for _, scores in self.scores.tasks)
+        return {
+            "rollout_rewards": {name: list(values) for name, values in self.rewards().items()},
+            "rollout_samples": len(self.samples),
+            "removed_rollouts": rollouts - sum(item.assembled for item in self.tokens),
+            "rollout_tokens": {
+                name: [
+                    {"response_tokens": item.response_tokens, "trained_tokens": item.trained_tokens}
+                    for item in self.tokens
+                    if item.task == name
+                ]
+                for name, _ in self.scores.tasks
+            },
+            "rollout_response_tokens": sum(item.response_tokens for item in self.tokens),
+            "rollout_trained_tokens": sum(item.trained_tokens for item in self.tokens),
+            **({"unrenderable_samples": self.left_out} if self.left_out else {}),
         }
 
 
@@ -248,12 +321,15 @@ def run_train_tasks(
     start: str,
     model_adapter: str | None = None,
     lab: TaskLab | None = None,
+    max_tokens: int | None = None,
 ) -> TaskJobRollouts:
     """Run ``settings.rollouts_per_task`` rollouts of each task, answering their model calls with ``chat``.
 
     ``model`` is the model name the agent sends, and ``model_adapter`` the adapter it names, or None. ``start`` is
     the job's ``start``, the weights that ``chat`` samples; each sample names it as its ``artifact_id``.
-    ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``.
+    ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``. ``max_tokens`` is the most tokens a
+    sample's targets, every token but the first, may have, or None for no bound: a longer sample is left out before
+    its task's group forms. The result counts the tokens of each rollout that ran (``RolloutTokens``).
     """
     assembly = rollout_assembly(settings)
     with ChatEndpoint(chat) as endpoint:
@@ -280,6 +356,8 @@ def run_train_tasks(
             ]
         )
     samples: list[TrajectorySample] = []
+    tokens: list[RolloutTokens] = []
+    left_out = 0
     for index, task in enumerate(tasks):
         name = task_name(task)
         ran = [
@@ -287,11 +365,30 @@ def run_train_tasks(
             for rollout in rollouts[index * settings.rollouts_per_task : (index + 1) * settings.rollouts_per_task]
             if not rollout.is_infrastructure_failure
         ]
-        group = [sample for sample in (rollout_sample(rollout, name, assembly, start) for rollout in ran) if sample]
+        assembled = [(rollout, rollout_sample(rollout, name, assembly, start)) for rollout in ran]
+        # A sample whose targets are longer than max_tokens is left out before the group forms: Tinker refuses a whole
+        # optimizer step for one such row.
+        rows = [
+            (
+                rollout,
+                sample,
+                sample is not None and (max_tokens is None or len(sample.training["tokens"]) - 1 <= max_tokens),
+            )
+            for rollout, sample in assembled
+        ]
+        group = [sample for _, sample, is_fitting in rows if sample is not None and is_fitting]
+        left_out += sum(sample is not None and not is_fitting for _, sample, is_fitting in rows)
         # A group of fewer than two samples has no relative reward, so it does not train.
-        if len(group) >= 2:
+        trains = len(group) >= 2
+        if trains:
             samples.extend(group)
+        for rollout, sample, is_fitting in rows:
+            sampled = sum(
+                len(recorded_training({"response": turn.response}).get("loss_mask", ())) for turn in rollout.turns
+            )
+            trained = sum(sample.training.get("loss_mask", [])) if sample is not None and is_fitting and trains else 0
+            tokens.append(RolloutTokens(name, sampled, trained, assembled=sample is not None))
     scores = RolloutScores.by_task(
         [task_name(task) for task in tasks], [runner.rollout_score(rollout) for rollout in rollouts]
     )
-    return TaskJobRollouts(tuple(samples), scores)
+    return TaskJobRollouts(tuple(samples), scores, tuple(tokens), left_out)

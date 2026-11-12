@@ -12,12 +12,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
+from reef.core.reasoning import ReasoningStreamSplitter
 from reef.inference.chat import (
     CapturedGeneration,
     ChatCall,
     ChatStreamRelay,
     NativeGenerateClient,
-    ReasoningStreamSplitter,
     TokenNativeChatHandler,
     finite_log_prob,
     normalize_finish_reason,

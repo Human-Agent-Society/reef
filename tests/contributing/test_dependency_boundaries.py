@@ -514,6 +514,16 @@ def test_training_backends_never_import_inference_implementations() -> None:
         assert _imports_of(imported, "reef.inference") == [], str(path.relative_to(REPO_ROOT))
 
 
+def test_the_tinker_pieces_that_training_shares_never_import_inference_or_training() -> None:
+    # Training imports reef.tinker, so what Tinker's sampler and the inference handlers share, such as the reasoning
+    # split, is in reef.core.
+    for path in sorted((REPO_ROOT / "reef/tinker").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
+        for dependency in ("reef.inference", "reef.train"):
+            assert _imports_of(imported, dependency) == [], str(path.relative_to(REPO_ROOT))
+
+
 def test_task_generation_contracts_do_not_depend_on_their_consumers() -> None:
     # The generator service owns the request; the generated-task recipe owns the generator contract.
     for module_name, package, consumers in (

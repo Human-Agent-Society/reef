@@ -62,18 +62,27 @@ per request, ``max_tokens`` or ``max_completion_tokens``, ``temperature``,
 ``chat_template_kwargs.enable_thinking``. Unknown options, tool calls,
 multimodal messages, and Anthropic routes fail explicitly.
 
+A request without ``max_tokens`` or ``max_completion_tokens`` may reply up to
+the rest of the model's context window, or 1024 tokens when the service states
+no window for the model. A prompt that fills the window gets a ``400`` whose
+message starts with ``context_length_exceeded``. A thinking model's reasoning
+comes in the message's ``reasoning_content``, and its answer in ``content``.
+
 Streaming is buffered: the complete sampled response is emitted as valid
-OpenAI SSE events. It does not provide token-by-token latency. Prompt IDs come
-from the tokenizer's chat template.
+OpenAI SSE events. It does not provide token-by-token latency. A streamed
+answer carries only ``content``, so a streaming client gets no reasoning.
+Prompt IDs come from the tokenizer's chat template.
 
 Serving returns and records no training tensors. The training component
 renders each recorded call with the base model's tokenizer and
 ``training.options.chat_template_kwargs``, which must equal the chat template
 arguments of serving, for example ``{enable_thinking: false}``. It computes
 the rollout log probabilities with a forward pass at the job's start, before
-the first optimizer step. A sample that cannot render does not train, and the
-job metric ``unrenderable_samples`` counts it. A task job's own rollouts keep
-the sampled IDs and log probabilities that Tinker returns.
+the first optimizer step. A sample that cannot render, or whose tokens after
+the first are more than the model's context window, does not train, and the
+job metric ``unrenderable_samples`` counts it: Tinker refuses a whole
+optimizer step for one such sample. A task job's own rollouts keep the sampled
+IDs and log probabilities that Tinker returns.
 
 Reef's normal ``WeightTrainingRecipe`` drives the integration. The backend is
 one training component (``reef.train.tinker_backend``) and one inference

@@ -274,12 +274,10 @@ def test_multi_turn_policy_sample_rejects_forks_and_mixed_weights(turns) -> None
 
 
 @pytest.mark.unit
-def test_multi_turn_scaffold_tolerance_realls_masked_scaffold_only() -> None:
-    """A thinking template drops the generation scaffold when re-rendering
-    history, so turn N+1's prompt diverges just *before* turn N's response.
-    With the default strict boundary that is a fork; with a scaffold
-    tolerance covering the divergence it realigns, and the trained span is
-    the latest response only (the realigned region is masked)."""
+def test_multi_turn_scaffold_tolerance_keeps_the_scaffold_and_trains_every_turn() -> None:
+    """A thinking template drops the generation scaffold when re-rendering history, so turn N+1's prompt diverges just
+    *before* turn N's response. With the default strict boundary that is a fork; with a scaffold tolerance covering
+    the divergence the transcript keeps the sampled scaffold and response, and both responses train."""
     # turn 0: prompt [1, 2, 99] where 99 is generation scaffold, response [3, 4]
     # turn 1: history re-render drops 99 -> prompt [1, 2, 3, 4, 5], response [6]
     turns = [
@@ -292,11 +290,10 @@ def test_multi_turn_scaffold_tolerance_realls_masked_scaffold_only() -> None:
 
     tolerant = make_multi_turn_policy_trajectory(turns, 1.0, source_agent_record_id="r1", scaffold_tolerance=2)
     assert tolerant is not None
-    assert tuple(tolerant.training.get("tokens", [])) == (1, 2, 3, 4, 5, 6)
-    # the loss mask starts after the leading prompt (3 tokens); everything
-    # before the final response is masked context
-    assert tuple(tolerant.training.get("loss_mask", [])) == (0, 0, 1)
-    assert tuple(tolerant.training.get("rollout_log_probs", [])) == (0.0, 0.0, -0.3)
+    assert tuple(tolerant.training.get("tokens", [])) == (1, 2, 99, 3, 4, 5, 6)
+    # the loss mask starts after the leading prompt (3 tokens): both responses train
+    assert tuple(tolerant.training.get("loss_mask", [])) == (1, 1, 0, 1)
+    assert tuple(tolerant.training.get("rollout_log_probs", [])) == (-0.1, -0.2, 0.0, -0.3)
     assert tolerant.training.get("turn_count", 1) == 2
 
     # a genuine fork deeper than the tolerance still returns None
@@ -305,3 +302,93 @@ def test_multi_turn_scaffold_tolerance_realls_masked_scaffold_only() -> None:
         _turn("i2", [9, 9, 9, 9, 9, 6], [1], [-0.3]),
     ]
     assert make_multi_turn_policy_trajectory(forked, 1.0, source_agent_record_id="r1", scaffold_tolerance=2) is None
+
+
+# Qwen3.5's empty think block with thinking off: <think> \n\n </think> \n\n.
+EMPTY_THINK = [248068, 271, 248069, 271]
+
+
+def scaffold_dropping_rollout() -> list[AgentRecord]:
+    """Three calls whose every prompt ends with the empty think block, which the next prompt's history drops."""
+    return [
+        _turn("i1", [10, 11, *EMPTY_THINK, 20, 21], [1, 1], [-0.1, -0.2]),
+        _turn("i2", [10, 11, 20, 21, 30, *EMPTY_THINK, 40], [1], [-0.3]),
+        _turn("i3", [10, 11, 20, 21, 30, 40, 50, *EMPTY_THINK, 60, 61], [1, 1], [-0.4, -0.5]),
+    ]
+
+
+@pytest.mark.unit
+def test_a_rollout_whose_history_drops_the_scaffold_trains_every_turn() -> None:
+    """Turn 3's prompt lacks both scaffolds that the transcript keeps: each prompt is compared with the previous call,
+    so it still extends, and every response trains with its sampler's log probabilities."""
+    turns = scaffold_dropping_rollout()
+
+    sample = make_multi_turn_policy_trajectory(turns, 1.0, source_agent_record_id="r1", scaffold_tolerance=8)
+
+    assert sample is not None
+    assert sample.training["tokens"] == [10, 11, *EMPTY_THINK, 20, 21, 30, *EMPTY_THINK, 40, 50, *EMPTY_THINK, 60, 61]
+    assert sum(sample.training["loss_mask"]) == sum(
+        len(turn.payload["response"]["training"]["loss_mask"]) for turn in turns
+    )
+    trained = [index for index, value in enumerate(sample.training["loss_mask"]) if value]
+    assert [sample.training["rollout_log_probs"][index] for index in trained] == [-0.1, -0.2, -0.3, -0.4, -0.5]
+    assert sample.training["turn_count"] == 3
+
+
+@pytest.mark.unit
+def test_the_default_tolerance_makes_a_dropped_scaffold_a_fork() -> None:
+    assert make_multi_turn_policy_trajectory(scaffold_dropping_rollout(), 1.0, source_agent_record_id="r1") is None
+
+
+@pytest.mark.unit
+def test_a_drifted_response_is_masked_and_the_other_turns_train() -> None:
+    """The history also trimmed a trailing newline of turn 1's response: that response realigns as masked context,
+    and the other turns still train."""
+    sample = make_multi_turn_policy_trajectory(
+        [
+            _turn("i1", [10, *EMPTY_THINK, 20, 198], [1, 1], [-0.1, -0.2]),
+            _turn("i2", [10, 20, 30, *EMPTY_THINK, 40], [1], [-0.3]),
+            _turn("i3", [10, 20, 30, 40, 50, *EMPTY_THINK, 60], [1], [-0.4]),
+        ],
+        1.0,
+        source_agent_record_id="r1",
+        scaffold_tolerance=8,
+    )
+
+    assert sample is not None
+    assert sample.training["tokens"] == [10, 20, 30, *EMPTY_THINK, 40, 50, *EMPTY_THINK, 60]
+    # The loss mask starts after turn 1's prompt (5 tokens).
+    assert sample.training["loss_mask"] == [0, 0, 1, 0, 0, 0, 0, 0, 1]
+    assert sample.training["rollout_log_probs"] == [0.0, 0.0, -0.3, 0.0, 0.0, 0.0, 0.0, 0.0, -0.4]
+
+
+@pytest.mark.unit
+def test_the_top_k_rows_stay_aligned_when_the_scaffold_is_kept() -> None:
+    sample = make_multi_turn_policy_trajectory(
+        [
+            _turn("i1", [1, 99, 3], [1], [-0.1], topk=[([3, 5], [-0.1, -1.0])]),
+            _turn("i2", [1, 3, 4, 99, 6], [1], [-0.3], topk=[([6, 7], [-0.3, -2.0])]),
+        ],
+        1.0,
+        source_agent_record_id="r1",
+        scaffold_tolerance=1,
+    )
+
+    assert sample is not None
+    assert sample.training["tokens"] == [1, 99, 3, 4, 99, 6]
+    assert sample.training["loss_mask"] == [1, 0, 0, 1]
+    assert sample.training["topk_indices"] == [[3, 5], [], [], [6, 7]]
+    assert sample.training["topk_log_probs"] == [[-0.1, -1.0], [], [], [-0.3, -2.0]]
+
+
+@pytest.mark.unit
+def test_drift_into_a_dropped_scaffold_is_a_fork() -> None:
+    """Turn 2's prompt dropped scaffold 99, which the transcript keeps; turn 3's prompt then rewrites the history
+    before it, which the transcript cannot realign."""
+    turns = [
+        _turn("i1", [1, 2, 99, 3], [1], [-0.1]),
+        _turn("i2", [1, 2, 3, 4, 99, 5], [1], [-0.2]),
+        _turn("i3", [1, 7, 3, 4, 5, 6, 99, 8], [1], [-0.3]),
+    ]
+
+    assert make_multi_turn_policy_trajectory(turns, 1.0, source_agent_record_id="r1", scaffold_tolerance=4) is None
