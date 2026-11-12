@@ -400,11 +400,13 @@ class EvaluationResults:
         """Start the evaluation once a worker took one of its rollouts; stop it when too many of its ended rollouts
         failed (``max_failed_fraction``); add the rollouts that wait while fewer than ``max_concurrent_rollouts`` are
         not final; end the evaluation once all of them are in the queue and final."""
-        items = self.rollouts(evaluation_id, scenario)
         with self.dispatcher.locked_scenario(scenario) as current:
             stored = current.store.evaluations.get(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
                 return
+            # Read under the lock: a retry changes the evaluation and its rollouts under it, and rollouts read
+            # before it would count as failed again.
+            items = self.rollouts(evaluation_id, scenario)
             request = stored.request
             ended = [item for item in items if item.final]
             failed = sum(rollout_failed(item) for item in ended)
