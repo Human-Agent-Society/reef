@@ -1,4 +1,4 @@
-"""Stand-ins for AutoEnvScaling's tests: sessions and sources, a Designer, a sandbox, a Reef and a generator.
+"""Stand-ins for AutoEnvScaling's tests: sessions, a Designer, pi and Claude Code sandboxes, a Reef and a generator.
 
 The generator service itself is :class:`~tests.support.task_service_stubs.StandInGenerator`.
 """
@@ -6,7 +6,9 @@ The generator service itself is :class:`~tests.support.task_service_stubs.StandI
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -34,12 +36,18 @@ from recipes.beta.autoenvscaling import (
     VariantDesigner,
 )
 from recipes.beta.autoenvscaling import designer as designer_module
-from recipes.beta.autoenvscaling import load_sources, workspace_reply
+from recipes.beta.autoenvscaling import load_sources, task_check, workspace_reply
 from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.designer import AgentTools, ModelCalls, RecordingGateway, TaskVariant
 from reef.core.tasks import HarborTask
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
-from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, SandboxProgram
+from reef.execution.sandbox.process import (
+    ProcessOutcome,
+    ProgramExecutor,
+    ProgramLaunchError,
+    ProgramTimeout,
+    SandboxProgram,
+)
 from reef.harness.harbor.rollouts import TaskRollout
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import StoredGeneratorState
@@ -470,3 +478,135 @@ def generating_config(tmp_path: Path, **fields: object) -> dict[str, object]:
         "agent_reef_url": "http://127.0.0.1:8901",
         **fields,
     }
+
+
+# The Claude Code OAuth token of the scripted Claude Code runs, and the session id of their transcript.
+TOKEN = "sk-ant-oat01-reef-test-token-7f3a91"
+SESSION_ID = "0b6f2c1e-5d4a-4e8b-9c3f-2a1d7e6b5c40"
+
+
+def result_json(subtype: str = "success", is_error: bool = False, **fields: object) -> str:
+    """What ``claude -p --output-format json`` prints at its end: a success carries its reply in ``result``, an
+    error subtype its ``errors``."""
+    document = {"type": "result", "subtype": subtype, "is_error": is_error, "num_turns": 3, "session_id": SESSION_ID}
+    return json.dumps({**({"result": "Done."} if subtype == "success" else {}), **document, **fields})
+
+
+def checked(arguments: Sequence[str], environ: Mapping[str, str]) -> str:
+    """What the agent's ``python3 "$REEF_DESIGNER_CHECK" ...`` prints."""
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        task_check.main(list(arguments), environ)
+    return output.getvalue()
+
+
+class ScriptedClaudeSession(E2BSession):
+    """A sandbox that runs no Claude Code. ``launch`` keeps what it was given, writes what Claude Code would (the
+    task, a transcript named ``session_name``, its own state), runs the agent's ``task_check`` commands
+    (``checks``) against the gateway, and prints ``stdout``, or times out with ``is_timeout``. ``leak`` goes into
+    the transcript and ``task_leak`` into the task; ``link_leak`` goes into a workspace file that a link in the
+    task's tests reads. With ``stop``, it sets the stop signal (a cancellation mid run) and waits for the sandbox
+    to be closed. ``launch_error`` and ``close_error`` are what a failing launch and close raise."""
+
+    def __init__(
+        self,
+        *,
+        stdout: str = "",
+        exit_code: int = 0,
+        stderr: str = "",
+        checks: Sequence[Sequence[str]] = (),
+        leak: str = "",
+        task_leak: str = "",
+        link_leak: str = "",
+        session_name: str = SESSION_ID,
+        is_timeout: bool = False,
+        launch_error: str = "",
+        close_error: str = "",
+        stop: threading.Event | None = None,
+    ) -> None:
+        self.env: dict[str, str] = {}
+        self.stdout = stdout or result_json()
+        self.exit_code = exit_code
+        self.stderr = stderr
+        self.checks = checks
+        self.leak = leak
+        self.task_leak = task_leak
+        self.link_leak = link_leak
+        self.session_name = session_name
+        self.is_timeout = is_timeout
+        self.launch_error = launch_error
+        self.close_error = close_error
+        self.stop = stop
+        self.is_closed = threading.Event()
+        self.argv: list[str] = []
+        self.launch_env: dict[str, str] = {}
+        self.writable: list[Path] = []
+        self.readonly: list[Path] = []
+        self.check_outputs: list[str] = []
+
+    def launch(
+        self,
+        argv: Sequence[str],
+        *,
+        root: Path,
+        workspace: Path,
+        env: Mapping[str, str],
+        timeout: float,
+        writable_paths: Sequence[Path] = (),
+        readonly_paths: Sequence[Path] = (),
+    ) -> ProcessOutcome:
+        self.argv = list(argv)
+        self.launch_env = dict(env)
+        self.writable = list(writable_paths)
+        self.readonly = list(readonly_paths)
+        if self.stop is not None:
+            self.stop.set()
+            self.is_closed.wait(10)
+            raise ProgramLaunchError("the E2B sandbox could not run the process: it is gone")
+        if self.launch_error:
+            raise ProgramLaunchError(self.launch_error)
+        task_dir = write_workspace_task(workspace / "task", 8600)
+        if self.task_leak:
+            with (task_dir / "instruction.md").open("a") as stream:
+                stream.write(f"\nThe key is {self.task_leak}.\n")
+        if self.link_leak:
+            (workspace / "notes.txt").write_text(self.link_leak)
+            (task_dir / "tests" / "data.txt").symlink_to("../../notes.txt")
+        self.check_outputs = [checked(arguments, env) for arguments in self.checks]
+        projects = root / "claude" / "projects" / f"-home-user-reef-{root.name}-workspace"
+        projects.mkdir(parents=True, exist_ok=True)
+        events = [
+            {"type": "user", "message": {"role": "user", "content": "Rebuild"}},
+            {"type": "x", "note": self.leak},
+        ]
+        (projects / f"{self.session_name}.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
+        (root / "claude" / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "o@example.com"}}))
+        (root / "claude" / "statsig").mkdir(exist_ok=True)
+        (root / "claude" / "statsig" / "cache").write_text("gates")
+        (root / "home" / ".cache").mkdir(parents=True, exist_ok=True)
+        if self.is_timeout:
+            raise ProgramTimeout("the agent ran out of time")
+        return ProcessOutcome(self.exit_code, self.stdout, self.stderr)
+
+    def pull(self, root: Path, relative: str = "") -> None:
+        return None
+
+    def close(self) -> None:
+        self.is_closed.set()
+        if self.close_error:
+            raise ProgramLaunchError(self.close_error)
+
+
+@dataclass(frozen=True)
+class ClaudeExecutor(E2BExecutor):
+    """An executor whose sandbox is the test's session."""
+
+    session: E2BSession | None = None
+
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
+        return self, program.binary
+
+    def open(self) -> E2BSession:
+        if self.session is None:
+            raise ProgramLaunchError("no scripted session")
+        return self.session

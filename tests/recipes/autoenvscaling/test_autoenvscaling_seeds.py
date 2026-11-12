@@ -17,7 +17,10 @@ import yaml
 from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
+    TOKEN,
+    ClaudeExecutor,
     NoChecks,
+    ScriptedClaudeSession,
     ScriptedExecutor,
     ScriptedRollouts,
     ScriptedSession,
@@ -32,11 +35,6 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     state,
     state_document,
     write_workspace_task,
-)
-from tests.recipes.autoenvscaling.test_autoenvscaling_claude_designer import (
-    TOKEN,
-    ClaudeExecutor,
-    ScriptedClaudeSession,
 )
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator
 

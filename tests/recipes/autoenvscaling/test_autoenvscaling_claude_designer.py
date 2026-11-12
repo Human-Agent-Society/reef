@@ -7,10 +7,8 @@ No test runs Claude Code or a sandbox: a scripted E2B session stands in for both
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import hashlib
-import io
 import json
 import logging
 import os
@@ -19,18 +17,23 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     NAMES,
     REQUEST,
+    SESSION_ID,
+    TOKEN,
+    ClaudeExecutor,
     NoChecks,
+    ScriptedClaudeSession,
     StandInDesigner,
     autoenvscaling,
+    checked,
     generating_config,
     report,
+    result_json,
     run_tasks,
     serving_reef,
     source_of,
@@ -38,7 +41,6 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     stand_in_e2b_package,
     state,
     state_document,
-    write_workspace_task,
 )
 from tests.support.task_service_stubs import task_for
 
@@ -63,19 +65,11 @@ from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import write_harbor_task
 from reef.core.tasks.split import TaskSplit, extend_split_by_source
-from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
-from reef.execution.sandbox.process import (
-    ProcessOutcome,
-    ProgramExecutor,
-    ProgramLaunchError,
-    ProgramTimeout,
-    SandboxProgram,
-)
+from reef.execution.sandbox.e2b import E2BSession
+from reef.execution.sandbox.process import ProcessOutcome
 from reef.recipe.generated_tasks.generator import RolledOutTask
 from reef.recipe.generated_tasks.processor import split_source_ids
 
-TOKEN = "sk-ant-oat01-reef-test-token-7f3a91"
-SESSION_ID = "0b6f2c1e-5d4a-4e8b-9c3f-2a1d7e6b5c40"
 # Claude Code's result text when the model provider refused the run's last model call.
 SAFEGUARDS_TEXT = (
     "API Error: Opus 4.8's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver "
@@ -106,133 +100,6 @@ def reef_url() -> Iterator[str]:
     finally:
         server.shutdown()
         server.server_close()
-
-
-def result_json(subtype: str = "success", is_error: bool = False, **fields: object) -> str:
-    """What ``claude -p --output-format json`` prints at its end: a success carries its reply in ``result``, an
-    error subtype its ``errors``."""
-    document = {"type": "result", "subtype": subtype, "is_error": is_error, "num_turns": 3, "session_id": SESSION_ID}
-    return json.dumps({**({"result": "Done."} if subtype == "success" else {}), **document, **fields})
-
-
-def checked(arguments: Sequence[str], environ: Mapping[str, str]) -> str:
-    """What the agent's ``python3 "$REEF_DESIGNER_CHECK" ...`` prints."""
-    output = io.StringIO()
-    with contextlib.redirect_stdout(output):
-        task_check.main(list(arguments), environ)
-    return output.getvalue()
-
-
-class ScriptedClaudeSession(E2BSession):
-    """A sandbox that runs no Claude Code. ``launch`` keeps what it was given, writes what Claude Code would (the
-    task, a transcript named ``session_name``, its own state), runs the agent's ``task_check`` commands
-    (``checks``) against the gateway, and prints ``stdout``, or times out with ``is_timeout``. ``leak`` goes into
-    the transcript and ``task_leak`` into the task; ``link_leak`` goes into a workspace file that a link in the
-    task's tests reads. With ``stop``, it sets the stop signal (a cancellation mid run) and waits for the sandbox
-    to be closed. ``launch_error`` and ``close_error`` are what a failing launch and close raise."""
-
-    def __init__(
-        self,
-        *,
-        stdout: str = "",
-        exit_code: int = 0,
-        stderr: str = "",
-        checks: Sequence[Sequence[str]] = (),
-        leak: str = "",
-        task_leak: str = "",
-        link_leak: str = "",
-        session_name: str = SESSION_ID,
-        is_timeout: bool = False,
-        launch_error: str = "",
-        close_error: str = "",
-        stop: threading.Event | None = None,
-    ) -> None:
-        self.env: dict[str, str] = {}
-        self.stdout = stdout or result_json()
-        self.exit_code = exit_code
-        self.stderr = stderr
-        self.checks = checks
-        self.leak = leak
-        self.task_leak = task_leak
-        self.link_leak = link_leak
-        self.session_name = session_name
-        self.is_timeout = is_timeout
-        self.launch_error = launch_error
-        self.close_error = close_error
-        self.stop = stop
-        self.is_closed = threading.Event()
-        self.argv: list[str] = []
-        self.launch_env: dict[str, str] = {}
-        self.writable: list[Path] = []
-        self.readonly: list[Path] = []
-        self.check_outputs: list[str] = []
-
-    def launch(
-        self,
-        argv: Sequence[str],
-        *,
-        root: Path,
-        workspace: Path,
-        env: Mapping[str, str],
-        timeout: float,
-        writable_paths: Sequence[Path] = (),
-        readonly_paths: Sequence[Path] = (),
-    ) -> ProcessOutcome:
-        self.argv = list(argv)
-        self.launch_env = dict(env)
-        self.writable = list(writable_paths)
-        self.readonly = list(readonly_paths)
-        if self.stop is not None:
-            self.stop.set()
-            self.is_closed.wait(10)
-            raise ProgramLaunchError("the E2B sandbox could not run the process: it is gone")
-        if self.launch_error:
-            raise ProgramLaunchError(self.launch_error)
-        task_dir = write_workspace_task(workspace / "task", 8600)
-        if self.task_leak:
-            with (task_dir / "instruction.md").open("a") as stream:
-                stream.write(f"\nThe key is {self.task_leak}.\n")
-        if self.link_leak:
-            (workspace / "notes.txt").write_text(self.link_leak)
-            (task_dir / "tests" / "data.txt").symlink_to("../../notes.txt")
-        self.check_outputs = [checked(arguments, env) for arguments in self.checks]
-        projects = root / "claude" / "projects" / f"-home-user-reef-{root.name}-workspace"
-        projects.mkdir(parents=True, exist_ok=True)
-        events = [
-            {"type": "user", "message": {"role": "user", "content": "Rebuild"}},
-            {"type": "x", "note": self.leak},
-        ]
-        (projects / f"{self.session_name}.jsonl").write_text("".join(json.dumps(event) + "\n" for event in events))
-        (root / "claude" / ".claude.json").write_text(json.dumps({"oauthAccount": {"emailAddress": "o@example.com"}}))
-        (root / "claude" / "statsig").mkdir(exist_ok=True)
-        (root / "claude" / "statsig" / "cache").write_text("gates")
-        (root / "home" / ".cache").mkdir(parents=True, exist_ok=True)
-        if self.is_timeout:
-            raise ProgramTimeout("the agent ran out of time")
-        return ProcessOutcome(self.exit_code, self.stdout, self.stderr)
-
-    def pull(self, root: Path, relative: str = "") -> None:
-        return None
-
-    def close(self) -> None:
-        self.is_closed.set()
-        if self.close_error:
-            raise ProgramLaunchError(self.close_error)
-
-
-@dataclass(frozen=True)
-class ClaudeExecutor(E2BExecutor):
-    """An executor whose sandbox is the test's session."""
-
-    session: E2BSession | None = None
-
-    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
-        return self, program.binary
-
-    def open(self) -> E2BSession:
-        if self.session is None:
-            raise ProgramLaunchError("no scripted session")
-        return self.session
 
 
 def cached_repositories(cache_dir: Path) -> Path:
