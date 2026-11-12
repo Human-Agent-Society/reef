@@ -13,7 +13,7 @@ from reef.execution.executor.uniproc import UniProcExecutor
 from reef.inference.deployment import InferenceConnection
 from reef.inference.vllm.backend import VLLMInferenceBackend
 from reef.inference.vllm.config import VLLMConfig
-from reef.inference.vllm.service import INFERENCE_PROTOCOL, VLLMInferenceService
+from reef.inference.vllm.service import VLLMInferenceService
 
 
 class Receiver:
@@ -42,10 +42,10 @@ def service():
     return VLLMInferenceService(VLLMConfig("model", 1, 1, 1))
 
 
-def test_service_adapts_only_compatible_connections_without_owning_workers():
+def test_service_adapts_only_connections_with_a_control_executor_without_owning_workers():
     receiver = Receiver()
     executor = UniProcExecutor.from_workers([receiver])
-    operations = service().backend(InferenceConnection(INFERENCE_PROTOCOL, executor))
+    operations = service().backend(InferenceConnection(executor))
 
     assert operations.inference_url() == "http://inference:8000"
     assert operations.runtime_load_ids() == ("weights:1", "weights:1")
@@ -53,8 +53,8 @@ def test_service_adapts_only_compatible_connections_without_owning_workers():
     assert receiver.paused
     operations.resume()
     assert not receiver.paused
-    with pytest.raises(ValueError, match="incompatible vLLM"):
-        service().backend(InferenceConnection("slime-sglang-control-v2", executor))
+    with pytest.raises(ValueError, match="vLLM inference connection has no control executor"):
+        service().backend(InferenceConnection(None))
 
 
 @pytest.mark.parametrize("versions", ["weights:1", [None], [""], {"engine": "weights:1"}])

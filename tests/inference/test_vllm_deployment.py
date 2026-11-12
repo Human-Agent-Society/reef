@@ -11,7 +11,7 @@ from reef.inference import deployment as registry
 from reef.inference.vllm import deployment
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.control import VLLMExecutor
-from reef.inference.vllm.service import INFERENCE_PROTOCOL, VLLMInferenceService
+from reef.inference.vllm.service import VLLMInferenceService
 
 
 def base_values(**overrides):
@@ -29,7 +29,6 @@ def test_factory_accepts_plain_input_without_starting_workers(monkeypatch, execu
     options = base_values(executor=executor, executor_options={"custom": "value"}, options={"max-model-len": 4096})
     service = registry.inference_service_for("vllm", options)
     assert isinstance(service, VLLMInferenceService)
-    assert service.connection_protocol == INFERENCE_PROTOCOL
     assert service.config.executor is VLLMExecutor
     assert service.config.executor_options == {"custom": "value"}
     assert service.config.options["max_model_len"] == 4096

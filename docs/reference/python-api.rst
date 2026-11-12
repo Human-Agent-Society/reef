@@ -896,7 +896,7 @@ plugin implements one class method:
 - ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
   are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
 
-Repository backends use *release* to mean a durable storage snapshot. Its
+Repository backends store snapshots. A snapshot's
 revision and checksum are private locators; the public identity belongs to
 each component's ``artifact_id``. Activating or serving an existing artifact
 updates scenario selections without calling ``publish``.
@@ -1030,7 +1030,7 @@ of a scheme that it reads.
 ``HuggingFaceRevisionFiles`` has a reference when the URI names a full
 40-digit commit SHA. Reef stores the reference instead of a copy only when the
 component's layout says that its readers resolve one
-(``ArtifactLayout.resolves_references``; ``TrainingArtifactLayout`` does for releases
+(``ArtifactLayout.resolves_references``; ``TrainingArtifactLayout`` does for snapshots
 that hold weight files). Then Reef stores only ``hf-reference.json``,
 ``{"uri": "hf://org/model", "version": "<commit>"}``, and
 ``reef.artifact.read_reference(directory)`` reads it back. The built-in
@@ -2080,7 +2080,7 @@ the ``"adapter"`` or ``"full"`` layout, to
 engine then reports. The runtime kind ``remote_serving``
 (``reef.inference.remote.runtime``) builds one of them over the engines of an
 inference component, as the artifact format says: ``AdapterServingRuntime``
-for ``adapter`` releases, ``FullWeightServingRuntime`` for ``full`` ones.
+for ``adapter`` snapshots, ``FullWeightServingRuntime`` for ``full`` ones.
 ``serving_engine_config`` builds the engines' input from the ``inference``
 settings and the artifact format. With a ``service``, each runtime checks its
 health every ``health_interval_s`` seconds (default 30). After a failed check
@@ -2193,7 +2193,7 @@ loop:
        resumes each unfinished job or reports it failed.
    * - ``cancel(job_id)``
      - Stop a running job, which then reports ``failed``.
-   * - ``import_start(release)``
+   * - ``import_start(artifact_dir)``
      - Copy a published snapshot into the component's own storage and return
        it as a start. Reef calls it
        for a ``train-from``. Raise ``ValueError`` when no job can start from
@@ -2318,7 +2318,7 @@ of the backend's own serving, or ``None`` without one.
 snapshots hold no weight files: the ``ArtifactFormat`` that Reef's engines load
 and the ``ArtifactWeights`` plugin (``reef.core.weight_layout``) that gives each
 snapshot's files. The default is ``None``: engines cannot serve such
-releases. ``ArtifactWeightFiles``, the default plugin, reads a snapshot's own files. ``requires_local_model``
+snapshots. ``ArtifactWeightFiles``, the default plugin, reads a snapshot's own files. ``requires_local_model``
 defaults to true; hosted integrations set it to false to preserve remote
 model identifiers during deployment resolution.
 

@@ -109,7 +109,7 @@ class QueueStartupReporter(StartupReporter):
 
 
 class ServingWorker(QueueWorker):
-    """Start queued releases and retire unused endpoints in the inference service.
+    """Start queued artifacts and retire unused endpoints in the inference service.
 
     ``recipe`` supplies the runtime and each scenario's components. ``backends`` resolves durable snapshots.
     ``coordination`` owns requests and routes. ``local_artifact_dir`` holds materialized snapshots, or uses the repository default.
