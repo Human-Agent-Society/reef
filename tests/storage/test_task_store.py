@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, Self
 
 import pytest
-from sqlalchemy import Column, MetaData, Table, Text, inspect
 
 from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
@@ -292,25 +291,6 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
             for digest in (published.files_digest, saved_digest):
                 with pytest.raises(TaskStoreError, match="no files"):
                     store.path(digest)
-
-
-def test_a_start_drops_the_published_tasks_of_the_older_schema(open_durable_storage, tmp_path):
-    with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
-        store = session.tasks.open("tasks")
-        store.begin_generation(generation=0, source_record_ids=("record-1",))
-        store.save_candidates(generation=0, directories=candidates(tmp_path, generated("alpha")))
-        published = store.publish_task(generation=0, index=0, split="train")
-        schema = store.tables.candidates.schema
-        with store.database._transaction(write=True) as connection:
-            Table("published_task", MetaData(schema=schema), Column("task_name", Text, primary_key=True)).create(
-                connection
-            )
-
-    with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
-        store = session.tasks.open("tasks")
-        assert store.tasks() == (published,)
-        with store.database._transaction(write=False) as connection:
-            assert not inspect(connection).has_table("published_task", schema=schema)
 
 
 def test_an_archived_postgres_session_writes_no_task(postgres_config, tmp_path):

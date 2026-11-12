@@ -214,44 +214,16 @@ Engine supervision
 ------------------
 
 ``reef.inference.recovery.InferenceControl`` pauses, resumes and recovers the
-engines of one inference service. The engine integration implements its two
-hooks:
-
-- ``InferenceEngineGroup`` pauses, resumes, replaces dead engines and retires
-  engines.
-- ``InferenceMonitor`` is the background health monitor.
+engines of one inference service. The engine integration implements its hook,
+``InferenceEngineGroup``, which pauses, resumes, replaces dead engines and
+retires engines.
 
 ``InferenceControl`` records the pause intent before the engine barrier, so a
-partial pause failure still fences replacement engines. Recovery stops
-monitoring and replaces dead engines. It pauses them again when generation
-was paused. A failed recovery keeps generation paused. Only ``resume`` lets
-the engines serve again. Each engine actor implements
-``reef.inference.interfaces.InferenceEngine``, the per-engine vocabulary that
-the group and the backend call by name.
-
-Engine health monitoring
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-``reef.inference.recovery.EngineHealthMonitor`` owns probe scheduling.
-``pause()`` disables new checks. It waits for the active probe or retirement
-to finish before the owner can replace or terminate engines. The monitor
-discards a late probe failure after the pause begins. A drain timeout leaves
-checks disabled, raises to the owner and prevents the engine operation.
-Shutdown keeps the monitor, so the owner can retry the drain. Deployment
-health checks report an internal monitoring failure, and the failure
-prevents monitoring from resuming.
-
-The SGLang adapter supplies ``EngineHealthChecks`` snapshots with one target per
-logical engine, including every node that must retire together. Both health and
-graceful-shutdown RPC waits are bounded. Retirement uses captured actor handles
-and clears a slot only if it still contains the captured actor. A stale probe
-cannot kill or erase a replacement engine. The adapter attempts every node even
-when a kill fails, then reports the failure.
-
-The engine configuration sets the probe interval, timeout and first wait. The
-shared monitor imports no Ray, Slime or model framework. Other backends supply
-bounded probe/retirement targets and serialize lifecycle operations in their
-owning controller.
+partial pause failure still fences replacement engines. Recovery replaces dead
+engines. It pauses them again when generation was paused. A failed recovery
+keeps generation paused. Only ``resume`` lets the engines serve again. Each
+engine actor implements ``reef.inference.interfaces.InferenceEngine``, the
+per-engine vocabulary that the group and the backend call by name.
 
 Independent SGLang backend
 --------------------------
@@ -271,9 +243,8 @@ Engines load published weights from files. The engine control worker's
 through ``load_lora_adapter_from_disk``. The plugin name ``reef`` is
 preserved.
 
-CPU tests cover native launch bindings, multi-node rendezvous, shared placement,
-external engine validation and ownership, response parsing, LoRA requirements and
-recovery.
+CPU tests cover native launch bindings, shared placement, response parsing,
+LoRA requirements and recovery.
 Actual GPU execution and backend combinations still require acceptance testing.
 
 Slime integration
@@ -732,8 +703,7 @@ Failure policy is fail-stop, not automatic restart/replay. A startup failure
 cancels peer readiness waits and joins launch tasks before Reef closes the
 executors it already created. A late launch therefore cannot escape cleanup.
 Shutdown attempts every dependent before its dependencies, even if an RPC
-fails. An individual executor does not delete borrowed external engines or
-shared Slime placement groups. The HTTP service closes its training component
+fails. An individual executor does not delete shared Slime placement groups. The HTTP service closes its training component
 and inference runtime after the dispatcher stops every scenario worker.
 
 Verification

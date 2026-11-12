@@ -14,15 +14,11 @@ from reef.core.weight_layout import ArtifactFormat
 from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang import plugin as sglang_plugin
 from reef.inference.sglang.config import SGLangConfig
-from reef.inference.sglang.lora_schema import (
-    adapter_scoped_prefix_cache_supported,
-    require_lora_distributed_request_schema,
-    require_lora_tensor_request_schema,
-)
+from reef.inference.sglang.lora_schema import adapter_scoped_prefix_cache_supported
 from reef.inference.sglang.plugin import (
     REEF_SGLANG_PLUGIN_ENV,
     install_colocated_retract_offload,
-    install_scheduler_runtime_load_id_tracking,
+    install_runtime_load_id_updates,
 )
 from reef.train.slime_backend.reef_adapters.worker_hooks import reef_rollout_env_vars
 
@@ -69,21 +65,10 @@ def _load_sglang_engine_module(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "slime.backends.sglang_utils.external", external)
 
     class BaseEngine:
-        def __init__(
-            self,
-            args,
-            rank,
-            worker_type="regular",
-            base_gpu_id=None,
-            sglang_overrides=None,
-            num_gpus_per_engine=None,
-        ):
+        def __init__(self, args, rank, base_gpu_id=None):
             self.args = args
             self.rank = rank
-            self.worker_type = worker_type
             self.base_gpu_id = base_gpu_id
-            self.sglang_overrides = sglang_overrides
-            self.num_gpus_per_engine = num_gpus_per_engine
 
         def _register_to_router(self, server_args_dict):
             self.registered = server_args_dict
@@ -101,83 +86,8 @@ def _load_sglang_engine_module(monkeypatch: pytest.MonkeyPatch):
     return module
 
 
-def _install_lora_request_schema(
-    monkeypatch: pytest.MonkeyPatch,
-    distributed_fields: tuple[str, ...],
-    tensor_fields: tuple[str, ...] = (
-        "lora_name",
-        "config_dict",
-        "serialized_named_tensors",
-        "load_format",
-        "expected_checksums",
-    ),
-) -> None:
-    managers = types.ModuleType("sglang.srt.managers")
-    managers.__path__ = []  # type: ignore[attr-defined]
-    io_struct = types.ModuleType("sglang.srt.managers.io_struct")
-    io_struct.LoadLoRAAdapterFromDistributedReqInput = type(  # type: ignore[attr-defined]
-        "LoadLoRAAdapterFromDistributedReqInput",
-        (),
-        {"__struct_fields__": distributed_fields},
-    )
-    io_struct.LoadLoRAAdapterFromTensorsReqInput = type(  # type: ignore[attr-defined]
-        "LoadLoRAAdapterFromTensorsReqInput",
-        (),
-        {"__struct_fields__": tensor_fields},
-    )
-    monkeypatch.setitem(sys.modules, "sglang.srt.managers", managers)
-    monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)
-
-
 @pytest.mark.unit
-def test_lora_schema_preflight_accepts_distributed_upsert(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_lora_request_schema(
-        monkeypatch,
-        ("lora_name", "config_dict", "names", "dtypes", "shapes", "group_name", "upsert"),
-    )
-
-    require_lora_distributed_request_schema()
-    require_lora_tensor_request_schema()
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("missing", ["config_dict", "names", "dtypes", "shapes", "group_name", "upsert"])
-def test_lora_schema_preflight_rejects_incomplete_distributed_receiver(
-    monkeypatch: pytest.MonkeyPatch,
-    missing: str,
-) -> None:
-    fields = {"lora_name", "config_dict", "names", "dtypes", "shapes", "group_name", "upsert"} - {missing}
-    _install_lora_request_schema(monkeypatch, tuple(sorted(fields)))
-
-    with pytest.raises(RuntimeError, match=missing):
-        require_lora_distributed_request_schema()
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "missing",
-    ["config_dict", "serialized_named_tensors", "load_format", "expected_checksums"],
-)
-def test_lora_schema_preflight_rejects_incomplete_colocated_receiver(
-    monkeypatch: pytest.MonkeyPatch,
-    missing: str,
-) -> None:
-    distributed_fields = ("lora_name", "config_dict", "names", "dtypes", "shapes", "group_name", "upsert")
-    tensor_fields = {
-        "lora_name",
-        "config_dict",
-        "serialized_named_tensors",
-        "load_format",
-        "expected_checksums",
-    } - {missing}
-    _install_lora_request_schema(monkeypatch, distributed_fields, tuple(sorted(tensor_fields)))
-
-    with pytest.raises(RuntimeError, match=missing):
-        require_lora_tensor_request_schema()
-
-
-@pytest.mark.unit
-def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_engine_extension_preserves_version_and_adapter_unload_requests(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_sglang_engine_module(monkeypatch)
     calls: list[tuple[str, dict[str, object]]] = []
     engine = object.__new__(module.ReefSGLangEngine)
@@ -186,57 +96,14 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
         calls.append((route, payload or {}))
         return {"success": True}
 
-    engine.node_rank = 0
     engine._make_request = request
 
     assert engine.set_runtime_load_id("deployment:2") == {"success": True}
-    assert engine.load_lora_adapter_from_tensors(
-        "adapter",
-        {"r": 8},
-        ["rank-0"],
-        load_format="flattened_bucket",
-        pinned=True,
-        expected_checksums={"a": "digest"},
-    ) == {"success": True}
-    assert engine.load_lora_adapter_from_distributed(
-        "adapter",
-        {"r": 8},
-        ["a", "b"],
-        ["torch.float16", "bfloat16"],
-        [[2, 4], [4, 2]],
-        "reef-lora",
-        pinned=True,
-    ) == {"success": True}
+    assert engine.load_lora_adapter_from_disk("adapter", "/release/adapter") == {"success": True}
     assert engine.unload_lora_adapter("adapter") == {"success": True}
     assert calls == [
-        (
-            "update_weight_version",
-            {"new_version": "deployment:2", "abort_all_requests": False},
-        ),
-        (
-            "load_lora_adapter_from_tensors",
-            {
-                "lora_name": "adapter",
-                "config_dict": {"r": 8},
-                "serialized_named_tensors": ["rank-0"],
-                "pinned": True,
-                "load_format": "flattened_bucket",
-                "expected_checksums": {"a": "digest"},
-            },
-        ),
-        (
-            "load_lora_adapter_from_distributed",
-            {
-                "lora_name": "adapter",
-                "config_dict": {"r": 8},
-                "names": ["a", "b"],
-                "dtypes": ["float16", "bfloat16"],
-                "shapes": [[2, 4], [4, 2]],
-                "group_name": "reef-lora",
-                "pinned": True,
-                "upsert": True,
-            },
-        ),
+        ("update_weight_version", {"new_version": "deployment:2", "abort_all_requests": False}),
+        ("load_lora_adapter", {"lora_name": "adapter", "lora_path": "/release/adapter"}),
         ("unload_lora_adapter", {"lora_name": "adapter"}),
     ]
 
@@ -259,7 +126,6 @@ def test_get_runtime_load_id_uses_model_info(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(module.requests, "get", get)
     engine = object.__new__(module.ReefSGLangEngine)
-    engine.node_rank = 0
     engine.server_host = "127.0.0.1"
     engine.server_port = 30000
     engine.config = SGLangConfig("model", 1, 1, 1)
@@ -269,24 +135,22 @@ def test_get_runtime_load_id_uses_model_info(monkeypatch: pytest.MonkeyPatch) ->
 
 
 @pytest.mark.unit
-def test_engine_preflights_scheduler_runtime_load_id_tracking_before_registration(
+def test_engine_gives_the_scheduler_its_runtime_load_id_before_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_sglang_engine_module(monkeypatch)
     events = []
     engine = object.__new__(module.ReefSGLangEngine)
-    engine.node_rank = 0
-    engine.worker_type = "regular"
     engine.get_runtime_load_id = lambda: "engine:3"
     engine._make_request = lambda endpoint, payload, **_kwargs: events.append((endpoint, payload)) or {"success": True}
 
     engine.router_ip = None
-    assert engine._register_to_router({"model_path": "model"}) is None
+    assert engine._register_to_router() is None
     assert events == [("update_weight_version", {"new_version": "engine:3", "abort_all_requests": False})]
-    # An engine that does not take the version, such as one without Reef's plugin, fails registration.
+    # An engine that does not take the version fails registration.
     engine._make_request = lambda endpoint, payload, **_kwargs: {"success": False, "message": "refused"}
     with pytest.raises(RuntimeError, match="did not accept the runtime-load-ID"):
-        engine._register_to_router({"model_path": "model"})
+        engine._register_to_router()
 
 
 @pytest.mark.unit
@@ -331,9 +195,6 @@ def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch):
     module = _load_sglang_engine_module(monkeypatch)
     import pickle
 
-    checked = []
-    monkeypatch.setattr(module, "require_lora_tensor_request_schema", lambda: checked.append(True))
-    monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: checked.append(True))
     values = serving_engine_config(
         "sglang",
         model_path="model",
@@ -348,14 +209,12 @@ def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch):
         environ={},
     )
     config = pickle.loads(pickle.dumps(SGLangConfig(**values)))
-    engine = module.ReefSGLangEngine(config, 0, sglang_overrides={"mem_fraction_static": 0.5})
-    assert checked == [True, True]
+    engine = module.ReefSGLangEngine(config, 0)
     assert engine.config.options["enable_lora"] is True
     assert engine.config.options["lora_target_modules"] == ["q_proj"]
     assert engine.config.options["max_lora_rank"] == 8
     assert engine.config.options["max_loaded_loras"] == 1
     assert engine.config.options["tokenizer_worker_num"] == 1
-    assert engine.sglang_overrides == {"mem_fraction_static": 0.5}
 
 
 @pytest.mark.unit
@@ -368,8 +227,6 @@ def test_server_options_keep_only_the_fields_of_either_server_args_kind(monkeypa
         "host",
         "port",
         "nccl_port",
-        "node_rank",
-        "nnodes",
         "dist_init_addr",
         "tp_size",
         "pp_size",
@@ -386,20 +243,10 @@ def test_server_options_keep_only_the_fields_of_either_server_args_kind(monkeypa
     monkeypatch.setattr(sys.modules["sglang.srt.server_args"], "ServerArgs", server_args)
     monkeypatch.setattr(module, "local_gpu_id", lambda gpu: gpu)
     config = SGLangConfig("model", 1, 1, 1, options={"mem_fraction_static": 0.5, "not_a_server_arg": 1})
-    options = module.ReefSGLangEngine(config, 0)._server_options("10.0.0.1:5000", 30000, None, "10.0.0.1", None)
+    options = module.ReefSGLangEngine(config, 0)._server_options("10.0.0.1:5000", 30000, None, "10.0.0.1")
     assert set(options) <= set(names)
     assert "not_a_server_arg" not in options
     assert (options["mem_fraction_static"], options["tp_size"], options["port"]) == (0.5, 1, 30000)
-
-
-def test_reef_engine_rejects_conflicting_lora_override(monkeypatch):
-    module = _load_sglang_engine_module(monkeypatch)
-    monkeypatch.setattr(module, "require_lora_tensor_request_schema", lambda: None)
-    monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: None)
-    with pytest.raises(ValueError, match="conflict"):
-        module.ReefSGLangEngine(
-            SGLangConfig("model", 1, 1, 1, options={"enable_lora": True}), 0, sglang_overrides={"enable-lora": False}
-        )
 
 
 @pytest.mark.unit
@@ -463,7 +310,7 @@ def test_native_sglang_plugin_is_explicitly_gated(monkeypatch: pytest.MonkeyPatc
     installed = []
     monkeypatch.setattr(
         sglang_plugin,
-        "install_scheduler_runtime_load_id_tracking",
+        "install_runtime_load_id_updates",
         lambda: installed.append("runtime_load_ids"),
     )
     monkeypatch.setattr(
@@ -482,37 +329,15 @@ def test_native_sglang_plugin_is_explicitly_gated(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.unit
-def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_scheduler_refuses_stale_deltas_and_opens_a_session_for_each_weight_push(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     current_args = types.SimpleNamespace(weight_version="engine:6")
     runtime_context = types.ModuleType("sglang.srt.runtime_context")
     runtime_context.get_serving = lambda: current_args  # type: ignore[attr-defined]
 
-    scheduler_module = types.ModuleType("sglang.srt.managers.scheduler")
-
-    class Scheduler:
-        def run_batch(self, batch):
-            return batch.result
-
-        def process_batch_result(self, batch, result):
-            assert result is batch.result
-            Accumulator().accept(req=batch.req)
-
-        def set_internal_state(self, request):
-            return types.SimpleNamespace(updated=True, server_args=dict(request.server_args))
-
-        def record_weight_version_change(self, new_version):
-            current_args.weight_version = new_version
-
-    scheduler_module.Scheduler = Scheduler  # type: ignore[attr-defined]
     components = types.ModuleType("sglang.srt.managers.scheduler_components")
     components.__path__ = []  # type: ignore[attr-defined]
-    output_streamer = types.ModuleType("sglang.srt.managers.scheduler_components.output_streamer")
-
-    class Accumulator:
-        def accept(self, *, req):
-            req.accepted = True
-
-    output_streamer._GenerationStreamAccumulator = Accumulator  # type: ignore[attr-defined]
     io_struct = types.ModuleType("sglang.srt.managers.io_struct")
 
     class UpdateResult:
@@ -573,32 +398,11 @@ def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pyte
 
     weight_updater.SchedulerWeightUpdaterManager = SchedulerWeightUpdaterManager  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sglang.srt.runtime_context", runtime_context)
-    monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler", scheduler_module)
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components", components)
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)
-    monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components.output_streamer", output_streamer)
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components.weight_updater", weight_updater)
 
-    install_scheduler_runtime_load_id_tracking()
-    request = types.SimpleNamespace(output_ids_through_stop=[20, 21], customized_info=None, accepted=False)
-    Accumulator().accept(req=request)
-    current_args.weight_version = "engine:7"
-    request.output_ids_through_stop.append(22)
-    Accumulator().accept(req=request)
-    assert request.customized_info["_reef_token_runtime_load_ids"] == ["engine:6", "engine:6", "engine:7"]
-
-    scheduler = Scheduler()
-    queued_request = types.SimpleNamespace(output_ids_through_stop=[40], customized_info=None, accepted=False)
-    queued_batch = types.SimpleNamespace(req=queued_request, result=object())
-    current_args.weight_version = "engine:9"
-    queued_result = scheduler.run_batch(queued_batch)
-    current_args.weight_version = "engine:10"
-    scheduler.process_batch_result(queued_batch, queued_result)
-    assert queued_request.customized_info["_reef_token_runtime_load_ids"] == ["engine:9"]
-
-    result = scheduler.set_internal_state(types.SimpleNamespace(server_args={"weight_version": "engine:8"}))
-    assert result.updated is True
-    assert current_args.weight_version == "engine:8"
+    install_runtime_load_id_updates()
 
     updater = SchedulerWeightUpdaterManager()
     current_args.weight_version = "engine:7"

@@ -336,11 +336,10 @@ def evaluation_selection(
         raise ValueError(
             "declare GPU needs through execution.evolution.resources.gpus_per_worker, not executor.options.num_gpus"
         )
-    configured_cpus = settings.options.get("num_cpus", requirements.cpus_per_worker)
-    if settings.resources.cpus_per_worker is not None and configured_cpus != requirements.cpus_per_worker:
-        raise ValueError("executor.options.num_cpus conflicts with execution.evolution.resources.cpus_per_worker")
-    # Keep the older Ray profiles, which request CPUs through options.num_cpus.
-    requirements = replace(requirements, cpus_per_worker=configured_cpus)
+    if settings.options.get("num_cpus", requirements.cpus_per_worker) != requirements.cpus_per_worker:
+        raise ValueError(
+            "declare CPU needs through execution.evolution.resources.cpus_per_worker, not executor.options.num_cpus"
+        )
     runtime_env = settings.options.get("runtime_env", {})
     if not isinstance(runtime_env, dict):
         raise ValueError("evolution executor runtime_env must be an object")

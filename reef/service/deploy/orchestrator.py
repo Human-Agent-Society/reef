@@ -681,14 +681,14 @@ _PROVIDERS: dict[str, tuple[str, str | None]] = {
 def _model_overrides(
     spec: str, environ: Mapping[str, str], overrides: Mapping[str, str] | None = None
 ) -> dict[str, str]:
-    """The ``reef.*`` overrides ``--model`` stands for.
+    """The overrides ``--model`` stands for.
 
     A known provider prefix fills the URL and the key; any other spelling,
     a prefix of another kind included (``Qwen/Qwen3-8B``), is the model id
     alone and the URL comes from the config or the environment."""
     provider, _, model = spec.partition("/")
     if provider not in _PROVIDERS or not model:
-        return {"upstream_model": spec}
+        return {"inference.upstream-model": spec}
     url, key = _PROVIDERS[provider]
     if key is None:
         key = environ.get("REEF_UPSTREAM_API_KEY", "").strip()
@@ -700,7 +700,7 @@ def _model_overrides(
             raise DeployConfigError(
                 f"--model {spec}: set REEF_UPSTREAM_API_KEY to the {provider} key or pass --inference.upstream-api-key"
             )
-    return {"upstream_url": url, "upstream_model": model, "upstream_api_key": key}
+    return {"inference.upstream-url": url, "inference.upstream-model": model, "inference.upstream-api-key": key}
 
 
 def _resolve_config(config: str | None) -> str | None:
@@ -716,7 +716,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         bootstrap = build_serve_parser(service_arguments=False)
         selection, extras = bootstrap.parse_known_args([arg for arg in argv if arg not in ("--help", "-h")])
         help_config = None
-        if selection.config or any(arg.startswith(("--reef.recipe", "--recipe.implementation")) for arg in extras):
+        if selection.config or any(arg.startswith("--recipe.implementation") for arg in extras):
             path = Path(selection.config or "reef.yaml")
             config = translate_layout(load_config(path, interpolate_env=False)) if selection.config else {}
             help_config, _ = _component_selection(config, _parse_overrides(extras), path.resolve())
@@ -734,8 +734,6 @@ def main(argv: Sequence[str] | None = None) -> None:
                 model_defaults.pop(key, None)
                 model_defaults[key] = value
             overrides = model_defaults
-        if args.recipe is not None:
-            raise DeployConfigError(f"--recipe {args.recipe}: built in profiles were removed; pass -c <config file>")
         config_path = _resolve_config(args.config)
         if args.component is not None and not args.print_config:
             exit_code = run_component(config_path, overrides, args.component)

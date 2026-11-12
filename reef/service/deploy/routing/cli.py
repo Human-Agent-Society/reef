@@ -59,7 +59,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             resolved, _ = resolve_deployment_config(load_config(path, interpolate_env=False), None, path)
             controller = RoutingDeploymentController(service_config_from_mapping(resolved), runtime)
             version = controller.validate_candidate()
-            print(json.dumps({"valid": True, "snapshot_version": version, "docker_mutations": 0}))
+            result: dict[str, object] = {"valid": True, "snapshot_version": version, "docker_mutations": 0}
+            if version is None:
+                # The version names the router image, which only `reef serve` resolves; its prepared event reports it.
+                result["image_resolution_required"] = True
+            print(json.dumps(result))
             return
         registry = DeploymentRegistry(args.deployment_id)
         try:

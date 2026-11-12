@@ -11,7 +11,6 @@ import pytest
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang import config as sglang_config
-from reef.inference.sglang import deployment as sglang_deployment
 from reef.inference.sglang.deployment import create_inference
 from reef.inference.sglang.launch import engine_environment
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
@@ -45,13 +44,6 @@ def engine_input(
         executor_options={},
         environ=environ or {},
     )
-
-
-@pytest.fixture
-def lora_receiver(monkeypatch):
-    """An SGLang whose LoRA request schema Reef accepts, without importing SGLang."""
-    monkeypatch.setattr(sglang_deployment, "require_lora_tensor_request_schema", lambda: None)
-    monkeypatch.setattr(sglang_deployment, "require_lora_distributed_request_schema", lambda: None)
 
 
 def test_sglang_input_loads_the_model_with_the_flags_reef_serving_relies_on(monkeypatch):
@@ -91,7 +83,7 @@ def test_sglang_shares_prefixes_only_when_each_load_retracts_the_requests_in_fli
         create_inference(engine_input(options={"disable-radix-cache": False}))
 
 
-def test_adapter_releases_size_the_engines_adapter_table_from_the_release_format_and_capacity(lora_receiver):
+def test_adapter_releases_size_the_engines_adapter_table_from_the_release_format_and_capacity():
     config = create_inference(engine_input(artifact_format=ADAPTER, adapter_capacity=4)).config
     assert {
         name: config.options[name]
@@ -114,9 +106,7 @@ def test_adapter_releases_size_the_engines_adapter_table_from_the_release_format
 
 
 @pytest.mark.parametrize("adapter_scoped", [True, False])
-def test_retracting_adapter_engines_share_prefixes_only_when_sglang_keys_them_by_adapter(
-    monkeypatch, lora_receiver, adapter_scoped
-):
+def test_retracting_adapter_engines_share_prefixes_only_when_sglang_keys_them_by_adapter(monkeypatch, adapter_scoped):
     """One engine holds several scenarios' adapters; the engine must keep their prefix-cache entries apart."""
     monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
     config = create_inference(engine_input(artifact_format=ADAPTER, prefix_sharing=True)).config
@@ -143,8 +133,6 @@ def test_router_options_configure_the_router_and_router_port_binds_it():
     assert config.options["context_length"] == 4096
     assert not [name for name in config.options if name.startswith("router")]
     assert engine_input()["router_port"] is None
-    with pytest.raises(ValueError, match="router-ip names an external router"):
-        engine_input(options={"router-ip": "10.0.0.1"})
 
 
 def test_another_engine_name_gets_the_sglang_input():

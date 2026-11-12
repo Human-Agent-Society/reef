@@ -429,7 +429,7 @@ class EvictionSizes:
     record_count, body_bytes)`` of the node when ``read`` read it, and ``counted[(s, n)]`` the number of its counts
     that the counted records released. Both start empty.
 
-    Purpose: a retention scan and ``SQLRecordRetention.evict`` count records with it in eviction order. The size of
+    Purpose: a retention scan and its eviction (``SQLDataStore.evict_records``) count records with it in eviction order. The size of
     a record is the bytes of its row plus the bytes of each node that evicting it deletes. The sizes hold while
     nothing writes the store between the counts and the eviction.
     """

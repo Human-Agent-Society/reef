@@ -52,13 +52,9 @@ class DesignerError(RuntimeError):
     """A designer call or report did not go through."""
 
 
-@dataclass(frozen=True, init=False)
+@dataclass(frozen=True)
 class DesignerRequest:
-    """Shared task inputs plus Designer settings.
-
-    Pass TaskGenerationRequest as inputs. The legacy target string and
-    target keyword remain supported for description-only callers.
-    """
+    """The shared task inputs ``inputs`` plus the Designer settings."""
 
     inputs: TaskGenerationRequest
     skill: str | None = None
@@ -67,41 +63,9 @@ class DesignerRequest:
     grounding: str | None = None
     experience_text: str = ""
 
-    def __init__(
-        self,
-        inputs: TaskGenerationRequest | str | None = None,
-        skill: str | None = None,
-        difficulty: str = "medium",
-        turn_limit: int = DEFAULT_TURN_LIMIT,
-        grounding: str | None = None,
-        experience_text: str = "",
-        *,
-        target: str | None = None,
-    ) -> None:
-        if target is not None:
-            if inputs is not None:
-                raise ValueError("supply inputs or the legacy target, not both")
-            inputs = target
-        if isinstance(inputs, str):
-            if not inputs.strip():
-                raise ValueError("target must be non-empty text")
-            inputs = TaskGenerationRequest((), inputs)
-        if not isinstance(inputs, TaskGenerationRequest):
-            raise ValueError("inputs must be TaskGenerationRequest, or supply a non-empty target")
-        object.__setattr__(self, "inputs", inputs)
-        object.__setattr__(self, "skill", skill)
-        object.__setattr__(self, "difficulty", difficulty)
-        object.__setattr__(self, "turn_limit", turn_limit)
-        object.__setattr__(self, "grounding", grounding)
-        object.__setattr__(self, "experience_text", experience_text)
-        self.__post_init__()
-
-    @property
-    def target(self) -> str:
-        """Compatibility alias for the shared input's description."""
-        return self.inputs.description
-
     def __post_init__(self) -> None:
+        if not isinstance(self.inputs, TaskGenerationRequest):
+            raise ValueError("inputs must be TaskGenerationRequest")
         if self.skill is not None and (not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill)):
             raise ValueError(f"skill {self.skill!r} must match {SKILL_PATTERN.pattern}")
         if self.difficulty not in DIFFICULTIES:

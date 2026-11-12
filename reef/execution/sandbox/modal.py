@@ -253,11 +253,14 @@ class ModalSession(RemoteSession):
         writable_paths: Sequence[Path] = (),
         readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
-        """Run one process in the jail; ``timeout`` stops its whole tree, and Modal's own limit backs it up."""
+        """Run one process in the jail, with an empty standard input; ``timeout`` stops its whole tree, and Modal's
+        own limit backs it up."""
         command, envs = remote_command(argv, {**env, **self.env}, root)
         command = protected_command(command, envs, root, workspace, writable_paths, readonly_paths)
         seconds = max(math.ceil(timeout), 1)
-        limited = f"timeout --kill-after={KILL_AFTER_S} {seconds} /bin/sh -c {shlex.quote(command)}"
+        # Modal keeps the standard input of a process open. A program that reads it to its end, as pi does, would
+        # wait for the life of the sandbox, so the process gets an empty one, as the local executor gives.
+        limited = f"timeout --kill-after={KILL_AFTER_S} {seconds} /bin/sh -c {shlex.quote(command)} < /dev/null"
         cwd = f"{remote_root(root)}/{workspace.relative_to(root).as_posix()}"
         finished = False
         try:

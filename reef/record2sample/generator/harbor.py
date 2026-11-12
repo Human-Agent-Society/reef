@@ -347,31 +347,6 @@ def trial_outcome(jobs_path: Path) -> TrialOutcome:
     return TrialOutcome(reward=float(value), exception=exception_text, agent_note=agent_note)
 
 
-class HarborRuns:
-    """Compatibility adapter for callers that explicitly own several Harbor checks.
-
-    scope is one initially open ProcessScope. pids reports its active children;
-    terminate_all closes it, signals with the supplied grace and waits for reaping.
-    New generator jobs instead receive their worker's per-job process scope.
-    """
-
-    def __init__(self) -> None:
-        self.scope = ProcessScope()
-
-    @property
-    def is_closed(self) -> bool:
-        return self.scope.closed
-
-    def pids(self) -> tuple[int, ...]:
-        return self.scope.pids()
-
-    def terminate_all(self, *, grace_s: float = STOP_GRACE_S) -> tuple[int, ...]:
-        pids = self.scope.pids()
-        self.scope.request_stop(grace_seconds=grace_s)
-        self.scope.wait_closed()
-        return pids
-
-
 def run_harbor_agent(
     task_path: Path,
     agent: str,
@@ -380,7 +355,6 @@ def run_harbor_agent(
     harbor: str,
     timeout_s: float,
     environment: str = "docker",
-    runs: HarborRuns | None = None,
 ) -> TrialOutcome:
     """Run ``agent`` on the task through the harbor command line in Harbor's ``environment``, and read the trial.
 
@@ -388,7 +362,7 @@ def run_harbor_agent(
     environment (``reef.execution.sandbox.task_environment``) reach Harbor.
     """
     command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", environment, "-o", str(jobs_path), "-n", "1"]
-    scope = runs.scope if runs is not None else CURRENT_PROCESS_SCOPE.get()
+    scope = CURRENT_PROCESS_SCOPE.get()
     if scope is None:
         scope = ProcessScope()
     try:
@@ -421,7 +395,6 @@ def oracle_check(
     harbor: str | None = None,
     environment: str = "docker",
     timeout_s: float = ORACLE_TIMEOUT_S,
-    runs: HarborRuns | None = None,
 ) -> OracleResult:
     """Solvable, and not for free: the reference solution scores 1 and doing nothing scores below 1 under Harbor.
 
@@ -442,7 +415,6 @@ def oracle_check(
             harbor=executable,
             timeout_s=timeout_s,
             environment=environment,
-            runs=runs,
         )
     except (RuntimeError, ValueError, OSError) as exc:
         raise OracleUnavailable(str(exc)[:500]) from exc
@@ -462,7 +434,6 @@ def oracle_check(
             harbor=executable,
             timeout_s=timeout_s,
             environment=environment,
-            runs=runs,
         )
     except (RuntimeError, ValueError, OSError) as exc:
         raise OracleUnavailable(str(exc)[:500]) from exc

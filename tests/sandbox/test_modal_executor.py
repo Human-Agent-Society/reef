@@ -234,7 +234,9 @@ def test_a_process_runs_in_the_jail_under_its_limit_with_the_deployments_environ
     ((args, options),) = sandbox.commands
     command = shlex.split(args[-1])
     assert command[:4] == ["timeout", f"--kill-after={modal_sandbox.KILL_AFTER_S}", "30", "/bin/sh"]
-    jailed = command[-1]
+    # The process reads an empty standard input: Modal would keep it open.
+    jailed, *redirect = command[-3:]
+    assert redirect == ["<", "/dev/null"]
     assert jailed.startswith("exec bwrap") and f"{REMOTE_BASE}/run/workspace/out.txt" in jailed
     assert options["workdir"] == f"{REMOTE_BASE}/run/workspace"
     assert options["env"] == {"CALLER": "1", "DEPLOYMENT": "yes"}

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, String, Table, Text, inspect
 from tests.support.samples import made_task
 from tests.support.task_service_stubs import task_for
 
@@ -313,61 +312,10 @@ def test_the_task_directories_of_many_tasks_are_read_at_the_same_time(scenario, 
     assert samples.task_paths([*reversed(names), "trajectory", "missing"]) == expected
 
 
-def legacy_sample_tables(connection, schema: str | None, storage_id: str | None) -> None:
-    """Make the ``training_sample`` and ``sample_record`` tables of the sample store before RFC #1140, with an upload
-    and a sample that the trainer ``a`` made."""
-
-    def scope() -> list[Column]:
-        return [] if storage_id is None else [Column("storage_id", String(32), nullable=False)]
-
-    samples = Table(
-        "training_sample",
-        MetaData(schema=schema),
-        Column("sequence", Integer, primary_key=True),
-        *scope(),
-        Column("sample_id", Text, nullable=False),
-        Column("kind", String(16), nullable=False),
-        Column("split", String(8), nullable=False),
-        Column("content_json", Text, nullable=False),
-        Column("content_sha256", String(64), nullable=False),
-        Column("component", Text, nullable=True),
-        Column("group_key", Text, nullable=True),
-        Column("record_ids_json", Text, nullable=False, server_default="[]"),
-    )
-    records = Table(
-        "sample_record",
-        MetaData(schema=schema),
-        *scope(),
-        Column("sample_id", Text, primary_key=True),
-        Column("agent_record_id", Text, primary_key=True),
-    )
-    samples.create(connection)
-    records.create(connection)
-    key = {} if storage_id is None else {"storage_id": storage_id}
-    row = {"kind": "trajectory", "split": "train", "content_json": "{}", "content_sha256": "0" * 64}
-    connection.execute(
-        samples.insert(),
-        [
-            {**key, **row, "sample_id": "upload", "component": None},
-            {**key, **row, "sample_id": "a:r1:0", "component": "a"},
-        ],
-    )
-    connection.execute(records.insert().values(**key, sample_id="a:r1:0", agent_record_id="r1"))
-
-
-def test_a_start_drops_the_sample_store_and_the_train_count_table_and_counts_from_the_commits(open_durable_storage):
+def test_a_restart_counts_the_trained_samples_from_the_commits(open_durable_storage):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         consumed = (consumed_sample_id("upload"), consumed_sample_id("a:r1:0"))
         session.commit_step(expected_step=0, commit=training_commit(1, *consumed, component="a"))
-        state = session.training_state
-        schema = state.commits.table.schema
-        with state.database._transaction(write=True) as connection:
-            storage_id = state.commits.scope.get("storage_id")
-            legacy_sample_tables(connection, schema, storage_id)
-            # The count table of an older schema: the counts are now a count over the commits.
-            Table("sample_train_count", MetaData(schema=schema), Column("sample_id", Text, primary_key=True)).create(
-                connection
-            )
 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
@@ -376,27 +324,3 @@ def test_a_start_drops_the_sample_store_and_the_train_count_table_and_counts_fro
         session.commit_step(expected_step=1, commit=training_commit(2, consumed_sample_id("upload"), component="a"))
         session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("upload"), component="b"))
         assert state.train_counts(["upload"]) == {"upload": {"a": 2, "b": 1}}
-        with state.database._transaction(write=False) as connection:
-            for name in ("training_sample", "sample_record", "sample_train_count"):
-                assert not inspect(connection).has_table(name, schema=schema)
-
-
-def test_a_start_drops_the_manual_buffers_of_the_older_schema(open_durable_storage):
-    with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
-        state = session.training_state
-        schema = state.commits.table.schema
-        with state.database._transaction(write=True) as connection:
-            legacy = Table(
-                "manual_buffer",
-                MetaData(schema=schema),
-                *(Column(key, Text, primary_key=True) for key in ("trainer", "sample_id")),
-            )
-            legacy.create(connection)
-            connection.execute(legacy.insert().values(trainer="", sample_id="t1"))
-
-    with (
-        closing(open_durable_storage()) as storage,
-        closing(storage.open("math")) as session,
-        session.training_state.database._transaction(write=False) as connection,
-    ):
-        assert not inspect(connection).has_table("manual_buffer", schema=schema)

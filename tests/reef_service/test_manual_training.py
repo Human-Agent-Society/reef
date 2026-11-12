@@ -38,7 +38,6 @@ from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.job_data import read_job_data
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
-from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -684,22 +683,6 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
         assert without_requests.get_or_create_scenario("s").trainer.pipeline.training_mode == "auto"
     assert "keeps its default training mode" in caplog.text
-
-
-def test_a_stored_hybrid_mode_loads_the_scenario_with_the_recipe_default(tmp_path, open_dispatcher, caplog):
-    def method(workspace, services):
-        return None
-
-    dispatcher = open_dispatcher(harness_recipe(tmp_path, method))
-    dispatcher.get_or_create_scenario("s")
-    dispatcher.close()
-    # The setting of a scenario that selected hybrid before Reef removed the mode.
-    with closing(SQLiteScenarioStorage(tmp_path / "agent-record")) as storage:
-        storage.write_settings("s", ScenarioSettings(training_mode="hybrid"))
-    restarted = open_dispatcher(recipe_in("manual", tmp_path, method))
-    with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
-        assert restarted.get_or_create_scenario("s").trainer.pipeline.training_mode == "manual"
-    assert "keeps its default training mode: the stored mode 'hybrid' is not supported" in caplog.text
 
 
 def _committed_row(dispatcher, text):

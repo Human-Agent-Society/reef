@@ -70,8 +70,9 @@ def test_file_command_line_automatic_and_default_sources(tmp_path):
 def test_command_line_startup_reports_environment_and_flag_sources(monkeypatch):
     environ = {"REEF_UPSTREAM_URL": "http://localhost:8000", "REEF_TOKEN": "env-secret"}
     base = command_line_config(environ)
-    resolved, _ = resolve_deployment_config(base, {"upstream-model": "demo"}, "<cli>")
-    lines = startup_report(base, resolved, {"upstream-model": "demo"}, environ=environ, from_file=False)
+    overrides = {"inference.upstream-model": "demo"}
+    resolved, _ = resolve_deployment_config(base, overrides, "<cli>")
+    lines = startup_report(base, resolved, overrides, environ=environ, from_file=False)
     assert "  inference.upstream-url = http://localhost:8000  (environment)" in lines
     assert "  inference.upstream-model = demo  (command line)" in lines
     assert "  reef.token = ****  (environment)" in lines

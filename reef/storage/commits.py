@@ -33,14 +33,12 @@ class RecordProgress:
 
 
 def read_consumed_ids(value: Mapping[str, object], *, context: str) -> frozenset[str]:
-    """Normalize old progress into the current consumption-only contract."""
-    consumed: set[str] = set()
-    for key in ("compacted_ids", "consumed_ids"):
-        ids = value.get(key, [] if key == "compacted_ids" else None)
-        if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
-            raise ValueError(f"{context} record_progress.{key} must be a list of strings")
-        consumed.update(ids)
-    return frozenset(consumed)
+    """The ``consumed_ids`` of the stored ``record_progress`` mapping ``value``; ``ValueError`` unless it is a list
+    of strings."""
+    ids = value.get("consumed_ids")
+    if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
+        raise ValueError(f"{context} record_progress.consumed_ids must be a list of strings")
+    return frozenset(ids)
 
 
 def parse_record_progress(value: object, *, context: str) -> RecordProgress:

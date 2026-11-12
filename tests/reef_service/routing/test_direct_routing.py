@@ -127,8 +127,6 @@ class Provider:
                     "Content-Type": "text/event-stream",
                     "x-reef-agent-record-id": "provider-record",
                     "x-reef-artifact-id": "provider-artifact",
-                    "x-reef-release-id": "provider-release",
-                    "x-reef-artifact-version": "provider-version",
                 }
             )
             await response.prepare(request)
@@ -313,8 +311,6 @@ def test_a_stream_shares_the_selection_and_its_receipt_links_feedback(tmp_path: 
             for header in (
                 "x-reef-agent-record-id",
                 "x-reef-artifact-id",
-                "x-reef-release-id",
-                "x-reef-artifact-version",
             ):
                 assert header not in headers
             receipt = next(
@@ -414,7 +410,6 @@ def test_routed_rollout_calls_are_refused_before_selection(tmp_path: Path, manag
         ([("x-selected-model", "teacher")], None, 400, "reserved_header"),
         ([("x-reef-sr-decision", "teacher_requested")], None, 400, "reserved_header"),
         ([("x-reef-scenario", "math")], None, 400, "duplicate_header"),
-        ([("x-reef-release-id", "release-1")], None, 400, "release_pin"),
         ([("x-reef-artifact-id", "artifact-1")], None, 400, "release_pin"),
         ([("x-reef-scenario", None), ("x-reef-scenario", "unknown")], None, 403, "unknown_scenario"),
         ([("x-reef-scenario", None)], None, 400, "missing_scenario"),
@@ -1036,6 +1031,8 @@ def test_the_tutorial_domain_smoke_writes_manifests_that_differ_only_in_a_reload
     initial = RoutingSnapshot.load(tmp_path / "manifests" / "manifest.yaml")
     updated = RoutingSnapshot.load(tmp_path / "manifests" / "manifest.updated.yaml")
     check_policy_change(initial, updated)
+    # The tutorial's default leaves the router image to Reef, which builds it at the first start.
+    assert initial.semantic_router_image is None and updated.semantic_router_image is None
     assert initial.domain_classifier is not None and initial.domain_classifier == updated.domain_classifier
     assert initial.domain_classifier.files == domain_smoke.VELA_DOMAIN_FILES
     assert initial.domain_classifier.model_directory == str(tmp_path / "vela-domain")

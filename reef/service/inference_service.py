@@ -80,7 +80,6 @@ BUCKET_COUNT = 100
 RECORD_HEADER = "x-reef-agent-record-id"
 #: The header that carries the ID of the artifact that answered.
 ARTIFACT_HEADER = "x-reef-artifact-id"
-# Kept for clients deployed before artifact identity became the public contract.
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
 
