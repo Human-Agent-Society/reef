@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import shutil
 import subprocess
@@ -32,6 +31,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     serving_reef,
     sources_file,
     stand_in_e2b_package,
+    state,
     write_workspace_task,
 )
 from tests.support.samples import open_sample_store
@@ -82,7 +82,8 @@ def test_a_generation_rebuilds_the_next_sessions_and_admits_each_task(tmp_path: 
 
     assert [call["source"] for call in author.calls] == ["session-1", "session-2", "session-1"]
     assert author.calls[0]["tags"] == {"role": "designer", "generation": "0", "index": "0"}
-    assert author.calls[0]["work_dir"] == tmp_path / "state" / "runs" / "00000-000"
+    work_dir = author.calls[0]["work_dir"]
+    assert work_dir.name == "00000-000" and not work_dir.exists(), "a run's directory goes when the run ends"
     assert author.calls[0]["check"] == {
         "check": 1,
         "ran": True,
@@ -533,16 +534,17 @@ def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_c
     assert report(tmp_path)["proposals"][0]["designer_record_id"] == "rec-1"
 
 
-def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_scenario(tmp_path: Path) -> None:
+def test_from_config_builds_the_author_and_keeps_its_snapshots_in_a_temporary_directory(tmp_path: Path) -> None:
     environ = {"E2B_API_KEY": "e2b-test", "DESIGNER_TOKEN": "designer-token"}
     generator = AutoEnvScalingGenerator.from_config(
         generating_config(tmp_path, agent_token_env="DESIGNER_TOKEN", count=2, band_high=None),
         scenario="one",
         environ=environ,
+        state=state(tmp_path),
     )
     assert isinstance(generator.author, AgentAuthor) and generator.author.upstream.api_key == "designer-token"
-    assert generator.author.cache_dir == tmp_path / "state" / "one" / "repositories"
-    assert generator.state_dir == tmp_path / "state" / "one" and generator.count == 2
+    assert generator.author.cache_dir == Path(generator.temporary.name) / "repositories"
+    assert generator.count == 2
     assert (generator.band.low, generator.band.high) == (0.25, None)
     assert [source.record_id for source in generator.sources] == ["session-1", "session-2"]
 
@@ -550,11 +552,14 @@ def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_sc
         generating_config(tmp_path, author="prompt", agent_api="responses", behaviour_rule=False),
         scenario="two",
         environ={},
+        state=state(tmp_path),
     )
     assert isinstance(prompt.author, PromptAuthor) and prompt.author.replies.api == "responses"
     assert generator.author.has_behaviour_rule and not prompt.author.has_behaviour_rule
     with pytest.raises(PluginConfigError, match="an E2B sandbox needs an API key"):
-        AutoEnvScalingGenerator.from_config(generating_config(tmp_path), scenario="three", environ={})
+        AutoEnvScalingGenerator.from_config(
+            generating_config(tmp_path), scenario="three", environ={}, state=state(tmp_path)
+        )
 
 
 @pytest.mark.parametrize(
@@ -562,7 +567,8 @@ def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_sc
     [
         ({"rollouts": 2}, "does not take rollouts"),
         ({"generator_url": "${endpoints.generator}"}, "generator_url"),
-        ({"state_dir": ""}, "state_dir and a sources_path"),
+        ({"state_dir": "state"}, r"does not take state_dir: .* \(RFC #1370\)"),
+        ({"sources_path": ""}, "needs a sources_path"),
         ({"sources_path": "/no/such/sources.json"}, "No such file"),
         ({"author": "human"}, "author must be one of"),
         ({"agent_reef_url": "${endpoints.designer}"}, "agent_model and agent_reef_url"),
@@ -579,7 +585,10 @@ def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_sc
 def test_from_config_refuses_a_config_that_cannot_run(tmp_path: Path, fields: dict[str, object], message: str) -> None:
     with pytest.raises(PluginConfigError, match=message):
         AutoEnvScalingGenerator.from_config(
-            generating_config(tmp_path, **fields), scenario="one", environ={"E2B_API_KEY": "e2b-test"}
+            generating_config(tmp_path, **fields),
+            scenario="one",
+            environ={"E2B_API_KEY": "e2b-test"},
+            state=state(tmp_path),
         )
 
 
@@ -596,10 +605,11 @@ def configured_report(
         generating_config(tmp_path, count=1, review=False, **fields),
         scenario="autoenvscaling",
         environ={"E2B_API_KEY": "e2b-test"},
+        state=state(tmp_path),
     )
     monkeypatch.setattr(generator, "author", StandInAuthor())
     asyncio.run(generator.record_results(run_tasks(generator, *training), generation=0))
-    return generator, json.loads((generator.state_dir / "generation-00000.json").read_text())
+    return generator, report(tmp_path)
 
 
 # YAML reads a bare off as false.
@@ -677,6 +687,7 @@ def test_from_config_refuses_a_calibration_that_cannot_run(
             generating_config(tmp_path, **{"calibration": "measure", **fields}),
             scenario="one",
             environ={"E2B_API_KEY": "e2b-test"},
+            state=state(tmp_path),
         )
 
 
@@ -757,9 +768,10 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
     assert section["module"] == "recipes.beta.autoenvscaling:AutoEnvScalingGenerator"
     # reef serve publishes the generator's endpoint when it starts the services.
     config = {**section["config"], "generator_url": "http://127.0.0.1:8910"}
-    generator = AutoEnvScalingGenerator.from_config(config, scenario="autoenvscaling", environ=os.environ)
+    generator = AutoEnvScalingGenerator.from_config(
+        config, scenario="autoenvscaling", environ=os.environ, state=state(tmp_path)
+    )
     assert isinstance(generator.author, AgentAuthor)
-    assert generator.state_dir == tmp_path / "generations" / "autoenvscaling"
     assert generator.author.upstream.api_key == "designer-token" and generator.author.upstream.model == "gpt-6-sol"
 
 
@@ -798,6 +810,7 @@ def test_from_config_gives_the_calibration_the_configured_band(tmp_path: Path) -
         generating_config(tmp_path, calibration="measure", band_low=0.1, band_high=0.9),
         scenario="autoenvscaling",
         environ={"E2B_API_KEY": "key"},
+        state=state(tmp_path),
     )
     [calibration] = [check for check in generator.task_checks if isinstance(check, CalibrationCheck)]
     assert (calibration.band.low, calibration.band.high) == (0.1, 0.9)

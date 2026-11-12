@@ -192,6 +192,45 @@ def test_documents_are_written_once_and_trained_marks_name_published_train_tasks
     assert session.tasks.open("other").documents() == {}
 
 
+def test_a_state_document_is_replaced_and_removed_apart_from_the_documents(session):
+    store = session.tasks.open("tasks")
+    assert store.state_document("cursor") is None and store.state_document_keys() == ()
+    store.write_document(key="cursor", document="written once")
+    store.write_state_document(key="cursor", document='{"next":1}')
+    store.write_state_document(key="cursor", document='{"next":2}')
+    store.write_state_document(key="open/00010", document="ten")
+    store.write_state_document(key="open/00002", document="")
+    store.write_state_document(key="OPEN/00001", document="other prefix")
+    store.write_state_document(key="open%", document="no pattern")
+    assert store.state_document("cursor") == '{"next":2}', "a write replaces the document of the key"
+    assert store.state_document("open/00002") == ""
+    assert store.state_document_keys() == ("OPEN/00001", "cursor", "open%", "open/00002", "open/00010")
+    assert store.state_document_keys(prefix="open/") == ("open/00002", "open/00010"), "the prefix is exact"
+    assert store.state_document_keys(prefix="open%") == ("open%",)
+
+    store.remove_state_document(key="open/00002")
+    store.remove_state_document(key="open/00002")
+    store.remove_state_document(key="unknown")
+    assert store.state_document("open/00002") is None
+    assert store.state_document_keys(prefix="open/") == ("open/00010",), "an unknown key changes nothing"
+    with pytest.raises(TaskStoreError, match="non-empty key"):
+        store.write_state_document(key="", document="x")
+    assert store.documents() == {"cursor": "written once"}, "the two kinds of document have separate keys"
+    assert session.tasks.open("other").state_document_keys() == ()
+
+
+def test_saved_files_are_read_by_their_digest_and_change_no_generation(session, tmp_path):
+    store = session.tasks.open("tasks")
+    (directory,) = candidates(tmp_path, generated("parent"))
+    digest = store.save_files(directory)
+    assert digest == files_digest(directory) == store.save_files(directory), "a repeated save changes nothing"
+    assert store.path(digest).name == "parent" and read_harbor_task(store.path(digest)) == generated("parent")
+    assert store.generations() == () and store.tasks() == ()
+    (directory / "link").symlink_to(directory / "instruction.md")
+    with pytest.raises(TaskStoreError, match="not a file"):
+        store.save_files(directory)
+
+
 def test_store_names_are_separate(session, tmp_path):
     alpha = session.tasks.open("alpha")
     alpha.begin_generation(generation=0, source_record_ids=("record-1",))
@@ -228,6 +267,11 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
         store.save_candidates(generation=0, directories=candidates(sources, generated("alpha"), generated("beta")))
         store.publish_task(generation=0, index=0, split="train")
         store.write_document(key="rollout/alpha", document="saved")
+        store.write_state_document(key="cursor", document="first")
+        store.write_state_document(key="cursor", document="second")
+        store.write_state_document(key="open/00000", document="removed")
+        store.remove_state_document(key="open/00000")
+        saved_digest = store.save_files(candidates(sources, generated("parent"))[0])
 
     with closing(open_durable_storage()) as storage:
         with closing(storage.open("math")) as session:
@@ -238,12 +282,16 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
             (published,) = store.tasks()
             assert read_harbor_task(store.path(published.files_digest)) == generated("alpha")
             assert store.documents() == {"rollout/alpha": "saved"}
+            assert store.state_document_keys() == ("cursor",) and store.state_document("cursor") == "second"
+            assert read_harbor_task(store.path(saved_digest)) == generated("parent")
         storage.archive("math")
         with closing(storage.open("math")) as session:
             store = session.tasks.open("tasks")
             assert store.generations() == () and store.documents() == {}
-            with pytest.raises(TaskStoreError, match="no files"):
-                store.path(published.files_digest)
+            assert store.state_document_keys() == ()
+            for digest in (published.files_digest, saved_digest):
+                with pytest.raises(TaskStoreError, match="no files"):
+                    store.path(digest)
 
 
 def test_a_start_drops_the_published_tasks_of_the_older_schema(open_durable_storage, tmp_path):

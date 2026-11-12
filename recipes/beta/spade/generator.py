@@ -7,22 +7,22 @@ results in the prompt as SPADE's experience section.
 ``validate`` writes the task under the service's tasks root, runs Harbor's oracle and nop agents on it,
 and removes it again: the generated-task recipe writes the valid task once more to run it.
 
-``generate`` keeps the open generation, its proposals and refusals, in ``open-<generation>.json`` under
-``state_dir``, named by the recipe's generation number. ``record_results`` closes it, also after later
-generations started or after a restart. For each train task that the recipe ran and that has
+The generator keeps its state in its ``GeneratorState``, which is in the scenario's task store, and keeps no
+file of its own. ``generate`` keeps the open generation, its proposals and refusals, in the document
+``open/<generation>``, named by the recipe's generation number as five digits. ``record_results`` closes it,
+also after later generations started or after a restart. For each train task that the recipe ran and that has
 ``solution/hint.txt``, it plays the task ``hint_plays`` more times through the generator service, with that
 file appended to the instruction. These plays report on the ``hint`` arm, so the recipe does not train on
 them. It reports each proposal's regret against the Designer's receipt (0 for a refused one) and keeps the
-generation report under ``state_dir``. Eval tasks and tasks that could not run get no hint plays and no
-Designer report, and do not go into the experience. A second call for a closed generation does nothing.
-A restart reads the last report for the experience, and continues numbering after the reports and open
-generations.
+generation report in the document ``report/<number>``, named by SPADE's own number of the generation. Eval
+tasks and tasks that could not run get no hint plays and no Designer report, and do not go into the
+experience. A second call for a closed generation does nothing. A restart reads the last report for the
+experience, and continues numbering after the reports and open generations.
 """
 
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -38,12 +38,10 @@ from recipes.beta.spade.generation import (
     TaskMeasure,
     experience_for,
     experience_text,
+    generation_report,
     load_experience,
     mean_reward,
-    recorded_generations,
-    report_path_for,
     skill_tag,
-    write_generation_report,
 )
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
@@ -51,6 +49,7 @@ from reef.harness.harbor.rollouts import rewards_of
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
+    GeneratorState,
     HeldOutTask,
     RejectedTask,
     TaskGenerator,
@@ -75,11 +74,12 @@ DEFAULT_HINT_PLAYS = 2
 HINT_FILE = "solution/hint.txt"
 HINT_NAME = "hint.txt"
 HINT_ARM = "hint"
-OPEN_PREFIX = "open-"
+# The state keys: an open generation by the recipe's generation number, and a report by SPADE's own number.
+OPEN_PREFIX = "open/"
+REPORT_PREFIX = "report/"
 CONFIG_KEYS = frozenset(
     {
         "generator_url",
-        "state_dir",
         "count",
         "skills",
         "difficulty",
@@ -109,8 +109,8 @@ class OpenGeneration:
     ``pending`` the proposals that became tasks, by task name. ``error`` is the error that stopped the
     generation, or empty. ``reports`` maps the index of each proposal already reported to the Designer to its
     report ID; a delivery that stopped part way does not report those proposals again.
-    Purpose: ``generate`` writes it to ``open-<generation>.json``; ``record_results`` reads it to close the
-    generation, also after later generations and after a restart.
+    Purpose: ``generate`` writes it to the state document ``open/<generation>``; ``record_results`` reads it to
+    close the generation, also after later generations and after a restart.
     """
 
     number: int
@@ -125,14 +125,18 @@ OPEN_GENERATION = TypeAdapter(OpenGeneration)
 
 
 class SpadeTaskGenerator(TaskGenerator):
-    """The Designer's generations through the generator service, adapted by the regret of the last one."""
+    """The Designer's generations through the generator service, adapted by the regret of the last one.
+
+    ``state`` holds the document ``open/<generation>`` of each open generation and the document
+    ``report/<number>`` of each closed one, with each number as five digits.
+    """
 
     def __init__(
         self,
         *,
         scenario: str,
         service: Generator,
-        state_dir: Path,
+        state: GeneratorState,
         count: int = DEFAULT_COUNT,
         skills: tuple[str, ...] = (),
         difficulty: str = "medium",
@@ -150,7 +154,7 @@ class SpadeTaskGenerator(TaskGenerator):
             raise ValueError("turn_limit must be at least 2")
         self.scenario = scenario
         self.service = service
-        self.state_dir = state_dir
+        self.state = state
         self.count = count
         self.skills = skills
         self.difficulty = difficulty
@@ -159,20 +163,23 @@ class SpadeTaskGenerator(TaskGenerator):
         self.hint_plays = hint_plays
         self.is_reporting_designer = is_reporting_designer
         self.served_model = served_model
-        # What the last generation measured, for the next prompt; read back from the state directory.
-        recorded = recorded_generations(state_dir)
-        self.experience: tuple[PlayRecord, ...] = (
-            load_experience(report_path_for(state_dir, recorded[-1])) if recorded else ()
-        )
-        self.experience_generation = recorded[-1] if recorded else -1
-        open_numbers = [
-            OPEN_GENERATION.validate_json(path.read_bytes()).number
-            for path in sorted(state_dir.glob(f"{OPEN_PREFIX}*.json"))
-        ]
+        # What the last generation measured, for the next prompt; read back from the newest report.
+        recorded = [int(key.removeprefix(REPORT_PREFIX)) for key in state.keys(REPORT_PREFIX)]
+        self.experience_generation = max(recorded, default=-1)
+        last_report = state.read(f"{REPORT_PREFIX}{self.experience_generation:05d}") if recorded else None
+        self.experience: tuple[PlayRecord, ...] = () if last_report is None else load_experience(last_report)
+        open_numbers = [open_generation.number for _, open_generation in self.open_generations()]
         self.generation = max((*recorded, *open_numbers), default=-1) + 1
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
+    ) -> Self:
+        if "state_dir" in config:
+            raise PluginConfigError(
+                "SpadeTaskGenerator does not take state_dir: the generator keeps its state in the scenario's task "
+                "store (RFC #1370). Remove the key; state under an old state_dir is not read."
+            )
         unknown = sorted(str(key) for key in config if key not in CONFIG_KEYS)
         if unknown:
             raise PluginConfigError(f"SpadeTaskGenerator does not take {', '.join(unknown)}")
@@ -182,9 +189,6 @@ class SpadeTaskGenerator(TaskGenerator):
                 "SpadeTaskGenerator needs generator_url: ${endpoints.generator} when the deployment has a "
                 "generator section"
             )
-        state_dir = str(config.get("state_dir", "") or "")
-        if not state_dir:
-            raise PluginConfigError("SpadeTaskGenerator needs a state_dir for its generation reports")
         skills = config.get("skills", ())
         skill_names = skills.split(",") if isinstance(skills, str) else skills
         grounding_path = str(config.get("grounding_path", "") or "")
@@ -193,8 +197,7 @@ class SpadeTaskGenerator(TaskGenerator):
             return cls(
                 scenario=scenario,
                 service=HttpGenerator(generator_url),
-                # Each scenario keeps its own experience.
-                state_dir=Path(state_dir) / scenario,
+                state=state,
                 count=int(config.get("count", DEFAULT_COUNT)),
                 skills=tuple(str(skill).strip() for skill in skill_names if str(skill).strip()),
                 difficulty=str(config.get("difficulty", "medium")),
@@ -211,6 +214,9 @@ class SpadeTaskGenerator(TaskGenerator):
         """One generation: ``count`` Designer proposals; a failed service call ends it with what ran."""
         if any(record.scenario != self.scenario for record in request.source_records):
             raise ValueError("source records must belong to the generator's scenario")
+        # The recipe keeps its generation numbers when an upgrade drops this generator's state: never number below
+        # them, so a new task never takes the name of a task that is already published.
+        self.generation = max(self.generation, request.generation)
         refused: list[ProposalRecord] = []
         pending: dict[str, PendingProposal] = {}
         error = ""
@@ -231,16 +237,19 @@ class SpadeTaskGenerator(TaskGenerator):
         self.generation += 1
         return tuple(tasks)
 
-    def open_path(self, generation: int) -> Path:
-        return self.state_dir / f"{OPEN_PREFIX}{generation:05d}.json"
+    def save_open(self, generation: int, open_generation: OpenGeneration) -> None:
+        """Keep an open generation in the state document ``open/<generation>``, replacing the document."""
+        self.state.write(f"{OPEN_PREFIX}{generation:05d}", OPEN_GENERATION.dump_json(open_generation).decode("utf-8"))
 
-    def save_open(self, generation: int, state: OpenGeneration) -> None:
-        """Keep an open generation under the state directory, replacing the file whole."""
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        path = self.open_path(generation)
-        partial = path.with_name(f"{path.name}.partial")
-        partial.write_bytes(OPEN_GENERATION.dump_json(state))
-        os.replace(partial, path)
+    def open_generations(self) -> tuple[tuple[int, OpenGeneration], ...]:
+        """Each open generation with the recipe's generation number that names its document, in key order."""
+        opened = []
+        for key in self.state.keys(OPEN_PREFIX):
+            document = self.state.read(key)
+            # A document that another call removed since the key was read is a closed generation.
+            if document is not None:
+                opened.append((int(key.removeprefix(OPEN_PREFIX)), OPEN_GENERATION.validate_json(document)))
+        return tuple(opened)
 
     async def propose(self, request: TaskGenerationRequest, *, skill: str | None, index: int) -> ProposedTask:
         """Ask the Designer for one task, with the experience section for its skill; keep its receipt."""
@@ -264,10 +273,9 @@ class SpadeTaskGenerator(TaskGenerator):
 
     def save_error(self, task_name: str, error: str) -> None:
         """Name an error in the report of the open generation that holds the task."""
-        for path in sorted(self.state_dir.glob(f"{OPEN_PREFIX}*.json")):
-            state = OPEN_GENERATION.validate_json(path.read_bytes())
-            if task_name in state.pending:
-                self.save_open(int(path.stem[len(OPEN_PREFIX) :]), replace(state, error=error))
+        for generation, open_generation in self.open_generations():
+            if task_name in open_generation.pending:
+                self.save_open(generation, replace(open_generation, error=error))
                 return
 
     async def validate(self, task: HarborTask) -> TaskValidationResult:
@@ -316,14 +324,17 @@ class SpadeTaskGenerator(TaskGenerator):
 
     async def record_results(self, results: tuple[GeneratedTaskResult, ...], *, generation: int) -> None:
         """Close an open generation: save its report and experience, and report Designer rewards for train tasks."""
-        path = self.open_path(generation)
-        if not path.is_file():
+        open_key = f"{OPEN_PREFIX}{generation:05d}"
+        open_document = self.state.read(open_key)
+        if open_document is None:
             logger.info("SPADE generation %d of scenario %r is already closed", generation, self.scenario)
             return
-        state = OPEN_GENERATION.validate_json(path.read_bytes())
-        error = state.error
-        pending_proposals = dict(state.pending)
-        proposals: list[tuple[ProposalRecord, TaskMeasure | None]] = [(proposal, None) for proposal in state.refused]
+        open_generation = OPEN_GENERATION.validate_json(open_document)
+        error = open_generation.error
+        pending_proposals = dict(open_generation.pending)
+        proposals: list[tuple[ProposalRecord, TaskMeasure | None]] = [
+            (proposal, None) for proposal in open_generation.refused
+        ]
         for result in results:
             pending = pending_proposals.pop(result.task.name, None)
             if pending is None:
@@ -343,7 +354,7 @@ class SpadeTaskGenerator(TaskGenerator):
             hint: tuple[float, ...] = ()
             if self.hint_plays and HINT_NAME in result.task.solution:
                 try:
-                    hint = await self.hint_rewards(result.task, generation=state.number)
+                    hint = await self.hint_rewards(result.task, generation=open_generation.number)
                 except GeneratorError as exc:
                     error = error or f"the hint plays of {result.task.name} failed: {exc}"
                     logger.error("SPADE hint plays of %s failed: %s", result.task.name, exc)
@@ -367,31 +378,34 @@ class SpadeTaskGenerator(TaskGenerator):
         reported: list[ProposalRecord] = []
         for entry, entry_measure in proposals:
             # A delivery that stopped part way already reported some proposals; they are not reported again.
-            report_id = state.reports.get(entry.index)
+            report_id = open_generation.reports.get(entry.index)
             if report_id is not None:
                 reported.append(replace(entry, designer_report_id=report_id))
                 continue
-            entry = await self.reported(entry, entry_measure, generation=state.number)
+            entry = await self.reported(entry, entry_measure, generation=open_generation.number)
             reported.append(entry)
             if entry.designer_report_id:
-                state = replace(state, reports={**state.reports, entry.index: entry.designer_report_id})
-                self.save_open(generation, state)
+                open_generation = replace(
+                    open_generation, reports={**open_generation.reports, entry.index: entry.designer_report_id}
+                )
+                self.save_open(generation, open_generation)
         measures = tuple(measure for _, measure in proposals if measure is not None)
-        generation_record = GenerationRecord(state.number, tuple(reported), measures, error)
-        report_path = write_generation_report(self.state_dir, generation_record)
+        generation_record = GenerationRecord(open_generation.number, tuple(reported), measures, error)
+        report_key = f"{REPORT_PREFIX}{open_generation.number:05d}"
+        self.state.write(report_key, generation_report(generation_record))
         logger.info(
-            "SPADE generation %d on scenario %r: %d tasks of %d proposals under %s",
-            state.number,
+            "SPADE generation %d on scenario %r: %d tasks of %d proposals in the state document %s",
+            open_generation.number,
             self.scenario,
             len(measures),
             len(reported),
-            report_path,
+            report_key,
         )
         # Generations can close out of order; the experience is the newest closed one's.
-        if state.number > self.experience_generation:
+        if open_generation.number > self.experience_generation:
             self.experience = generation_record.experience
-            self.experience_generation = state.number
-        path.unlink()
+            self.experience_generation = open_generation.number
+        self.state.remove(open_key)
 
     async def reported(
         self, proposal: ProposalRecord, measure: TaskMeasure | None, *, generation: int

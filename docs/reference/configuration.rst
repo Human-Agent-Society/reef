@@ -2064,7 +2064,6 @@ and the rollouts.
            config:
              generator_url: ${endpoints.generator}
              skills: [inspection, repair]
-             state_dir: ${REEF_STATE_DIR}/generations
      sample2job:
        config:
          buffer_size: 2
@@ -2120,6 +2119,13 @@ Related source sessions keep the same split across generations.
 A task that joins existing train and eval source groups is rejected.
 Eval tasks are saved without rollouts or Designer rewards.
 The generator's pass-rate band does not filter the store.
+
+The generator keeps its own state in the same task store, so the state is in
+the deployment's storage with the tasks. A generator's ``config`` therefore
+names no state directory; the built-in generators refuse a ``state_dir`` key.
+See `the task generation contract
+<../developer-guide/processors.rst#task-generation-contract>`__ for the state
+that a generator gets.
 
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
 The defaults keep every task in train.
