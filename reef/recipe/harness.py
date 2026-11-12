@@ -1,8 +1,8 @@
 """The harness evolution recipe: one recipe for every harness evolution method.
 
 ``HarnessEvolutionRecipe`` reads the ``evolution`` config section. Its
-trainer submits each step as a job of its ``HarnessTrainingComponent``
-(``reef.train.harness_backend.component``), which runs the step in the
+trainer submits each job to its ``HarnessTrainingComponent``
+(``reef.train.harness_backend.component``), which runs the job in the
 training service on one ``HarnessBackend`` per scenario component, with
 the evaluator and the selection policy around it. A method is a
 ``reef.train.harness_backend.Method`` that the deployment names in
@@ -77,10 +77,10 @@ from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
-from reef.train.harness_backend.backend import HarnessBackend, StepLimits
-from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
+from reef.train.harness_backend.backend import HarnessBackend, JobLimits
+from reef.train.harness_backend.component import HISTORY_DIR, JOB_RECORDS_DIR, HarnessJobs, HarnessTrainingComponent
 from reef.train.harness_backend.contract import Method
-from reef.train.harness_backend.records import StepRecord
+from reef.train.harness_backend.records import JobRecord
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.trainer import Trainer
@@ -99,7 +99,7 @@ class EvolutionSettings(Settings):
     ``models`` maps a name other than ``served`` to a model section (``url``,
     ``model``, ``api_key_env``); ``model_metadata`` maps a model name to its
     metadata. ``state_dir`` is the directory of every scenario's history
-    and step records. Every count is ≥ 0, where 0 turns its limit off.
+    and job records. Every count is ≥ 0, where 0 turns its limit off.
     The retired ``publish`` and ``review_kinds`` are refused: the top-level
     ``activation`` section decides whether a kept tree serves.
     ``executor`` and ``sandbox`` choose where tasks run
@@ -118,13 +118,13 @@ class EvolutionSettings(Settings):
         default_factory=dict, help="The method's own models by name: url, model and api_key_env."
     )
     model_metadata: Mapping[str, Any] = config_option(default_factory=dict, help="Model metadata by model name.")
-    state_dir: str = config_option(".reef/harness", help="Each scenario's history and step records.")
-    max_steps: int = config_option(0, help="The most automatic steps. 0 sets no limit.")
+    state_dir: str = config_option(".reef/harness", help="Each scenario's history and job records.")
+    max_steps: int = config_option(0, help="The most automatic jobs. 0 sets no limit.")
     max_failure_streak: int = config_option(
-        0, help="Skip automatic steps after this many rejections in a row. 0 sets no limit."
+        0, help="Skip automatic jobs after this many rejections in a row. 0 sets no limit."
     )
-    max_model_calls_per_step: int = config_option(0, help="The most model calls of one step. 0 sets no limit.")
-    max_runs_per_step: int = config_option(0, help="The most runs a method runs in one step. 0 sets no limit.")
+    max_model_calls_per_step: int = config_option(0, help="The most model calls of one job. 0 sets no limit.")
+    max_runs_per_step: int = config_option(0, help="The most runs a method runs in one job. 0 sets no limit.")
     executor: str = config_option("local", help="Where tasks run: local, sandbox or e2b.")
     sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the run executor.")
     agent: Mapping[str, Any] | None = config_option(
@@ -174,8 +174,8 @@ class HarnessLayout(ArtifactLayout):
 
 
 @dataclass(frozen=True)
-class RecipeSteps(HarnessSteps):
-    """The ``HarnessSteps`` of ``recipe``: its seed, its state directories, its backend and its selection policy.
+class RecipeJobs(HarnessJobs):
+    """The ``HarnessJobs`` of ``recipe``: its seed, its state directories, its backend and its selection policy.
 
     Values: ``recipe`` is the recipe whose component reads it.
     Purpose: ``HarnessEvolutionRecipe`` gives one to its ``HarnessTrainingComponent``.
@@ -224,12 +224,12 @@ class HarnessEvolutionRecipe(Recipe):
     method as ``services.models.served``, and the adapter's ``model_binding``
     templates write it into each evaluation run, so neither the seed nor
     a kept tree ever carries a provider.
-    ``harness_component`` is the training component that runs the steps: the recipe's own
-    ``HarnessTrainingComponent`` over ``RecipeSteps`` of this recipe, under ``<evolution.state_dir>/.training``,
+    ``harness_component`` is the training component that runs the jobs: the recipe's own
+    ``HarnessTrainingComponent`` over ``RecipeJobs`` of this recipe, under ``<evolution.state_dir>/.training``,
     which each copy of the recipe makes again, or the jobs queue's view of one (``with_job_components``).
     Purpose: a deployment names it as its recipe; the service builds it once
     from the deployment config, and ``build`` makes each scenario's trainer,
-    which submits each step as a job of ``harness_component``.
+    which submits each job to ``harness_component``.
     """
 
     method: Method
@@ -293,7 +293,7 @@ class HarnessEvolutionRecipe(Recipe):
         if self.evaluation.collect_failures and task_directories:
             raise RecipeConfigError("evaluation.collect_failures adds prompts, and these tasks are task directories")
         if offline and self.scorer is None:
-            # An offline step plays the imported train tasks and scores each run.
+            # An offline job plays the imported train tasks and scores each run.
             raise RecipeConfigError("offline runs score each train task, so they need evaluation.scorer")
         if self.scorer is not None:
             evaluation_selection(self.scorer, self.worker_executor)
@@ -303,10 +303,10 @@ class HarnessEvolutionRecipe(Recipe):
         # the recipe was given, the jobs queue's view of one, stays.
         if self.harness_component is None or isinstance(self.harness_component, HarnessTrainingComponent):
             root = Path(self.evolution.state_dir).expanduser().resolve() / TRAINING_DIR
-            object.__setattr__(self, "harness_component", HarnessTrainingComponent(RecipeSteps(self), root))
+            object.__setattr__(self, "harness_component", HarnessTrainingComponent(RecipeJobs(self), root))
 
     def job_components(self) -> tuple[TrainingComponent, ...]:
-        """The harness component, whose jobs are this recipe's steps."""
+        """The harness component, which runs this recipe's jobs."""
         return () if self.harness_component is None else (self.harness_component,)
 
     def with_job_components(
@@ -316,13 +316,13 @@ class HarnessEvolutionRecipe(Recipe):
         return replace(self, harness_component=next(iter(components.values())), data_store=data_store)
 
     def runs_offline(self) -> bool:
-        """Whether the steps roll out the imported train tasks (``TrainTaskJobData``)."""
+        """Whether the jobs roll out the imported train tasks (``TrainTaskJobData``)."""
         return issubclass(self.stages().sample2job.plugin_class, TrainTaskJobData)
 
     def task_directories(self, descriptor: AdapterDescriptor) -> bool:
         """Whether the runs play Harbor task directories rather than prompts: always for an adapter whose
         command takes a task directory, else when the evaluation reads a task manifest or the imported tasks, or the
-        steps roll out the imported train tasks."""
+        jobs roll out the imported train tasks."""
         return (
             descriptor.takes_task_directory
             or self.evaluation.task_manifest is not None
@@ -356,7 +356,7 @@ class HarnessEvolutionRecipe(Recipe):
         return PipelineSpec(record2sample=TraceSamples, sample2job=TraceJobData)
 
     def stages(self) -> PipelineSettings:
-        """The pipeline's stages, whose harness stage names the eval split in each job when the steps evaluate on the
+        """The pipeline's stages, whose harness stage names the eval split in each job when the jobs evaluate on the
         imported tasks (``evolution.evaluation.imported_tasks``)."""
         stages = super().stages()
         sample2job = stages.sample2job
@@ -509,7 +509,7 @@ class HarnessEvolutionRecipe(Recipe):
         return DefaultStart(files=dict(self.seed.files), inputs={"seed": self.seed.checksum()})
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
-        """The scenario's history and step records: what a delete archives beside the record store."""
+        """The scenario's history and job records: what a delete archives beside the record store."""
         return (self.state_root(scenario),)
 
     def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
@@ -534,14 +534,14 @@ class HarnessEvolutionRecipe(Recipe):
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
-        """The scenario's trainer: it submits each step as a job of ``harness_component``, whose start is the
+        """The scenario's trainer: it submits each job to ``harness_component``, and a job's start is the
         component's head snapshot in ``releases``."""
         if artifacts is None:
             raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed snapshots")
         if self.evaluation.imported_tasks and samples is None:
             raise RecipeConfigError("evolution.evaluation.imported_tasks needs the samples of a scenario session")
         if self.harness_component is None:
-            raise RecipeConfigError("harness evolution has no training component to run its steps")
+            raise RecipeConfigError("harness evolution has no training component to run its jobs")
         return Trainer.build(
             scenario,
             records,
@@ -587,7 +587,7 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError(f"evolution.state_dir cannot hold {root}: {exc}") from exc
         models = self.model_bindings(scenario)
         evaluator = None if self.scorer is None else self.build_evaluator(descriptor, models, history, self.scorer)
-        records = StepRecord(root / STEPS_DIR)
+        records = JobRecord(root / JOB_RECORDS_DIR)
         return HarnessBackend(
             descriptor=descriptor,
             method=self.method,
@@ -603,7 +603,7 @@ class HarnessEvolutionRecipe(Recipe):
             ),
             history=history,
             models=models,
-            limits=StepLimits(
+            limits=JobLimits(
                 max_steps=self.evolution.max_steps,
                 max_failure_streak=self.evolution.max_failure_streak,
                 max_model_calls_per_step=self.evolution.max_model_calls_per_step,

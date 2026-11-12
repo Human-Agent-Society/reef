@@ -16,8 +16,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.support.harness_jobs import PI_FAKE, build_harness_backend, changed_rules, harness_recipe, make_pi_binary
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import PI_FAKE, build_harness_backend, changed_rules, harness_recipe, make_pi_binary
 
 from reef.execution.executor.config import ExecutorSettings
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable

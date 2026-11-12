@@ -15,7 +15,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.activation_rule_plugin import ComponentRule
 from tests.support.artifact_versions import inference, report
-from tests.support.harness_steps import IdleMethod, evolution_config
+from tests.support.harness_jobs import IdleMethod, evolution_config
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 

@@ -1,4 +1,4 @@
-"""Run the deployment's coding agent in one step's workspace.
+"""Run the deployment's coding agent in one job's workspace.
 
 ``AgentExecution`` is the agent bound for one scenario: its adapter, the
 executor that isolates it, its binary and its time limit. ``run_agent``
@@ -7,7 +7,7 @@ tools (``check`` and ``evaluate``), renders the agent's tree after Reef's
 protocol rules (``protocol.md``), runs the agent in the workspace, and keeps
 its session log in ``output/``.
 
-The agent's root is the directory that holds the step's workspace and the
+The agent's root is the directory that holds the job's workspace and the
 history, so the agent reads both. Its working directory is the workspace;
 ``harness/``, ``state/``, ``scratch/`` and ``output/`` are writable, and
 ``material/``, the history and the agent's own rendered files are not.
@@ -38,9 +38,9 @@ from reef.train.harness_backend.workspace import Workspace
 
 #: Reef's rules for every agent run, before the agent's own: the workspace, the outputs and the tools.
 PROTOCOL = Path(__file__).with_name("protocol.md").read_text(encoding="utf-8").strip()
-#: In the step's ``scratch/``: the agent's home, which holds its rendered harness and its sessions.
+#: In the job's ``scratch/``: the agent's home, which holds its rendered harness and its sessions.
 AGENT_HOME = "agent"
-#: In the step's ``output/``: the agent's session log, one JSON event per line.
+#: In the job's ``output/``: the agent's session log, one JSON event per line.
 SESSION_FILE = "agent-session.jsonl"
 #: The tree a tool reads when its arguments name none.
 DEFAULT_TREE = "harness"
@@ -78,15 +78,15 @@ def agent_env(descriptor: AdapterDescriptor, binary: str, home: Path) -> dict[st
 
 
 def fill(text: str, workspace: Workspace) -> str:
-    """``text`` with ``{step}`` as the step's number and ``{history}`` as the history's path from the workspace."""
+    """``text`` with ``{step}`` as the job's number and ``{history}`` as the history's path from the workspace."""
     history = os.path.relpath(workspace.history_dir, workspace.root)
     return text.replace("{step}", str(workspace.step)).replace("{history}", history)
 
 
 class AgentRun:
-    """One agent run in a step's workspace: what its tools read, and the session that runs it.
+    """One agent run in a job's workspace: what its tools read, and the session that runs it.
 
-    Values: ``workspace`` is the step's workspace and ``services`` the step's
+    Values: ``workspace`` is the job's workspace and ``services`` the job's
     services. ``root`` is the run's root: the directory that holds the
     workspace and the history. ``session`` is the executor of the running
     agent, ``None`` before it starts. ``lock`` makes the run's tool calls
@@ -107,11 +107,11 @@ class AgentRun:
         left it; ``ValueError`` for a name outside the workspace and for a tree that cannot be read."""
         name = arguments.get("tree", DEFAULT_TREE)
         if not isinstance(name, str) or not name.strip():
-            raise ValueError("tree must name a directory of the step's workspace, such as harness")
+            raise ValueError("tree must name a directory of the job's workspace, such as harness")
         workspace = self.workspace.root.resolve()
         directory = (workspace / name).resolve()
         if directory != workspace and workspace not in directory.parents:
-            raise ValueError(f"tree {name!r} is outside the step's workspace")
+            raise ValueError(f"tree {name!r} is outside the job's workspace")
         if self.session is not None:
             # A remote agent edits a copy; a tool reads that copy as it stands now.
             download_directory(self.session, self.root, directory.relative_to(self.root).as_posix())
@@ -123,13 +123,13 @@ class CheckTool(AgentTool):
 
     name = "check"
     description = (
-        "Validate a tree of the step's workspace for the harness's adapter, as the step validates its candidate. "
+        "Validate a tree of the job's workspace for the harness's adapter, as the job validates its candidate. "
         "Answers passed (true or false) and problems (a list of messages)."
     )
     input_schema: ClassVar[Mapping[str, Any]] = {
         "type": "object",
         "properties": {
-            "tree": {"type": "string", "description": "A directory of the step's workspace.", "default": "harness"}
+            "tree": {"type": "string", "description": "A directory of the job's workspace.", "default": "harness"}
         },
         "additionalProperties": False,
     }
@@ -149,19 +149,19 @@ class CheckTool(AgentTool):
 
 
 class EvaluateTool(AgentTool):
-    """``evaluate``: score a tree of the workspace on tasks, through the score cache and the step's budget."""
+    """``evaluate``: score a tree of the workspace on tasks, through the score cache and the job's budget."""
 
     name = "evaluate"
     description = (
-        "Score a tree of the step's workspace on tasks, repeats runs each. A scored run in the history is "
-        "reused; new runs spend the step's run budget. Answers tree (its checksum) and runs: one "
+        "Score a tree of the job's workspace on tasks, repeats runs each. A scored run in the history is "
+        "reused; new runs spend the job's run budget. Answers tree (its checksum) and runs: one "
         "record per run with its task, repeat, score (null when it could not run), failure, reply, and "
         "directory (its files, from the workspace)."
     )
     input_schema: ClassVar[Mapping[str, Any]] = {
         "type": "object",
         "properties": {
-            "tree": {"type": "string", "description": "A directory of the step's workspace.", "default": "harness"},
+            "tree": {"type": "string", "description": "A directory of the job's workspace.", "default": "harness"},
             "tasks": {"type": "array", "items": {"type": "string"}, "minItems": 1},
             "repeats": {"type": "integer", "minimum": 1, "default": 1},
         },

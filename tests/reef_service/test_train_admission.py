@@ -8,8 +8,8 @@ from pathlib import Path
 from threading import Event
 
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import harness_recipe
 from tests.support.harness_service import harness_dispatcher
-from tests.support.harness_steps import harness_recipe
 
 from reef.core import AgentRecord, RequestType
 from reef.service.app import create_app

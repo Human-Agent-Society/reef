@@ -6,7 +6,7 @@ user can provide, then writes the files; a second call reviews the files
 against the request. What only the user can provide is declared as a
 ``requires`` item with a prompt sentence, never asked for by the change at
 run time. A review that finds the answer short sends the request back, up to
-``REQUEST_ATTEMPTS`` answers in all. Without a request the step learns
+``REQUEST_ATTEMPTS`` answers in all. Without a request the job learns
 one skill from its failing traces. The prompts, their sections and the
 words they take for each kind of harness are in ``prompts/``; the functions
 here fill them in and build the short parts that depend on the request and
@@ -49,7 +49,7 @@ PI_EXTENSION_API = Path(__file__).with_name("pi_extension_api.md")
 #: show whole up to the larger cap, since an answer that changes one writes it again in full.
 PREVIEW_CHARS = 240
 WHOLE_FILE_CHARS = 8000
-#: How much of a design the step records: a few paragraphs with its How to use section.
+#: How much of a design the job records: a few paragraphs with its How to use section.
 DESIGN_CHARS = 4000
 #: How much of each long text in a refused answer a retry shows.
 EARLIER_TEXT_CHARS = 400
@@ -88,7 +88,7 @@ HARNESS_SECTION = prompt("harness")
 NO_EXTENSIONS_SECTION = prompt("no_extensions")
 #: The platforms a change serves on a harness that runs on the person's machine.
 PLATFORMS_SENTENCE = prompt("platforms")
-#: The section of the request prompt and the agent's prompt carrying the failures a step in training_mode manual
+#: The section of the request prompt and the agent's prompt carrying the failures a job in training_mode manual
 #: hands over beside the request.
 FAILURES_SECTION = prompt("failing_requests")
 #: The request prompt's section carrying the extension API reference.
@@ -127,10 +127,10 @@ RETRY_EARLIER_ANSWER = prompt("retry_earlier_answer")
 #: Why an answer is refused before its review on opencode: an agent it defines without a permission map is offered
 #: every tool, so a mode built on it restricts nothing.
 UNRESTRICTED_AGENT = prompt("unrestricted_agent")
-#: What a request step records under ``declined`` when the reply is a design saying no file can deliver it.
+#: What a request job records under ``declined`` when the reply is a design saying no file can deliver it.
 DECLINED = "the design says no file this harness takes can deliver the request"
 
-#: The prompt that learns one skill from failing traces, when no request drives the step.
+#: The prompt that learns one skill from failing traces, when no request drives the job.
 FAILURES_PROMPT = prompt("failures")
 
 
@@ -213,17 +213,17 @@ def review_commands(adapter: str) -> str:
 
 @dataclass(frozen=True)
 class Answer:
-    """What a request step answers: the change, what it needs, and what the step records.
+    """What a request job answers: the change, what it needs, and what the job records.
 
     Values: ``patch`` changes the head tree, or is the empty patch when the
-    step changes nothing. ``requires`` are the requires items the change
+    job changes nothing. ``requires`` are the requires items the change
     adds, each through the screens of ``screened_requires``; the empty patch
-    adds none. ``notes`` are what the step records: the design, the review,
+    adds none. ``notes`` are what the job records: the design, the review,
     what was refused or left undeclared. They hold ``failure`` (or
     ``declined``, for a design that says no file can deliver the request),
     why nothing changes, exactly when the patch is empty.
     Purpose: ``answer_request`` and the agent make it; ``ReefineMethod``
-    writes ``patch`` into the step's tree and returns the rest.
+    writes ``patch`` into the job's tree and returns the rest.
     """
 
     patch: TreePatch
@@ -260,10 +260,10 @@ class WrittenAnswer:
 
     Values: ``patch`` is the change, and the patched head tree passes
     validation; ``added`` are the requires items the reply added; ``notes``
-    are what the step records (the design, the review, what was refused or
+    are what the job records (the design, the review, what was refused or
     undeclared).
     Purpose: ``answer_once`` makes one per usable answer; the loop keeps
-    the one with the fewest uncovered points, and the step answers with it.
+    the one with the fewest uncovered points, and the job answers with it.
     """
 
     patch: TreePatch
@@ -279,7 +279,7 @@ class UnusableAnswer:
     the design it carried, if any; ``files`` shows, when its files parsed and
     something refused them, those files in short, for the retry to start
     from; ``dropped`` names why the parser dropped each file, for the retry
-    alone (the step's failure keeps the reason).
+    alone (the job's failure keeps the reason).
     Purpose: ``answer_once`` makes it; the loop writes the next retry
     section from it.
     """
@@ -296,7 +296,7 @@ class DeclinedAnswer:
 
     Values: ``notes`` hold the design, ``declined`` and the review that
     names what is out of reach.
-    Purpose: ``declined_answer`` makes it; the step records the notes
+    Purpose: ``declined_answer`` makes it; the job records the notes
     with the empty patch.
     """
 
@@ -309,7 +309,7 @@ class FailedCall:
 
     Values: ``notes`` say why, under ``failure``, with the design when the
     reply held one.
-    Purpose: ``answer_once`` makes it; the loop stops and the step
+    Purpose: ``answer_once`` makes it; the loop stops and the job
     records the notes with the empty patch.
     """
 
@@ -347,7 +347,7 @@ class RequestAnswers:
         why = answer.reason if not answer.dropped else f"{answer.reason}: {'; '.join(answer.dropped)}"
         self.dropped_attempts.append(f"answer {attempt}: {why}")
         if attempt < REQUEST_ATTEMPTS:
-            # The request page shows it while the step runs, not only once the step settles.
+            # The request page shows it while the job runs, not only once the job settles.
             calls.note("check", f"answer {attempt} written again: {why}", failed=True)
         retry = f"{self.reviewed}{RETRY_UNUSABLE_SECTION.format(reason=why)}\n\n"
         if answer.files is not None:
@@ -396,7 +396,7 @@ class RequestAnswers:
         return self.reviewed
 
     def unanswered(self, attempt: int) -> dict[str, Any]:
-        """The step's notes when no answer was kept, with the reasons earlier answers were dropped. After a failed
+        """The job's notes when no answer was kept, with the reasons earlier answers were dropped. After a failed
         call an earlier substitute says more about the request than the failure does; otherwise a design that
         declined, then a substitute, then the last unusable answer's reason with its design."""
         if self.failed is not None:
@@ -423,7 +423,7 @@ def answer_request(
     services: Services,
     adapter: str = EXTENSION_ADAPTER,
 ) -> Answer:
-    """The served model's answer to one request: the files of the kept answer, with the notes the step records.
+    """The served model's answer to one request: the files of the kept answer, with the notes the job records.
 
     A review that finds the answer short (partial, or not delivering the
     behavior at all) sends the request back with what it found, up to
@@ -432,7 +432,7 @@ def answer_request(
     points, and ``attempts`` in the notes counts the answers written when
     there was more than one. When no answer delivers the behavior, the
     answer has the empty patch and its notes say why under ``failure``.
-    ``services`` are the step's: its models answer, its check validates each
+    ``services`` are the job's: its models answer, its check validates each
     answer's files, and its activity names each answer written again.
     """
     prompt_text = request_prompt(tree, request, traces, services.models, adapter)
@@ -462,7 +462,7 @@ def answer_request(
     if attempt > 1:
         notes["attempts"] = attempt
         if answers.kept_attempt != attempt:
-            # An earlier answer covered more than the later ones: the notes say which one the step kept.
+            # An earlier answer covered more than the later ones: the notes say which one the job kept.
             notes["kept_attempt"] = answers.kept_attempt
     if answers.dropped_attempts:
         notes["dropped_attempts"] = answers.dropped_attempts
@@ -508,11 +508,11 @@ def answer_once(
     written = files_in_short(patch, layout)
     candidate = tree.apply(patch)
     if candidate == tree:
-        # The step skips a tree it left unchanged, so such an answer is written again instead.
+        # The job skips a tree it left unchanged, so such an answer is written again instead.
         return UnusableAnswer("the files change nothing in the tree", design, written)
     validation = services.check(candidate)
     if not validation.passed:
-        # The validation the step meets next, run here so a refused file is written again instead of losing the step.
+        # The validation the job meets next, run here so a refused file is written again instead of losing the job.
         return UnusableAnswer(f"the harness refused the files: {validation.message()}", design, written)
     unrestricted = unrestricted_agents(tree, patch)
     if unrestricted:
@@ -529,7 +529,7 @@ def answer_once(
         notes["design"] = kept_design(design)
     if parsed.dropped:
         notes["dropped"] = list(parsed.dropped)
-    # The review reads the whole design; the step records it cut to the record's size.
+    # The review reads the whole design; the job records it cut to the record's size.
     review, review_failure = review_answer(models, request.text, design, patch, [*own, *added], adapter=adapter)
     if review is not None:
         notes["review"] = review
@@ -558,7 +558,7 @@ def declined_answer(models: ModelBindings, request: TrainingRequest, design: str
 
 
 def nothing_to_apply(reply: str, reason: str) -> FailedCall:
-    """A request step's notes when the reply gave no file: the reason, and the design when the model wrote one."""
+    """A request job's notes when the reply gave no file: the reason, and the design when the model wrote one."""
     notes: dict[str, Any] = {}
     design = design_text(reply)
     if design is not None:
@@ -708,8 +708,8 @@ def client_text(request: TrainingRequest) -> str:
 
 
 def failures_section(traces: Sequence[Trace]) -> str:
-    """The prompt section that carries the step's traces, fenced as data since they are client text, with a blank
-    line after it; empty for a step without traces, such as one in manual mode."""
+    """The prompt section that carries the job's traces, fenced as data since they are client text, with a blank
+    line after it; empty for a job without traces, such as one in manual mode."""
     if not traces:
         return ""
     return f"{FAILURES_SECTION.format(text=untrusted_text(failures_text(traces)))}\n\n"
@@ -722,7 +722,7 @@ def request_prompt(
     models: ModelBindings,
     adapter: str = EXTENSION_ADAPTER,
 ) -> str:
-    """The request prompt: the request fenced as data, the failures beside it when the step has any traces, every
+    """The request prompt: the request fenced as data, the failures beside it when the job has any traces, every
     file of the tree, the steps the plan call found need a tool, and the extension API reference on pi."""
     request_text = untrusted_text(request.text, "user request")
     view = files_view(tree, get_adapter(adapter).layout)
@@ -819,7 +819,7 @@ def review_answer(
     adapter: str = EXTENSION_ADAPTER,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """The served model's reading of its files against the request, ``{result, covered, uncovered}``, and no
-    reason; or ``None`` and the reason the step has no review, which the step records so the page says the one
+    reason; or ``None`` and the reason the job has no review, which the job records so the page says the one
     check of whether the files deliver the request did not run. New commands are judged by ``adapter``'s own
     command surface."""
     written: dict[str, Any] = {"files": patch.to_json()}
@@ -845,7 +845,7 @@ def review_answer(
         return None, reason
     review = parse_review(reply)
     if review is None and json_in(reply, openers=("{",)) is None and '"result"' in reply:
-        # The model wrote the object but a stray quote broke its JSON: asked once more before the step records that
+        # The model wrote the object but a stray quote broke its JSON: asked once more before the job records that
         # no review ran.
         reply, reason = ask(
             models, f"{review_prompt}\n\n{REVIEW_AGAIN}", max_tokens=max_tokens(16384), timeout_s=timeout_s(120.0)
@@ -896,7 +896,7 @@ def design_text(reply: str) -> str | None:
 
 
 def kept_design(design: str) -> str:
-    """The design as the step records it: whole up to ``DESIGN_CHARS``, and past it the start cut so the last
+    """The design as the job records it: whole up to ``DESIGN_CHARS``, and past it the start cut so the last
     paragraph, the How to use the person reads, stays whole."""
     if len(design) <= DESIGN_CHARS:
         return design
@@ -972,7 +972,7 @@ def max_tokens(default: int) -> int:
 
 
 def failures_text(traces: Sequence[Trace]) -> str:
-    """The step's traces as a prompt reads them: one object per trace with the request as served (the trace's last
+    """The job's traces as a prompt reads them: one object per trace with the request as served (the trace's last
     captured exchange; the task of a run, whose trace has no trajectory), the trace's score and its feedback
     verbatim (``null`` where there is none)."""
     views = []
@@ -995,7 +995,7 @@ def ask(
     """One served model call: the reply and no reason, or ``None`` and a one-line reason when the endpoint failed.
 
     The reason names how long the call took and the reply budget, then the exception's text; it goes to the log,
-    and a request step records it so the person sees why nothing changed."""
+    and a request job records it so the person sees why nothing changed."""
     started = time.monotonic()
     try:
         reply = models.served.chat([{"role": "user", "content": text}], timeout_s=timeout_s, max_tokens=max_tokens)
@@ -1144,7 +1144,7 @@ def open_brackets(text: str) -> int:
 def learn_from_failures(
     tree: HarnessTree, traces: Sequence[Trace], models: ModelBindings, layout: TreeLayout
 ) -> TreePatch | None:
-    """One improved or new skill from the step's failing traces; ``None`` when the call fails or the reply holds
+    """One improved or new skill from the job's failing traces; ``None`` when the call fails or the reply holds
     no skill, and the reason goes to the log alone."""
     skills = {
         path: text

@@ -1,9 +1,9 @@
-"""The deployment's coding agent in a harness step, and ``AgentMethod``, a method that is a folder of prompts.
+"""The deployment's coding agent in a harness job, and ``AgentMethod``, a method that is a folder of prompts.
 
 The agent is a stand-in for pi: a script that reads its prompt and rules,
 calls the gateway's tools and model route, edits the workspace and writes
 what it saw to ``output/notes.json``. The gateway relays its model call to a
-local stand-in upstream. Tasks run the fake pi of ``harness_steps``.
+local stand-in upstream. Tasks run the fake pi of ``harness_jobs``.
 """
 
 from __future__ import annotations
@@ -17,8 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from tests.support.harness_jobs import TreeArtifacts, build_harness_backend, harness_recipe
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import TreeArtifacts, build_harness_backend, harness_recipe
 
 from reef.core.plugins import PluginConfigError
 from reef.execution.sandbox.e2b import E2BExecutor
@@ -146,24 +146,24 @@ def test_the_agent_edits_the_workspace_through_its_tools_and_its_notes_become_th
     seen = notes["seen"]
     assert first.artifact is not None and first.metrics["method_summary"] == "Added the marker to the rules."
     assert notes["agent"]["exit_code"] == 0 and "dropped" not in json.dumps(notes["agent"])
-    # Reef's protocol rules come before the method's own, with the step and the history filled in.
+    # Reef's protocol rules come before the method's own, with the job and the history filled in.
     assert seen["prompt"] == "Step 1: improve the rules. The history is at ../../history.\n"
-    assert "Reef runs you in step 1" in seen["rules"] and seen["rules"].endswith("Prefer small edits.\n")
+    assert "Reef runs you in job 1" in seen["rules"] and seen["rules"].endswith("Prefer small edits.\n")
     assert seen["skill"] and seen["tools"] == ["check", "evaluate"]
-    assert seen["outside"][0] == 400 and "outside the step's workspace" in seen["outside"][1]["error"]
+    assert seen["outside"][0] == 400 and "outside the job's workspace" in seen["outside"][1]["error"]
     assert seen["check"] == [200, {"passed": True, "problems": []}]
     (task_run,) = seen["evaluate"][1]["runs"]
     assert (
         seen["evaluate"][0] == 200 and task_run["score"] == 1.0 and task_run["directory"].startswith("../../history/")
     )
-    # The model call went to the method's binding, metered and recorded with the step.
+    # The model call went to the method's binding, metered and recorded with the job.
     assert seen["model"][0] == 200 and upstream.requests[0]["body"]["model"] == "proposer-model"
-    step_dir = Path(first.metrics["step_record"])
-    calls = json.loads((step_dir / "calls.json").read_text())
+    job_dir = Path(first.metrics["step_record"])
+    calls = json.loads((job_dir / "calls.json").read_text())
     assert [call["source"] for call in calls] == ["agent"] and calls[0]["model"] == "proposer-model"
-    assert (step_dir / "output" / "agent-session.jsonl").is_file()
+    assert (job_dir / "output" / "agent-session.jsonl").is_file()
     assert HarnessState.from_json(first.state).method_files == {"memory.md": "tried the marker\n"}
-    # The next step continues from state/, with the resume prompt.
+    # The next job continues from state/, with the resume prompt.
     second = backend_step(backend, JobData("demo:2", ()), first.state)
     assert second.metrics["method_notes"]["seen"]["prompt"] == "Step 2: continue from state/.\n"
 

@@ -7,7 +7,7 @@ Writes, each in a light and a dark file:
   introduction;
 - harness-tutorial-overview-*.svg: what runs on your machine and what runs in
   Reef, for the harness tutorial;
-- harness-method-step-*.svg: one training step from the method's view, for
+- harness-method-step-*.svg: one training job from the method's view, for
   "Write a harness method";
 - harness-adapter-modes-*.svg: the three ways one adapter.yaml runs an agent,
   for "Harness adapters".
@@ -54,7 +54,7 @@ def svg(p, fonts, width: int, height: int, label: str, title: str, subtitle: str
     return out
 
 
-# One training step, from the method's view: three columns over one band.
+# One training job, from the method's view: three columns over one band.
 STEP_W, STEP_H = 1240, 628
 STEP_X = (56, 452, 868)
 STEP_COL = 316
@@ -69,12 +69,12 @@ def method_step(theme: str, fonts) -> str:
         fonts,
         STEP_W,
         STEP_H,
-        "One training step from the method's view. Reef writes the workspace: a copy of the head in harness, "
-        "the step's material, and the method's state from the last step. Reef calls step(context) once; the "
+        "One training job from the method's view. Reef writes the workspace: a copy of the head in harness, "
+        "the job's material, and the method's state from the last job. Reef calls run(job) once; the "
         "method reads the workspace, calls the services, and writes the candidate tree, its state and its output. "
         "Reef then checks the candidate and evaluates it; a selected candidate is a snapshot, which the activation "
         "rule serves or holds for a person.",
-        "One training step, from the method's view",
+        "One training job, from the method's view",
         "Numbers 5 to 8 are the steps of the architecture figure in Evolve your harness.",
         [("you write", "machine"), ("Reef", "reef"), ("files", "store")],
     )
@@ -90,18 +90,18 @@ def method_step(theme: str, fonts) -> str:
     inputs = [
         ("harness/", "a copy of the head tree"),
         ("material/", "traces · tasks · host.json"),
-        ("state/", "your files from the last step"),
+        ("state/", "your files from the last job"),
     ]
     outputs = [
         ("harness/", "the tree you leave: the candidate"),
-        ("state/", "kept for the next step"),
+        ("state/", "kept for the next job"),
         ("output/", "summary.md · notes.json"),
     ]
     for row, (title, line) in zip(STEP_ROWS, inputs, strict=True):
         o.append(card(p, left, row + 8, STEP_COL, "store", title, line))
     for row, (title, line) in zip(STEP_ROWS, outputs, strict=True):
         o.append(card(p, right, row + 8, STEP_COL, "store", title, line))
-    o.append(card(p, middle, STEP_ROWS[0] + 8, STEP_COL, "machine", "Method", "`step(context)", number=5))
+    o.append(card(p, middle, STEP_ROWS[0] + 8, STEP_COL, "machine", "Method", "`run(job)", number=5))
     o.append(card(p, middle, STEP_ROWS[-1] + 8, STEP_COL, "reef", "Services", "`models · check · evaluate"))
 
     # The workspace goes into the method; what the method writes comes back out.
@@ -119,11 +119,11 @@ def method_step(theme: str, fonts) -> str:
     o.extend(path(p, [(bus_out, middle_y[0]), (bus_out, y), (right, y)]) for y in middle_y[1:])
     service_x = middle + 120
     o.append(pair(p, service_x, STEP_ROWS[0] + 8 + BOX_H, STEP_ROWS[-1] + 8))
-    o.append(write(service_x + 26, STEP_ROWS[1] + 46, "context.services", MONO, p["muted"], mono=True))
+    o.append(write(service_x + 26, STEP_ROWS[1] + 46, "job.services", MONO, p["muted"], mono=True))
 
-    # After step returns: the check, the evaluation and the activation rule, right to left.
+    # After run returns: the check, the evaluation and the activation rule, right to left.
     o.append(zone(p, 40, BAND_TOP, STEP_W - 40, BAND_TOP + 140, "reef", p["band"]))
-    o.append(cap(56, BAND_TOP + 24, "after step returns, Reef runs", p["reef"]))
+    o.append(cap(56, BAND_TOP + 24, "after run returns, Reef runs", p["reef"]))
     band_row = BAND_TOP + 44
     o.append(card(p, right, band_row, STEP_COL, "reef", "Check", "`validate_tree", number=6))
     o.append(card(p, middle, band_row, STEP_COL, "reef", "Evaluation", "`compare · floor · none", number=7))
@@ -136,7 +136,7 @@ def method_step(theme: str, fonts) -> str:
         write(
             40,
             STEP_H - 20,
-            "An unchanged tree, or one that fails the check, skips the step: no evaluation and no snapshot.",
+            "An unchanged tree, or one that fails the check, skips the job: no evaluation and no snapshot.",
             BODY,
             p["muted"],
         )

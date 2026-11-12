@@ -45,9 +45,9 @@ from reef.service.wire import (
     scenario_header,
     with_request_tags,
 )
-from reef.train.harness_backend.backend import StepProgress
-from reef.train.harness_backend.component import PROGRESS_FILE, STEPS_DIR, read_step_progress
-from reef.train.harness_backend.records import read_step_records
+from reef.train.harness_backend.backend import JobProgress
+from reef.train.harness_backend.component import JOB_RECORDS_DIR, PROGRESS_FILE, read_job_progress
+from reef.train.harness_backend.records import read_job_records
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -382,10 +382,10 @@ class RequestService:
         component = scenario.components.files_component
         return None if component is None else self._dispatcher.recipe.harness_state_dir(scenario.name, component)
 
-    def step_progress(self, scenario: Scenario) -> StepProgress | None:
+    def step_progress(self, scenario: Scenario) -> JobProgress | None:
         """The progress of the harness step that runs now, which the training component writes; None for none."""
         root = self.harness_state_dir(scenario)
-        return None if root is None else read_step_progress(root / PROGRESS_FILE)
+        return None if root is None else read_job_progress(root / PROGRESS_FILE)
 
     @staticmethod
     def files_trainer(scenario: Scenario) -> Trainer:
@@ -465,7 +465,7 @@ class RequestService:
         if not isinstance(directory, str):
             raise ValueError("invalid step record directory")
         try:
-            return read_step_records(root / STEPS_DIR, directory, relative)
+            return read_job_records(root / JOB_RECORDS_DIR, directory, relative)
         except FileNotFoundError as error:
             raise ArtifactNotFound("record file is not retained") from error
 
@@ -581,7 +581,7 @@ class RequestService:
             # The step's own clock, so a client shows the time in the step and not the time since it asked.
             "started_at": None if mine is None else mine.started_at,
             "runs_total": None if mine is None else mine.runs_total,
-            "step_record": None if mine is None else mine.step_record,
+            "step_record": None if mine is None else mine.job_record,
             # What the method has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],
         }

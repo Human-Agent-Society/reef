@@ -17,8 +17,8 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from tests.support.harness_jobs import harness_recipe
 from tests.support.harness_service import harness_repository
-from tests.support.harness_steps import harness_recipe
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.polling import wait_until
 from tests.support.records import report, token_inference

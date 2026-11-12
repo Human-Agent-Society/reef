@@ -1,31 +1,32 @@
-"""The harness backend: one evolution step, from the head tree to a snapshot.
+"""The harness backend: one evolution job, from the head tree to a snapshot.
 
-One step runs in three phases, one training job of the harness training
+One job runs in three phases. It is one training job of the harness training
 component (``reef.train.harness_backend.component``):
 
-``prepare_step``
-    Read the head tree, which the job names, and the step's evaluation tasks. The step's job data is its material: the traces of
-    traffic, and on an offline step the train tasks, which the step rolls
+``prepare_job``
+    Read the head tree, which the job names, and the job's evaluation tasks.
+    The job data is the job's material: the traces of
+    traffic, and on an offline job the train tasks, which the job rolls
     out on the head tree first. Write them to a fresh ``Workspace``, then
     ``propose`` runs the method in it:
 
-    1. Call ``Method.step`` once with the step's services, and keep its
-       model calls with the step record, even when it raises.
-    2. Read what the method says about its step from ``output/``, clipped
+    1. Call ``Method.run`` once with the job's services, and keep its
+       model calls with the job record, even when it raises.
+    2. Read what the method says about its job from ``output/``, clipped
        and redacted as the record keeps it, and its files from ``state/``.
     3. Read the tree it left in ``harness/``. An unchanged tree, or one that
-       fails validation for the adapter, skips the step.
+       fails validation for the adapter, skips the job.
     4. Add the tree to the history with its parent and the method's
        summary, and make it a ``HarnessCandidate`` against the head. On a
-       request step the method's ``requires`` join the request's, after
+       request job the method's ``requires`` join the request's, after
        the screens a person's items pass.
 ``evaluate``
     Score the sides that the publication policy names with
     ``HarnessTaskEvaluator`` (``reef.evaluation.harness``), which reuses
     the scores the history holds.
-``settle_step``
+``settle_job``
     Fold the decision into the state and the history. A selected tree is
-    the step's kept tree: an ``Artifact.local`` of its source tree, which the
+    the job's kept tree: an ``Artifact.local`` of its source tree, which the
     component saves as the job's checkpoint and the scenario committer stores
     as a git commit. The scenario's activation rule
     decides whether it serves, from the tree kinds it changes.
@@ -62,56 +63,56 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
-from reef.train.backend import ArtifactTextFiles, PreparedStep
+from reef.train.backend import ArtifactTextFiles, PreparedHarnessJob
 from reef.train.harness_backend.agent.run import AgentExecution
-from reef.train.harness_backend.calls import StepCalls, call_tokens
-from reef.train.harness_backend.contract import Method, StepContext
-from reef.train.harness_backend.records import CALLS_FILE, StepRecord
-from reef.train.harness_backend.services import StepServices
+from reef.train.harness_backend.calls import JobCalls, call_tokens
+from reef.train.harness_backend.contract import Method, MethodJob
+from reef.train.harness_backend.records import CALLS_FILE, JobRecord
+from reef.train.harness_backend.services import JobServices
 from reef.train.harness_backend.state import HarnessState
-from reef.train.harness_backend.workspace import StepOutput, Workspace
+from reef.train.harness_backend.workspace import JobOutput, Workspace
 from reef.train.types import JobData, TrainingCommit
 
-#: The phases of a running step, in order; only an offline step, which rolls out train tasks, has the first.
-STEP_PHASES = ("running tasks", "proposing", "evaluating")
+#: The phases of a running job, in order; only an offline job, which rolls out train tasks, has the first.
+JOB_PHASES = ("running tasks", "proposing", "evaluating")
 
 
 @dataclass(frozen=True)
-class StepProgress:
-    """Where the running step stands, for a page a person watches.
+class JobProgress:
+    """Where the running job stands, for a page a person watches.
 
-    Values: ``request_id`` names the request the step answers, ``None``
-    for an automatic step. ``phase`` is one of
-    ``STEP_PHASES``: ``"running tasks"`` while an offline step runs the head
+    Values: ``request_id`` names the request the job answers, ``None``
+    for an automatic job. ``phase`` is one of
+    ``JOB_PHASES``: ``"running tasks"`` while an offline job runs the head
     tree on its train tasks, ``"evaluating"`` while the evaluation's
     tasks run, and ``"proposing"`` at any other time from the moment the
-    step claims its record directory until a candidate exists.
-    ``started_at`` is the step's start in seconds since the epoch.
-    ``step_record`` is the step's record directory, which the step claims
+    job claims its record directory until a candidate exists.
+    ``started_at`` is the job's start in seconds since the epoch.
+    ``job_record`` is the job's record directory, which the job claims
     before it reports any progress.
     ``runs_total`` ≥ 0 is the run count of the runs or of the
     evaluation once its runs are laid out, else ``None``. ``activity``
     is what the method did so far, oldest first, each ``{at, kind, text}``
     with ``failed`` on a line that went wrong.
-    Purpose: the backend replaces it at each phase change; the harness training component writes it to the step's
+    Purpose: the backend replaces it at each phase change; the harness training component writes it to the job's
     progress file (``to_json``), and the request page reads it back (``from_json``).
     """
 
     request_id: str | None
     phase: str
     started_at: float
-    step_record: str
+    job_record: str
     runs_total: int | None = None
     activity: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.phase not in STEP_PHASES:
-            raise ValueError(f"StepProgress.phase must be one of {', '.join(STEP_PHASES)}")
-        if not isinstance(self.step_record, str) or not self.step_record:
-            raise ValueError("StepProgress.step_record must name the step's record directory")
+        if self.phase not in JOB_PHASES:
+            raise ValueError(f"JobProgress.phase must be one of {', '.join(JOB_PHASES)}")
+        if not isinstance(self.job_record, str) or not self.job_record:
+            raise ValueError("JobProgress.job_record must name the job's record directory")
         total = self.runs_total
         if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
-            raise ValueError("StepProgress.runs_total must be an integer of at least 0 or None")
+            raise ValueError("JobProgress.runs_total must be an integer of at least 0 or None")
 
     def to_json(self) -> dict[str, Any]:
         """The progress file's form of this value; ``from_json`` reads it back as an equal value."""
@@ -119,37 +120,37 @@ class StepProgress:
             "request_id": self.request_id,
             "phase": self.phase,
             "started_at": self.started_at,
-            "step_record": self.step_record,
+            "step_record": self.job_record,
             "runs_total": self.runs_total,
             "activity": [dict(line) for line in self.activity],
         }
 
     @classmethod
-    def from_json(cls, value: Mapping[str, Any]) -> StepProgress:
+    def from_json(cls, value: Mapping[str, Any]) -> JobProgress:
         """The value that ``to_json`` wrote; ``ValueError`` or ``KeyError`` for another mapping."""
         request_id = value["request_id"]
         return cls(
             request_id=None if request_id is None else str(request_id),
             phase=str(value["phase"]),
             started_at=float(value["started_at"]),
-            step_record=str(value["step_record"]),
+            job_record=str(value["step_record"]),
             runs_total=value["runs_total"],
             activity=tuple(dict(line) for line in value["activity"]),
         )
 
 
 @dataclass(frozen=True)
-class StepLimits:
-    """The deployment's budgets for harness steps.
+class JobLimits:
+    """The deployment's budgets for harness jobs.
 
     Values: every count is an integer ≥ 0, where 0 turns its limit off.
-    ``max_steps`` caps automatic steps; ``max_failure_streak`` skips
-    automatic steps after that many rejections in a row;
-    ``max_model_calls_per_step`` caps one step's model calls;
+    ``max_steps`` caps automatic jobs; ``max_failure_streak`` skips
+    automatic jobs after that many rejections in a row;
+    ``max_model_calls_per_step`` caps one job's model calls;
     ``max_runs_per_step`` caps the runs the method's
-    ``services.evaluate`` runs in one step.
+    ``services.evaluate`` runs in one job.
     Purpose: ``HarnessEvolutionRecipe`` builds it from ``evolution``; the
-    backend reads it in every step.
+    backend reads it in every job.
     """
 
     max_steps: int = 0
@@ -169,16 +170,16 @@ class StepLimits:
 
 
 class HarnessBackend(HarnessCandidateEvaluator):
-    """Evolve one harness component: one candidate per step, evaluated against the head tree.
+    """Evolve one harness component: one candidate per job, evaluated against the head tree.
 
-    Values: ``method`` is the deployment's ``Method``, the one part of a step that is not Reef's; methods never
-    subclass the backend. ``models`` are the scenario's model bindings for every step. ``agent`` is the
+    Values: ``method`` is the deployment's ``Method``, the one part of a job that is not Reef's; methods never
+    subclass the backend. ``models`` are the scenario's model bindings for every job. ``agent`` is the
     deployment's coding agent, ``None`` when it configured none or the method
     does not run it. ``evaluator`` is ``None`` when the deployment configured
     no scorer; then no task runs. ``task_directories`` says
     that the tasks are Harbor task directories.
     Purpose: ``HarnessEvolutionRecipe.build_backend`` makes one per scenario
-    component; the harness training component (``reef.train.harness_backend.component``) runs one step per job.
+    component; the harness training component (``reef.train.harness_backend.component``) runs each job.
     """
 
     def __init__(
@@ -191,8 +192,8 @@ class HarnessBackend(HarnessCandidateEvaluator):
         tasks: EvaluationTasks,
         history: History,
         models: ModelBindings,
-        limits: StepLimits,
-        records: StepRecord,
+        limits: JobLimits,
+        records: JobRecord,
         task_directories: bool,
     ) -> None:
         self.descriptor = descriptor
@@ -205,13 +206,13 @@ class HarnessBackend(HarnessCandidateEvaluator):
         self.limits = limits
         self.records = records
         self.task_directories = task_directories
-        # The selected tree of the step in flight, until the committer stored it.
+        # The selected tree of the job in flight, until the committer stored it.
         self.pending_artifact: Artifact | None = None
         #: Written by the training thread, read by the request page: each write is one assignment of a frozen value.
-        self.progress: StepProgress | None = None
-        self.step_calls: StepCalls | None = None
-        #: What the step that raised had reached, for the failed request's row.
-        self.failed_step: dict[str, Any] = {}
+        self.progress: JobProgress | None = None
+        self.job_calls: JobCalls | None = None
+        #: What the job that raised had reached, for the failed request's row.
+        self.failed_job: dict[str, Any] = {}
 
     # -- the candidate lifecycle ------------------------------------------------------------------------------------
 
@@ -219,7 +220,7 @@ class HarnessBackend(HarnessCandidateEvaluator):
         if self.evaluator is not None:
             self.evaluator.close()
 
-    def prepare_step(
+    def prepare_job(
         self,
         data: JobData,
         state: Mapping[str, Any],
@@ -227,21 +228,21 @@ class HarnessBackend(HarnessCandidateEvaluator):
         *,
         head: ArtifactTextFiles,
         seed_tasks: tuple[str, ...] | None = None,
-    ) -> PreparedStep:
-        """Step ``scenario_step + 1``'s candidate, or its skip, on ``head``. ``seed_tasks`` replaces the
-        evaluation's seed tasks for this step when it is set."""
+    ) -> PreparedHarnessJob:
+        """The candidate of job ``scenario_step + 1``, or its skip, on ``head``. ``seed_tasks`` replaces the
+        evaluation's seed tasks for this job when it is set."""
         self.progress = None
-        self.failed_step = {}
+        self.failed_job = {}
         try:
             prepared = self.prepare(data, HarnessState.from_json(state), scenario_step + 1, head, seed_tasks)
         except BaseException:
             if self.progress is not None:
                 # The failed row keeps the phase it reached and the record directory the attempt wrote.
-                self.failed_step = {"failed_stage": self.progress.phase, "step_record": self.progress.step_record}
+                self.failed_job = {"failed_stage": self.progress.phase, "step_record": self.progress.job_record}
             self.progress = None
             raise
         if prepared.outcome != "candidate" or self.progress is None:
-            # A skip ends the step here: neither settle_step nor abort_step follows it.
+            # A skip ends the job here: neither settle_job nor abort_job follows it.
             self.progress = None
         else:
             self.progress = replace(self.progress, phase="evaluating")
@@ -254,9 +255,9 @@ class HarnessBackend(HarnessCandidateEvaluator):
         step: int,
         head: ArtifactTextFiles,
         seed_tasks: tuple[str, ...] | None,
-    ) -> PreparedStep:
-        """Step ``step``'s candidate on ``head``, or the skip and its reason; ``seed_tasks`` as ``prepare_step``."""
-        # The step's material: the traces of traffic, and on an offline step the train tasks it rolls out.
+    ) -> PreparedHarnessJob:
+        """The candidate of job ``step`` on ``head``, or the skip and its reason; ``seed_tasks`` as ``prepare_job``."""
+        # The job's material: the traces of traffic, and on an offline job the train tasks it rolls out.
         samples = tuple(sample for sample in data.samples if isinstance(sample, TrajectorySample))
         train_tasks = tuple(str(sample.task_path) for sample in data.samples if isinstance(sample, TaskSample))
         metrics: dict[str, Any] = {"traces": len(samples)}
@@ -270,30 +271,30 @@ class HarnessBackend(HarnessCandidateEvaluator):
         head_tree = HarnessTree(head.files)
         metrics["head_checksum"] = head_tree.checksum()
         self.history.add_candidate(head_tree, step=step, origin="release" if self.history.candidates else "seed")
-        step_tasks = self.tasks.for_step(samples, state.collected_tasks, state.collected_clients, seed=seed_tasks)
+        job_tasks = self.tasks.for_job(samples, state.collected_tasks, state.collected_clients, seed=seed_tasks)
         state = replace(
-            state, collected_tasks=step_tasks.collected_tasks, collected_clients=step_tasks.collected_clients
+            state, collected_tasks=job_tasks.collected_tasks, collected_clients=job_tasks.collected_clients
         )
-        metrics.update({"evaluation_task_count": len(step_tasks.tasks), "screened_tasks": step_tasks.screened})
-        step_dir = self.records.claim(step)
-        metrics["step_record"] = str(step_dir)
-        calls = StepCalls(self.limits.max_model_calls_per_step, [])
-        self.step_calls = calls
-        self.progress = StepProgress(
+        metrics.update({"evaluation_task_count": len(job_tasks.tasks), "screened_tasks": job_tasks.screened})
+        job_dir = self.records.claim(step)
+        metrics["step_record"] = str(job_dir)
+        calls = JobCalls(self.limits.max_model_calls_per_step, [])
+        self.job_calls = calls
+        self.progress = JobProgress(
             request_id=None if data.request is None else data.request.id,
             phase="proposing",
             started_at=time.time(),
-            step_record=str(step_dir),
+            job_record=str(job_dir),
         )
         task_runs = self.run_train_tasks(head_tree, train_tasks, step) if train_tasks else ()
         workspace = Workspace.create(
-            step_dir,
+            job_dir,
             history_dir=self.history.root,
             step=step,
             tree=head_tree,
             descriptor=self.descriptor,
             task_directories=self.task_directories,
-            tasks=step_tasks.tasks,
+            tasks=job_tasks.tasks,
             repeats=0 if self.evaluator is None else self.evaluator.task_repeats,
             samples=samples,
             runs=task_runs,
@@ -303,7 +304,7 @@ class HarnessBackend(HarnessCandidateEvaluator):
         return self.propose(
             workspace,
             head=head_tree,
-            evaluation_tasks=step_tasks.tasks,
+            evaluation_tasks=job_tasks.tasks,
             data=data,
             state=state,
             calls=calls,
@@ -318,30 +319,30 @@ class HarnessBackend(HarnessCandidateEvaluator):
         evaluation_tasks: tuple[str, ...],
         data: JobData,
         state: HarnessState,
-        calls: StepCalls,
+        calls: JobCalls,
         metrics: dict[str, Any],
-    ) -> PreparedStep:
-        """Run the method in ``workspace`` on ``head``: the step's candidate, or the skip and its reason.
+    ) -> PreparedHarnessJob:
+        """Run the method in ``workspace`` on ``head``: the job's candidate, or the skip and its reason.
 
-        The candidate is evaluated on ``evaluation_tasks``. ``state`` is the step's state, and the returned step's
-        state carries the method's files from ``state/``. ``calls`` is the step's call record, and ``metrics``
+        The candidate is evaluated on ``evaluation_tasks``. ``state`` is the job's state, and the returned job's
+        state carries the method's files from ``state/``. ``calls`` is the job's call record, and ``metrics``
         gains the method's calls, runs and words.
         """
-        services = StepServices(
+        services = JobServices(
             workspace=workspace,
             descriptor=self.descriptor,
             evaluator=self.evaluator,
             history=self.history,
             head=head.checksum(),
             models=self.models,
-            step_calls=calls,
+            job_calls=calls,
             max_runs=self.limits.max_runs_per_step,
             agent=self.agent,
         )
         try:
-            self.method.step(StepContext(workspace, services))
+            self.method.run(MethodJob(workspace, services))
         finally:
-            # Written even when the step raised: the calls before the failure are the step's record.
+            # Written even when the job raised: the calls before the failure are the job's record.
             self.records.write(workspace.root, CALLS_FILE, calls.entries)
             shutil.rmtree(workspace.scratch, ignore_errors=True)
             metrics["model_calls"] = len(calls.entries)
@@ -382,10 +383,10 @@ class HarnessBackend(HarnessCandidateEvaluator):
             evaluation_tasks=evaluation_tasks,
             step=workspace.step,
         )
-        return PreparedStep.with_candidate(candidate, state=state.to_json(), metrics=metrics)
+        return PreparedHarnessJob.with_candidate(candidate, state=state.to_json(), metrics=metrics)
 
     @staticmethod
-    def read_output(workspace: Workspace, metrics: dict[str, Any]) -> StepOutput:
+    def read_output(workspace: Workspace, metrics: dict[str, Any]) -> JobOutput:
         """What the method wrote to ``output/``, rewritten as the record keeps it: redacted and clipped."""
         output = workspace.read_output()
         workspace.write_output(clip_record_text(output.summary), clip_record_value(output.notes), output.requires)
@@ -398,13 +399,13 @@ class HarnessBackend(HarnessCandidateEvaluator):
         return output
 
     def run_train_tasks(self, head: HarnessTree, tasks: Sequence[str], step: int) -> tuple[RunRecord, ...]:
-        """One run record of ``head`` on each of an offline step's train ``tasks``, in task order.
+        """One run record of ``head`` on each of an offline job's train ``tasks``, in task order.
 
         The runs go through the score cache, as an evaluation's do: a run of the same tree, task and
         evaluation context that the history holds is reused. ``RuntimeError`` without a scorer.
         """
         if self.evaluator is None:
-            raise RuntimeError("an offline step rolls out its train tasks, which needs evolution.evaluation.scorer")
+            raise RuntimeError("an offline job rolls out its train tasks, which needs evolution.evaluation.scorer")
         if self.progress is not None:
             self.progress = replace(self.progress, phase="running tasks", runs_total=len(tasks))
         records = self.evaluator.runs(head, tasks, repeats=1, step=step)
@@ -421,11 +422,11 @@ class HarnessBackend(HarnessCandidateEvaluator):
             self.progress = replace(self.progress, phase="evaluating", runs_total=total)
         return self.evaluator.evaluate(harness_candidate, sides=sides)
 
-    def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainingCommit:
-        """Fold ``decision`` into the state and the history; a selected tree is the step's kept tree.
+    def settle_job(self, prepared: PreparedHarnessJob, decision: SelectionDecision) -> TrainingCommit:
+        """Fold ``decision`` into the state and the history; a selected tree is the job's kept tree.
 
-        The head the step prepared against is ``prepared.metrics["head_checksum"]``; no activation, new training
-        start, import or sync moves it while a step runs. The commit keeps the evaluation's sums, not its score
+        The head the job prepared against is ``prepared.metrics["head_checksum"]``; no activation, new training
+        start, import or sync moves it while a job runs. The commit keeps the evaluation's sums, not its score
         vectors: the history holds every run. The metrics gain ``selected`` and ``selection``: the candidate
         id, the decision's ``selected``, ``policy``, ``reason`` and ``metrics``, and the ``evaluation`` that the
         decision read without its metrics (``evaluator``, ``evaluator_version``, ``metadata``). A rejected
@@ -483,12 +484,12 @@ class HarnessBackend(HarnessCandidateEvaluator):
         self.pending_artifact = artifact
         return TrainingCommit(state.to_json(), metrics, artifact=artifact)
 
-    def abort_step(self, prepared: PreparedStep) -> None:
+    def abort_job(self, prepared: PreparedHarnessJob) -> None:
         self.progress = None
         candidate = require_harness_candidate(prepared.candidate)
         # The candidate reached its evaluation: the failed row keeps what changed, the method's notes and the
         # record directory, and says where it stopped.
-        self.failed_step = {
+        self.failed_job = {
             "failed_stage": "evaluating",
             "patch": clip_record_value(candidate.patch.to_json()),
             "patch_parts": self.descriptor.layout.part_names(candidate.patch.changes),
@@ -500,18 +501,18 @@ class HarnessBackend(HarnessCandidateEvaluator):
         }
 
     def discard_kept_tree(self) -> None:
-        """Discard the local source tree of the step's kept tree, once its job's checkpoint holds a copy."""
+        """Discard the local source tree of the job's kept tree, once the job's checkpoint holds a copy."""
         if self.pending_artifact is not None:
             self.pending_artifact.discard()
             self.pending_artifact = None
 
-    def failed_step_metrics(self) -> Mapping[str, Any]:
-        return dict(self.failed_step)
+    def failed_job_metrics(self) -> Mapping[str, Any]:
+        return dict(self.failed_job)
 
     @property
-    def step_progress(self) -> StepProgress | None:
-        """Where the running step stands, with the method's activity so far; ``None`` when no step runs."""
-        progress, calls = self.progress, self.step_calls
+    def job_progress(self) -> JobProgress | None:
+        """Where the running job stands, with the method's activity so far; ``None`` when no job runs."""
+        progress, calls = self.progress, self.job_calls
         if progress is None or calls is None:
             return progress
         return replace(progress, activity=calls.activity())
@@ -524,7 +525,7 @@ def screened_requires(
 
     An added item whose name a person's item in ``base`` already has is dropped: the person's copy wins. An item
     whose name, check or prompt carries a credential-shaped literal or an instruction override is refused, each
-    refusal as ``{item, reason}``, so the step records it; the others are kept in order.
+    refusal as ``{item, reason}``, so the job records it; the others are kept in order.
     """
     names = {str(item.get("name")) for item in base}
     kept: list[dict[str, Any]] = []
@@ -544,9 +545,9 @@ def screened_requires(
     return kept, refused
 
 
-def skipped(state: HarnessState, metrics: Mapping[str, Any], reason: str) -> PreparedStep:
-    """A step that ends without a candidate, keeping ``state`` and saying why."""
-    return PreparedStep.skipped(state=state.to_json(), metrics={**metrics, "skipped": reason})
+def skipped(state: HarnessState, metrics: Mapping[str, Any], reason: str) -> PreparedHarnessJob:
+    """A job that ends without a candidate, keeping ``state`` and saying why."""
+    return PreparedHarnessJob.skipped(state=state.to_json(), metrics={**metrics, "skipped": reason})
 
 
 def require_harness_candidate(candidate: UpdateCandidate | None) -> HarnessCandidate:
@@ -555,4 +556,4 @@ def require_harness_candidate(candidate: UpdateCandidate | None) -> HarnessCandi
     return candidate
 
 
-__all__ = ["STEP_PHASES", "HarnessBackend", "StepLimits", "StepProgress", "screened_requires"]
+__all__ = ["JOB_PHASES", "HarnessBackend", "JobLimits", "JobProgress", "screened_requires"]

@@ -1,18 +1,18 @@
-"""``AgentMethod``: a method that is a folder of prompts, which the deployment's coding agent runs each step.
+"""``AgentMethod``: a method that is a folder of prompts, which the deployment's coding agent runs each job.
 
-The folder holds ``START.md``, the prompt of a step; ``RESUME.md``, the
-prompt of a step whose ``state/`` holds files from an earlier step
+The folder holds ``START.md``, the prompt of a job; ``RESUME.md``, the
+prompt of a job whose ``state/`` holds files from an earlier job
 (``START.md`` when the folder has none); and the agent's own harness tree,
 such as its ``rules.md`` and ``skills/<name>/SKILL.md``, which Reef renders
 for the agent's adapter after its protocol rules. A ``README.md`` is for
 people and is not given to the agent. In a prompt, ``{step}`` becomes the
-step's number and ``{history}`` the history's path from the workspace.
+job's number and ``{history}`` the history's path from the workspace.
 Every other file of the folder is a file of the agent's tree; a run refuses
 one that no part of the agent's adapter takes.
 
-Each step runs the agent once (``Services.run_agent``). The tree it leaves in
+Each job runs the agent once (``Services.run_agent``). The tree it leaves in
 ``harness/`` is the candidate; a run that does not exit 0 leaves the head
-tree, so the step skips. The agent says what the step did in ``output/``
+tree, so the job skips. The agent says what the job did in ``output/``
 (``summary.md``, ``notes.json``, ``requires.json``), as every method does;
 the method adds the run's outcome to the notes under ``agent``.
 """
@@ -29,7 +29,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.agent.run import fill
-from reef.train.harness_backend.contract import Method, StepContext
+from reef.train.harness_backend.contract import Method, MethodJob
 from reef.train.harness_backend.workspace import NOTES_FILE, SUMMARY_FILE, json_object, output_text
 
 START_FILE = "START.md"
@@ -59,10 +59,10 @@ class AgentMethodSettings(PluginSettings):
 
 
 class AgentMethod(Method):
-    """A method that is a folder of prompts, which the deployment's coding agent runs each step.
+    """A method that is a folder of prompts, which the deployment's coding agent runs each job.
 
-    Values: ``start`` is the prompt of a step and ``resume`` the prompt of a
-    step that continues from ``state/``, ``None`` to use ``start``. ``tree``
+    Values: ``start`` is the prompt of a job and ``resume`` the prompt of a
+    job that continues from ``state/``, ``None`` to use ``start``. ``tree``
     is the agent's own harness tree, and ``model`` the binding it runs on.
     Purpose: a deployment names ``reef.train.harness_backend:AgentMethod``
     in ``evolution.method`` with the folder in its config.
@@ -92,8 +92,8 @@ class AgentMethod(Method):
         # The rest is the agent's own tree; rendering it for the agent's adapter refuses a file no part takes.
         return cls(start, resume, HarnessTree(files), settings.model)
 
-    def step(self, context: StepContext) -> None:
-        workspace, services = context.workspace, context.services
+    def run(self, job: MethodJob) -> None:
+        workspace, services = job.workspace, job.services
         head = workspace.tree()
         prompt = self.start
         if self.resume is not None and any(workspace.state.iterdir()):
