@@ -302,7 +302,9 @@ Live objects
 The process that runs a service builds the objects that run the recipe, and
 holds them in one frozen ``LiveObjects`` value. The service assembly builds it
 (``reef.service.assembly.load_deployment`` returns the recipe and the value),
-and ``Dispatcher(recipe, backend_factory, live=live, ...)`` receives it.
+and ``Dispatcher(recipe, backend_factory, live=live, ...)`` receives it. The
+inference service calls ``load_serving_deployment``, which builds no training
+component for a backend that states its facts.
 
 .. list-table::
    :header-rows: 1
@@ -314,8 +316,13 @@ and ``Dispatcher(recipe, backend_factory, live=live, ...)`` receives it.
      - the serving ``InferenceRuntime``, or ``None``
    * - ``training_component``
      - the ``TrainingComponent`` that runs the jobs of the recipe that trains
-       weights, or ``None``; a ``WeightTrainingRecipe`` needs it and the
-       runtime (``check_recipe_objects`` raises ``RecipeConfigError``)
+       weights, or ``None``; a ``WeightTrainingRecipe`` needs the runtime,
+       and this component or ``training_facts`` (``check_recipe_objects``
+       raises ``RecipeConfigError``)
+   * - ``training_facts``
+     - the ``TrainingBackendFacts`` of that recipe's backend, in a process
+       that built them in place of the component, or ``None``; at most one of
+       ``training_component`` and ``training_facts`` is set
    * - ``harness_component``
      - the training component that runs the jobs of the harness recipe, or
        ``None``
@@ -334,7 +341,9 @@ The same module holds the functions that need a recipe and a live object:
 - ``scenario_components(recipe, live, scenario)`` gives the components of a
   deployment's scenario: ``recipe.build_components(scenario)``, with the kind
   of the weight component from the runtime (``served_weight_kind``) and its
-  layout from the training component (``TrainingArtifactLayout``).
+  layout from the training component (``TrainingArtifactLayout``). A process
+  that holds ``training_facts`` gets a ``TrainingFactsLayout``: it answers
+  ``resolves_references`` and checks no import.
 - ``default_start(recipe, live)`` gives the root content of a new scenario:
   the training component's untrained checkpoint for a weight recipe, each
   component's start under its directory for a composite, and
@@ -2242,7 +2251,10 @@ its name, artifact format, default start inputs, parameters schema, root start
 check, and whether scenarios and jobs share it.
 The HTTP service builds the training component first, then the serving
 runtime that ``reef.service.deploy.serving.serving_runtime_config`` describes
-from the ``inference`` settings and the component's ``artifact_format``.
+from the ``inference`` settings and the component's ``artifact_format``. The
+inference service of a split deployment reads the ``artifact_format`` of the
+facts and builds no component; it builds the component only for a backend
+whose ``facts`` returns ``None``.
 
 Each side owns its contracts. The inference contracts are the modules at the
 root of ``reef.inference``: ``interfaces`` (inference contracts and runtime

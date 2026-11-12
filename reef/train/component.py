@@ -32,7 +32,7 @@ from reef.artifact.components import ArtifactLayout
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.config import ConfiguredFactory
-from reef.core.errors import RuntimeConfigError
+from reef.core.errors import InternalError, RuntimeConfigError
 from reef.core.job_data import JobData
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
@@ -512,6 +512,41 @@ class TrainingArtifactLayout(ArtifactLayout):
     @property
     def resolves_references(self) -> bool:
         return self.component.artifact_format is not None
+
+
+@dataclass(frozen=True)
+class TrainingFactsLayout(ArtifactLayout):
+    """The layout of the snapshots of the backend of ``facts``, in a process that built no training component.
+
+    Values: ``facts`` is the ``TrainingBackendFacts`` of the deployment's training backend.
+
+    Let ``component`` be the backend's ``TrainingComponent`` of the same settings. ``resolves_references`` equals
+    ``TrainingArtifactLayout(component).resolves_references``: it is true exactly when ``facts.artifact_format`` is
+    not None. The check of an artifact is not among the facts (``TrainingComponent.check_artifact`` asks the
+    backend's service for some backends), so this type answers no check: ``check(files)`` raises ``InternalError``
+    for every ``files``, and so does ``stored``. The error is no ``ValueError``, so no caller reads it as a refusal
+    of the files.
+
+    Purpose: ``reef.scenario.live_objects.scenario_components`` binds it on the weight component in a process that
+    holds the facts and no component. That is the inference service, which loads artifacts that control admitted
+    and stores no import.
+    """
+
+    facts: TrainingBackendFacts
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.facts, TrainingBackendFacts):
+            raise TypeError(f"facts must be TrainingBackendFacts, got {type(self.facts).__name__}")
+
+    def check(self, files: ArtifactFiles) -> None:
+        raise InternalError(
+            f"this process built no {self.facts.name} training component, so it checks no imported artifact; "
+            "the control service checks an import"
+        )
+
+    @property
+    def resolves_references(self) -> bool:
+        return self.facts.artifact_format is not None
 
 
 class TrainingComponentFactory(ConfiguredFactory):

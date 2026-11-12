@@ -45,6 +45,7 @@ from reef.service.assembly import (
     build_task_files,
     default_served_url,
     load_deployment,
+    load_serving_deployment,
     open_scenario_storage,
     open_service_coordination,
     with_harness_components,
@@ -81,10 +82,13 @@ class ControlApp(ComponentApp):
 
 
 class InferenceApp(ComponentApp):
-    """The inference service owns runtime startup and serves requests from published routes."""
+    """The inference service owns runtime startup and serves requests from published routes.
+
+    It runs no training job, so it builds no training component for a backend that states its facts
+    (``load_serving_deployment``)."""
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
-        recipe, live = load_deployment(settings, environ)
+        recipe, live = load_serving_deployment(settings, environ)
         runtime = live.runtime
         coordination = open_service_coordination(settings)
         try:
