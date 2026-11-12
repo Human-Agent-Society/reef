@@ -33,6 +33,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     source_of,
     sources,
     stand_in_e2b_package,
+    state,
     write_workspace_task,
 )
 from tests.support.task_service_stubs import task_for
@@ -466,10 +467,11 @@ def test_claude_task_names_session_and_transcript_not_a_record(tmp_path: Path, r
     assert "all 1 checks are used" in spent, "max_checks holds on the host"
     assert isinstance(result, RolledOutTask)
     task = result.task
-    transcript = f"runs/00000-000/claude/projects/-home-user-reef-00000-000-workspace/{SESSION_ID}.jsonl"
+    transcript = f"{SESSION_ID}.jsonl"
     assert task.source_agent_record_ids == ("session-1",) and "designer_record_id" not in task.metadata
     assert task.metadata["designer_transcript"] == transcript and task.metadata["designer_harness"] == "claude-code"
-    assert (tmp_path / "state" / transcript).is_file()
+    # The run's directory is gone; the state keeps the transcript as saved files.
+    assert (state(tmp_path).files(task.metadata["designer_transcript_files"]) / transcript).is_file()
     [proposal] = report(tmp_path)["proposals"]
     assert proposal["designer_record_id"] == "" and proposal["task_name"] == task.name
 
@@ -528,6 +530,7 @@ def test_adaptive_config_builds_claude_code_as_a_variant_author(tmp_path: Path) 
         generating_config(tmp_path, author_harness="claude-code", adaptive=True, count=2),
         scenario="one",
         environ={"E2B_API_KEY": "e2b-test", "CLAUDE_CODE_OAUTH_TOKEN": TOKEN},
+        state=state(tmp_path),
     )
     assert generator.is_adaptive and isinstance(generator.author, ClaudeCodeAuthor)
     assert generator.variant_author is generator.author
@@ -736,7 +739,10 @@ def test_claude_config_refusals(
 ) -> None:
     with pytest.raises(PluginConfigError, match=message) as raised:
         AutoEnvScalingGenerator.from_config(
-            generating_config(tmp_path, **fields), scenario="one", environ={"E2B_API_KEY": "e2b-test", **environ}
+            generating_config(tmp_path, **fields),
+            scenario="one",
+            environ={"E2B_API_KEY": "e2b-test", **environ},
+            state=state(tmp_path),
         )
     assert TOKEN not in str(raised.value) and "leak-me" not in str(raised.value)
 
@@ -754,11 +760,12 @@ def test_env_from_refuses_every_variable_the_run_sets(tmp_path: Path, reef_url: 
                 generating_config(tmp_path, **fields),
                 scenario="one",
                 environ={**environ, name: TOKEN if name == "CLAUDE_CODE_OAUTH_TOKEN" else "0"},
+                state=state(tmp_path),
             )
     # A variable of the deployment's own still reaches the sandbox.
     fields = {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": ["OWNER_SETTING"]}}
     generator = AutoEnvScalingGenerator.from_config(
-        generating_config(tmp_path, **fields), scenario="one", environ=environ
+        generating_config(tmp_path, **fields), scenario="one", environ=environ, state=state(tmp_path)
     )
     assert isinstance(generator.author, ClaudeCodeAuthor)
     assert dict(generator.author.executor.env) == {"OWNER_SETTING": "1"}
@@ -769,11 +776,12 @@ def test_claude_config_builds_claude_code_on_the_agent_settings(tmp_path: Path) 
         generating_config(tmp_path, author_harness="claude-code", claude_token_env="OWNER_TOKEN", max_model_calls=80),
         scenario="one",
         environ={"E2B_API_KEY": "e2b-test", "OWNER_TOKEN": f"{TOKEN}\n", "REEF_TOKEN": "reef-token"},
+        state=state(tmp_path),
     )
     author = generator.author
     assert isinstance(author, ClaudeCodeAuthor)
     assert (author.claude_token, author.model, author.max_turns) == (TOKEN, "opus", 80)
-    assert author.reef.token == "reef-token" and author.cache_dir == tmp_path / "state" / "one" / "repositories"
+    assert author.reef.token == "reef-token" and author.cache_dir == Path(generator.temporary.name) / "repositories"
 
 
 def test_stop_signal_closes_claude_sandbox(tmp_path: Path, reef_url: str) -> None:

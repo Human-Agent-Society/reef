@@ -23,8 +23,10 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     autoenvscaling,
     fenced,
     generating_config,
+    report,
     serving_reef,
     stand_in_e2b_package,
+    state,
 )
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator, task_for
 
@@ -81,7 +83,10 @@ def closed_with(generator: AutoEnvScalingGenerator, task: HarborTask, errors: tu
         asyncio.run(generator.service.write_task(task))
         result = RolledOutTask(task, (0.0, 1.0))
     asyncio.run(generator.record_results((result,), generation=0))
-    return json.loads((generator.state_dir / f"generation-{generator.generation:05d}.json").read_text())
+    document = generator.state.read(f"report/{generator.generation:05d}")
+    assert document is not None
+    closed: dict[str, Any] = json.loads(document)
+    return closed
 
 
 @pytest.mark.parametrize("is_refusing", [True, False])
@@ -214,6 +219,7 @@ def test_the_configured_review_refuses_by_default_and_only_a_refusing_one_reache
             generating_config(tmp_path, count=1, agent_reef_url=reef_url(reef), **fields),
             scenario="autoenvscaling",
             environ={"E2B_API_KEY": "e2b-test"},
+            state=state(tmp_path),
         )
         # The agent and the generator service are stand-ins; the review is the configured one.
         author = StandInAuthor()
@@ -249,12 +255,18 @@ def test_from_config_refuses_check_settings_that_cannot_run(
 ) -> None:
     with pytest.raises(PluginConfigError, match=message):
         AutoEnvScalingGenerator.from_config(
-            generating_config(tmp_path, **fields), scenario="one", environ={"E2B_API_KEY": "e2b-test"}
+            generating_config(tmp_path, **fields),
+            scenario="one",
+            environ={"E2B_API_KEY": "e2b-test"},
+            state=state(tmp_path),
         )
     if fields == {"agent_api": "anthropic"}:
         # Without the review, the agent may ask in any dialect.
         AutoEnvScalingGenerator.from_config(
-            generating_config(tmp_path, review=False, **fields), scenario="one", environ={"E2B_API_KEY": "e2b-test"}
+            generating_config(tmp_path, review=False, **fields),
+            scenario="one",
+            environ={"E2B_API_KEY": "e2b-test"},
+            state=state(tmp_path),
         )
 
 
@@ -332,6 +344,7 @@ def test_calibration_runs_only_after_the_other_checks_pass(
             generating_config(tmp_path, count=1, agent_reef_url=reef_url(reef), calibration="refuse"),
             scenario="autoenvscaling",
             environ={"E2B_API_KEY": "e2b-test"},
+            state=state(tmp_path),
         )
         monkeypatch.setattr(generator, "author", StandInAuthor())
         _, errors = validated(generator)
@@ -516,7 +529,7 @@ def test_a_failed_rollout_request_stops_the_round_and_the_next_attempt_starts_ag
         asyncio.run(generator.validate(task))
     assert not (tmp_path / "tasks" / NAMES[0]).exists(), "no copy is left"
     asyncio.run(generator.record_results((), generation=0))
-    document = json.loads((generator.state_dir / "generation-00000.json").read_text())
+    document = report(tmp_path)
     assert document["error"] == f"the check of {NAMES[0]} could not run: {error}"
     [proposal] = document["proposals"]
     assert proposal["stage"] == "unreached" and [check["check"] for check in proposal["checks"]] == ["oracle"]
@@ -596,6 +609,7 @@ def contamination_from_config(
         generating_config(tmp_path, count=1, contamination_tasks_path=str(root), **fields),
         scenario="autoenvscaling",
         environ={"E2B_API_KEY": "e2b-test"},
+        state=state(tmp_path),
     )
     monkeypatch.setattr(generator, "author", StandInAuthor())
     return generator
@@ -736,7 +750,10 @@ def test_a_contaminated_task_costs_no_review_call_and_no_calibration_rollout(
 @pytest.mark.parametrize("fields", [{}, yaml.safe_load("contamination: off\ncontamination_tasks_path: missing")])
 def test_contamination_is_off_by_default_and_adds_no_check(tmp_path: Path, fields: dict[str, object]) -> None:
     generator = AutoEnvScalingGenerator.from_config(
-        generating_config(tmp_path, **fields), scenario="one", environ={"E2B_API_KEY": "e2b-test"}
+        generating_config(tmp_path, **fields),
+        scenario="one",
+        environ={"E2B_API_KEY": "e2b-test"},
+        state=state(tmp_path),
     )
     assert [check.name for check in generator.task_checks] == ["oracle", "review"]
 
@@ -753,6 +770,7 @@ def test_from_config_takes_the_ngram_size_and_a_tasks_path_under_home(
         ),
         scenario="one",
         environ={"E2B_API_KEY": "e2b-test"},
+        state=state(tmp_path),
     )
     [check] = [check for check in generator.task_checks if check.name == "contamination"]
     result = asyncio.run(check.run(task_for("harbor-00000-000", "r", 8471), WrittenTask(tmp_path, "t", "d")))
@@ -800,7 +818,10 @@ def test_from_config_refuses_contamination_settings_that_cannot_run(
     paths = {"contamination_tasks_path": str(tmp_path / path)} if isinstance(path, str) and path else {}
     with pytest.raises(PluginConfigError, match=message):
         AutoEnvScalingGenerator.from_config(
-            generating_config(tmp_path, **{**fields, **paths}), scenario="one", environ={"E2B_API_KEY": "e2b-test"}
+            generating_config(tmp_path, **{**fields, **paths}),
+            scenario="one",
+            environ={"E2B_API_KEY": "e2b-test"},
+            state=state(tmp_path),
         )
 
 
@@ -841,7 +862,8 @@ def test_generator_rejects_a_calibration_with_a_different_band(tmp_path: Path) -
             service=service,
             author=generator.author,
             sources=generator.sources,
-            state_dir=generator.state_dir,
+            state=generator.state,
+            temporary=generator.temporary,
             band=checks.PassRateBand(0.1, 0.9),
             calibration=calibration(service),
         )

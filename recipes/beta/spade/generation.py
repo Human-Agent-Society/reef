@@ -6,7 +6,7 @@ regret of Sec. 4.2 into the frontier (the hint turns losses into wins), the mast
 the out of reach (lost even with it), so the next environment lands where the agent fails without a hint
 and passes with one. ``experience_text`` is that section of the prompt; the generic task designer in
 ``reef.record2sample.generator`` carries it as data. The rest of this module is the bookkeeping of one generation,
-which ``SpadeTaskGenerator`` writes under its state directory and reads back after a restart.
+which ``SpadeTaskGenerator`` keeps as a report document in its state and reads back after a restart.
 """
 
 from __future__ import annotations
@@ -15,7 +15,6 @@ import json
 import statistics
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from pathlib import Path
 from typing import Literal
 
 from reef.core.prompts import untrusted_text
@@ -27,7 +26,6 @@ INSTRUCTION_EXCERPT_CHARS = 1200
 RECORDED_EXCERPT_CHARS = 600
 MASTERED_RETURN = 0.9
 TOO_HARD_RETURN = 0.1
-REPORT_PREFIX = "generation-"
 
 
 class GenerationError(RuntimeError):
@@ -169,7 +167,7 @@ class TaskMeasure:
 
 @dataclass(frozen=True)
 class GenerationRecord:
-    """What one generation produced, as its report file keeps it."""
+    """What one generation produced, as its report document keeps it."""
 
     generation: int
     proposals: tuple[ProposalRecord, ...]
@@ -191,14 +189,9 @@ def mean_reward(rewards: Sequence[float]) -> float:
     return statistics.fmean(rewards) if rewards else 0.0
 
 
-def report_path_for(state_dir: Path, generation: int) -> Path:
-    return Path(state_dir) / f"{REPORT_PREFIX}{generation:05d}.json"
-
-
-def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
-    """Keep every proposal, refusal and measure of one generation, and the experience the next generation's prompts take."""
-    state_dir = Path(state_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
+def generation_report(record: GenerationRecord) -> str:
+    """The report document of one generation: every proposal, refusal and measure, and the experience the next
+    generation's prompts take."""
     document = {
         "generation": record.generation,
         "error": record.error,
@@ -217,34 +210,22 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
         ],
         "experience": [asdict(measure.record) for measure in record.measures],
     }
-    path = report_path_for(state_dir, record.generation)
-    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    return path
+    return json.dumps(document, indent=2) + "\n"
 
 
-def load_experience(report_path: Path) -> tuple[PlayRecord, ...]:
-    """The play records a generation report holds, for the next generation's prompts."""
+def load_experience(report: str) -> tuple[PlayRecord, ...]:
+    """The play records that the generation report ``report`` holds, for the next generation's prompts.
+
+    Raises ``GenerationError`` if ``report`` is not a generation report.
+    """
     try:
-        document = json.loads(Path(report_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise GenerationError(f"{report_path} is not a generation report: {exc}") from exc
+        document = json.loads(report)
+    except ValueError as exc:
+        raise GenerationError(f"the text is not a generation report: {exc}") from exc
     records = document.get("experience") if isinstance(document, dict) else None
     if not isinstance(records, list):
-        raise GenerationError(f"{report_path} holds no experience")
+        raise GenerationError("the generation report holds no experience")
     try:
         return tuple(PlayRecord(**record) for record in records)
     except (TypeError, ValueError) as exc:
-        raise GenerationError(f"{report_path} holds a record the Designer cannot take: {exc}") from exc
-
-
-def recorded_generations(state_dir: Path) -> tuple[int, ...]:
-    """The generations whose reports are under the state directory, in order."""
-    state_dir = Path(state_dir)
-    if not state_dir.is_dir():
-        return ()
-    numbers = []
-    for path in sorted(state_dir.glob(f"{REPORT_PREFIX}*.json")):
-        stem = path.name[len(REPORT_PREFIX) : -len(".json")]
-        if stem.isdigit():
-            numbers.append(int(stem))
-    return tuple(numbers)
+        raise GenerationError(f"the generation report holds a record the Designer cannot take: {exc}") from exc
