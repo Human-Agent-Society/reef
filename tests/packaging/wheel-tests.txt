@@ -53,6 +53,7 @@ tests/inference/test_adapter_names.py
 tests/inference/test_adapter_residency.py
 tests/inference/test_http.py
 tests/inference/test_inference_admission.py
+tests/inference/test_inference_features.py
 tests/inference/test_inference_recovery.py
 tests/inference/test_runtime_kinds.py
 tests/inference/test_runtime_load_id.py

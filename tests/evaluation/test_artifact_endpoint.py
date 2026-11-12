@@ -30,6 +30,13 @@ class RefusingHandler(InferenceHandler):
 
 
 class Runtime(InferenceRuntime):
+    """A runtime without engines that answers through ``RefusingHandler``.
+
+    Values: ``any_artifact`` is ``serves_any_artifact``. With it, ``artifact_model`` names the base model at the
+    artifact's revision; without it, the base refusal applies. ``activate_checkpoint`` loads nothing and returns
+    "load-0". Purpose: the tests build an ``ArtifactEndpoint`` on it.
+    """
+
     def __init__(self, *, any_artifact: bool) -> None:
         super().__init__(base_url="http://runtime.invalid")
         self.any_artifact = any_artifact
@@ -44,6 +51,8 @@ class Runtime(InferenceRuntime):
         return self.any_artifact
 
     def artifact_model(self, artifact):
+        if not self.any_artifact:
+            return super().artifact_model(artifact)
         return PolicyModel("base", artifact.ref.revision)
 
     def activate_checkpoint(self, artifact, *, scenario=None):

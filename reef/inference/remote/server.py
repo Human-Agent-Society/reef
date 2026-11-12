@@ -19,15 +19,10 @@ from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
 
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightFiles
 from reef.inference.deployment import InferenceResources, InferenceService, inference_service_for
-from reef.inference.http import HOP_BY_HOP_HEADERS
+from reef.inference.http import HOP_BY_HOP_HEADERS, SERVED_MODEL_HEADER
 from reef.inference.interfaces import InferenceBackend
-from reef.inference.remote.config import (
-    CONTROL_PATH,
-    OWNER_SEQUENCE_HEADER,
-    SERVED_MODEL_HEADER,
-    require_no_external_kv_cache,
-)
-from reef.inference.remote.pins import RequestPins, generation_outcome
+from reef.inference.remote.config import CONTROL_PATH, OWNER_SEQUENCE_HEADER, require_no_external_kv_cache
+from reef.inference.remote.pins import RequestPins, generation_stopped
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +31,8 @@ FORWARD_EXCLUDED_HEADERS = HOP_BY_HOP_HEADERS | {"host", "authorization"}
 #: Largest inference request body; weight uploads stream and are not bound by it.
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
+#: Longest wait, in seconds, of a pinned or owner-fenced control call for an earlier one.
+CONTROL_WAIT_S = 30.0
 
 
 class RemoteInferenceServer:
@@ -111,7 +108,7 @@ class RemoteInferenceServer:
             if self.pins.enabled:
                 self.pins.quarantine()
 
-    async def control_call(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    async def control_call[**P, T](self, function: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
         """Keep a blocking control operation inside its caller's lock even if the HTTP handler is cancelled."""
         task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
         cancelled = False
@@ -140,7 +137,7 @@ class RemoteInferenceServer:
         """
         try:
             if self.pins.enabled or OWNER_SEQUENCE_HEADER in request.headers:
-                await asyncio.wait_for(self.lock.acquire(), min(30.0, self.pins.drain_timeout_s))
+                await asyncio.wait_for(self.lock.acquire(), min(CONTROL_WAIT_S, self.pins.drain_timeout_s))
             else:
                 await self.lock.acquire()
         except TimeoutError as exc:
@@ -271,15 +268,15 @@ class RemoteInferenceServer:
         if self.pins.enabled and not pinning:
             raise web.HTTPConflict(text="restart the component before disabling request pinning")
         layout = body.get("weight_layout", "full")
-        drain_timeout = body.get("drain_timeout_s", 300.0)
+        drain_timeout_s = body.get("drain_timeout_s", 300.0)
         if pinning:
-            if backend_name not in ("sglang", "vllm") or layout not in ("full", "adapter"):
+            if backend_name not in ("sglang", "vllm") or layout not in WEIGHT_LAYOUTS:
                 raise web.HTTPBadRequest(text="request pinning requires a built-in engine and a weight layout")
             if (
-                isinstance(drain_timeout, bool)
-                or not isinstance(drain_timeout, (int, float))
-                or not math.isfinite(drain_timeout)
-                or drain_timeout <= 0
+                isinstance(drain_timeout_s, bool)
+                or not isinstance(drain_timeout_s, (int, float))
+                or not math.isfinite(drain_timeout_s)
+                or drain_timeout_s <= 0
             ):
                 raise web.HTTPBadRequest(text="drain_timeout_s must be positive and finite")
             # Every pause follows a fresh start or a completed drain, so a retracting pause finds no request to
@@ -291,12 +288,16 @@ class RemoteInferenceServer:
                 raise web.HTTPBadRequest(text=str(exc)) from exc
         self.check_owner(request, required=pinning)
         async with self.control_lock(request):
-            self.check_owner(request, required=pinning)
+            if self.pins.enabled and not pinning:
+                # A pinned start can finish while this request waits for the lock.
+                raise web.HTTPConflict(text="restart the component before disabling request pinning")
             await self.pins.interrupt()
             self.check_owner(request, required=pinning)
-            self.pins.enabled = pinning
-            self.pins.layout = layout
-            self.pins.drain_timeout_s = drain_timeout
+            if pinning:
+                # Only a pinned start checked these values. Pinning stays on until the component restarts.
+                self.pins.enabled = True
+                self.pins.layout = layout
+                self.pins.drain_timeout_s = drain_timeout_s
             try:
                 await self.control_call(self.start_stack, backend_name, config, num_gpus)
                 self.check_owner(request)
@@ -310,7 +311,6 @@ class RemoteInferenceServer:
         self.authorize(request, self.control_token)
         self.check_owner(request)
         async with self.control_lock(request):
-            self.check_owner(request)
             await self.pins.interrupt()
             self.check_owner(request)
             try:
@@ -347,7 +347,6 @@ class RemoteInferenceServer:
         self.authorize(request, self.control_token)
         self.check_owner(request)
         async with self.control_lock(request):
-            self.check_owner(request)
             versions = await self.control_call(self.running_backend().runtime_load_ids)
         return web.json_response({"runtime_load_ids": [str(version) for version in versions]})
 
@@ -359,7 +358,6 @@ class RemoteInferenceServer:
         if not isinstance(runtime_load_id, str) or not runtime_load_id:
             raise web.HTTPBadRequest(text="initialize-version needs a runtime_load_id")
         async with self.control_lock(request):
-            self.check_owner(request)
             if self.pins.enabled and self.pins.loaded:
                 raise web.HTTPConflict(text="a loaded binding cannot be relabelled")
             try:
@@ -379,7 +377,6 @@ class RemoteInferenceServer:
         self.check_owner(request)
         operation = request.match_info["operation"]
         async with self.control_lock(request):
-            self.check_owner(request)
             backend = self.running_backend()
             try:
                 if self.pins.enabled:
@@ -402,7 +399,8 @@ class RemoteInferenceServer:
                     # Recovery replaces the whole stack; pausing a dead engine again would prevent reaching it.
                     result = None
                 elif self.pins.enabled and operation == "abort":
-                    result = await self.control_call(self.stop_stack)
+                    await self.control_call(self.stop_stack)
+                    result = None
                 else:
                     operations = {
                         "pause": backend.pause,
@@ -452,7 +450,6 @@ class RemoteInferenceServer:
         loaded = False
         try:
             async with self.control_lock(request):
-                self.check_owner(request)
                 backend = self.running_backend()
                 if self.pins.enabled:
                     if self.pins.uncertain or self.pins.accepting or self.pins.active:
@@ -501,7 +498,6 @@ class RemoteInferenceServer:
         self.check_owner(request)
         name = request.match_info["name"]
         async with self.control_lock(request):
-            self.check_owner(request)
             backend = self.running_backend()
             resume = self.pins.enabled and self.pins.accepting
             if self.pins.enabled:
@@ -512,13 +508,11 @@ class RemoteInferenceServer:
                 self.pins.adapters.discard(name)
             try:
                 if self.pins.enabled:
-                    self.check_owner(request)
                     await self.control_call(backend.pause)
                 self.check_owner(request)
                 await self.control_call(backend.unload_adapter, name)
                 self.check_owner(request)
                 if resume:
-                    self.check_owner(request)
                     await self.control_call(backend.resume)
                     self.check_owner(request)
                     self.pins.accepting = True
@@ -543,7 +537,7 @@ class RemoteInferenceServer:
                 raise web.HTTPNotFound(text="not a pinned generation route")
             try:
                 payload = json.loads(body)
-            except (ValueError, UnicodeError) as exc:
+            except ValueError as exc:
                 raise web.HTTPBadRequest(text="generation needs a JSON object") from exc
             if not isinstance(payload, Mapping):
                 raise web.HTTPBadRequest(text="generation needs a JSON object")
@@ -594,10 +588,7 @@ class RemoteInferenceServer:
                 if pin is not None and not 400 <= upstream.status < 500:
                     if upstream.status >= 500:
                         raise ValueError("the upstream failed without establishing whether generation stopped")
-                    outcome = generation_outcome(
-                        bytes(captured), upstream.headers.get("Content-Type", ""), self.engine
-                    )
-                    if outcome == "ambiguous":
+                    if not generation_stopped(bytes(captured), upstream.headers.get("Content-Type", ""), self.engine):
                         raise ValueError("the upstream ended without a verified native generation")
                 if connected:
                     try:

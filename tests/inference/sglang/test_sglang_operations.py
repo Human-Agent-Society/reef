@@ -233,8 +233,10 @@ def test_worker_reloads_full_weights_into_every_engine(monkeypatch):
     worker = worker_module.SGLangWorker.__new__(worker_module.SGLangWorker)
     worker.cluster = SimpleNamespace(group=SimpleNamespace(all_engines=[engine(), engine()]))
     backend = SGLangInferenceBackend(UniProcExecutor.from_workers([worker]))
-    for _ in range(2):
-        backend.load_weight_files(WeightFiles(Path("/ckpt/hf"), "full"), adapter_name=None, runtime_load_id="inc:3")
+    # A repeated load of the same files reaches every engine again.
+    files = WeightFiles(Path("/ckpt/hf"), "full")
+    backend.load_weight_files(files, adapter_name=None, runtime_load_id="inc:3")
+    backend.load_weight_files(files, adapter_name=None, runtime_load_id="inc:3")
     assert calls == [{"model_path": "/ckpt/hf", "runtime_load_id": "inc:3"}] * 4
     worker.cluster = SimpleNamespace(group=SimpleNamespace(all_engines=[engine({"success": False})]))
     with pytest.raises(RuntimeError, match="refused weights"):

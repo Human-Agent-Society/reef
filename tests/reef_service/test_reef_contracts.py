@@ -404,7 +404,10 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
         upstream_app.router.add_post("/v1/chat/completions", upstream)
         async with TestServer(upstream_app) as server:
             inference_handler = HttpInferenceHandler(str(server.make_url("")).rstrip("/"))
-            assert await inference_handler.inference(artifact, "/v1/chat/completions", payload) == {"provider": "ok"}
+            response = await inference_handler.inference(
+                InferenceArtifact.from_artifact(artifact), "/v1/chat/completions", payload
+            )
+            assert response == {"provider": "ok"}
 
     asyncio.run(run())
     assert received == {
@@ -929,9 +932,8 @@ def test_finished_stream_keeps_its_receipt_and_drops_the_training_block(tmp_path
 def test_stream_receipt_waits_for_capture_finalization(tmp_path, finish_reason) -> None:
     handler = FinalizingStreamHandler(None if finish_reason is None else chat_stream_record(finish_reason))
     with closing(serving_dispatcher(tmp_path)) as dispatcher:
-        status, _, body = post_stream(
-            dispatcher, handler, "/v1/chat/completions", expect_failure=finish_reason is None
-        )
+        answer = post_stream(dispatcher, handler, "/v1/chat/completions", expect_failure=finish_reason is None)
+        status, body = answer[0], answer[2]
         assert status == 200
         assert handler.exhausted
         [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
@@ -966,7 +968,8 @@ def test_failed_stream_breaks_the_client_response_without_retrying(
     handler = FinalizingStreamHandler(capture, failure=failure, frames=frames, stall=stall)
     # Only the stalled stream waits for its deadline; the other failures end at once.
     with closing(serving_dispatcher(tmp_path, inference_timeout_s=0.25 if stall else 300.0)) as dispatcher:
-        status, _, body = post_stream(dispatcher, handler, "/v1/chat/completions", expect_failure=True)
+        answer = post_stream(dispatcher, handler, "/v1/chat/completions", expect_failure=True)
+        status, body = answer[0], answer[2]
         assert status == 200  # Headers were already sent; the body must fail instead.
         assert b"[DONE]" not in body
         assert handler.calls == 1
@@ -985,9 +988,9 @@ def test_failed_stream_breaks_the_client_response_without_retrying(
 def test_an_opaque_stream_failure_has_no_receipt_even_with_a_terminal_frame(tmp_path, failure) -> None:
     handler = StreamRecordHandler(None, (failure, b"data: [DONE]\n\n"), record_before_terminal=False)
     with closing(serving_dispatcher(tmp_path)) as dispatcher:
-        _, _, body = post_stream(
+        body = post_stream(
             dispatcher, handler, "/v1/chat/completions", expect_failure=failure.startswith(b"event: error")
-        )
+        )[2]
         [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         assert record.agent_record_id.encode() not in body
         assert record.payload["response"]["complete"] is False
@@ -1003,7 +1006,7 @@ def test_data_after_a_terminal_frame_does_not_receive_a_success_receipt(tmp_path
         record_before_terminal=False,
     )
     with closing(serving_dispatcher(tmp_path)) as dispatcher:
-        _, _, body = post_stream(dispatcher, handler, "/v1/chat/completions", expect_failure=True)
+        body = post_stream(dispatcher, handler, "/v1/chat/completions", expect_failure=True)[2]
         [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         assert record.agent_record_id.encode() not in body
         assert record.payload["response"]["stream_delivery"]["complete"] is False
@@ -1017,7 +1020,7 @@ def test_opaque_proxy_completion_is_independent_of_trailing_chunk_boundaries(tmp
     frames = (terminal + tail, b"NE]\n\n") if same_chunk else (terminal, tail, b"NE]\n\n")
     handler = StreamRecordHandler(None, frames, record_before_terminal=False)
     with closing(serving_dispatcher(tmp_path)) as dispatcher:
-        _, _, body = post_stream(dispatcher, handler, "/v1/responses")
+        body = post_stream(dispatcher, handler, "/v1/responses")[2]
         [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         assert record.agent_record_id.encode() in body
         assert record.payload["response"]["complete"] is True

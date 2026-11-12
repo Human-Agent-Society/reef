@@ -158,7 +158,20 @@ def normalize_native_response(response: dict[str, Any]) -> dict[str, Any]:
 
 
 class NativeStreamCapture:
-    """Accumulate Reef's required disjoint SGLang stream events."""
+    """Accumulate the disjoint incremental events of one SGLang stream into its complete native response.
+
+    Values: ``text`` joins the events' text deltas in order, and ``output_ids`` joins their output token IDs.
+    ``meta`` holds each list field of ``_LIST_META_KEYS`` joined over the events in order, and the newest value of
+    every other ``meta_info`` field. ``last_output_logprobs`` holds the newest event's own
+    ``output_token_logprobs``. ``seen`` is whether an event arrived.
+
+    ``accept`` adds one event and returns its text delta. It raises ``ValueError`` for an event without
+    ``meta_info`` or ``output_token_logprobs``, for an event whose ``completion_tokens`` is not the running token
+    count (a cumulative stream: Reef requires ``--incremental-streaming-output``), and for inconsistent IDs, types
+    or text. ``response`` gives the native response that ``SGLangGenerateClient.parse`` reads. It raises
+    ``ValueError`` before any event and when no event gave a finish reason, so a truncated stream gives no response.
+    Purpose: ``SGLangInferenceHandler`` makes one for each stream.
+    """
 
     _LIST_META_KEYS = (
         "output_token_logprobs",
@@ -229,7 +242,13 @@ class NativeStreamCapture:
 
 
 class SGLangInferenceHandler(TokenNativeChatHandler):
-    """Serve OpenAI or Anthropic chat over SGLang, streaming its incremental output."""
+    """Serve OpenAI or Anthropic chat over SGLang, streaming its incremental output.
+
+    It is a ``TokenNativeChatHandler`` whose default client is ``SGLangGenerateClient``, and it adds conditions to
+    streams. A stream's ``stream_interval`` defaults to 1, every decode step, and keeps a value that the sampling
+    parameters set. The handler reads the events with a ``NativeStreamCapture``. A stream without a finish reason
+    raises ``ValueError`` and records no response.
+    """
 
     def __init__(
         self,

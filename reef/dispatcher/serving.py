@@ -239,8 +239,7 @@ class ServingWorker(QueueWorker):
         try:
             runtime.release_unreferenced_artifacts(retained)
         except InferenceOwnerLostError as exc:
-            self.receiver_ownership_lost()
-            raise WorkLeaseLostError("the inference receiver accepted a newer owner") from exc
+            raise self.receiver_ownership_lost() from exc
         self.release_due = False
 
     def open_runtime(self, runtime: InferenceRuntime) -> None:
@@ -262,8 +261,7 @@ class ServingWorker(QueueWorker):
         try:
             self.open_runtime(runtime)
         except InferenceOwnerLostError as exc:
-            self.receiver_ownership_lost()
-            raise WorkLeaseLostError("the inference receiver accepted a newer owner") from exc
+            raise self.receiver_ownership_lost() from exc
         except Exception:
             logger.exception("could not open the inference runtime; the %d routes from before go", len(previous))
             return ()
@@ -275,11 +273,13 @@ class ServingWorker(QueueWorker):
         try:
             return self.serve_item(item, lease_lost)
         except InferenceOwnerLostError as exc:
-            self.receiver_ownership_lost()
-            raise WorkLeaseLostError("the inference receiver accepted a newer owner") from exc
+            raise self.receiver_ownership_lost() from exc
 
-    def receiver_ownership_lost(self) -> None:
-        """Stop renewing a fenced owner even when cleanup is also refused by the newer owner."""
+    def receiver_ownership_lost(self) -> WorkLeaseLostError:
+        """Stop renewing a fenced owner even when cleanup is also refused by the newer owner.
+
+        Return the lease loss that the caller raises in place of the receiver's refusal.
+        """
         self.stopped.set()
         if self.owner is not None:
             self.owner.stop()
@@ -288,6 +288,7 @@ class ServingWorker(QueueWorker):
                 self.owner.runtime.shutdown()
             except Exception:
                 logger.exception("cleanup of the superseded inference owner failed")
+        return WorkLeaseLostError("the inference receiver accepted a newer owner")
 
     def serve_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         """Activate, publish or retire the selection while this worker retains runtime ownership."""

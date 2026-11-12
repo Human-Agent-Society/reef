@@ -6,12 +6,12 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 
-from reef.artifact import Artifact, InMemoryRepositoryBackend, SnapshotRef
+from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core.errors import RuntimeConfigError
 from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
-from reef.inference.interfaces import InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
 from reef.scenario.live_objects import LiveObjects
@@ -117,6 +117,12 @@ inference:
 def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_path) -> None:
     async def run() -> None:
         class RoutingRuntime(InferenceRuntime):
+            """The runtime of the recipe ``recipe``: its handler answers each call with the recipe's name.
+
+            It loads no weights, so it binds no artifact (``served_artifact`` is None), and an activation returns
+            the snapshot's revision. Its model ``<recipe>-model`` answers snapshots without weights.
+            """
+
             def __init__(self, recipe: str) -> None:
                 super().__init__(base_url="http://recipe-runtime")
                 self.recipe = recipe
@@ -231,7 +237,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(SnapshotRef("version-1", None), None, artifact_id="version-1"),
+                InferenceArtifact("version-1"),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}]},
             )
@@ -244,7 +250,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
             }
 
             stream = await runtime.inference_handler.inference_stream(
-                Artifact(SnapshotRef("version-1", None), None, artifact_id="version-1"),
+                InferenceArtifact("version-1"),
                 "/v1/chat/completions",
                 {"messages": [], "stream": True},
             )
@@ -286,7 +292,7 @@ def test_recipe_runtime_proxies_anthropic_auth_and_version() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(SnapshotRef("rev", None), None, artifact_id="rev"),
+                InferenceArtifact("rev"),
                 "/v1/messages",
                 {"model": "claude-compatible", "messages": []},
             )

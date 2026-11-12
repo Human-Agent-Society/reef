@@ -85,14 +85,24 @@ class RuntimeLoadMismatchError(RuntimeContractError):
 
 
 class InferenceOwnerLostError(RuntimeContractError, InternalError, RuntimeError):
-    """The receiver has accepted a later serving owner and refuses this owner's control operations."""
+    """The receiver has accepted a later serving owner and refuses this owner's control operations.
+
+    A remote component's control client raises it for HTTP 412. The serving worker then gives up its ownership
+    and reports a lost work lease, so the selection stays for the later owner.
+    """
 
 
+#: The prefix of every name that ``full_weight_name`` makes; a name without it is an ordinary model name.
 FULL_WEIGHT_NAME_PREFIX = "reef-weights-"
 
 
 def full_weight_name(model_path: str, runtime_load_id: str) -> str:
-    """Address one full-weight load without adding fields to ``ServedArtifact``."""
+    """The route model name of one full-weight load: the model at ``model_path`` under ``runtime_load_id``.
+
+    The name is ``FULL_WEIGHT_NAME_PREFIX``, the unpadded base64url form of ``model_path``, a ``.`` and
+    ``runtime_load_id``, so ``parse_full_weight_name`` returns both values. Raise ``ValueError`` for an empty
+    ``model_path`` or a ``runtime_load_id`` that ``RuntimeLoadId.parse`` refuses.
+    """
     if not model_path:
         raise ValueError("a full-weight route needs a model path")
     RuntimeLoadId.parse(runtime_load_id)
@@ -101,7 +111,11 @@ def full_weight_name(model_path: str, runtime_load_id: str) -> str:
 
 
 def parse_full_weight_name(name: str) -> tuple[str, str] | None:
-    """Decode a pinned full-weight name; ordinary model names return None, malformed pinned names raise."""
+    """The ``(model_path, runtime_load_id)`` of a name that ``full_weight_name`` made.
+
+    None for a name without ``FULL_WEIGHT_NAME_PREFIX``, which is an ordinary model name. Raise ``ValueError`` for
+    any other name that ``full_weight_name`` does not make.
+    """
     if not name.startswith(FULL_WEIGHT_NAME_PREFIX):
         return None
     encoded, separator, version = name[len(FULL_WEIGHT_NAME_PREFIX) :].partition(".")
@@ -545,7 +559,6 @@ class InferenceRuntime(ABC):
         before every admitted request ended or its engine stopped. The built-in saved-weight runtimes refuse
         engines without such a receiver (``ServingEngines.request_pinning``).
         """
-        raise NotImplementedError
 
     def endpoint_model_name(self, scenario: str) -> str | None:
         """The non-empty model name at ``base_url`` for ``scenario``'s snapshot without weights, or None.

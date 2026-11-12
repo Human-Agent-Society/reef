@@ -2249,8 +2249,10 @@ Neither inherits from the other, and no trainer holds a serving engine.
   opens the runtime, loads the published snapshot, and publishes routes when
   activation returns. Route publication and startup completion share one
   transaction. A superseded request cannot publish routes.
-  ``train-from`` still imports the artifact into the trainer before it writes
-  a ``train_from`` record.
+  For a ``train-from``, the committer checks the artifact with the training
+  backend's facts and sets the training start, then writes a ``train_from``
+  record. The training service imports the snapshot when it takes the next
+  job.
 
 An ``InferenceRuntime`` implements ``inference_handler`` and the two members
 marked *required*. It overrides another member only when it has the

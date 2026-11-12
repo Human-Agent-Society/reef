@@ -398,7 +398,7 @@ def retried_request(
             # No runtime: each row's URL gets its own proxy handler, as for independently configured endpoints.
             engines = DeploymentEngineClients(None, provider_key=None, timeout_seconds=30.0)
             app = build_inference_app(table, storage, engines, tokens=None)
-            route, model, _, _ = RETRY_CALLS[selection]
+            route, model = RETRY_CALLS[selection][:2]
             async with TestClient(TestServer(app)) as client:
                 answer = await client.post(route, json={**chat(), "model": model, "stream": stream}, headers=HEADERS)
                 headers = {name.lower(): value for name, value in answer.headers.items()}
@@ -434,7 +434,7 @@ def test_a_retry_reads_the_row_of_its_selection_again(tmp_path, selection, after
     status, headers, body, calls, records = retried_request(
         tmp_path, selection=selection, stream=stream, cause=cause, after=after
     )
-    _, _, first, retried = RETRY_CALLS[selection]
+    first, retried = RETRY_CALLS[selection][2:]
     assert status == 200
     # The retry reaches the row's new load on the new engine: the body's model and the pin header both name it. A
     # request for the active artifact reaches B. A request that selected its artifact keeps it, though B now serves
@@ -456,9 +456,9 @@ def test_a_retry_reads_the_row_of_its_selection_again(tmp_path, selection, after
 def test_a_retry_whose_artifact_stopped_serving_answers_503_instead_of_moving(
     tmp_path, selection, cause, stream
 ) -> None:
-    status, headers, _, calls, records = retried_request(
-        tmp_path, selection=selection, stream=stream, cause=cause, after="removed"
-    )
+    answer = retried_request(tmp_path, selection=selection, stream=stream, cause=cause, after="removed")
+    status, headers = answer[:2]
+    calls, records = answer[3:]
     # The selected artifact has no row any more, and the active row now serves B: no call reaches B.
     assert (status, headers.get("retry-after")) == (503, "1")
     assert calls == expected_calls(RETRY_CALLS[selection][2])
@@ -468,10 +468,10 @@ def test_a_retry_whose_artifact_stopped_serving_answers_503_instead_of_moving(
 @pytest.mark.unit
 @pytest.mark.parametrize("stream", [False, True])
 def test_a_second_refusal_answers_503_without_a_record(tmp_path, stream) -> None:
-    status, headers, _, calls, records = retried_request(
-        tmp_path, selection="split", stream=stream, cause="refuse", after="refused"
-    )
-    _, _, first, retried = RETRY_CALLS["split"]
+    answer = retried_request(tmp_path, selection="split", stream=stream, cause="refuse", after="refused")
+    status, headers = answer[:2]
+    calls, records = answer[3:]
+    first, retried = RETRY_CALLS["split"][2:]
     assert (status, headers.get("retry-after")) == (503, "1")
     assert calls == expected_calls(first, retried)
     assert records == []

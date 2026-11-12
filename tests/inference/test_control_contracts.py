@@ -40,6 +40,8 @@ def test_native_engines_implement_the_whole_engine_vocabulary(engine_type):
 
 def test_a_runtime_that_gives_no_served_artifact_cannot_be_constructed():
     class UnboundRuntime(InferenceRuntime):
+        """Every abstract member of a runtime except ``served_artifact``; the test calls none of them."""
+
         @property
         def inference_handler(self):
             raise AssertionError("never called")
@@ -55,6 +57,9 @@ def test_a_runtime_that_gives_no_served_artifact_cannot_be_constructed():
 
 def test_a_runtime_serves_snapshots_without_weights_only_when_it_names_its_endpoint_model():
     class WeightRuntime(InferenceRuntime):
+        """A complete runtime that keeps the base ``endpoint_model_name``; it gives no route, and the test calls
+        none of its other members."""
+
         @property
         def inference_handler(self):
             raise AssertionError("never called")

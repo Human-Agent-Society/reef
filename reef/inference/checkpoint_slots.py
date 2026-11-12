@@ -30,7 +30,8 @@ class CheckpointSlotsRuntime(InferenceRuntime):
     artifact ID of each bound checkpoint to the route of its last verified load. The route's URL is the base URL of
     the checkpoint's slot, and no two bindings share a slot. ``active_artifact_id`` is the key in ``bindings`` of
     the checkpoint that the last successful ``activate_checkpoint`` selected. It is None before that call, and
-    again after ``stop_serving`` released that checkpoint. ``opened`` is whether every slot's engines opened.
+    again after ``stop_serving`` released that checkpoint. ``opened`` is whether a call of ``open`` has opened every
+    slot's engines. It stays true after ``shutdown``, so it records that history and not that the engines run now.
     ``stopped`` is whether ``shutdown`` ran; from then on the runtime opens no slot and binds no checkpoint.
 
     A checkpoint keeps its slot until ``stop_serving`` releases it, also while the slot recovers. The runtime

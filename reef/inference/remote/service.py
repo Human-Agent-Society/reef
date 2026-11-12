@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tarfile
 import tempfile
@@ -12,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, BinaryIO, Self
 from urllib.parse import quote, urlencode
 
-from reef.core.weight_layout import WeightFiles
+from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightFiles, WeightLayout
 from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
 from reef.inference.interfaces import InferenceBackend, InferenceOwnerLostError
 from reef.inference.remote.config import CONTROL_PATH, OWNER_SEQUENCE_HEADER, RemoteInferenceSettings
@@ -28,8 +29,11 @@ class RemoteControl:
     ``url`` is the component's base URL and ``token`` its control token. Each
     call sends one request under ``CONTROL_PATH`` and returns the decoded JSON
     answer; an HTTP error or an unreachable component raises ``RuntimeError``
-    with the component's message. Values hold only strings, so they cross
-    process boundaries to Reef's serving runtime.
+    with the component's message. ``owner_sequence`` is None, or the positive serving-owner sequence that
+    ``RemoteInferenceService.set_owner_sequence`` checked and set for pinned serving. When it is set, each call
+    sends it in ``OWNER_SEQUENCE_HEADER``, and a component that knows a newer owner answers 412, which raises
+    ``InferenceOwnerLostError``. The fields are plain strings and an int, so a value crosses process boundaries to
+    Reef's serving runtime.
     """
 
     def __init__(self, url: str, token: str) -> None:
@@ -146,7 +150,11 @@ class RemoteInferenceBackend(InferenceBackend):
         return replaced
 
     def abort(self) -> None:
-        self.control.call("DELETE", "engines") if self.service.request_pinning else self.control.call("POST", "abort")
+        """Stop generation: a pinning component retires its whole engine stack, any other aborts the requests."""
+        if self.service.request_pinning:
+            self.control.call("DELETE", "engines")
+        else:
+            self.control.call("POST", "abort")
 
     def unload_adapter(self, name: str) -> None:
         self.control.call("DELETE", f"adapters/{quote(name, safe='')}")
@@ -191,9 +199,9 @@ class RemoteInferenceService(InferenceService):
     the pinning configuration to the component, and fails unless the component confirms it. A training
     deployment's rollout engines (``from_config``) leave it false, because the trainer synchronizes its own
     rollouts with its weight updates. Plain endpoints also leave it false and claim no artifact binding.
-    ``weight_layout`` selects "full" or "adapter"; ``drain_timeout_s`` is the
-    positive, finite drain bound in seconds. The component validates those two values at pinned startup; they
-    are unused for unpinned startup.
+    ``request_pinning`` is a bool, ``weight_layout`` is "full" or "adapter", and ``drain_timeout_s`` is a positive,
+    finite drain bound in seconds; construction raises ``ValueError`` for any other value. Only pinned startup
+    sends the last two values, and the component checks them again.
     """
 
     def __init__(
@@ -205,13 +213,24 @@ class RemoteInferenceService(InferenceService):
         num_gpus: int,
         control_token: str,
         request_pinning: bool = False,
-        weight_layout: str = "full",
+        weight_layout: WeightLayout = "full",
         drain_timeout_s: float = 300.0,
     ) -> None:
         if not engine:
             raise ValueError("remote inference needs the engine backend that the component starts")
         if isinstance(num_gpus, bool) or not isinstance(num_gpus, int) or num_gpus <= 0:
             raise ValueError("remote inference needs a positive num_gpus")
+        if not isinstance(request_pinning, bool):
+            raise ValueError("request_pinning must be a bool")
+        if weight_layout not in WEIGHT_LAYOUTS:
+            raise ValueError(f"weight_layout must be one of {WEIGHT_LAYOUTS}, not {weight_layout!r}")
+        if (
+            isinstance(drain_timeout_s, bool)
+            or not isinstance(drain_timeout_s, (int, float))
+            or not math.isfinite(drain_timeout_s)
+            or drain_timeout_s <= 0
+        ):
+            raise ValueError("drain_timeout_s must be a positive, finite number of seconds")
         self.settings = settings
         self.engine = engine
         self.engine_config = dict(engine_config)

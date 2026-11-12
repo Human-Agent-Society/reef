@@ -45,6 +45,7 @@ from reef.inference.interfaces import (
 )
 from reef.inference.residency import (
     AdapterCapacityExhaustedError,
+    AdapterEvictionFailedError,
     AdapterResidencyError,
     AdapterResidencyManager,
     ResidentAdapter,
@@ -80,7 +81,9 @@ class ServingEngines(ABC):
     """The engines of a serving runtime, which only the inference worker opens.
 
     Values: ``base_url`` is the engines' HTTP(S) address, known without opening them. ``open`` attaches to the
-    engines that run, or starts them when none run (``OpenedEngines``); a runtime calls it at most once.
+    engines that run, or starts them when none run (``OpenedEngines``). A runtime takes the engines of one
+    successful ``open``. After an ``open`` that raised, the runtime may call it again, and that call must give
+    engines in a known state: ``ComponentEngines`` then starts a new stack in place of a half-started one.
     ``check_health`` raises when the engines failed; the runtime calls it on a schedule after ``open``.
     ``request_pinning`` declares that the engines' receiver protects each request's weights.
     ``close`` releases what ``open`` took and stops no engine that serves requests.
@@ -167,21 +170,23 @@ class SavedWeightServingRuntime(InferenceRuntime):
 
     ``engines`` reaches the engines, and ``handler`` executes requests at ``engines.base_url``. The runtimes replace
     weights in engines that keep running, so ``engines`` must declare ``ServingEngines.request_pinning``; building a
-    runtime on other engines raises ``RuntimeContractError``. Building the
-    runtime touches no engine: the inference worker opens it (``open``), which attaches to the engines or starts them, and
-    stamps the base model's version on them; before that, the runtime only sends requests, and an operation that
-    changes the engines raises ``ReefError``.
-    ``weights`` gives each snapshot's weight files; the default is
-    ``ArtifactWeightFiles``.
-    Runtime load IDs belong to one fresh incarnation, so a restart never
-    reuses an ID for other weights. The base model serves under the first one,
-    ``base_version``, and each load under the next unused one;
-    ``activate_checkpoint`` returns it. Each load
-    first replaces the engines that died since the last one
-    (``InferenceBackend.recover``), while the engines are paused.
+    runtime on other engines raises ``RuntimeContractError``. Building the runtime touches no engine: the inference
+    worker opens it (``open``), which attaches to the engines or starts them, and stamps the base model's version on
+    them. Before that, the runtime only sends requests, and an operation that changes the engines raises
+    ``ReefError``. ``weights`` gives each snapshot's weight files; the default is ``ArtifactWeightFiles``.
+
+    Runtime load IDs belong to one fresh incarnation, so a restart never reuses an ID for other weights. The base
+    model serves under the first one, ``base_version``, and each load under the next unused one;
+    ``activate_checkpoint`` returns it. ``loaded_version`` is the load ID of the last successful activation, which
+    the runtime keeps for recovery, and ``base_version`` before any activation. A load that the engines
+    acknowledged, followed by a resume that failed, leaves the earlier value. Each load first replaces the engines
+    that died since the last one (``InferenceBackend.recover``), while the engines are paused.
+
+    ``lock`` serializes every operation that changes the engines or the bindings: activation, recovery, release
+    and the watcher's own recovery. ``served_artifact`` reads the bindings under it.
 
     After ``open``, a thread checks the engines' health every
-    ``health_interval_s`` seconds. When the check fails, for example because
+    ``health_interval_s`` seconds, until ``shutdown`` sets ``stopping``. When the check fails, for example because
     the inference component restarted, ``recover_engines`` replaces the
     engines and loads what the runtime serves into them again, so the
     engines serve the same versions as before.
@@ -205,40 +210,41 @@ class SavedWeightServingRuntime(InferenceRuntime):
         health_interval_s: float = HEALTH_INTERVAL_S,
         weights: ArtifactWeights | None = None,
     ) -> None:
-        if engines.request_pinning is not True:
+        if not engines.request_pinning:
             raise RuntimeContractError(
                 "saved-weight serving replaces weights in running engines, so it needs engines whose receiver keeps "
                 "each request on its weights (ServingEngines.request_pinning)"
             )
         super().__init__(base_url=engines.base_url, inference_timeout_s=inference_timeout_s)
         self._weights = ArtifactWeightFiles() if weights is None else weights
-        self._engines = engines
+        self.engines = engines
         self._opened: InferenceBackend | None = None
         self._handler = handler
         self._model_path = model_path
-        self._lock = threading.RLock()
+        self.lock = threading.RLock()
         self._incarnation = new_runtime_load_id_incarnation()
         self._next_sequence = 1
         self.base_version = str(RuntimeLoadId(self._incarnation, 0))
-        self._version = self.base_version
+        self.loaded_version = self.base_version
         self.recovery_pending = False
-        self._health_interval_s = health_interval_s
-        self._stopping = threading.Event()
+        self.health_interval_s = health_interval_s
+        self.stopping = threading.Event()
         self._watcher: threading.Thread | None = None
 
     def set_owner_sequence(self, sequence: int) -> None:
-        self._engines.set_owner_sequence(sequence)
+        self.engines.set_owner_sequence(sequence)
 
     def open(self) -> None:
         """Take control of the engines: attach to them or start them, stamp the base model's version on engines that
-        it started, and prepare generation. A second call does nothing."""
-        with self._lock:
+        it started, and prepare generation. A call after a successful one does nothing; a call after one that raised
+        opens the engines again (``ServingEngines.open``)."""
+        with self.lock:
             if self._opened is not None:
                 return
-            opened = self._engines.open()
+            opened = self.engines.open()
             backend = opened.backend
             if not opened.attached:
-                backend.initialize_version(self._version)
+                backend.initialize_version(self.loaded_version)
             self.prepare_generation(opened)
             self._opened = backend
             self._watcher = threading.Thread(target=self.watch_engines, name="reef-serving-health", daemon=True)
@@ -249,7 +255,8 @@ class SavedWeightServingRuntime(InferenceRuntime):
         opened.backend.resume()
 
     @property
-    def _backend(self) -> InferenceBackend:
+    def backend(self) -> InferenceBackend:
+        """The backend of the opened engines; ``ReefError`` before ``open``."""
         if self._opened is None:
             raise ReefError(
                 "the serving runtime is not open: only the inference worker, which opens it, changes the engines"
@@ -285,16 +292,16 @@ class SavedWeightServingRuntime(InferenceRuntime):
         A runtime that awaits its first activation has nothing to restore. The watcher then only replaces failed
         engines, and the replacements stay paused for that activation.
         """
-        while not self._stopping.wait(self._health_interval_s):
+        while not self.stopping.wait(self.health_interval_s):
             try:
-                self._engines.check_health()
+                self.engines.check_health()
                 healthy = True
             except Exception:
                 healthy = False
                 logger.warning("the serving engines failed a health check; recovering them", exc_info=True)
             try:
-                with self._lock:
-                    if self._stopping.is_set():
+                with self.lock:
+                    if self.stopping.is_set():
                         return
                     if not self.awaits_first_activation:
                         if not healthy or self.recovery_pending:
@@ -302,8 +309,8 @@ class SavedWeightServingRuntime(InferenceRuntime):
                     elif not healthy:
                         # Nothing loads into the replacements, so they stay paused and no route serves.
                         self.recovery_pending = True
-                        self._backend.pause()
-                        self._backend.recover()
+                        self.backend.pause()
+                        self.backend.recover()
             except Exception:
                 logger.exception("recovering the serving engines failed; the next health check tries again")
 
@@ -316,11 +323,11 @@ class SavedWeightServingRuntime(InferenceRuntime):
 
     def shutdown(self) -> None:
         self.close_admission()
-        self._stopping.set()
+        self.stopping.set()
         if self._watcher is not None:
             self._watcher.join()
         if self._opened is not None:
-            self._engines.close()
+            self.engines.close()
 
 
 class BackendAdapterEngine(AdapterEngine):
@@ -363,6 +370,13 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
 
     A new runtime takes over no adapter from earlier engines (``adopt`` is False), because the engines' load IDs
     do not prove which adapters are resident. It loads each selected artifact again.
+
+    ``restore_adapters`` is None while no activation or engine restart is unfinished. An activation, or a recovery
+    that restarts the engines, sets it to ``residency.current_adapters()`` of that moment: one adapter for each
+    scenario that has one, in activation order, possibly none. ``restart_engines`` loads exactly these adapters into
+    new engines and keeps the value after a partial restore, so a retry restores every scenario and not only those
+    that loaded. The value is None again when generation resumes (``resume_restored``). ``recovery_pending`` is true
+    whenever the value is set.
     """
 
     def __init__(
@@ -376,13 +390,11 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         health_interval_s: float = HEALTH_INTERVAL_S,
         weights: ArtifactWeights | None = None,
     ) -> None:
-        self._residency = AdapterResidencyManager(adapter_capacity)
+        self.residency = AdapterResidencyManager(adapter_capacity)
         #: The artifact ID of each resident adapter, indexed by its runtime load ID.
         self.loaded_artifact_ids: dict[str, str] = {}
         #: The artifact ID of the base root that each scenario serves, for the scenarios that serve no adapter.
         self.base_artifact_ids: dict[str, str] = {}
-        #: The residency that an unfinished activation or recovery restores, kept across partial restores; None
-        #: when none is unfinished.
         self.restore_adapters: tuple[ResidentAdapter, ...] | None = None
         super().__init__(
             engines,
@@ -394,9 +406,9 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         )
 
     @property
-    def _engine(self) -> BackendAdapterEngine:
+    def adapter_engine(self) -> BackendAdapterEngine:
         """The engines as the residency manager drives them; only an open runtime has them."""
-        return BackendAdapterEngine(self._backend)
+        return BackendAdapterEngine(self.backend)
 
     @property
     def served_weight_kind(self) -> ArtifactKind:
@@ -422,13 +434,17 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         return self.model_path
 
     def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
-        current = self._residency.current_adapter(scenario)
+        current = self.residency.current_adapter(scenario)
         return None if current is None else current.runtime_load_id
 
     def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
         """Publish a resident adapter bound to this artifact, or the base model for the base root that the scenario
-        selected; a missing adapter is never a base-model route."""
-        with self._lock:
+        selected; a missing adapter is never a base-model route.
+
+        None while recovery is pending, for any other artifact, and when ``base_url`` is no HTTP(S) URL: another
+        process then has no route that it can call. None also for a base root when no model path names the base
+        model."""
+        with self.lock:
             if self.recovery_pending:
                 return None
             version = self.serving_adapter_runtime_load_id(scenario)
@@ -443,7 +459,7 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
                 return None
 
     def adapter_residency_status(self) -> Mapping[str, Any]:
-        return self._residency.status()
+        return self.residency.status()
 
     def stop_serving(self, served: ServedArtifact) -> None:
         """Unload the adapter that ``served`` names, unless a scenario serves it again."""
@@ -451,8 +467,8 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
             parse_adapter_name(served.model_name)
         except ValueError:
             return
-        with self._lock:
-            self._residency.retire(served.model_name, self._engine)
+        with self.lock:
+            self.residency.retire(served.model_name, self.adapter_engine)
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the snapshot ``artifact`` of ``scenario``; return the version that serves it.
@@ -477,78 +493,82 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         if scenario is None:
             raise ReefError("per-scenario adapters are served for a named scenario")
         artifact_id = artifact.artifact_id
-        with self._lock:
+        with self.lock:
             if self.recovery_pending:
                 self.recover_engines()
-            current = self._residency.current_adapter(scenario)
+            current = self.residency.current_adapter(scenario)
             if current is not None and self.loaded_artifact_ids.get(current.runtime_load_id) == artifact_id:
                 return current.runtime_load_id
             path = artifact.materialize().local_path
             if path is None:
                 raise ReefError("serving a snapshot requires a materialized artifact")
             if holds_base_root(path):
-                self._residency.serve_base(scenario)
+                self.residency.serve_base(scenario)
                 self.base_artifact_ids[scenario] = artifact_id
                 return self.base_version
             files = self._weights.weight_files(path, "adapter")
             version = self.next_version()
-            self.restore_adapters = self._residency.current_adapters()
+            self.restore_adapters = self.residency.current_adapters()
             self.recovery_pending = True
-            self._backend.pause()
+            self.backend.pause()
             try:
-                if self._backend.recover():
-                    self.restart_engines(fresh=True)
+                if self.backend.recover():
+                    self.restart_engines(engines_replaced=True)
                 # Generation is paused, so the scenario's own adapter may make room for its new one.
-                self._residency.activate(scenario, version, self._engine, files=files, supersede=True)
+                self.residency.activate(scenario, version, self.adapter_engine, files=files, supersede=True)
                 self.loaded_artifact_ids[version] = artifact_id
                 self.base_artifact_ids.pop(scenario, None)
                 self.resume_restored()
-            except AdapterCapacityExhaustedError as exc:
-                if type(exc) is AdapterCapacityExhaustedError:
-                    # A plain capacity refusal changed no binding; eviction failures still require recovery.
-                    self.resume_restored()
+            except AdapterEvictionFailedError:
+                # The engine kept an adapter that the runtime tried to unload, so recovery must restore the bindings.
                 raise
-            self._version = version
+            except AdapterCapacityExhaustedError:
+                # A plain capacity refusal changed no binding.
+                self.resume_restored()
+                raise
+            self.loaded_version = version
             return version
 
     def resume_restored(self) -> None:
         """Resume generation once every binding is known, and forget the artifacts of adapters that are gone."""
-        self._backend.resume()
+        self.backend.resume()
         self.recovery_pending = False
         self.restore_adapters = None
-        resident = {adapter.runtime_load_id for adapter in self._residency.current_adapters()}
+        resident = {adapter.runtime_load_id for adapter in self.residency.current_adapters()}
         self.loaded_artifact_ids = {key: value for key, value in self.loaded_artifact_ids.items() if key in resident}
 
     def recover_engines(self) -> None:
         """Restore the whole residency after lost engines or a partial restore; resume only when every adapter is
         known."""
-        with self._lock:
+        with self.lock:
             retry_reload = self.recovery_pending
             self.recovery_pending = True
-            self._backend.pause()
-            replaced = self._backend.recover()
+            self.backend.pause()
+            replaced = self.backend.recover()
             if replaced or retry_reload:
-                self.restart_engines(fresh=bool(replaced))
+                self.restart_engines(engines_replaced=bool(replaced))
             self.resume_restored()
 
-    def restart_engines(self, *, fresh: bool = False) -> None:
+    def restart_engines(self, *, engines_replaced: bool = False) -> None:
         """Retire every engine, start them all again and load each scenario's current adapter; engines are paused.
 
         The adapters are those of ``restore_adapters`` when an earlier restore is unfinished.
         A scenario whose adapter fails to load serves no adapter afterwards; the other scenarios still load.
-        Raise ``AdapterResidencyError`` after the loop when one failed. ``fresh`` means that recovery already
-        replaced every engine, so no second restart is needed.
+        Raise ``AdapterResidencyError`` after the loop when one failed. ``engines_replaced`` means that recovery
+        already replaced every engine, so no second restart is needed.
         """
         if self.restore_adapters is None:
-            self.restore_adapters = self._residency.current_adapters()
-        if not fresh:
-            self._backend.abort()
-            self._backend.recover()
-        self._residency = AdapterResidencyManager(self._residency.capacity)
+            self.restore_adapters = self.residency.current_adapters()
+        if not engines_replaced:
+            self.backend.abort()
+            self.backend.recover()
+        self.residency = AdapterResidencyManager(self.residency.capacity)
         failed: list[str] = []
         for adapter in self.restore_adapters:
             try:
-                self._residency.activate(adapter.scenario, adapter.runtime_load_id, self._engine, files=adapter.files)
+                self.residency.activate(
+                    adapter.scenario, adapter.runtime_load_id, self.adapter_engine, files=adapter.files
+                )
             except AdapterResidencyError:
                 logger.exception(
                     "scenario %r lost its adapter %r in an engine restart", adapter.scenario, adapter.name
@@ -572,9 +592,9 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
     of its own: it loads the base model's files, the directory ``model_path``
     (``base_weight_files``), under a new version, and binds the base root's artifact as any activation does.
 
-    ``served_artifact_id`` and ``_served_files`` are both None before the first successful activation. Afterwards,
-    they name the last successful activation's artifact and files, with its load ID in ``_version``. A failed load
-    or load-ID check leaves generation paused and ``recovery_pending`` true. The last successful artifact remains
+    ``served_artifact_id`` and ``served_files`` are both None before the first successful activation. Afterwards,
+    they name the last successful activation's artifact and files, with its load ID in ``loaded_version``. A failed
+    load or load-ID check leaves generation paused and ``recovery_pending`` true. The last successful artifact remains
     the recovery target, but it must load again before requests resume. With no successful activation yet, only an
     explicit activation can establish that target. Until then, the health watcher attempts no restoration.
     ``release_checkpoint`` returns the runtime to that first state: both values are None again, and the engines
@@ -592,7 +612,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
         weights: ArtifactWeights | None = None,
     ) -> None:
         self.served_artifact_id: str | None = None
-        self._served_files: WeightFiles | None = None
+        self.served_files: WeightFiles | None = None
         super().__init__(
             engines,
             handler,
@@ -616,16 +636,19 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
     def awaits_first_activation(self) -> bool:
         """True until the first verified activation, and again after ``release_checkpoint``: no artifact is known,
         so recovery has nothing to restore."""
-        return self._served_files is None
+        return self.served_files is None
 
     def served_model_name(self, scenario: str) -> str:
         """The route name of the current load (``full_weight_name``), which the receiver admits only while the
         engines serve that load."""
-        return full_weight_name(self.model_path, self._version)
+        return full_weight_name(self.model_path, self.loaded_version)
 
     def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
-        """The route for the last verified activation, or None while its binding needs restoration."""
-        with self._lock:
+        """The route for the last verified activation, or None while its binding needs restoration.
+
+        Also None for any other artifact, and when ``base_url`` is no HTTP(S) URL or the route has no model name:
+        another process then has no route that it can call."""
+        with self.lock:
             if self.recovery_pending or self.served_artifact_id != artifact_id:
                 return None
             try:
@@ -636,15 +659,15 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         artifact_id = artifact.artifact_id
-        with self._lock:
+        with self.lock:
             if self.served_artifact_id == artifact_id and not self.recovery_pending:
-                return self._version
+                return self.loaded_version
             path = artifact.materialize().local_path
             if path is None:
                 raise ReefError("serving a snapshot requires a materialized artifact")
             files = self.base_weight_files() if holds_base_root(path) else self._weights.weight_files(path, "full")
             version = self.next_version()
-            backend = self._backend
+            backend = self.backend
             self.recovery_pending = True
             backend.pause()
             # The load writes every engine, so an engine that recovery replaced serves the snapshot too.
@@ -653,8 +676,8 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
             check_engines_serve(backend, version)
             backend.resume()
             self.served_artifact_id = artifact_id
-            self._served_files = files
-            self._version = version
+            self.served_files = files
+            self.loaded_version = version
             self.recovery_pending = False
             return version
 
@@ -664,10 +687,10 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
         Raise ``ReefError`` when ``model_path`` is no directory on this host. The engines then cannot load the
         base model again after another artifact, since a load sends them a directory of this host.
         """
-        directory = Path(self._model_path).expanduser()
-        if not self._model_path or not directory.is_dir():
+        directory = Path(self.model_path).expanduser()
+        if not self.model_path or not directory.is_dir():
             raise ReefError(
-                f"a base root serves the base model, but the model path {self._model_path!r} is no directory on "
+                f"a base root serves the base model, but the model path {self.model_path!r} is no directory on "
                 "this host, so the engines cannot load it"
             )
         return WeightFiles(directory, "full")
@@ -682,20 +705,20 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
         recovery or an activation loads it again. A runtime that binds no checkpoint only pauses its engines
         again, so engines that an unfinished first activation left stay paused.
         """
-        with self._lock:
-            backend = self._backend
+        with self.lock:
+            backend = self.backend
             # As in an activation, the binding is uncertain from here until the pause is confirmed.
             self.recovery_pending = True
             backend.pause()
             self.served_artifact_id = None
-            self._served_files = None
+            self.served_files = None
 
     def reload_served(self) -> None:
         """Restore the last successfully activated snapshot under its version, or refuse when no snapshot is known."""
-        if self._served_files is None:
+        if self.served_files is None:
             raise ReefError("no verified full-weight artifact to restore; activate a published artifact first")
-        self._backend.load_weight_files(self._served_files, adapter_name=None, runtime_load_id=self._version)
-        check_engines_serve(self._backend, self._version)
+        self.backend.load_weight_files(self.served_files, adapter_name=None, runtime_load_id=self.loaded_version)
+        check_engines_serve(self.backend, self.loaded_version)
 
     def recover_engines(self) -> None:
         """Restore the last successful activation after lost engines or an unfinished load, then resume.
@@ -705,13 +728,13 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
         the call replaces the lost engines and then raises ``ReefError``, because no artifact is known; the health
         watcher does not make this call.
         """
-        with self._lock:
-            backend = self._backend
+        with self.lock:
+            backend = self.backend
             retry_reload = self.recovery_pending
             self.recovery_pending = True
             backend.pause()
             replaced = backend.recover()
-            if retry_reload or (replaced and self._served_files is not None):
+            if retry_reload or (replaced and self.served_files is not None):
                 self.reload_served()
             backend.resume()
             self.recovery_pending = False

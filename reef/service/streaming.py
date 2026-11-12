@@ -19,12 +19,17 @@ WEB_SEARCH_CALL_ITEM = "web_search_call"
 
 
 def sse_failure(frame: bytes) -> str | None:
-    """Read explicit provider failures without requiring a native capture or inventing absent finish reasons."""
+    """The failure that one SSE ``frame`` of a provider reports, or None when it reports none.
+
+    A failure is an ``error`` event, a JSON object that carries an error or a failed response, or an engine abort,
+    which gives ``INFERENCE_ABORT_ERROR``. A frame without a JSON object reports none. The check needs no native
+    capture, and a missing finish reason is not a failure.
+    """
     if any(line.startswith(b"event:") and line[6:].strip() == b"error" for line in frame.splitlines()):
         return "the provider reported a stream error"
     try:
         payload = json.loads(frame_data(frame))
-    except (ValueError, UnicodeError):
+    except ValueError:
         return None
     if not isinstance(payload, dict):
         return None
@@ -272,5 +277,6 @@ __all__ = [
     "frame_for_codex",
     "is_terminal_sse_event",
     "receipt_sse_events",
+    "sse_failure",
     "stream_record",
 ]

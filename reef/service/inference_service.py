@@ -572,15 +572,14 @@ class InferenceReplica:
 
         At most one of ``kept_row`` and ``kept_artifact`` is set. ``kept_row`` is the row that the request selected:
         the artifact of a split's choice, or a named route's row. ``kept_artifact`` is the artifact that the
-        request's ``model`` named and that was selected for the first attempt. Such a request keeps its artifact: the retry
-        reads the row ``kept_row``, or the row for ``payload``'s model, which must still serve ``kept_artifact``.
-        When that row is gone, or serves another artifact, the retry answers 503 with ``Retry-After``; a new request
-        selects again. Any other request reads the row for its model again, as ``resolve`` reads it without a split,
-        so its retry can reach a new active artifact.
+        request's ``model`` named and that was selected for the first attempt. Such a request keeps its artifact:
+        the retry reads the row ``kept_row``, or the row for ``payload``'s model, which must still serve
+        ``kept_artifact``. When that row is gone, or serves another artifact, the retry answers 503 with
+        ``Retry-After``; a new request selects again. Any other request reads the row for its model again, as
+        ``resolve`` reads it without a split, so its retry can reach a new active artifact.
         """
         if kept_row is None and kept_artifact is None:
-            served, _ = await self.resolve(scenario, payload, name=None, refresh=True)
-            return served
+            return (await self.resolve(scenario, payload, name=None, refresh=True))[0]
         gone = f"artifact {kept_row or kept_artifact!r} of scenario {scenario!r} has no route any more"
         try:
             if kept_row is not None:

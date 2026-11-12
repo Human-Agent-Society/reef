@@ -18,8 +18,6 @@ from dataclasses import dataclass
 from reef.inference.remote.runtime import ComponentEngines
 from reef.inference.remote.service import RemoteInferenceService
 
-#: The thread that a serving runtime checks and recovers its engines on.
-WATCHER_THREAD = "reef-serving-health"
 #: The logger of the serving runtime: a warning for each failed health check, an error for each failed recovery.
 SERVING_LOGGER = "reef.inference.serving"
 #: How often a wait reads the list of health checks again.

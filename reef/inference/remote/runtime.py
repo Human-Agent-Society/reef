@@ -186,11 +186,12 @@ class RemoteServingRuntimeSettings:
 class ComponentEngines(ServingEngines):
     """The engines of a remote inference component, which outlive control.
 
-    ``open`` starts a new engine stack, which replaces the engines that the component runs. A new serving owner,
-    such as a restarted inference worker or one that takes over, therefore ends the requests in flight: the
-    engines' load IDs cannot prove which weights they hold, and a late operation of the previous owner could still
-    change them. ``close`` stops no engine: the component's engines are the inference service's, and stop with the
-    component.
+    ``open`` starts a new engine stack, which replaces the engines that the component runs. After an earlier
+    ``open`` that raised once the service had started, the call restarts the engines of that service. A new
+    serving owner, such as a restarted inference worker or one that takes over, therefore ends the requests in
+    flight: the engines' load IDs cannot prove which weights they hold, and a late operation of the previous owner
+    could still change them. ``close`` stops no engine: the component's engines are the inference service's, and
+    stop with the component.
 
     ``request_pinning`` is the service's own. A service that requests the protection requires the component to
     confirm it at every engine start and health check, so the declaration holds only for a component that

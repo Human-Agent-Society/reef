@@ -93,8 +93,9 @@ class Record2Sample(ABC, Plugin):
     The pipeline pushes every record that it reads, in append order (``push``). The stage collects the records that
     train together into record sets and forms each one (``form``). No record is in two record sets of one stage:
     ``form`` refuses a set that holds a record of another set. Before it makes samples, ``form`` rejects a set if
-    any inference response reports an engine abort, and the whole set ends, including reports that reference the
-    aborted inference. Otherwise ``form`` makes the set's samples (``make_samples``) and settles the result
+    any inference response is incomplete (``inference_incomplete``): it reports an engine abort, or a stream whose
+    delivery did not complete. The whole set then ends, including reports that reference that inference.
+    Otherwise ``form`` makes the set's samples (``make_samples``) and settles the result
     (``settle``): a set that has samples waits in a record set unit, and a set without samples ends. When the
     pipeline looks for job data, it first advances the stage to the current time (``advance``): the stage takes in
     background work that ended, such as judgments, and forms the sets that are due. The pipeline takes the units

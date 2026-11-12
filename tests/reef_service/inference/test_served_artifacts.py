@@ -127,7 +127,7 @@ def test_a_harness_artifact_served_beside_the_active_one_answers_under_its_own_i
             ]
 
     try:
-        scenario, _ = control.create_scenario("math")
+        scenario = control.create_scenario("math")[0]
         active = scenario.serving_artifact_id()
         beside = scenario.import_artifact(
             DirectorySource(tree, source_version="", link=False),
@@ -145,9 +145,12 @@ def test_a_harness_artifact_served_beside_the_active_one_answers_under_its_own_i
         control.publisher.write_traffic_weights("math", {active: 0, beside: 100})
 
         answered = asyncio.run(answers(beside))
-        assert [(status, artifact_id) for status, artifact_id, _ in answered] == [(200, beside)] * 2
+        assert [(status, artifact_id) for status, artifact_id, record_id in answered] == [(200, beside)] * 2
         assert handler.artifact_ids == [beside] * 2
-        assert [scenario.records.read("math", record_id).artifact_id for _, _, record_id in answered] == [beside] * 2
+        records = scenario.records
+        assert [records.read("math", record_id).artifact_id for status, artifact_id, record_id in answered] == [
+            beside
+        ] * 2
 
         # The scenario serves nothing, and the stops of its withdrawn routes come due. No engine holds weights for
         # these routes, so the same mapping activates nothing: the endpoint model answers both artifacts again.
@@ -391,7 +394,8 @@ def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_second_se
 @pytest.mark.unit
 def test_a_runtime_with_two_checkpoint_slots_serves_two_artifacts_and_refuses_a_third_over_http(tmp_path) -> None:
     async def run() -> None:
-        value, _, _, newest, older = two_artifacts(tmp_path, checkpoint_slots=True)
+        trained = two_artifacts(tmp_path, checkpoint_slots=True)
+        value, newest, older = trained[0], trained[3], trained[4]
         scenario = value.get_or_create_scenario("math")
         new_id, old_id = newest["artifact_id"], older["artifact_id"]
         # The artifact that the scenario started with is the third one.
@@ -485,7 +489,8 @@ def test_a_runtime_with_two_checkpoint_slots_serves_two_artifacts_and_refuses_a_
 
 @pytest.mark.unit
 def test_a_mapping_that_replaces_one_of_two_loaded_artifacts_counts_only_the_artifacts_that_it_names(tmp_path) -> None:
-    value, _, _, newest, older = two_artifacts(tmp_path, checkpoint_slots=True)
+    trained = two_artifacts(tmp_path, checkpoint_slots=True)
+    value, newest, older = trained[0], trained[3], trained[4]
     scenario = value.get_or_create_scenario("math")
     new_id, old_id = newest["artifact_id"], older["artifact_id"]
     root_id = scenario.artifacts()[-1]["artifact_id"]

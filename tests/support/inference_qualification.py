@@ -22,6 +22,7 @@ from aiohttp import ClientSession, ClientTimeout, web
 
 from reef.artifact import Artifact
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
+from reef.core.values import JsonValue
 from reef.inference.interfaces import EngineClients, InferenceRuntime, RuntimeContractError
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.storage.sql_coordination import memory_coordination
@@ -29,22 +30,37 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 class OutputOracle(ABC):
-    """Identify weights from generated content, independently of metadata, labels and runtime load IDs."""
+    """Name the artifact whose weights generated an answer, from the generated content alone.
+
+    Purpose: an ``InferenceQualification`` holds one, and ``qualify_inference`` checks each answer's artifact header
+    and record against it. The oracle reads no metadata, label or runtime load ID, because the run checks those.
+    """
 
     @abstractmethod
     def artifact_id(self, response: Mapping[str, Any]) -> str:
-        """Return the artifact identified by a distinguishable output, or raise for ambiguous output."""
+        """The ID of the artifact that generated the chat-completion ``response``; raise for output that names no
+        single artifact."""
 
 
 @dataclass(frozen=True)
 class InferenceQualification:
     """An isolated integration and two distinguishable artifacts for an explicit qualification run.
 
-    ``runtime`` and ``engines`` are existing production contracts, not alternative provider interfaces.
-    ``artifacts`` has two different IDs. ``oracle`` identifies output from ``payload`` without trusting a label.
-    ``engine_version`` identifies the exact integration build; ``capabilities`` declares its supported features.
-    ``owner_sequence`` is a fresh durable owner sequence for the isolated component, never a production takeover.
-    The caller owns external service cleanup; the run opens and shuts down this runtime.
+    Values: ``runtime`` and ``engines`` are existing production contracts, not alternative provider interfaces.
+    ``artifacts`` holds two different artifact IDs in activation order: the run serves the first, then changes to
+    the second. ``oracle`` names the artifact of each answer to ``payload``, a chat-completion body, without trusting
+    a label. ``engine_version`` is a non-empty name of the exact integration build. ``capabilities`` names the
+    features that the integration declares, in the caller's order: distinct non-empty strings, possibly none. The
+    run copies them into its report and checks none of them. ``owner_sequence`` is a positive int, a fresh durable
+    owner sequence for the isolated component, never a production takeover.
+
+    The constructor checks only the local conditions: two different artifact IDs, a non-empty ``engine_version``,
+    a positive integer ``owner_sequence``, and distinct non-empty ``capabilities``. The caller supplies an isolated
+    component, a fresh owner sequence and the correct build name, and ``oracle`` identifies the outputs; the
+    constructor cannot check those facts.
+
+    Purpose: a test, or a factory of ``tests.smoke.inference_cutover``, makes the value; ``qualify_inference`` reads
+    it. The caller owns external service cleanup; the run opens and shuts down this runtime.
     """
 
     runtime: InferenceRuntime
@@ -59,13 +75,18 @@ class InferenceQualification:
     def __post_init__(self) -> None:
         if len(self.artifacts) != 2 or self.artifacts[0].artifact_id == self.artifacts[1].artifact_id:
             raise ValueError("qualification needs two different artifacts")
-        if not self.engine_version or self.owner_sequence <= 0:
-            raise ValueError("qualification needs an engine version and a positive isolated owner sequence")
+        if not self.engine_version:
+            raise ValueError("qualification needs an engine version")
+        sequence = self.owner_sequence
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+            raise ValueError("qualification needs a positive integer owner sequence for its isolated component")
+        if not all(self.capabilities) or len(set(self.capabilities)) != len(self.capabilities):
+            raise ValueError("the declared capabilities are distinct non-empty names")
 
 
 async def qualify_inference(
     case: InferenceQualification, directory: Path, *, samples_per_artifact: int = 5
-) -> dict[str, Any]:
+) -> dict[str, JsonValue]:
     """Verify completed outputs and stale routes; report what the run exercised.
 
     Every success must agree with its header and durable record. The gap deliberately retains A's route after
@@ -152,7 +173,8 @@ async def qualify_inference(
                     await sample(allow_failure=True)
                     await asyncio.sleep(0.02)
 
-            for _ in range(samples_per_artifact):
+            # A sample that may not fail completes, which counts it, or raises.
+            while completed < samples_per_artifact:
                 await sample(expected=first.artifact_id)
             probe_task = asyncio.create_task(probe())
             cutover_started = time.monotonic()
@@ -165,7 +187,8 @@ async def qualify_inference(
             await asyncio.sleep(0)
             stop.set()
             await probe_task
-            for _ in range(samples_per_artifact):
+            verified = completed + samples_per_artifact
+            while completed < verified:
                 # Verify B through its named route, independent of the active-row cache interval.
                 await sample(
                     expected=second.artifact_id,

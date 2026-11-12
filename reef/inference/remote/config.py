@@ -12,8 +12,8 @@ from reef.core.values import JsonValue
 
 #: Every control route is under this path. Any other path is an inference request for the engines.
 CONTROL_PATH = "/reef/control/v1"
+#: The control request header with the sender's serving-owner sequence, a positive decimal integer.
 OWNER_SEQUENCE_HEADER = "x-reef-owner-sequence"
-SERVED_MODEL_HEADER = "x-reef-served-model"
 DEFAULT_CONTROL_TOKEN_ENV = "REEF_REMOTE_CONTROL_TOKEN"
 DEFAULT_INFERENCE_TOKEN_ENV = "REEF_REMOTE_INFERENCE_TOKEN"
 

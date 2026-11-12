@@ -133,7 +133,7 @@ def startup(tmp_path):
 @pytest.mark.unit
 @pytest.mark.parametrize("lost_binding", [False, True])
 def test_cached_activation_is_reused_only_while_the_runtime_still_has_its_route(startup, lost_binding):
-    control, worker, runtime, _ = startup
+    control, worker, runtime = startup[:3]
     control.create_scenario("math")
     runtime.release.set()
     assert worker.run_once()
@@ -150,7 +150,7 @@ def test_cached_activation_is_reused_only_while_the_runtime_still_has_its_route(
 
 @pytest.mark.unit
 def test_an_activation_that_leaves_no_weight_binding_fails_despite_an_endpoint_model(startup, monkeypatch):
-    control, worker, runtime, _ = startup
+    control, worker, runtime = startup[:3]
     # The activation returns, but the runtime holds no weight binding for the artifact afterwards.
     monkeypatch.setattr(runtime, "served_artifact", lambda artifact_id, scenario: None)
     control.create_scenario("math")
@@ -484,7 +484,7 @@ def test_owner_lease_loss_stops_the_runtime_and_prevents_reacquisition(startup):
 
 @pytest.mark.unit
 def test_receiver_ownership_loss_preserves_the_selection_even_when_cleanup_is_fenced(startup, monkeypatch):
-    control, worker, runtime, _ = startup
+    control, worker, runtime = startup[:3]
     control.create_scenario("math")
 
     def fenced(*args, **kwargs):
@@ -524,7 +524,7 @@ def test_an_owner_retries_recovery_before_opening_its_runtime(startup, monkeypat
 
 @pytest.mark.unit
 def test_a_stop_shuts_down_a_runtime_whose_open_failed(startup, monkeypatch):
-    control, worker, runtime, _ = startup
+    control, worker, runtime = startup[:3]
     control.create_scenario("math")
 
     def refuse_open():
@@ -540,7 +540,7 @@ def test_a_stop_shuts_down_a_runtime_whose_open_failed(startup, monkeypatch):
 
 @pytest.mark.unit
 def test_an_idle_owner_releases_what_no_route_and_no_scheduled_stop_uses(startup, monkeypatch):
-    control, worker, runtime, _ = startup
+    control, worker, runtime = startup[:3]
     control.create_scenario("math")
     runtime.release.set()
     assert worker.run_once()
@@ -570,7 +570,7 @@ def test_an_idle_owner_releases_what_no_route_and_no_scheduled_stop_uses(startup
 
 @pytest.mark.unit
 def test_a_release_that_the_receiver_fences_stops_the_owner(startup, monkeypatch):
-    control, worker, runtime, _ = startup
+    control, worker, runtime = startup[:3]
     control.create_scenario("math")
     runtime.release.set()
     assert worker.run_once()
@@ -666,7 +666,7 @@ def test_a_proxy_routes_each_snapshot_without_weights_to_its_configured_model(tm
             assert published["active"] == route and set(published.values()) == {route}
             assert runtime.served_artifact(artifact_id, scenario) is None
         assert runtime.served_artifact("an-arbitrary-artifact", "math") is None
-        status, headers, _ = chat(inference, "math")
+        status, headers = chat(inference, "math")[:2]
         assert (status, headers[ARTIFACT_HEADER]) == (200, selected["math"])
         store = storage.open("math")
         try:
@@ -680,19 +680,21 @@ def test_a_proxy_routes_each_snapshot_without_weights_to_its_configured_model(tm
 def test_a_proxy_refuses_a_recipe_that_loads_weights_even_with_a_configured_model(tmp_path):
     runtime = InferenceProxyRuntime(base_url="http://provider.invalid", model_path="configured-model")
     live = LiveObjects(runtime=runtime, training_facts=StubFacts(StubTrainingComponent()))
-    with served_scenarios(tmp_path, TestPolicyRecipe(), live, "math") as (routes, _, inference):
+    with served_scenarios(tmp_path, TestPolicyRecipe(), live, "math") as served:
+        routes, inference = served[0], served[2]
         failed = routes.current_request("math")
         # The weights cannot load, and the configured model is no route for them.
         assert failed.state == "failed" and "an inference proxy loads no weights" in failed.error
         assert routes.read_scenario("math") == {}
-        status, _, body = chat(inference, "math")
-        assert (status, body["error"]["type"]) == (503, "inference_start_failed")
+        answer = chat(inference, "math")
+        assert (answer[0], answer[2]["error"]["type"]) == (503, "inference_start_failed")
 
 
 @pytest.mark.unit
 def test_a_weight_runtime_gives_no_route_to_a_snapshot_without_weights(tmp_path):
     runtime = FullWeightServingRuntime(RunningEngines(Engines()), Answer(), model_path="test-model")
-    with served_scenarios(tmp_path, Recipe(), LiveObjects(runtime=runtime), "math") as (routes, _, _):
+    with served_scenarios(tmp_path, Recipe(), LiveObjects(runtime=runtime), "math") as served:
+        routes = served[0]
         failed = routes.current_request("math")
         assert failed.state == "failed" and "provides no route for the selected artifact" in failed.error
         assert routes.read_scenario("math") == {}

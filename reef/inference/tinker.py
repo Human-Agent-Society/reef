@@ -90,6 +90,11 @@ class TinkerInferenceRuntime(InferenceRuntime):
     Every sampler served in this process gets a runtime load ID of this
     incarnation; activating a snapshot whose sampler is not the one served
     mints a new one. A snapshot of another service is refused.
+
+    ``active_artifact_id`` is None before the first activation. Each successful ``activate_checkpoint`` sets it to
+    the ID of the activated artifact, whose manifest names the active sampler; a refused snapshot changes nothing.
+    ``served_artifact`` gives a route for that artifact only. A sampler is immutable, so a route's name keeps its
+    weights after a later activation.
     """
 
     def __init__(
@@ -109,13 +114,12 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._service = service
         self._kind = weight_kind
         self._handler = TinkerInferenceHandler(self, sampler, base_model)
-        self._lock = RLock()
+        self.lock = RLock()
         self._incarnation = new_runtime_load_id_incarnation()
         self._load_count = 0
         #: The runtime load ID that each sampler served under last, by sampler path (None: the base model).
         self._versions: dict[str | None, str] = {}
         self._active, self._version = self._remember(None)
-        #: The artifact whose manifest established the current sampler, absent before activation.
         self.active_artifact_id: str | None = None
         self._closed = False
 
@@ -130,12 +134,16 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def served_model_name(self, scenario: str) -> str:
         """The name of the sampler that serves now: its sampler path, or the base model before any snapshot.
         A request under this name reaches that sampler on the service at ``base_url``."""
-        with self._lock:
+        with self.lock:
             return self._active or self._model
 
     def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
-        """The activated artifact's sampler, never the active sampler relabelled with an arbitrary artifact ID."""
-        with self._lock:
+        """The activated artifact's sampler, never the active sampler relabelled with an arbitrary artifact ID.
+
+        None for any other artifact. Also None when ``base_url`` is no HTTP(S) URL: the service then has no route
+        that another process can call.
+        """
+        with self.lock:
             if self.active_artifact_id != artifact_id:
                 return None
             try:
@@ -147,7 +155,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def sampler_load(self, model_name: str) -> tuple[str | None, str]:
         """The sampler that ``model_name`` names (None for the base model) and its runtime load ID."""
         sampler_path = None if model_name == self._model else model_name
-        with self._lock:
+        with self.lock:
             if sampler_path == self._active:
                 return self._active, self._version
             return self._remember(sampler_path)
@@ -202,7 +210,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the snapshot's sampler; a sampler other than the served one is a new serving update."""
-        with self._lock:
+        with self.lock:
             sampler_path = self.sampler_path(artifact)
             if sampler_path != self._active:
                 # Even a sampler served earlier in this incarnation, as after an activation, serves under a new load.
@@ -213,7 +221,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
 
     def shutdown(self) -> None:
         self.close_admission()
-        with self._lock:
+        with self.lock:
             if self._closed:
                 return
             self._closed = True

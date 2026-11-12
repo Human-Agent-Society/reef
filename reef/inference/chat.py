@@ -545,9 +545,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         request names in ``lora_path``."""
         pinned = parse_full_weight_name(model_name)
         if pinned is not None:
-            model_name = self._model_path
+            model_name = self.model_path
         addressed = {key: value for key, value in payload.items() if key != "lora_path"}
-        if model_name == self._model_path:
+        if model_name == self.model_path:
             return {**addressed, "model": model_name}
         return {**addressed, "model": model_name, "lora_path": model_name}
 

@@ -2,7 +2,8 @@
 
 ``tests.smoke.native_inference`` runs the engines and the Reef apps; this module checks what they answered and stored.
 It imports no engine, model or tensor library at import time: ``LogprobOracle`` imports Torch and Transformers when it
-is made. A failed check raises ``AssertionError`` that names the request.
+is made. A failed check raises ``AssertionError`` that names the request. A malformed answer can instead raise
+the error of the read that it breaks (``Exchange``); the run fails in both cases.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -23,6 +25,8 @@ from typing import Any
 
 from aiohttp import ClientSession
 
+from reef.core.records_types import AgentRecord
+from reef.core.values import JsonValue
 from reef.service.inference_service import BUCKET_COUNT, RECORD_HEADER
 
 #: The largest accepted difference between an engine's log probability and the Hugging Face float32 score.
@@ -40,11 +44,11 @@ GENERATED_CONTENT = re.compile(rb'"content":\s*"[^"]')
 class Checkpoint:
     """One synthetic checkpoint whose language-model head alone sets each next-token distribution.
 
-    Values: ``name`` is a non-empty label, unique within a run. ``directory`` holds the saved Hugging Face model
-    and the tokenizer that every checkpoint of the run shares. ``words`` are three distinct words; the text
-    ``" " + word`` of each is one vocabulary token. No word belongs to two checkpoints of one run, so generated text
-    names the checkpoint that produced it.
-    Purpose: ``native_inference.write_checkpoints`` makes the values; the checks read ``words``, and
+    Values: ``name`` is a non-empty label. ``directory`` holds the saved Hugging Face model and the tokenizer that
+    every checkpoint of the run shares. ``words`` are three distinct non-empty words; the text ``" " + word`` of
+    each is one vocabulary token. Construction checks the name and the words.
+    Purpose: ``native_inference.write_checkpoints`` makes the checkpoints of a run, with different names and
+    disjoint words, so generated text names the checkpoint that produced it. The checks read ``words``, and
     ``LogprobOracle`` loads ``directory``.
     """
 
@@ -65,15 +69,42 @@ class Checkpoint:
 class ExpectedToken:
     """The Hugging Face scores of one generated position.
 
-    Values: ``token_id`` is the generated token; ``log_probability`` is its float32 log probability, finite and at
-    most 0. ``alternatives`` holds the ``TOP_ALTERNATIVES`` most likely tokens at that position as (token ID, log
-    probability) pairs, most likely first.
-    Purpose: ``LogprobOracle.score`` makes it; the logprob checks compare engine answers with it.
+    Values: ``token_id`` is the generated token, a non-negative int, and ``log_probability`` is its float32 log
+    probability, finite and at most 0. ``alternatives`` holds the ``TOP_ALTERNATIVES`` most likely tokens at that
+    position as (token ID, log probability) pairs: distinct non-negative token IDs, scores finite and at most 0, in
+    descending score order, with tied scores in any order. When the generated token is one of them, its pair's
+    score is ``log_probability``. Otherwise ``log_probability`` is at most the last pair's score.
+    The constructor checks only these local conditions. That the scores and tokens are the saved model's own is up
+    to the maker.
+    Purpose: ``LogprobOracle.score`` makes it, from one float32 row of the saved model's log probabilities; the
+    logprob checks compare engine answers with it.
     """
 
     token_id: int
     log_probability: float
     alternatives: tuple[tuple[int, float], ...]
+
+    def __post_init__(self) -> None:
+        scores = [self.log_probability, *(score for token_id, score in self.alternatives)]
+        if not all(math.isfinite(score) and score <= 0 for score in scores):
+            raise ValueError(f"log probabilities are finite and at most 0, not {scores}")
+        token_ids = [self.token_id, *(token_id for token_id, score in self.alternatives)]
+        if not all(type(token_id) is int and token_id >= 0 for token_id in token_ids):
+            raise ValueError(f"token IDs are non-negative integers, not {token_ids}")
+        listed = dict(self.alternatives)
+        if len(self.alternatives) != TOP_ALTERNATIVES or len(listed) != TOP_ALTERNATIVES:
+            raise ValueError(f"a position has {TOP_ALTERNATIVES} distinct most likely tokens: {self.alternatives}")
+        if any(earlier[1] < later[1] for earlier, later in itertools.pairwise(self.alternatives)):
+            raise ValueError(f"the most likely token comes first: {self.alternatives}")
+        if self.token_id in listed:
+            consistent = self.log_probability == listed[self.token_id]
+        else:
+            consistent = self.log_probability <= self.alternatives[-1][1]
+        if not consistent:
+            raise ValueError(
+                f"the generated token {self.token_id} scored {self.log_probability} disagrees with the most likely "
+                f"tokens {self.alternatives}"
+            )
 
     def known(self) -> dict[int, float]:
         """The tokens an engine may list as alternatives here, with their scores: the most likely ones and the
@@ -191,9 +222,13 @@ class Exchange:
     JSON request body; ``headers`` the request headers other than ``Authorization``; ``status`` the HTTP status;
     ``response_headers`` the answer's headers with lowercase names; ``content`` the answer's bytes. ``sent`` and
     ``ended`` are ``time.monotonic`` readings when the request was sent and when its answer ended.
-    Purpose: ``ReefClient.post`` makes it; the checks read it, and the wire log keeps it. The accessors below read
-    a successful chat-completion answer, buffered or streamed; each raises ``AssertionError`` when the answer has
-    another form.
+    Purpose: ``ReefClient.post`` makes it, and so gives these headers; the constructor checks no field. The checks
+    read the value, and the wire log keeps it.
+
+    The accessors below read a successful chat-completion answer, buffered or streamed. Each raises
+    ``AssertionError`` with the label when the answer is of the other kind, has no single receipt or ``meta_info``,
+    or is a stream without its final receipt and ``[DONE]``. An answer that is no JSON, or that lacks a field that an
+    accessor reads, raises the error of that read instead, such as ``ValueError``, ``KeyError`` or ``IndexError``.
     """
 
     label: str
@@ -347,7 +382,7 @@ def check_alternatives(
     likely tokens or the sampled token, which an engine may list even when it ranks lower. Each score must be its own
     token's, within ``LOGPROB_TOLERANCE``.
     """
-    ids = [oracle.token_id(token) for token, _ in listed]
+    ids = [oracle.token_id(token) for token, value in listed]
     assert len(ids) == TOP_ALTERNATIVES and len(set(ids)) == len(ids), f"{where}: alternatives {listed!r}"
     known = position.known()
     for token_id, (token, value) in zip(ids, listed, strict=True):
@@ -456,13 +491,24 @@ def artifact_of_bucket(bucket: int, weights: Mapping[str, int]) -> str:
 class ExpectedTraffic:
     """The traffic split that one recorded request must store.
 
-    Values: ``weights`` are the weights in force when the request selected its artifact; ``bucket`` is the bucket
-    that the run computed for the request's conversation, or None when the run did not compute one.
+    Values: ``weights`` are the weights in force when the request selected its artifact. They are a split as Reef
+    stores one: a non-empty map from non-empty artifact IDs to integer weights of at least 0, which sum to
+    ``BUCKET_COUNT``. ``bucket`` is the bucket that the run computed for the request's conversation, an integer from
+    0 to ``BUCKET_COUNT`` - 1, or None when the run did not compute one. Construction checks both fields.
     Purpose: a request that a split routed is recorded with one; ``check_traffic`` compares it with the record.
     """
 
     weights: Mapping[str, int]
     bucket: int | None = None
+
+    def __post_init__(self) -> None:
+        shares = self.weights.values()
+        if not all(self.weights) or not all(type(share) is int and share >= 0 for share in shares):
+            raise ValueError(f"a split maps artifact IDs to integer weights of at least 0: {dict(self.weights)!r}")
+        if sum(shares) != BUCKET_COUNT:
+            raise ValueError(f"the weights of a split sum to {BUCKET_COUNT}: {dict(self.weights)!r}")
+        if self.bucket is not None and (type(self.bucket) is not int or not 0 <= self.bucket < BUCKET_COUNT):
+            raise ValueError(f"a bucket is an integer from 0 to {BUCKET_COUNT - 1}, not {self.bucket!r}")
 
 
 def check_traffic(stored: object, expected: ExpectedTraffic | None, artifact_id: str, label: str) -> None:
@@ -502,7 +548,7 @@ def check_stored_response(response: Mapping[str, Any], exchange: Exchange) -> No
     assert entries == exchange.logprob_entries(), f"{label}: the record's logprobs differ"
 
 
-def replay_records(directory: Path, scenario: str) -> list[Any]:
+def replay_records(directory: Path, scenario: str) -> list[AgentRecord]:
     """The records of ``scenario`` in a closed SQLite scenario store under ``directory``, in order, read through
     the store's replay, as training reads them.
 
@@ -524,7 +570,7 @@ def replay_records(directory: Path, scenario: str) -> list[Any]:
             storage.close()
 
 
-def write_records(path: Path, records: Iterable[Any]) -> None:
+def write_records(path: Path, records: Iterable[AgentRecord]) -> None:
     """Write replayed records as JSON lines, for replay without the store."""
     with path.open("w", encoding="utf-8") as stream:
         for record in records:
@@ -576,17 +622,17 @@ class QualificationReport:
     """
 
     def __init__(self) -> None:
-        self.facts: dict[str, Any] = {}
-        self.checks: dict[str, Any] = {}
+        self.facts: dict[str, JsonValue] = {}
+        self.checks: dict[str, JsonValue] = {}
         self.error: str | None = None
 
-    def passed(self, name: str, **details: Any) -> None:
+    def passed(self, name: str, **details: JsonValue) -> None:
         if name in self.checks:
             raise ValueError(f"check {name!r} passed twice")
         self.checks[name] = details
         print(f"passed: {name}", flush=True)
 
-    def document(self) -> dict[str, Any]:
+    def document(self) -> dict[str, JsonValue]:
         return {
             "passed": self.error is None,
             "error": self.error,

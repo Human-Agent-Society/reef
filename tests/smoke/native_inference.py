@@ -78,14 +78,7 @@ from tests.smoke.inference_features import (
     write_records,
 )
 from tests.smoke.inference_lifecycle import ControlClient, NoTraining, SeededWeights
-from tests.smoke.inference_recovery import (
-    WATCHER_THREAD,
-    ObservedEngines,
-    ServingLog,
-    ended_checks,
-    first_check,
-    serving_log,
-)
+from tests.smoke.inference_recovery import ObservedEngines, ServingLog, ended_checks, first_check, serving_log
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord
@@ -232,6 +225,8 @@ METRIC_DELAY_S = 10.0
 #: The health interval of the recovery profile's runtime, so that one run sees many checks; a deployment's runtime
 #: checks every ``HEALTH_INTERVAL_S`` seconds.
 WATCHER_INTERVAL_S = 2.0
+#: The thread that a serving runtime checks and recovers its engines on.
+WATCHER_THREAD = "reef-serving-health"
 #: The passed health checks in a row that show a watcher at rest, and how long they may take.
 QUIET_CHECKS = 3
 QUIET_TIMEOUT_S = 90.0
@@ -293,7 +288,10 @@ class Credentials:
     """The bearer tokens of one run: random, held only in memory, and never written to a file or a log.
 
     Values: ``control`` and ``inference`` are the component's tokens, ``service`` is the Reef app's, and
-    ``management`` and ``selection`` are the router's. All are distinct URL-safe strings.
+    ``management`` and ``selection`` are the router's. The five are distinct, non-empty URL-safe strings: letters,
+    digits, ``-`` and ``_``. Construction checks this, and its error shows no token.
+    Purpose: ``generate`` makes the tokens of a run. Each process and client of the run reads its own token, and
+    the run checks that no output file holds one of ``values``.
     """
 
     control: str = field(repr=False)
@@ -302,9 +300,20 @@ class Credentials:
     management: str = field(repr=False)
     selection: str = field(repr=False)
 
+    def __post_init__(self) -> None:
+        tokens = self.values()
+        if len(set(tokens)) != len(tokens) or not all(re.fullmatch(r"[A-Za-z0-9_-]+", token) for token in tokens):
+            raise ValueError("the tokens of a run must be distinct, non-empty URL-safe strings")
+
     @classmethod
     def generate(cls) -> Credentials:
-        return cls(*(secrets.token_urlsafe(32) for _ in range(5)))
+        return cls(
+            control=secrets.token_urlsafe(32),
+            inference=secrets.token_urlsafe(32),
+            service=secrets.token_urlsafe(32),
+            management=secrets.token_urlsafe(32),
+            selection=secrets.token_urlsafe(32),
+        )
 
     def values(self) -> tuple[str, ...]:
         return (self.control, self.inference, self.service, self.management, self.selection)
@@ -501,7 +510,7 @@ async def wait_for_port(port: int, process: OwnedProcess, timeout_s: float) -> N
     while True:
         process.check_running()
         try:
-            _, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer = (await asyncio.open_connection("127.0.0.1", port))[1]
         except OSError:
             if time.monotonic() > deadline:
                 raise TimeoutError(f"{process.name} did not listen on port {port} within {timeout_s:.0f} s") from None
@@ -582,6 +591,9 @@ def byte_symbols() -> list[str]:
 
 def write_checkpoints(root: Path) -> tuple[Checkpoint, Checkpoint]:
     """Write checkpoint A (``native``) and B (``provider``) under ``root``, and check each from its saved files.
+
+    Their words are ``NATIVE_WORDS`` and ``PROVIDER_WORDS``, which share no word, so generated text names the
+    checkpoint that produced it.
 
     Both are two-layer Qwen2 models with zero attention and MLP weights, so every hidden state is the all-ones
     embedding after normalization and the language-model head alone sets the next-token distribution, the same at
@@ -770,7 +782,7 @@ def native_service(run: Run, component_url: str, *, artifact_serving: bool) -> R
     published artifact, and the engine keeps no prefix cache.
     """
     engine = run.inputs.native_engine
-    native, _ = run.checkpoints()
+    native = run.checkpoints()[0]
     config = serving_engine_config(
         engine,
         model_path=str(native.directory),
@@ -803,7 +815,7 @@ def native_runtime(
     """The production full-weight runtime of the native engine on the component of ``engines``, as the remote
     serving factory builds it: the engine's own handler with the inference token, and the component's control
     client. Its watcher checks the engines every ``health_interval_s`` seconds: by default, never within a run."""
-    native, _ = run.checkpoints()
+    native = run.checkpoints()[0]
     model_path = str(native.directory)
     service = engines.service
     handler_class = InferenceHandler.resolve_class(
@@ -885,7 +897,7 @@ async def start_provider(run: Run) -> str:
     The engine facts must exist. They receive the provider's command and models, and its entry in ``start_order``.
     """
     provider_engine = run.inputs.provider_engine
-    _, provider = run.checkpoints()
+    provider = run.checkpoints()[1]
     engine_facts = run.report.facts["engines"]
     provider_facts: dict[str, Any] = engine_facts.setdefault("provider", {"engine": provider_engine})
     # The port is taken last, so that no engine started before takes it.
@@ -1000,7 +1012,13 @@ class Arm:
 
 @dataclass(frozen=True)
 class RecordedRequest:
-    """A request that must have exactly one record: its exchange, the arm that answered it and its split."""
+    """A request that must have exactly one record.
+
+    Values: ``exchange`` is the request and its successful answer, which names a record; ``arm`` is the arm whose
+    artifact answered; ``traffic`` is the split that routed the request, or None for a request outside a split.
+    Purpose: ``RequestChecks`` keeps one for each recorded request that it sends, and its record check compares
+    each with the one record that the store holds for it.
+    """
 
     exchange: Exchange
     arm: Arm
@@ -1190,7 +1208,7 @@ class RequestChecks:
 
     # -- Records
 
-    def check_records(self, records: Sequence[Any]) -> dict[str, Any]:
+    def check_records(self, records: Sequence[AgentRecord]) -> dict[str, AgentRecord]:
         """Check that every recorded request has exactly one record, which keeps its artifact, split and answer,
         and that no other record exists. Return the records by their ID."""
         by_id = {record.agent_record_id: record for record in records}
@@ -1283,7 +1301,7 @@ class FeatureChecks(RequestChecks):
             self.session_records.append(exchange.receipt())
             answered.append(arm.name)
         assert answered[0] == answered[1], f"one session key reached two arms: {answered}"
-        text, _ = conversations[self.provider.name]
+        text = conversations[self.provider.name][0]
         await self.chat(
             "50/50 rollout of a provider-bucket conversation",
             self.native,
@@ -1508,7 +1526,7 @@ class FeatureChecks(RequestChecks):
             loaded_route=served.to_json(),
         )
 
-    def verify_records(self, records: Sequence[Any]) -> None:
+    def verify_records(self, records: Sequence[AgentRecord]) -> None:
         """Every recorded request has exactly one record, which keeps its artifact, split and answer. The requests
         of one session key stored one bucket, and each arm sampled more than one token."""
         by_id = self.check_records(records)
@@ -1599,7 +1617,7 @@ class RecoveryChecks(RequestChecks):
         self.runtime = runtime
         self.engines = engines
         self.log = log
-        startup, _ = run.checkpoints()
+        startup = run.checkpoints()[0]
         startup_id = f"artifact:startup-load-{revision_of(startup).removeprefix('sha256:')[:16]}"
         self.startup = Arm("startup load", startup_id, startup, native_facade=True)
         self.component_log = run.layout.logs / "component.log"
@@ -1762,7 +1780,7 @@ class RecoveryChecks(RequestChecks):
 
 
 async def qualify_recovery(run: Run) -> None:
-    _, successor = run.checkpoints()
+    successor = run.checkpoints()[1]
     service = await start_component(run, artifact_serving=True)
     engines = ObservedEngines(service)
     runtime = native_runtime(run, engines, health_interval_s=WATCHER_INTERVAL_S)
@@ -1857,7 +1875,7 @@ class NativeSlot:
     def service(self) -> RemoteInferenceService:
         """The control client of the slot's component. The factory built it, and its calls carry the sequence of
         the serving worker that owns the engines."""
-        engines = self.runtime._engines
+        engines = self.runtime.engines
         if not isinstance(engines, ComponentEngines):
             raise TypeError(f"the slot at {self.url} runs no component engines, but {type(engines).__name__}")
         return engines.service
@@ -1896,9 +1914,9 @@ async def start_checkpoint_slots(run: Run) -> tuple[CheckpointSlotsRuntime, list
     reports what it ran.
     """
     engine = run.inputs.native_engine
-    native, _ = run.checkpoints()
+    native = run.checkpoints()[0]
     started = [await start_component_process(run, name) for name in SLOT_COMPONENTS]
-    urls = [url for url, _ in started]
+    urls = [url for url, process in started]
     config = {
         "type": "remote_serving",
         "engine": engine,
@@ -1922,7 +1940,7 @@ async def start_checkpoint_slots(run: Run) -> tuple[CheckpointSlotsRuntime, list
     run.runtime = runtime
     slots = [
         NativeSlot(process.log, child, child.base_version)
-        for child, (_, process) in zip(runtime.slots, started, strict=True)
+        for child, (url, process) in zip(runtime.slots, started, strict=True)
     ]
     run.report.facts["engines"] = {
         "start_order": [],
@@ -2368,7 +2386,7 @@ class LifecycleChecks(RequestChecks):
         return {
             "control_operation": "DELETE engines",
             "component": losing.url,
-            "watcher_interval_seconds": losing.runtime._health_interval_s,
+            "watcher_interval_seconds": losing.runtime.health_interval_s,
             "seconds_from_call": {
                 "engines_removed": after_call(removed),
                 "first_refusal": after_call(refusals[0].ended),
@@ -2510,7 +2528,7 @@ class LifecycleChecks(RequestChecks):
             "a public update splits the traffic 50/50 between A and B: each keeps its conversations, its component "
             "and its runtime load ID",
             routes={name: route.to_json() for name, route in routes.items()},
-            conversation_buckets={name: bucket for name, (_, bucket) in conversations.items()},
+            conversation_buckets={name: bucket for name, (text, bucket) in conversations.items()},
         )
 
         promoted = {root_id: 0, successor_id: 100}
@@ -2743,7 +2761,7 @@ class LifecycleChecks(RequestChecks):
             "a public update serves harness A and B at the same time: named routes, and a 50/50 split that keeps "
             "conversations",
             routes={name: route.to_json() for name, route in routes.items()},
-            conversation_buckets={name: bucket for name, (_, bucket) in conversations.items()},
+            conversation_buckets={name: bucket for name, (text, bucket) in conversations.items()},
         )
 
         shifted = {root_id: 0, successor_id: 100}
@@ -2751,7 +2769,7 @@ class LifecycleChecks(RequestChecks):
         assert routes == endpoint_routes(provider_url, shifted), f"the routes at 0/100 are {routes}"
         await self.selection("at 0/100", shifted, artifact_ids)
         # One weight above 0 is no split: B answers the conversation that was A's, and its record stores no traffic.
-        text, _ = conversations[root.name]
+        text = conversations[root.name][0]
         await self.chat(
             "0/100 conversation that the split gave to harness A", successor, chat_body(text, stream=False)
         )
@@ -2909,12 +2927,28 @@ async def qualify_lifecycle(run: Run) -> None:
 
 @dataclass(frozen=True)
 class RoutedExpectation:
-    """The decision that one routed request must get: its target, reason, rule and selector."""
+    """The decision that one routed request must get.
+
+    Values: ``target_id`` is a target of the run's policy. ``reason`` is "default" or "rule" when the router chose
+    the target, with ``rule_name`` the rule that chose it and ``selector`` ``AUTOMATIC_MODEL``. It is
+    "explicit_pin" when the request named the target: ``rule_name`` is then None and ``selector`` is
+    ``target_id``. Construction checks these cases.
+    Purpose: ``RoutingChecks`` makes one for each routed case. A request sends ``selector`` as its model, and its
+    record must store this decision.
+    """
 
     target_id: str
     reason: str
     rule_name: str | None
     selector: str
+
+    def __post_init__(self) -> None:
+        if self.reason == "explicit_pin":
+            valid = self.rule_name is None and self.selector == self.target_id
+        else:
+            valid = self.reason in ("default", "rule") and bool(self.rule_name) and self.selector == AUTOMATIC_MODEL
+        if not valid:
+            raise ValueError(f"no routing decision has the reason, rule and selector of {self!r}")
 
 
 class RoutingChecks:
@@ -2997,7 +3031,7 @@ class RoutingChecks:
             await self.refused(label, body, status, code, headers=headers)
         self.run.report.passed("unknown, private, malformed and missing targets and Reef pins are refused")
 
-    def verify_records(self, records: Sequence[Any]) -> None:
+    def verify_records(self, records: Sequence[AgentRecord]) -> None:
         """Each routed request has one record with its decision, its provider request and its answer, and no Reef
         artifact; refused requests have none."""
         by_id = {record.agent_record_id: record for record in records}
@@ -3078,35 +3112,11 @@ def routing_policy(run: Run, engines: Engines) -> tuple[dict[str, Any], str, str
     return policy, native_target, provider_target
 
 
-async def wait_for_router(process: OwnedProcess, management: Any) -> Any:
-    """Wait until the router is ready and serves the runtime it generated, as a replica checks it; return that
-    ``RouterRuntime``. ``management`` is the router's ``RouterManagementClient``."""
-    from reef.service.deploy.routing.policy import RouterPolicyError
-
-    deadline = time.monotonic() + ROUTER_READY_TIMEOUT_S
-    runtime = None
-    while True:
-        process.check_running()
-        # The management listener refuses connections until the router has started.
-        with suppress(RouterPolicyError):
-            if await asyncio.to_thread(management.ready):
-                runtime = await asyncio.to_thread(management.runtime_hashes)
-                if (
-                    runtime.activation_status == "active"
-                    and runtime.active_runtime_hash == runtime.generated_runtime_hash
-                    and is_router_config_hash(runtime.active_runtime_hash)
-                ):
-                    return runtime
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"the router served no verified runtime in time ({runtime!r}); see {process.log}")
-        await asyncio.sleep(0.5)
-
-
 async def qualify_routing(run: Run) -> None:
     # The routed one-process app, its dispatcher and the router's deployment code load only for this profile.
     from reef.dispatcher import build_default_dispatcher
     from reef.service.app import create_app
-    from reef.service.deploy.routing.policy import RouterManagementClient
+    from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError, RouterRuntime
     from reef.service.deploy.routing.renderer import (
         MANAGEMENT_TOKEN_ENV,
         SELECTION_TOKEN_ENV,
@@ -3163,7 +3173,29 @@ async def qualify_routing(run: Run) -> None:
         cwd=run.layout.router,
     )
     management = RouterManagementClient(router_port, run.credentials.management)
-    runtime = await wait_for_router(router, management)
+
+    async def wait_for_router() -> RouterRuntime:
+        """Wait until ``router`` is ready and serves the runtime it generated, as a replica checks it; return that
+        runtime. The routing modules load only in this profile, so the wait is local to it."""
+        deadline = time.monotonic() + ROUTER_READY_TIMEOUT_S
+        runtime = None
+        while True:
+            router.check_running()
+            # The management listener refuses connections until the router has started.
+            with suppress(RouterPolicyError):
+                if await asyncio.to_thread(management.ready):
+                    runtime = await asyncio.to_thread(management.runtime_hashes)
+                    if (
+                        runtime.activation_status == "active"
+                        and runtime.active_runtime_hash == runtime.generated_runtime_hash
+                        and is_router_config_hash(runtime.active_runtime_hash)
+                    ):
+                        return runtime
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"the router served no verified runtime in time ({runtime!r}); see {router.log}")
+            await asyncio.sleep(0.5)
+
+    runtime = await wait_for_router()
     runtime_hash = str(runtime.active_runtime_hash)
     run.report.facts["router"] = {
         "binary": str(binary),

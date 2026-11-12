@@ -172,8 +172,10 @@ def test_worker_reloads_full_weights_into_every_engine_with_the_version(monkeypa
     worker = worker_module.VLLMWorker.__new__(worker_module.VLLMWorker)
     worker.group = SimpleNamespace(engines=[SimpleNamespace(update_weights_from_disk=Remote())] * 2)
     backend = VLLMInferenceBackend(UniProcExecutor.from_workers([worker]))
-    for _ in range(2):
-        backend.load_weight_files(WeightFiles(Path("/ckpt/hf"), "full"), adapter_name=None, runtime_load_id="inc:3")
+    # A repeated load of the same files reaches every engine again.
+    files = WeightFiles(Path("/ckpt/hf"), "full")
+    backend.load_weight_files(files, adapter_name=None, runtime_load_id="inc:3")
+    backend.load_weight_files(files, adapter_name=None, runtime_load_id="inc:3")
     assert calls == [(("/ckpt/hf",), {"runtime_load_id": "inc:3"})] * 4
     worker.group = SimpleNamespace(engines=[])
     with pytest.raises(RuntimeError, match="no vLLM engines"):

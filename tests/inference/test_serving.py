@@ -958,6 +958,9 @@ def test_only_a_runtime_that_answers_from_any_artifact_has_unlimited_artifact_ca
 
 def test_a_new_full_weight_owner_does_not_resume_an_unverified_attached_group(tmp_path):
     class AttachedEngines(RunningEngines):
+        """The test's existing backend, which ``open`` reports as attached engines and starts no new ones. A new
+        owner finds the engines so after a failed full-weight load, and must adopt no route and resume nothing."""
+
         def open(self):
             return OpenedEngines(self.backend, attached=True)
 
@@ -1214,7 +1217,7 @@ def test_waiting_health_tick_does_not_run_after_activation_or_shutdown(tmp_path,
                 assert service.during_load.wait(2)
                 if shutdown_during_load:
                     stopped = executor.submit(serving.shutdown)
-                    assert serving._stopping.wait(2)
+                    assert serving.stopping.wait(2)
             finally:
                 engines.release_load.set()
             if shutdown_during_load:

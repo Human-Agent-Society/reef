@@ -24,7 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 class ReefVLLMEngine(InferenceEngine):
-    """Own one native vLLM server on this node's reserved GPUs."""
+    """Own one native vLLM server on this node's reserved GPUs.
+
+    Values: ``config`` is the engine's configuration, ``rank`` its index in its group, and ``gpu_ids`` the
+    ``config.gpus_per_engine`` GPUs that it runs on; construction checks that count. ``process`` is None until
+    ``init`` starts the server at ``server_host``:``server_port``, and again after ``shutdown`` stopped it. The
+    control operations call that server over HTTP; a retracting pause pauses and then resets the prefix cache.
+    ``update_weights_from_disk`` reloads and then, with a ``runtime_load_id``, stamps it, but only after every
+    worker acknowledged the reload, so the engine never reports a load ID for weights that it did not load. A
+    reload answer without that acknowledgement raises ``RuntimeError``.
+    Purpose: Reef's inference control actors make one for each engine and drive it as an ``InferenceEngine``.
+    """
 
     def __init__(self, config: VLLMSettings, rank: int, gpu_ids: Sequence[int]) -> None:
         if len(gpu_ids) != config.gpus_per_engine:

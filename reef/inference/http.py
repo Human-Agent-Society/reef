@@ -16,9 +16,16 @@ from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.core.errors import UpstreamStatusError
 from reef.core.served_models import ServedArtifact
-from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime, InferenceStream
+from reef.inference.interfaces import (
+    FULL_WEIGHT_NAME_PREFIX,
+    InferenceArtifact,
+    InferenceHandler,
+    InferenceRuntime,
+    InferenceStream,
+)
 from reef.inference.provider_protocol import provider_headers
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string
+from reef.inference.residency import ADAPTER_NAME_PREFIX
 
 #: Hop-by-hop headers that describe one connection and must not be forwarded.
 HOP_BY_HOP_HEADERS = frozenset(
@@ -38,6 +45,10 @@ HOP_BY_HOP_HEADERS = frozenset(
 #: Provider API dialects the proxy can describe to the training side.
 PROVIDER_APIS = ("openai", "responses", "anthropic")
 
+#: The request header with the engine-side name of the weights that a request selects. A remote inference
+#: component that keeps each request on its weights admits the request only while it serves that name.
+SERVED_MODEL_HEADER = "x-reef-served-model"
+
 # -- Request headers ----------------------------------------------------------
 
 
@@ -54,14 +65,17 @@ class RequestHeadersFactory(ABC):
 
 
 def artifact_identity_headers(artifact: InferenceArtifact) -> dict[str, str]:
-    """Reef identity headers for one selected, optionally materialized artifact."""
+    """Reef identity headers for one selected, optionally materialized artifact.
+
+    The artifact ID is always present, and the local path when the artifact has one. ``SERVED_MODEL_HEADER``
+    carries ``served_model`` when that is a full-weight or adapter name that Reef gave the engines; a provider's
+    own model name stays in the request body only.
+    """
     headers = {"x-reef-artifact-id": artifact.artifact_id}
-    if (
-        isinstance(artifact, InferenceArtifact)
-        and artifact.served_model is not None
-        and artifact.served_model.startswith("reef-")
+    if artifact.served_model is not None and artifact.served_model.startswith(
+        (FULL_WEIGHT_NAME_PREFIX, ADAPTER_NAME_PREFIX)
     ):
-        headers["x-reef-served-model"] = artifact.served_model
+        headers[SERVED_MODEL_HEADER] = artifact.served_model
     if artifact.local_path is not None:
         headers["x-reef-artifact-path"] = str(artifact.local_path)
     return headers
@@ -144,10 +158,9 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
         return cls(upstream_url, timeout_s=timeout_s)
 
-    def _post_arguments(
-        self, artifact: InferenceArtifact | None, path: str, payload: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Keyword arguments of one ``session.post`` call."""
+    def post_arguments(self, artifact: InferenceArtifact | None, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """The keyword arguments of one ``session.post`` call: the upstream URL of ``path``, ``payload`` as JSON,
+        and the headers for ``artifact``, or only the provider's headers without one."""
         headers = (
             self._request_headers.external_headers(path)
             if artifact is None
@@ -173,7 +186,7 @@ class HttpInferenceHandler(InferenceHandler):
 
         async with (
             ClientSession(timeout=ClientTimeout(total=self._timeout_s)) as session,
-            session.post(**self._post_arguments(artifact, path, payload)) as response,
+            session.post(**self.post_arguments(artifact, path, payload)) as response,
         ):
             if response.status >= 400:
                 raise self._status_error(response.status, await response.text())
@@ -200,7 +213,7 @@ class HttpInferenceHandler(InferenceHandler):
         # The session outlives this call: the stream owns it until closed.
         session = ClientSession(timeout=ClientTimeout(total=self._timeout_s), auto_decompress=False)
         try:
-            response = await session.post(**self._post_arguments(artifact, path, payload))
+            response = await session.post(**self.post_arguments(artifact, path, payload))
         except BaseException:
             # Cancelled while waiting for the provider's headers, too: nothing else owns this session yet.
             await session.close()
@@ -378,6 +391,7 @@ def _env_value(values: Mapping[str, str], name: str) -> str | None:
 
 __all__ = [
     "PROVIDER_APIS",
+    "SERVED_MODEL_HEADER",
     "ArtifactRequestHeaders",
     "HttpInferenceHandler",
     "InferenceProxyRuntime",

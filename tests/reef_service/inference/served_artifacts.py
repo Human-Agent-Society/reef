@@ -34,8 +34,9 @@ class NamedInference(ImportingInference):
 
 
 class TwoSlotInference(NamedInference):
-    """A ``NamedInference`` that keeps two artifacts of a scenario loaded at once, as engines with two checkpoint
-    slots do. It answers only from a loaded artifact, so it evaluates no candidate."""
+    """A ``NamedInference`` that keeps two artifacts of a scenario bound at once, as engines with two checkpoint
+    slots do: its capacity is 2, so ``serve_artifact`` deploys an artifact beside the active one. It answers only
+    from a bound artifact (``serves_any_artifact`` stays False), so it evaluates no candidate."""
 
     @property
     def served_artifact_capacity(self) -> int:
@@ -85,5 +86,8 @@ def two_artifacts(tmp_path, *, checkpoint_slots: bool = False):
         answering_each_artifact(runtime)
     train(value, 1)
     train(value, 2)
-    newest, older, _ = value.get_or_create_scenario("math").artifacts()
+    artifacts = value.get_or_create_scenario("math").artifacts()
+    # The two trained artifacts, newest first, then the scenario's root artifact.
+    assert len(artifacts) == 3
+    newest, older = artifacts[:2]
     return value, runtime, backend_factory, newest, older

@@ -26,7 +26,13 @@ from reef.inference import deployment as deployment_module
 from reef.inference.checkpoint_slots import CheckpointSlotsRuntime
 from reef.inference.deployment import InferenceConnection, InferenceService
 from reef.inference.http import ProviderRequestHeaders
-from reef.inference.interfaces import FixedEngineClients, InferenceBackend, RuntimeContractError, full_weight_name
+from reef.inference.interfaces import (
+    FixedEngineClients,
+    InferenceArtifact,
+    InferenceBackend,
+    RuntimeContractError,
+    full_weight_name,
+)
 from reef.inference.registry import RuntimeRegistry, runtime_factory_for
 from reef.inference.remote import server as server_module
 from reef.inference.remote.config import RemoteInferenceSettings
@@ -84,9 +90,11 @@ def engine_app(services=None) -> web.Application:
             engine.generation_started.set()
             if payload.get("hold") and not await asyncio.to_thread(engine.release_generation.wait, 10):
                 raise RuntimeError("toy generation was not released")
-            text = marker
-            for _ in range(2):
-                text += engine.marker_for(payload.get("lora_path"))
+            # Three tokens: one before the hold and two after it, so a weight change between them shows.
+            tokens = [marker]
+            while len(tokens) < 3:
+                tokens.append(engine.marker_for(payload.get("lora_path")))
+            text = "".join(tokens)
             engine.generation_done.set()
             token_ids = [ord(character) for character in text]
             return web.json_response(
@@ -128,7 +136,20 @@ def engine_app(services=None) -> web.Application:
 
 
 class FakeEngines(InferenceBackend):
-    """Toy engines. With the retracting pause they keep a prefix cache: ``cache`` counts the generations in it."""
+    """Toy engines that ``engine_app`` answers for; each control operation appends to ``events``.
+
+    Values: ``versions`` holds the one runtime load ID that every engine reports. ``marker`` is the text of the
+    full weights' ``marker.txt``, "base" before a load, and ``adapter_markers`` maps each loaded adapter name to
+    its marker. A toy generation of three tokens repeats the marker of the weights that it read for each token.
+    With the retracting pause the engines keep a prefix cache: ``cache`` counts the generations in it, and a pause
+    empties it. ``paused`` is true from ``pause`` to ``resume``.
+
+    Purpose: ``FakeService`` holds one, and a test controls it. A load sets ``entered_load`` and waits for
+    ``release_load``. A generation sets ``generation_started``, waits for ``release_generation`` when it asks to
+    ``hold``, and sets ``generation_done`` at its end. With ``fail_load`` each load raises after it changed the
+    markers; with ``ignore_load`` a load keeps the markers and still reports its load ID, as engines that
+    acknowledge weights that they do not serve.
+    """
 
     def __init__(self, engine_url: str, events: list, *, retracting: bool = False):
         self.engine_url = engine_url
@@ -204,6 +225,13 @@ class FakeEngines(InferenceBackend):
 
 
 class FakeService(InferenceService):
+    """The engine service that the component's server starts in a test, with ``FakeEngines`` as its engines.
+
+    Values: ``config`` is the start input with its ``backend``; each operation appends to ``events``. A
+    ``pause_mode`` of "retract" gives engines with a prefix cache. Purpose: the ``component`` fixture makes one
+    for each engine start and lists them in start order.
+    """
+
     def __init__(self, config, events, engine_url):
         self.config = config
         self.events = events
@@ -240,13 +268,16 @@ class FakeReservation:
 
 
 @pytest.fixture
-def server(tmp_path, request):
+def engine_name():
+    """The built-in engine of the component's server; a test parametrizes ``engine_name`` to select the other one."""
+    return "sglang"
+
+
+@pytest.fixture
+def server(tmp_path, engine_name):
     """The component's server, which a test can restart (``restart``)."""
     return RemoteInferenceServer(
-        engine=getattr(request, "param", "sglang"),
-        control_token=CONTROL_TOKEN,
-        inference_token=INFERENCE_TOKEN,
-        work_dir=tmp_path / "work",
+        engine=engine_name, control_token=CONTROL_TOKEN, inference_token=INFERENCE_TOKEN, work_dir=tmp_path / "work"
     )
 
 
@@ -331,9 +362,9 @@ def pinned_request(url, engine, name, *, adapter=None, hold=False, **options):
         return json.load(response)
 
 
-@pytest.mark.parametrize("server", ["sglang", "vllm"], indirect=True)
+@pytest.mark.parametrize("engine_name", ["sglang", "vllm"])
 def test_pinned_receiver_refuses_stale_routes_during_the_publication_gap(component, server, tmp_path):
-    _, backend = pinned_service(component, server)
+    backend = pinned_service(component, server)[1]
     load_marker(backend, tmp_path, "A", "owner:6")
     backend.resume()
     assert pinned_request(component[0], server.engine, full_weight_name("toy", "owner:6"))["text"] == "AAA"
@@ -349,9 +380,9 @@ def test_pinned_receiver_refuses_stale_routes_during_the_publication_gap(compone
         backend.initialize_version("owner:6")
 
 
-@pytest.mark.parametrize("server", ["sglang", "vllm"], indirect=True)
+@pytest.mark.parametrize("engine_name", ["sglang", "vllm"])
 def test_pinned_pause_waits_for_a_generation_before_mutating_weights(component, server, tmp_path):
-    _, backend = pinned_service(component, server)
+    backend = pinned_service(component, server)[1]
     load_marker(backend, tmp_path, "A", "owner:6")
     backend.resume()
     engine = component[3][-1].engines
@@ -375,7 +406,7 @@ def test_pinned_pause_waits_for_a_generation_before_mutating_weights(component, 
 
 
 def test_adapter_pin_checks_residency_and_the_native_adapter_selection(component, server, tmp_path):
-    _, backend = pinned_service(component, server, layout="adapter")
+    backend = pinned_service(component, server, layout="adapter")[1]
     first, second = adapter_name("math", "owner:6"), adapter_name("code", "owner:7")
     load_marker(backend, tmp_path, "A", "owner:6", adapter=first)
     load_marker(backend, tmp_path, "B", "owner:7", adapter=second)
@@ -433,15 +464,51 @@ def test_new_owner_fences_a_late_load_and_resume_before_replacing_the_stack(comp
         backend.resume()
     with pytest.raises(RuntimeError, match="superseded"):
         old.close()
-    _, current = pinned_service(component, server, sequence=2)
+    current = pinned_service(component, server, sequence=2)[1]
     load_marker(current, tmp_path, "B", "new:7")
     current.resume()
     assert pinned_request(component[0], server.engine, full_weight_name("toy", "new:7"))["text"] == "BBB"
 
 
-@pytest.mark.parametrize("server", ["sglang", "vllm"], indirect=True)
+def test_an_unpinned_start_cannot_disable_pinning_that_began_while_it_waited_for_the_lock(
+    component, server, tmp_path, monkeypatch
+):
+    backend = started_service(component[0]).backend(InferenceConnection(None))
+    engine = component[3][-1].engines
+    engine.release_load.clear()
+    queued = threading.Semaphore(0)
+    control_lock = server.control_lock
+
+    def announced(request):
+        # The handler takes its place in the lock's queue in the event-loop step that makes this call.
+        queued.release()
+        return control_lock(request)
+
+    late = RemoteControl(component[0], CONTROL_TOKEN)
+    late.owner_sequence = 1
+    unpinned_start = {"backend": server.engine, "config": {"model_path": "toy"}, "num_gpus": 1}
+    with ThreadPoolExecutor(3) as pool:
+        load = pool.submit(load_marker, backend, tmp_path, "A", "base:1")
+        try:
+            assert engine.entered_load.wait(5)
+            monkeypatch.setattr(server, "control_lock", announced)
+            pinned = pool.submit(pinned_service, component, server)
+            assert queued.acquire(timeout=5)
+            # Pinning is still off, so this start passes the check that precedes the lock.
+            unpinned = pool.submit(late.call, "PUT", "engines", payload=unpinned_start)
+            assert queued.acquire(timeout=5)
+        finally:
+            engine.release_load.set()
+        load.result(timeout=5)
+        pinned.result(timeout=5)
+        with pytest.raises(RuntimeError, match="409: restart the component before disabling request pinning"):
+            unpinned.result(timeout=5)
+    assert server.pins.enabled and len(component[3]) == 2
+
+
+@pytest.mark.parametrize("engine_name", ["sglang", "vllm"])
 def test_pinned_components_require_a_pin_and_forward_only_generation(component, server, tmp_path):
-    _, backend = pinned_service(component, server)
+    backend = pinned_service(component, server)[1]
     load_marker(backend, tmp_path, "A", "owner:6")
     backend.resume()
     with pytest.raises(urllib.error.HTTPError) as refused:
@@ -455,12 +522,12 @@ def test_pinned_components_require_a_pin_and_forward_only_generation(component, 
     assert refused.value.code == 404
 
 
-@pytest.mark.parametrize("server", ["sglang", "vllm"], indirect=True)
+@pytest.mark.parametrize("engine_name", ["sglang", "vllm"])
 @pytest.mark.parametrize(
     "selection", [{"model": "another-model"}, {"lora_path": "adapter"}, {"lora_id": 7}, {"lora_name": "adapter"}]
 )
 def test_a_full_weight_pin_refuses_conflicting_native_selections(component, server, tmp_path, selection):
-    _, backend = pinned_service(component, server)
+    backend = pinned_service(component, server)[1]
     load_marker(backend, tmp_path, "A", "owner:6")
     backend.resume()
     with pytest.raises(urllib.error.HTTPError) as refused:
@@ -473,7 +540,7 @@ def test_a_full_weight_pin_refuses_conflicting_native_selections(component, serv
 
 
 def test_disconnected_client_keeps_its_pin_until_native_generation_finishes(component, server, tmp_path):
-    _, backend = pinned_service(component, server)
+    backend = pinned_service(component, server)[1]
     load_marker(backend, tmp_path, "A", "owner:6")
     backend.resume()
     engine = component[3][-1].engines
@@ -575,9 +642,11 @@ def test_a_server_error_cannot_prove_that_native_generation_stopped(component, s
         service.check_health()
 
 
-@pytest.mark.parametrize("failure", ["initialize_version", "load_weight_files"])
+@pytest.mark.parametrize(
+    "original", [FakeEngines.initialize_version, FakeEngines.load_weight_files], ids=lambda method: method.__name__
+)
 def test_adapter_restore_retries_every_scenario_after_a_partial_failure(
-    component, server, tmp_path, monkeypatch, failure
+    component, server, tmp_path, monkeypatch, original
 ):
     monkeypatch.setattr(FakeEngines, "recover", lambda engines: 0)
     runtime = RuntimeRegistry().build(
@@ -595,7 +664,6 @@ def test_adapter_restore_retries_every_scenario_after_a_partial_failure(
             (files / "adapter_config.json").write_text('{"r": 16}')
             artifacts[scenario] = Artifact.local(directory)
             runtime.activate_checkpoint(artifacts[scenario], scenario=scenario)
-        original = getattr(FakeEngines, failure)
         failed = False
 
         def once(self, *args, **kwargs):
@@ -605,8 +673,8 @@ def test_adapter_restore_retries_every_scenario_after_a_partial_failure(
                 raise RuntimeError("interrupted restore")
             return original(self, *args, **kwargs)
 
-        monkeypatch.setattr(FakeEngines, failure, once)
-        runtime._backend.abort()
+        monkeypatch.setattr(FakeEngines, original.__name__, once)
+        runtime.backend.abort()
         with pytest.raises((ReefError, RuntimeError)):
             runtime.recover_engines()
         assert runtime.recovery_pending
@@ -630,7 +698,7 @@ def test_adapter_restore_retries_every_scenario_after_a_partial_failure(
 
 
 def test_owner_change_during_drain_prevents_the_old_adapter_unload(component, server, tmp_path):
-    _, backend = pinned_service(component, server, layout="adapter")
+    backend = pinned_service(component, server, layout="adapter")[1]
     name = adapter_name("math", "owner:6")
     load_marker(backend, tmp_path, "A", "owner:6", adapter=name)
     backend.resume()
@@ -691,11 +759,11 @@ def test_pinned_runtime_recovers_without_repeating_a_broken_pause(
         if failure == "pause":
             monkeypatch.setattr(component[3][-1].engines, "pause", broken)
             with pytest.raises(RuntimeError, match="dead toy engine"):
-                runtime._backend.pause()
+                runtime.backend.pause()
         else:
             monkeypatch.setattr(component[3][-1], "poll", broken)
             with pytest.raises(RuntimeError, match="binding recovery"):
-                runtime._engines.check_health()
+                runtime.engines.check_health()
         # The route is still published, but admission stays closed until new engines replace the stack.
         with pytest.raises(urllib.error.HTTPError) as refused:
             answer()
@@ -708,13 +776,15 @@ def test_pinned_runtime_recovers_without_repeating_a_broken_pause(
         runtime.shutdown()
 
 
-@pytest.mark.parametrize("failure", ["start", "initialize"])
-def test_pinned_runtime_open_can_retry_a_partial_start(component, server, monkeypatch, failure):
+@pytest.mark.parametrize(
+    ("target", "original"),
+    [(FakeService, FakeService.start), (FakeEngines, FakeEngines.initialize_version)],
+    ids=["start", "initialize"],
+)
+def test_pinned_runtime_open_can_retry_a_partial_start(component, server, monkeypatch, target, original):
     config = serving_config(component[0], artifact_format=ArtifactFormat("full").to_dict())
     runtime = RuntimeRegistry().build(config, model_path="toy", environ=TOKENS)
     runtime.set_owner_sequence(1)
-    target, name = (FakeService, "start") if failure == "start" else (FakeEngines, "initialize_version")
-    original = getattr(target, name)
     attempts = 0
 
     def once(self, *args, **kwargs):
@@ -724,7 +794,7 @@ def test_pinned_runtime_open_can_retry_a_partial_start(component, server, monkey
             raise RuntimeError("temporary startup failure")
         return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(target, name, once)
+    monkeypatch.setattr(target, original.__name__, once)
     with pytest.raises(RuntimeError, match="temporary startup failure"):
         runtime.open()
     try:
@@ -793,7 +863,7 @@ def test_upload_from_a_superseded_owner_cannot_mutate_the_new_stack(component, s
             )
             await began.wait()
             try:
-                _, current = await asyncio.to_thread(pinned_service, component, server, sequence=2)
+                current = (await asyncio.to_thread(pinned_service, component, server, sequence=2))[1]
             finally:
                 finish.set()
             async with await upload as response:
@@ -817,7 +887,12 @@ class MarkerTokenizer:
 
 
 class MarkerOracle(OutputOracle):
-    """Identify toy weights from generated content rather than the engine's reported version."""
+    """Name the toy artifact of an answer from its text, not from the engine's reported version.
+
+    Values: ``ids`` maps "AAA" to the ID of the first of two artifacts and "BBB" to the second's, because a toy
+    generation repeats the marker of its weights three times. ``artifact_id`` raises ``KeyError`` for any other
+    text, which neither artifact made.
+    """
 
     def __init__(self, artifacts):
         self.ids = dict(zip(("AAA", "BBB"), (artifact.artifact_id for artifact in artifacts), strict=True))
@@ -842,7 +917,28 @@ def test_weight_serving_refuses_a_component_service_that_requests_no_request_pro
         AdapterServingRuntime(ComponentEngines(service), handler, adapter_capacity=1, model_path="toy")
 
 
-@pytest.mark.parametrize("server", ["sglang", "vllm"], indirect=True)
+@pytest.mark.parametrize(
+    ("values", "match"),
+    [
+        ({"request_pinning": "yes"}, "request_pinning must be a bool"),
+        ({"weight_layout": "shards"}, "weight_layout must be one of"),
+        ({"drain_timeout_s": 0}, "drain_timeout_s must be a positive, finite"),
+        ({"drain_timeout_s": float("inf")}, "drain_timeout_s must be a positive, finite"),
+    ],
+)
+def test_a_component_service_refuses_an_invalid_pinning_configuration(values, match):
+    with pytest.raises(ValueError, match=match):
+        RemoteInferenceService(
+            RemoteInferenceSettings(url="http://127.0.0.1:9"),
+            engine="sglang",
+            engine_config={"model_path": "toy"},
+            num_gpus=1,
+            control_token=CONTROL_TOKEN,
+            **values,
+        )
+
+
+@pytest.mark.parametrize("engine_name", ["sglang", "vllm"])
 @pytest.mark.parametrize("ignore_load", [False, True], ids=["protected", "false-load-ack"])
 def test_shared_qualification_checks_real_output_headers_and_records(
     component, server, tmp_path, monkeypatch, ignore_load
@@ -988,17 +1084,16 @@ def test_component_starts_only_the_engine_its_operator_chose(component):
 
 
 @pytest.mark.parametrize(
-    ("server", "config", "option"),
+    ("engine_name", "config", "option"),
     [
         ("sglang", {"options": {"hicache-storage-backend": "file"}}, "hicache_storage_backend"),
         ("sglang", {"options": {"enable_lmcache": True}}, "enable_lmcache"),
         ("vllm", {"options": {"kv_transfer_config": {"kv_connector": "OffloadingConnector"}}}, "kv_transfer_config"),
         ("vllm", {"options": {"kv-offloading-size": 4}}, "kv_offloading_size"),
     ],
-    indirect=["server"],
 )
 def test_component_refuses_protected_engines_that_keep_kv_outside_them(component, server, config, option):
-    url, events, _, _ = component
+    url, events = component[:2]
     control = RemoteControl(url, CONTROL_TOKEN)
     control.owner_sequence = 1
     payload = {"backend": server.engine, "config": {"model_path": "toy", **config}, "num_gpus": 1}
@@ -1230,16 +1325,20 @@ def saved_adapter(path):
     return path
 
 
+class CustomHandler(SGLangInferenceHandler):
+    """A deployment's own handler factory: it changes nothing of the built-in handler, but it is another class.
+
+    Purpose: the runtime factory refuses it, because only a built-in handler is known to name the selected weights
+    on every request.
+    """
+
+
 @pytest.mark.parametrize(
     ("values", "environ", "match"),
     [
         # Only the built-in engines with their own handlers keep each request on its weights; nothing turns that off.
         ({"engine": "my.engines:create"}, TOKENS, "cannot serve published weights"),
-        (
-            {"inference_handler_factory": type("CustomHandler", (SGLangInferenceHandler,), {})},
-            TOKENS,
-            "built-in request handlers",
-        ),
+        ({"inference_handler_factory": CustomHandler}, TOKENS, "built-in request handlers"),
         ({"prefix_sharing": "sometimes"}, TOKENS, "runtime.prefix_sharing must be a valid bool"),
         ({"request_pinning": False}, TOKENS, "unknown config fields: request_pinning"),
         ({}, {"REEF_REMOTE_CONTROL_TOKEN": CONTROL_TOKEN}, "REEF_REMOTE_INFERENCE_TOKEN"),
@@ -1314,7 +1413,9 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_thr
     )
     assert served.parent == work_dir and events[-1] == "resume"
     assert runtime.serving_adapter_runtime_load_id("math") == version
-    arguments = runtime.inference_handler._post_arguments(Artifact.local(tmp_path), "/generate", {"input_ids": [1]})
+    arguments = runtime.inference_handler.post_arguments(
+        InferenceArtifact("artifact"), "/generate", {"input_ids": [1]}
+    )
     assert (arguments["url"], arguments["headers"]["Authorization"]) == (
         f"{url}/generate",
         f"Bearer {INFERENCE_TOKEN}",
@@ -1406,7 +1507,7 @@ def test_a_base_root_reaches_the_component_as_the_base_models_files_or_as_no_loa
 
 def test_slot_urls_serve_one_full_weight_checkpoint_on_each_component(component, server, tmp_path, monkeypatch):
     monkeypatch.setattr(FakeEngines, "recover", lambda engines: 0)
-    url, events, _, services = component
+    url, events, services = component[0], component[1], component[3]
     other = RemoteInferenceServer(
         engine="sglang", control_token=CONTROL_TOKEN, inference_token=INFERENCE_TOKEN, work_dir=tmp_path / "other"
     )
@@ -1428,7 +1529,7 @@ def test_slot_urls_serve_one_full_weight_checkpoint_on_each_component(component,
         for slot_url in (url, other_url):
             handler = runtime.handler_for(slot_url)
             assert isinstance(handler, SGLangInferenceHandler)
-            arguments = handler._post_arguments(Artifact.local(tmp_path), "/generate", {"input_ids": [1]})
+            arguments = handler.post_arguments(InferenceArtifact("artifact"), "/generate", {"input_ids": [1]})
             assert (arguments["url"], arguments["headers"]["Authorization"]) == (
                 f"{slot_url}/generate",
                 f"Bearer {INFERENCE_TOKEN}",
@@ -1461,17 +1562,16 @@ def test_slot_urls_serve_one_full_weight_checkpoint_on_each_component(component,
 
 
 @pytest.mark.parametrize(
-    ("server", "options"),
+    ("engine_name", "options"),
     [
         # Each engine's own cache, which the pause clears, with an option for KV outside the engine that is off.
         ("sglang", {"enable-hierarchical-cache": True, "enable-lmcache": False}),
         ("vllm", {"enable-prefix-caching": True, "kv-transfer-config": None}),
     ],
-    indirect=["server"],
 )
 def test_prefix_sharing_keeps_the_cache_to_one_set_of_weights(component, server, options, tmp_path, monkeypatch):
     monkeypatch.setattr(FakeEngines, "recover", lambda engines: 0)
-    url, events, _, services = component
+    url, events, services = component[0], component[1], component[3]
     runtime = RuntimeRegistry().build(
         serving_config(
             url,
@@ -1504,7 +1604,8 @@ def test_prefix_sharing_keeps_the_cache_to_one_set_of_weights(component, server,
         return served.model_name
 
     def answers(name):
-        replies = [pinned_request(url, server.engine, name) for _ in range(2)]
+        # The first request fills the prefix cache, and the second can reuse it.
+        replies = (pinned_request(url, server.engine, name), pinned_request(url, server.engine, name))
         return [(reply["text"], reply["meta_info"]["cached_tokens"]) for reply in replies]
 
     def refused(name):
@@ -1525,7 +1626,7 @@ def test_prefix_sharing_keeps_the_cache_to_one_set_of_weights(component, server,
             assert engine.generation_started.wait(5)
             # No pause has drained this request, so the component refuses a load.
             with pytest.raises(RuntimeError, match="409"):
-                load_marker(runtime._backend, tmp_path, "B", "owner:9")
+                load_marker(runtime.backend, tmp_path, "B", "owner:9")
             pauses = events.count("pause")
             activation = pool.submit(runtime.activate_checkpoint, artifacts[1])
             try:
@@ -1589,7 +1690,7 @@ def test_the_serving_runtime_reloads_its_snapshot_into_the_engines_of_a_restarte
 
 def test_a_new_owner_starts_new_engines_and_loads_the_selected_adapter_again(component, tmp_path, monkeypatch):
     monkeypatch.setattr(FakeEngines, "recover", lambda engines: 0)
-    url, events, _, services = component
+    url, events, services = component[0], component[1], component[3]
     artifact = Artifact.local(saved_adapter(tmp_path / "job-1"))
     routes = []
     # A control restart, or a standby that takes over, opens with the next owner sequence.
