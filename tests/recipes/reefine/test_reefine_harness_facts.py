@@ -14,7 +14,7 @@ import json
 import re
 
 import pytest
-from tests.recipes.reefine.reefine_support import PLAN_MARKER, TREE, Model, answer, designed, extension, failure_of
+from tests.recipes.reefine.support import PLAN_MARKER, TREE, Model, answer, designed, extension, failure_of
 
 from recipes.beta.reefine import answer as reefine_answer
 from recipes.beta.reefine.harness_facts import harness_facts

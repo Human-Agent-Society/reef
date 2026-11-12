@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support import records
+from tests.support.trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.job_data import TaskSample
@@ -25,15 +27,8 @@ from reef.record2sample import (
 from reef.record2sample.staleness import ServedArtifacts, is_stale, producing_artifact_ids
 from reef.train import PipelineContext
 
-
-def inference(record_id: str) -> AgentRecord:
-    return AgentRecord.create(scenario="s", request_type=RequestType.INFERENCE, payload={}, agent_record_id=record_id)
-
-
-def report(record_id: str, *references: str) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="s", request_type=RequestType.REPORT, payload={}, agent_record_id=record_id, references=references
-    )
+inference = partial(records.inference, scenario="s")
+report = partial(records.report, scenario="s")
 
 
 @dataclass(frozen=True, kw_only=True)

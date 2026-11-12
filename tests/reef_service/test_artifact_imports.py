@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, dispatcher, train
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import runtime_bindings
 from tests.support.serving import wait_for_serving
 

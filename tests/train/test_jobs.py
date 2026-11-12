@@ -7,13 +7,13 @@ from functools import partial
 from pathlib import Path
 
 import pytest
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples import open_sample_store
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
+from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import Artifact, DefaultStart
 from reef.core import AgentRecord, RequestType

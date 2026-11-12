@@ -155,22 +155,44 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     A snapshot serves under the version its ``model.txt`` names, or under its
     artifact ID when it holds no such file. ``activated`` lists the versions
     of the snapshots it served, at commits, activations and starts, in order;
-    ``served`` is the last one, ``None`` before the first one.
+    ``served`` is the last one, ``None`` before the first one. For each
+    activation, ``activated_ids`` holds the artifact ID and
+    ``activated_scenarios`` the scenario that the activation named, or None.
 
     With ``answers_each_artifact``, the runtime answers each call from the artifact it names, as Tinker does: each
-    artifact has its own model name, ``sampler:<artifact_id>``.
+    artifact has its own model name, ``sampler:<artifact_id>``. ``per_scenario_adapters`` and
+    ``shared_by_training_scenarios`` are what the runtime reports for the properties of the same names.
     """
 
-    def __init__(self, base_url: str = "http://inference-runtime", **kwargs) -> None:
+    def __init__(
+        self,
+        base_url: str = "http://inference-runtime",
+        *,
+        per_scenario_adapters: bool = False,
+        shared_by_training_scenarios: bool = False,
+        **kwargs,
+    ) -> None:
         kwargs.setdefault("model_path", "stub-model")
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
+        self.activated_ids: list[str] = []
+        self.activated_scenarios: list[str | None] = []
         self.served: str | None = None
         self.answers_each_artifact = False
+        self.adapters_per_scenario = per_scenario_adapters
+        self.training_scenarios_share = shared_by_training_scenarios
 
     @property
     def serves_any_artifact(self) -> bool:
         return self.answers_each_artifact
+
+    @property
+    def per_scenario_adapters(self) -> bool:
+        return self.adapters_per_scenario
+
+    @property
+    def shared_by_training_scenarios(self) -> bool:
+        return self.training_scenarios_share
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", artifact.ref.revision)
@@ -179,6 +201,8 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         return ServedArtifact(artifact.artifact_id, self.base_url, f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        self.activated_ids.append(artifact.artifact_id)
+        self.activated_scenarios.append(scenario)
         version = self.serve(artifact)
         self.activated.append(version)
         return version

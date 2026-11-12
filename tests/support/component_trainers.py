@@ -8,9 +8,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples import data_storage
+from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree

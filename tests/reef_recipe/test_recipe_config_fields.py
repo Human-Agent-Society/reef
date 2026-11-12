@@ -11,9 +11,9 @@ from dataclasses import KW_ONLY, dataclass
 
 import pytest
 import yaml
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.core.config import config_arguments
 from reef.evaluation.activation import AlwaysActivate

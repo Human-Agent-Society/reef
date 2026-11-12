@@ -19,8 +19,6 @@ from types import ModuleType
 
 import pytest
 from tests.harness.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
-from tests.support._strategies import resolve_method, resolve_task_scorer
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_render import (
     NATIVE_SEED_FILES,
     NATIVE_SEED_TOOLS,
@@ -30,6 +28,8 @@ from tests.support.harness_render import (
     write_rendered,
 )
 from tests.support.harness_steps import build_harness_backend, head_of
+from tests.support.strategies import resolve_method, resolve_task_scorer
+from tests.support.trajectories import recorded_trajectory
 
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
 from reef.execution.sandbox.process import SandboxExecutor

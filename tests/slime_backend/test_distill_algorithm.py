@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.core.trajectories import source_record_id
 from reef.train.slime_backend.data_builder import to_slime_rollout_data

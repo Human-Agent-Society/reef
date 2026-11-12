@@ -9,18 +9,12 @@ from contextlib import closing
 
 import pytest
 from sqlalchemy.exc import OperationalError
+from tests.support.records import report
 
 from reef.artifact import SnapshotRef
-from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
-
-
-def report(record_id: str, scenario: str = "math") -> AgentRecord:
-    return AgentRecord.create(
-        agent_record_id=record_id, scenario=scenario, request_type=RequestType.REPORT, payload={"score": 1.0}
-    )
 
 
 def commit(step: int = 1) -> CommitRecord:

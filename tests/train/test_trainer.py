@@ -7,12 +7,11 @@ from functools import partial
 
 import pytest
 from sqlalchemy import func, select
-from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
-from tests.support._grouped_pg import grouped_policy_pipeline
-from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.chat_templates import CharTemplate
 from tests.support.conversations import conversation
-from tests.support.records import item_records, memory_records
+from tests.support.grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
+from tests.support.grouped_pg import grouped_policy_pipeline
+from tests.support.records import item_records, memory_records, token_inference
 from tests.support.runtime_stubs import (
     STUB_ROOT,
     RecordingComponent,
@@ -23,6 +22,7 @@ from tests.support.runtime_stubs import (
 from tests.support.samples import data_storage, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
 
 from recipes.sao import SAOJobData, SAOSamples
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
@@ -102,15 +102,6 @@ def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> N
     )
 
 
-def inference(agent_record_id: str, *, candidate: str | None = None) -> AgentRecord:
-    payload = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
-    if candidate is not None:
-        payload["candidate"] = candidate
-    return AgentRecord.create(
-        scenario="math", request_type=RequestType.INFERENCE, payload=payload, agent_record_id=agent_record_id
-    )
-
-
 def served_call(agent_record_id: str, turns: int, *, filler: str = "") -> AgentRecord:
     """A call of the conversation ``filler`` names (``conversation``), which the inference service recorded as served
     by ``artifact-1``; a call with more turns continues a call of the same conversation with fewer."""
@@ -132,7 +123,7 @@ def report(agent_record_id: str, references: str | tuple[str, ...], score: float
 def one_pair_records() -> ItemRecordStore:
     """An in-memory store holding inference i1 and its report r1, scored 1."""
     records = memory_records("math")
-    records.append(inference("i1"))
+    records.append(token_inference("i1"))
     records.append(report("r1", "i1", 1.0))
     return records
 
@@ -160,7 +151,7 @@ def positioned_report(sequence: int, reference: str, score: float) -> AgentRecor
 @pytest.mark.unit
 def test_recipe_processor_never_becomes_ready() -> None:
     processor = TrainingPipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
 
     assert not processor.ready(1)
     # A processor that never becomes ready says so: it holds no ready samples, whatever it has been pushed.
@@ -171,8 +162,8 @@ def test_recipe_processor_never_becomes_ready() -> None:
 @pytest.mark.unit
 def test_pairing_processor_uses_feedback_without_score_filtering() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("bad"))
-    processor.push(inference("good"))
+    processor.push(token_inference("bad"))
+    processor.push(token_inference("good"))
     processor.push(report("bad-r", "bad", 0.1))
     processor.push(report("good-r", "good", 1.0))
     assert [trajectory_reward(sample) for sample in processor.build_job_data(2).samples] == [0.1, 1.0]
@@ -181,7 +172,7 @@ def test_pairing_processor_uses_feedback_without_score_filtering() -> None:
 @pytest.mark.unit
 def test_pairing_processor_emits_policy_samples_for_spo() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     processor.push(report("r1", "i1", 0.8))
 
     batch = processor.build_job_data(1)
@@ -200,7 +191,7 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
 @pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), float("-inf")])
 def test_pairing_processor_rejects_a_non_finite_score(bad_score: float) -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     with pytest.raises(ReportValidationError, match="finite"):
         processor.push(report("r1", "i1", bad_score))
     assert not processor.ready(1)
@@ -299,7 +290,7 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
 @pytest.mark.unit
 def test_pairing_processor_rejects_report_eligibility_flags() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     with pytest.raises(ReportValidationError, match="eligible"):
         processor.push(report("r1", "i1", 0.0, training={"eligible": False}))
     assert not processor.ready(1)
@@ -309,7 +300,7 @@ def test_pairing_processor_rejects_report_eligibility_flags() -> None:
 @pytest.mark.unit
 def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     processor.push(report("r1", "i1", 1.0))
     # r1's sample is stored, which consumes r1 and i1; r2 ends at once without training.
     processor.push(report("r2", "i1", 0.5))
@@ -329,7 +320,7 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
 @pytest.mark.unit
 def test_pairing_retention_keeps_low_score_feedback_until_its_sample_is_stored() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     assert processor.record2sample.releasable_record_ids().isdisjoint({"i1"})
     processor.push(report("low", "i1", 0.1))
     # The low-score sample is stored, so its records are consumed; the sample trains in the next job data.
@@ -343,7 +334,7 @@ def test_pairing_retention_keeps_low_score_feedback_until_its_sample_is_stored()
 def test_grpo_retention_releases_complete_comparison_set_after_acknowledgement() -> None:
     processor = grouped_policy_pipeline(PipelineContext("math"))
     for agent_record_id, score in (("i1", 0.2), ("i2", 0.8)):
-        processor.push(inference(agent_record_id))
+        processor.push(token_inference(agent_record_id))
         processor.push(report("r" + agent_record_id, agent_record_id, score, comparison_set="set-a"))
 
     batch = processor.build_job_data(1)
@@ -355,14 +346,14 @@ def test_grpo_retention_releases_complete_comparison_set_after_acknowledgement()
 @pytest.mark.unit
 def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None:
     sft_processor = threshold_pipeline(PipelineContext("math"))
-    sft_processor.push(inference("i1"))
+    sft_processor.push(token_inference("i1"))
     sft_processor.push(report("r1", "i1", 1.0))
     sft_result = prepare_slime_job(sft_processor.build_job_data(1), "sft", {}, StepScheduling(), step_size=1)
     assert sft_result.next_algorithm_state == {"steps": 1}
 
     grpo_processor = grouped_policy_pipeline(PipelineContext("math"))
     for rid, score in (("i3", 0.2), ("i4", 0.8)):
-        grpo_processor.push(inference(rid))
+        grpo_processor.push(token_inference(rid))
         grpo_processor.push(report("r" + rid, rid, score, comparison_set="x"))
     result = prepare_slime_job(
         grpo_processor.build_job_data(1), _GROUPED_PG_OBJECTIVE, {}, StepScheduling(), step_size=1
@@ -481,7 +472,7 @@ def test_a_selection_names_the_tasks_that_read_and_stored_each_sample() -> None:
 def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> None:
     records = memory_records("math")
     for sequence in range(3):
-        records.append(inference(f"i{sequence}"))
+        records.append(token_inference(f"i{sequence}"))
         records.append(report(f"r{sequence}", f"i{sequence}", 1.0))
     trainer = preparing_trainer(records, pipeline_factory=partial(threshold_pipeline, job_samples=2))
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 2)
@@ -575,9 +566,9 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     samples = items.for_trainer("")
     records = session.records
     for item in (
-        inference("i1"),
+        token_inference("i1"),
         report("r1", "i1", 1.0),
-        inference("i2"),
+        token_inference("i2"),
         report("r2", "i2", 0.5),
     ):
         records.append(item)
@@ -723,7 +714,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     wait_for_serving(dispatcher)
     serving = scenario.serving_artifact_id()
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
-        record = inference(rid)
+        record = token_inference(rid)
         dispatcher.accept_record(replace(record, payload={**record.payload, "artifact_id": serving}))
         dispatcher.accept_record(report("r" + rid, rid, score, comparison_set="set-a"))
 

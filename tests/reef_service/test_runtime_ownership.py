@@ -20,7 +20,7 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class RecordingComponent(StubTrainingComponent):
+class OwnedComponent(StubTrainingComponent):
     """A component that several training scenarios share, which records its close."""
 
     def __init__(self, events: list[str]) -> None:
@@ -31,23 +31,19 @@ class RecordingComponent(StubTrainingComponent):
         self.events.append("close component")
 
 
-class RecordingRuntime(StubInferenceRuntime):
-    """A runtime that several training scenarios share, each served its own weights."""
+class OwnedRuntime(StubInferenceRuntime):
+    """A runtime that several training scenarios share, each served its own weights, which records its shutdown."""
 
     def __init__(self, events: list[str]) -> None:
-        super().__init__()
+        super().__init__(shared_by_training_scenarios=True)
         self.events = events
-
-    @property
-    def shared_by_training_scenarios(self) -> bool:
-        return True
 
     def shutdown(self) -> None:
         self.events.append("shutdown runtime")
 
 
-def owned_pair(events: list[str]) -> tuple[RecordingComponent, RecordingRuntime]:
-    return RecordingComponent(events), RecordingRuntime(events)
+def owned_pair(events: list[str]) -> tuple[OwnedComponent, OwnedRuntime]:
+    return OwnedComponent(events), OwnedRuntime(events)
 
 
 def dispatcher_for(recipe: Recipe, tmp_path) -> Dispatcher:
@@ -112,13 +108,13 @@ def test_dispatcher_releases_the_runtime_when_scenario_teardown_fails(tmp_path):
 
 def test_a_named_recipe_takes_its_configured_runtime_and_an_invalid_one_releases_it(tmp_path):
     events: list[str] = []
-    runtimes: list[RecordingRuntime] = []
+    runtimes: list[OwnedRuntime] = []
 
     def build_runtime(*args):
-        runtimes.append(RecordingRuntime(events))
+        runtimes.append(OwnedRuntime(events))
         return runtimes[-1]
 
-    registry = RuntimeRegistry({"injected": build_runtime, "component": lambda *args: RecordingComponent(events)})
+    registry = RuntimeRegistry({"injected": build_runtime, "component": lambda *args: OwnedComponent(events)})
     (tmp_path / "valid.yaml").write_text(
         "recipe:\n  implementation: recipe\n  runtime:\n    type: injected\ninference:\n  upstream-model: test-model\n"
     )

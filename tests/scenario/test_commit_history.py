@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-import time
 from contextlib import closing
 from dataclasses import dataclass, replace
 from functools import partial
@@ -18,13 +17,15 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support.harness_service import harness_repository
 from tests.support.harness_steps import harness_recipe
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.polling import wait_until
+from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
@@ -323,7 +324,7 @@ def test_commit_record_validates_its_schema() -> None:
         CommitRecord.from_dict(encoded)
 
 
-class RecordingComponent(StubTrainingComponent):
+class SourceRecordingComponent(StubTrainingComponent):
     """A training component that records the source records of each batch it trained."""
 
     def __init__(self, checkpoint_root: Path | None = None) -> None:
@@ -333,29 +334,6 @@ class RecordingComponent(StubTrainingComponent):
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         self.trained_data.append([source_record_id(sample) for sample in read_job_data(job.data_dir).samples])
         return super().train(job)
-
-
-def sft_inference(agent_record_id: str, artifact_id: str | None = None) -> AgentRecord:
-    """An inference record; ``artifact_id`` names the artifact that answered it, when one is given."""
-    payload: dict[str, object] = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
-    if artifact_id is not None:
-        payload["artifact_id"] = artifact_id
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload=payload,
-        agent_record_id=agent_record_id,
-    )
-
-
-def sft_report(agent_record_id: str, reference: str) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.REPORT,
-        payload={"score": 1.0, "references": [reference]},
-        agent_record_id=agent_record_id,
-        references=(reference,),
-    )
 
 
 def build_training_dispatcher(
@@ -404,17 +382,10 @@ def repository_factory(tmp_path):
     return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
 
 
-def wait_until(condition, message: str) -> None:
-    deadline = time.monotonic() + 10
-    while not condition():
-        if time.monotonic() >= deadline:
-            raise AssertionError(message)
-        time.sleep(0.001)
-
-
 def wait_for_step(dispatcher: Dispatcher, step: int, *, scenario: str = "math") -> None:
     wait_until(
-        lambda: dispatcher.get_or_create_scenario(scenario).scenario_step >= step, "async training did not commit"
+        lambda: dispatcher.get_or_create_scenario(scenario).scenario_step >= step,
+        message="async training did not commit",
     )
 
 
@@ -422,7 +393,7 @@ def wait_for_jobs(dispatcher: Dispatcher, count: int, *, scenario: str = "math")
     """Wait until the scenario's trainer committed the end of ``count`` training jobs."""
     wait_until(
         lambda: dispatcher.get_or_create_scenario(scenario).trainer.state["finished_jobs"] >= count,
-        "the training job did not finish",
+        message="the training job did not finish",
     )
 
 
@@ -430,8 +401,8 @@ def train_pair(dispatcher: Dispatcher, index: int, artifact_id: str | None = Non
     """Send inference ``i<index>`` (answered by ``artifact_id``, else by the served artifact) and its report
     ``r<index>``, then wait until ``index`` training jobs ended."""
     answered = served_artifact_id(dispatcher) if artifact_id is None else artifact_id
-    dispatcher.accept_record(sft_inference(f"i{index}", answered))
-    dispatcher.accept_record(sft_report(f"r{index}", f"i{index}"))
+    dispatcher.accept_record(token_inference(f"i{index}", artifact_id=answered))
+    dispatcher.accept_record(report(f"r{index}", f"i{index}"))
     wait_for_jobs(dispatcher, index)
 
 
@@ -476,7 +447,7 @@ class _SavedArtifactRecipe(Recipe):
         )
 
 
-def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
+def build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
     artifact_path = tmp_path / "candidate"
     artifact_path.mkdir()
     (artifact_path / "model.txt").write_text("trained")
@@ -497,7 +468,7 @@ def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
 def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_from_the_log(tmp_path) -> None:
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = repository_factory(tmp_path)
-    component = RecordingComponent(tmp_path / "exported")
+    component = SourceRecordingComponent(tmp_path / "exported")
     dispatcher = build_training_dispatcher(component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     train_pair(dispatcher, 1)
     train_pair(dispatcher, 2)
@@ -538,7 +509,7 @@ def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_fr
     # A fresh dispatcher over the same dirs is a process restart: nothing is
     # durable except the snapshot chain, the record store, and the commit history.
     second = build_training_dispatcher(
-        RecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
+        SourceRecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 6
@@ -615,7 +586,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
             coordination=memory_coordination(),
         )
 
-    first_component = RecordingComponent(tmp_path / "first")
+    first_component = SourceRecordingComponent(tmp_path / "first")
     first = build(first_component)
     train_pair(first, 1)
     assert first_component.trained_data == [["i1"]]
@@ -623,7 +594,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     assert first.get_or_create_scenario("math").records.read("math", "i1") is not None
     first.close()
 
-    second_component = RecordingComponent(tmp_path / "second")
+    second_component = SourceRecordingComponent(tmp_path / "second")
     second = build(second_component)
     recovered = second.get_or_create_scenario("math")
 
@@ -649,12 +620,12 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = repository_factory(tmp_path)
     # The components save no checkpoint, so the root snapshot serves both inferences and neither is stale.
-    first_component = RecordingComponent()
+    first_component = SourceRecordingComponent()
     first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     base_artifact_id = served_artifact_id(first)
-    first.accept_record(sft_inference("i1", base_artifact_id))
-    first.accept_record(sft_inference("i2", base_artifact_id))
-    first.accept_record(sft_report("r1", "i1"))
+    first.accept_record(token_inference("i1", artifact_id=base_artifact_id))
+    first.accept_record(token_inference("i2", artifact_id=base_artifact_id))
+    first.accept_record(report("r1", "i1"))
     wait_for_jobs(first, 1)
     assert first_component.trained_data == [["i1"]]
     # The second inference sits below the committed watermark yet survives
@@ -663,12 +634,12 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     assert first.get_or_create_scenario("math").records.read("math", "i2") is not None
     first.close()
 
-    second_component = RecordingComponent()
+    second_component = SourceRecordingComponent()
     second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     second.get_or_create_scenario("math")
     assert served_artifact_id(second) == base_artifact_id
 
-    second.accept_record(sft_report("r2", "i2"))
+    second.accept_record(report("r2", "i2"))
     wait_for_jobs(second, 2)
     # The replayed inference pairs with the late report; i1 never retrains.
     assert second_component.trained_data == [["i2"]]
@@ -679,7 +650,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     """A committed batch cannot train twice even if processor cleanup fails."""
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = repository_factory(tmp_path)
-    first_component = RecordingComponent(tmp_path / "first")
+    first_component = SourceRecordingComponent(tmp_path / "first")
     first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     scenario = first.get_or_create_scenario("math")
 
@@ -700,7 +671,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     assert crash["armed"] is False
     first.close()
 
-    second_component = RecordingComponent(tmp_path / "second")
+    second_component = SourceRecordingComponent(tmp_path / "second")
     second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("math")
     # Recovery uses committed consumption while leaving bodies readable.
@@ -710,7 +681,9 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     train_pair(second, 2)
     assert second_component.trained_data == [["i2"]]
     # The job's three commits land on the scenario that serves now; a failed cycle can replace the instance.
-    wait_until(lambda: second.get_or_create_scenario("math").scenario_step == 6, "the job's commits did not all land")
+    wait_until(
+        lambda: second.get_or_create_scenario("math").scenario_step == 6, message="the job's commits did not all land"
+    )
     second.close()
 
 
@@ -723,7 +696,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     """
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = repository_factory(tmp_path)
-    component = RecordingComponent(tmp_path / "exported")
+    component = SourceRecordingComponent(tmp_path / "exported")
     first = build_training_dispatcher(component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     train_pair(first, 1)
     submitted, checkpoint, _ = committed_records(agent_record_dir)
@@ -772,7 +745,7 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
     backend_factory = repository_factory(tmp_path)
     # The component saves no checkpoint, so every commit lies after the checkpointed step 0.
     first = build_training_dispatcher(
-        RecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
+        SourceRecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
     base_artifact_id = served_artifact_id(first)
     for index in (1, 2, 3):
@@ -782,7 +755,7 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
     delete_commits(agent_record_dir, 3)
 
     second = build_training_dispatcher(
-        RecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
+        SourceRecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
     with pytest.raises(ReefError, match="corrupt"):
         second.get_or_create_scenario("math")
@@ -792,7 +765,7 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
 def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     """In-memory deployments keep pre-log semantics: version-chain-only recovery."""
     backend_factory = repository_factory(tmp_path)
-    component = RecordingComponent()
+    component = SourceRecordingComponent()
     first = build_training_dispatcher(component, tmp_path, backend_factory)
     train_pair(first, 1)
 
@@ -808,7 +781,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
 
     # Recovery still works from the snapshot chain, as before the commit history
     # existed: the step reverts to the checkpointed 0.
-    second = build_training_dispatcher(RecordingComponent(), tmp_path, backend_factory)
+    second = build_training_dispatcher(SourceRecordingComponent(), tmp_path, backend_factory)
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 0
     assert recovered.store.history() == ()
@@ -818,14 +791,14 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
 @pytest.mark.unit
 def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> None:
     backend_factory = repository_factory(tmp_path)
-    first = build_training_dispatcher(RecordingComponent(tmp_path / "exported"), tmp_path, backend_factory)
+    first = build_training_dispatcher(SourceRecordingComponent(tmp_path / "exported"), tmp_path, backend_factory)
     train_pair(first, 1)
     checkpoint = first.get_or_create_scenario("math").store.history()[1]
     assert checkpoint.checkpoint is True
 
     first.close()
     # Inspect checkpoint recovery before the worker can commit the missing job's failure.
-    second = build_training_dispatcher(RecordingComponent(), tmp_path, backend_factory, hold_local_cycles=True)
+    second = build_training_dispatcher(SourceRecordingComponent(), tmp_path, backend_factory, hold_local_cycles=True)
     recovered = second.get_or_create_scenario("math")
 
     # The snapshot chain ends at the checkpoint, so recovery returns to its step and metrics.
@@ -866,14 +839,7 @@ def trace_inference(
     )
 
 
-def trace_report(agent_record_id: str, reference: str, *, scenario: str = "skills") -> AgentRecord:
-    return AgentRecord.create(
-        scenario=scenario,
-        request_type=RequestType.REPORT,
-        payload={"score": 0.0, "references": [reference]},
-        agent_record_id=agent_record_id,
-        references=(reference,),
-    )
+trace_report = partial(report, scenario="skills", score=0.0)
 
 
 @pytest.mark.unit
@@ -982,13 +948,13 @@ def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_
 @pytest.mark.parametrize("failure_point", ["stage", "publish", "commit_history"])
 def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, monkeypatch, failure_point) -> None:
     agent_record_dir = tmp_path / "records" if failure_point == "commit_history" else None
-    dispatcher, backend = _build_saved_artifact_dispatcher(
+    dispatcher, backend = build_saved_artifact_dispatcher(
         tmp_path,
         agent_record_dir=agent_record_dir,
     )
     scenario = dispatcher.get_or_create_scenario("math")
-    scenario.records.append(sft_inference("i1"))
-    scenario.records.append(sft_report("r1", "i1"))
+    scenario.records.append(token_inference("i1"))
+    scenario.records.append(report("r1", "i1"))
     make_samples(scenario)
     # The job's submission consumes the batch; its checkpoint is the commit that publishes the artifact.
     submitted = scenario.next_commit()
@@ -1031,7 +997,7 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
     assert scenario.trainer.state == submitted_state
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1"]
 
-    scenario.records.append(sft_inference("i2"))
+    scenario.records.append(token_inference("i2"))
     scenario.commit(result)
 
     assert backend.data_ids == [pending.data_id]
@@ -1044,13 +1010,13 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
 
 @pytest.mark.unit
 def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp_path, monkeypatch) -> None:
-    dispatcher, backend = _build_saved_artifact_dispatcher(
+    dispatcher, backend = build_saved_artifact_dispatcher(
         tmp_path,
         agent_record_dir=tmp_path / "records",
     )
     scenario = dispatcher.get_or_create_scenario("math")
-    scenario.records.append(sft_inference("i1"))
-    scenario.records.append(sft_report("r1", "i1"))
+    scenario.records.append(token_inference("i1"))
+    scenario.records.append(report("r1", "i1"))
     make_samples(scenario)
     result = scenario.next_commit()
     assert result is not None
@@ -1098,7 +1064,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
 @pytest.mark.unit
 def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, monkeypatch) -> None:
     agent_record_dir = tmp_path / "records"
-    component = RecordingComponent(tmp_path / "exported")
+    component = SourceRecordingComponent(tmp_path / "exported")
     dispatcher = build_training_dispatcher(
         component,
         tmp_path,
@@ -1108,8 +1074,8 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
     )
     scenario = dispatcher.get_or_create_scenario("math")
     wait_for_serving(dispatcher)
-    scenario.records.append(sft_inference("i1", scenario.serving_artifact_id()))
-    scenario.records.append(sft_report("r1", "i1"))
+    scenario.records.append(token_inference("i1", artifact_id=scenario.serving_artifact_id()))
+    scenario.records.append(report("r1", "i1"))
     make_samples(scenario)
     # The job's submission is the step that consumes the batch.
     result = scenario.next_commit()
@@ -1146,7 +1112,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
     assert scenario.scenario_step == 1
     assert scenario.trainer.state == result.state
     # The training worker hands the queued job to the component on its own thread.
-    wait_until(lambda: component.trained_data, "the training worker did not run the job")
+    wait_until(lambda: bool(component.trained_data), message="the training worker did not run the job")
     assert [job["job_id"] for job in scenario.trainer.state["jobs"]] == [component.submitted[0].job_id]
     assert scenario.trainer.pending_job_data is None
     assert scenario.store.training_run_position() == (0, 1)

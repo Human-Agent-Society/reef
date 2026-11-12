@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtime_bindings
+from tests.support.trajectories import policy_trajectory
 
 from reef.core.job_data import JobOutcome, TaskSample
 from reef.storage.samples import SampleKind

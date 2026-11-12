@@ -860,8 +860,8 @@ def test_tinker_serves_its_releases_with_the_training_options_as_cli_text_gives_
 def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(tmp_path, objective):
     from dataclasses import dataclass
 
-    from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
     from tests.support.runtime_stubs import job_sized_stages
+    from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.core import AgentRecord, RequestType

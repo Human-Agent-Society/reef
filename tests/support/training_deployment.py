@@ -63,8 +63,8 @@ def build_local_serving(config, model_path, recipe_config, environ):
 class LocalDeployment(InProcessTrainingDeployment):
     """A training backend that serves its own snapshots by default, as Tinker does."""
 
-    component_type = "tests.support._training_deployment:component_factory"
+    component_type = "tests.support.training_deployment:component_factory"
     default_serving = "trainer"
 
     def trainer_serving_config(self, settings):
-        return {"type": "tests.support._training_deployment:build_local_serving"}
+        return {"type": "tests.support.training_deployment:build_local_serving"}

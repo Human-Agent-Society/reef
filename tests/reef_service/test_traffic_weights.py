@@ -7,7 +7,8 @@ from collections import Counter
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_served_artifacts import ArtifactEcho, two_artifacts, wait_for_serving
+from tests.reef_service.test_served_artifacts import ArtifactEcho, two_artifacts
+from tests.support.serving import wait_for_serving
 
 from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import FixedEngineClients

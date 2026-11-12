@@ -1,6 +1,6 @@
 """A CPU stand-in for the SGLang engines: the control surface Reef drives, as Ray actors.
 
-Selected with ``inference.backend: tests.support._stub_engine:create_inference``.
+Selected with ``inference.backend: tests.support.stub_engine:create_inference``.
 It borrows the deployment's reservation like SGLang does, accepts Reef's
 adapter files, and records every adapter it was asked to load so a test can
 check what Reef served.
@@ -135,7 +135,7 @@ class StubEngineService(InferenceService):
         self._control = RayExecutor(
             ExecutorLaunch(
                 backend=RayExecutor,
-                workers=(WorkerSpec(worker_cls="tests.support._stub_engine:StubControl", args=(self.config,)),),
+                workers=(WorkerSpec(worker_cls="tests.support.stub_engine:StubControl", args=(self.config,)),),
                 # Ray workers import this module by name; give them the driver's import path.
                 options={
                     "num_cpus": 1,

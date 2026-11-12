@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._trajectories import policy_trajectory
 from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection

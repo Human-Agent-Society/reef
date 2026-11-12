@@ -11,9 +11,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_steps import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_backend, harness_recipe
 from tests.support.job_data import job_data_ref
+from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData

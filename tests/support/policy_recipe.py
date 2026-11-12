@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass
 from typing import Any
 
-from tests.support._threshold_processor import threshold_pipeline
+from tests.support.threshold_processor import threshold_pipeline
 
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentLogger

@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.conversations import conversation
 from tests.support.runtime_stubs import (
@@ -28,6 +27,7 @@ from tests.support.runtime_stubs import (
 from tests.support.samples import data_storage, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.trajectories import policy_trajectory
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOJobData, SAOSamples

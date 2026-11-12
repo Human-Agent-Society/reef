@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 from tests.support.serving import wait_for_serving
 
@@ -438,19 +438,11 @@ class _RootImportingComponent(StubTrainingComponent):
         return TrainingComponent.root_start(self, root)
 
 
-class _SharedRuntime(StubInferenceRuntime):
-    """A stub runtime that serves each training scenario its own weights, so scenarios share one deployment."""
-
-    @property
-    def shared_by_training_scenarios(self) -> bool:
-        return True
-
-
-def _weights_dispatcher(tmp_path, backend_factory, model: str) -> Dispatcher:
+def weights_dispatcher(tmp_path, backend_factory, model: str) -> Dispatcher:
     """A dispatcher of the test policy recipe whose training component's default start is the model ``model``."""
     component = _RootImportingComponent(model)
     return Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, _SharedRuntime())),
+        TestPolicyRecipe(**runtime_bindings(component, StubInferenceRuntime(shared_by_training_scenarios=True))),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
@@ -460,7 +452,7 @@ def _weights_dispatcher(tmp_path, backend_factory, model: str) -> Dispatcher:
 
 @pytest.mark.unit
 def test_two_scenarios_own_distinct_root_releases(tmp_path) -> None:
-    dispatcher = _weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
+    dispatcher = weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:
         first, second = (dispatcher.get_or_create_scenario(name) for name in ("first", "second"))
         roots = [scenario.repository.start_artifact for scenario in (first, second)]
@@ -482,11 +474,11 @@ def test_two_scenarios_own_distinct_root_releases(tmp_path) -> None:
 def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario(tmp_path) -> None:
     """The old scenario keeps serving and training its own root; a new scenario gets the new default start."""
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
-    first = _weights_dispatcher(tmp_path, backend_factory, "old-model")
+    first = weights_dispatcher(tmp_path, backend_factory, "old-model")
     old_root = first.get_or_create_scenario("old").repository.start_artifact
     first.close()
 
-    second = _weights_dispatcher(tmp_path, backend_factory, "new-model")
+    second = weights_dispatcher(tmp_path, backend_factory, "new-model")
     try:
         old = second.get_or_create_scenario("old")
         assert old.repository.start_artifact == old.current_snapshot() == old_root
@@ -508,7 +500,7 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
 
 @pytest.mark.unit
 def test_concurrent_creations_of_one_name_register_one_root(tmp_path) -> None:
-    dispatcher = _weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
+    dispatcher = weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:
         with ThreadPoolExecutor(max_workers=8) as executor:
             results = list(executor.map(lambda _: dispatcher.create_scenario("shared"), range(8)))
@@ -571,7 +563,7 @@ def test_composite_item_roots_are_checked_before_registration(
     tmp_path: Path, component: str, accepts_item: bool
 ) -> None:
     training = _RootImportingComponent("base-model") if accepts_item else _NoArtifactStarts("base-model")
-    weights = TestPolicyRecipe(**runtime_bindings(training, _SharedRuntime()))
+    weights = TestPolicyRecipe(**runtime_bindings(training, StubInferenceRuntime(shared_by_training_scenarios=True)))
     recipe = CompositeRecipe(components={"weights": weights, "harness": ItemTreeRecipe()})
     backend_factory = InMemoryRepositoryBackend.factory()
     directory = tmp_path / "item"
@@ -630,7 +622,7 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
             ItemIdentity("upload-1"), directory.as_uri(), DirectorySource(directory, source_version="v1", link=False)
         )
 
-    dispatcher = _weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
+    dispatcher = weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:
         with pytest.raises(ValueError, match=r"config\.json and weight files"):
             dispatcher.create_scenario("refused", item(notes))
@@ -647,7 +639,7 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
 
     component = _NoArtifactStarts("base-model")
     pinned = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, _SharedRuntime())),
+        TestPolicyRecipe(**runtime_bindings(component, StubInferenceRuntime(shared_by_training_scenarios=True))),
         InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),

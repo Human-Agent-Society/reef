@@ -20,10 +20,10 @@ import pytest
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
-from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
+from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import Artifact, ModelDirectory
 from reef.core.job_data import TaskSample, TrajectorySample

@@ -9,13 +9,11 @@ Skipped unless REEF_REAL_DSH_BINARY points at an installed dsh
 
 from __future__ import annotations
 
-import json
 import os
 import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
 
 import pytest
+from tests.support.openai_stub import MODEL, StubOpenAI
 
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
@@ -26,61 +24,11 @@ REAL_DSH = os.environ.get("REEF_REAL_DSH_BINARY", "")
 
 pytestmark = pytest.mark.skipif(not REAL_DSH, reason="REEF_REAL_DSH_BINARY does not name a real dsh binary")
 
-MODEL = "smoke-model"
 RULES_SENTENCE = "The reef smoke marker phrase is TIDEPOOL-STONE-41."
 
 
-class StubOpenAI(ThreadingHTTPServer):
-    """A canned /v1 endpoint that records every request it is sent."""
-
-    def __init__(self) -> None:
-        super().__init__(("127.0.0.1", 0), StubHandler)
-        self.bodies: list[str] = []
-        self.auth: list[str | None] = []
-
-
-class StubHandler(BaseHTTPRequestHandler):
-    server: StubOpenAI
-
-    def log_message(self, format: str, *args: Any) -> None:
-        pass  # keep the harness's stderr out of pytest output
-
-    def do_POST(self) -> None:
-        body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
-        self.server.bodies.append(body)
-        self.server.auth.append(self.headers.get("Authorization"))
-        usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-        if json.loads(body).get("stream"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.end_headers()
-            chunks = [
-                {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "READY"}}]},
-                {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage},
-            ]
-            for chunk in chunks:
-                event = {"id": "chatcmpl-smoke", "object": "chat.completion.chunk", "model": MODEL, **chunk}
-                self.wfile.write(b"data: " + json.dumps(event).encode("utf-8") + b"\n\n")
-            self.wfile.write(b"data: [DONE]\n\n")
-        else:
-            message = {"role": "assistant", "content": "READY"}
-            payload = {
-                "id": "chatcmpl-smoke",
-                "object": "chat.completion",
-                "model": MODEL,
-                "choices": [{"index": 0, "message": message, "finish_reason": "stop"}],
-                "usage": usage,
-            }
-            raw = json.dumps(payload).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(raw)))
-            self.end_headers()
-            self.wfile.write(raw)
-
-
 def test_real_dsh_run_renders_runs_and_cleans_up() -> None:
-    server = StubOpenAI()
+    server = StubOpenAI(lists_models=False)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("dsh")
     try:
@@ -112,7 +60,7 @@ def test_real_dsh_runs_a_command_that_the_model_cannot_list() -> None:
     """A command whose text carries its own frontmatter stays a command dsh lists, whatever that frontmatter
     holds: the model's skill catalog lists the skill and not the commands, and a task that types each command gets
     its text."""
-    server = StubOpenAI()
+    server = StubOpenAI(lists_models=False)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("dsh")
     # Each header after the first is one the adapter must repair or must not break: dsh ignores a camelCase

@@ -9,25 +9,11 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from tests.support.tokenizers import FakeTokenizer
 
 from reef.core.errors import inference_aborted
 from reef.inference.interfaces import InferenceArtifact
 from reef.inference.vllm.chat import VLLMGenerateClient, VLLMInferenceHandler, VLLMToolCallParser
-
-
-class FakeTokenizer:
-    def __init__(self) -> None:
-        self.rendered_messages = None
-
-    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
-        assert add_generation_prompt is True
-        if not tokenize:
-            return "<user></user><assistant>"
-        self.rendered_messages = (messages, kwargs)
-        return [10, 11]
-
-    def decode(self, token_ids, *, skip_special_tokens=False):
-        return "".join(f"<{token_id}>" for token_id in token_ids)
 
 
 class FixedParserClient(VLLMGenerateClient):
@@ -42,11 +28,11 @@ class FixedParserClient(VLLMGenerateClient):
         return self.parser
 
 
-def _live_artifact() -> InferenceArtifact:
+def live_artifact() -> InferenceArtifact:
     return InferenceArtifact("artifact:engine:6")
 
 
-def _generate_response(*, finish_reason="stop"):
+def generate_response(*, finish_reason="stop"):
     content = [
         {"token": "token_id:20", "logprob": -0.25, "bytes": None},
         {"token": "token_id:21", "logprob": -0.5, "bytes": None},
@@ -61,7 +47,7 @@ def _generate_response(*, finish_reason="stop"):
     }
 
 
-async def _serve(handler_body, run):
+async def serve(handler_body, run):
     """Run ``run(base_url, requests)`` against a fake engine whose generate route answers ``handler_body``."""
     received = []
 
@@ -87,7 +73,7 @@ def test_vllm_facade_answers_from_engine_ids_without_retokenizing() -> None:
         tokenizer = FakeTokenizer()
         backend = VLLMInferenceHandler(base_url, model_path="model", tokenizer=tokenizer)
         response = await backend.inference(
-            _live_artifact(),
+            live_artifact(),
             "/v1/chat/completions",
             {
                 "model": "served-model",
@@ -117,8 +103,8 @@ def test_vllm_facade_answers_from_engine_ids_without_retokenizing() -> None:
         assert [item["token"] for item in choice["logprobs"]["content"]] == ["<20>", "<21>"]
         assert "training" not in response, "serving returns no training tensors"
 
-    body = _generate_response()
-    asyncio.run(_serve(body, run))
+    body = generate_response()
+    asyncio.run(serve(body, run))
     captured = VLLMGenerateClient().parse(body)
     assert captured.output_ids == [20, 21]
     assert captured.rollout_log_probs == [-0.25, -0.5]
@@ -126,19 +112,19 @@ def test_vllm_facade_answers_from_engine_ids_without_retokenizing() -> None:
 
 @pytest.mark.unit
 def test_vllm_facade_rejects_a_response_without_one_logprob_per_token() -> None:
-    body = _generate_response()
+    body = generate_response()
     body["choices"][0]["logprobs"]["content"].pop()
 
     async def run(base_url, received):
         backend = VLLMInferenceHandler(base_url, model_path="model", tokenizer=FakeTokenizer())
         with pytest.raises(ValueError, match="one log probability per sampled token"):
             await backend.inference(
-                _live_artifact(),
+                live_artifact(),
                 "/v1/chat/completions",
                 {"model": "m", "messages": [{"role": "user", "content": "hello"}], "max_completion_tokens": 2},
             )
 
-    asyncio.run(_serve(body, run))
+    asyncio.run(serve(body, run))
 
 
 @pytest.mark.unit
@@ -198,7 +184,7 @@ def test_vllm_facade_streams_the_buffered_turn_as_openai_frames() -> None:
     async def run(base_url, received):
         backend = VLLMInferenceHandler(base_url, model_path="model", tokenizer=FakeTokenizer())
         stream = await backend.inference_stream(
-            _live_artifact(),
+            live_artifact(),
             "/v1/chat/completions",
             {"model": "served-model", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 2},
         )
@@ -216,7 +202,7 @@ def test_vllm_facade_streams_the_buffered_turn_as_openai_frames() -> None:
         assert "training" not in stream.record_response
         assert stream.headers["Content-Type"].startswith("text/event-stream")
 
-    asyncio.run(_serve(_generate_response(), run))
+    asyncio.run(serve(generate_response(), run))
 
 
 @pytest.mark.unit
@@ -224,7 +210,7 @@ def test_vllm_facade_streams_anthropic_messages_from_the_buffered_turn() -> None
     async def run(base_url, received):
         backend = VLLMInferenceHandler(base_url, model_path="model", tokenizer=FakeTokenizer())
         stream = await backend.inference_stream(
-            _live_artifact(),
+            live_artifact(),
             "/v1/messages",
             {"model": "served-model", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 2},
         )
@@ -241,7 +227,7 @@ def test_vllm_facade_streams_anthropic_messages_from_the_buffered_turn() -> None
         assert stream.record_response["content"] == [{"type": "text", "text": "<20><21>"}]
         assert "training" not in stream.record_response
 
-    asyncio.run(_serve(_generate_response(), run))
+    asyncio.run(serve(generate_response(), run))
 
 
 @pytest.mark.unit
@@ -250,14 +236,14 @@ def test_vllm_facade_streams_an_engine_abort_that_the_service_detects(path) -> N
     async def run(base_url, received):
         backend = VLLMInferenceHandler(base_url, model_path="model", tokenizer=FakeTokenizer())
         stream = await backend.inference_stream(
-            _live_artifact(),
+            live_artifact(),
             path,
             {"model": "served-model", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 2},
         )
         [frame async for frame in stream.chunks]
         assert inference_aborted(stream.record_response)
 
-    asyncio.run(_serve(_generate_response(finish_reason="abort"), run))
+    asyncio.run(serve(generate_response(finish_reason="abort"), run))
 
 
 @pytest.mark.unit
@@ -293,7 +279,7 @@ def test_vllm_tool_call_parser_adapts_vllm_extraction(finish_reason: str) -> Non
         )
         tools = [{"type": "function", "function": {"name": "read", "parameters": {"type": "object"}}}]
         response = await backend.inference(
-            _live_artifact(),
+            live_artifact(),
             "/v1/chat/completions",
             {"model": "m", "messages": [{"role": "user", "content": "read it"}], "tools": tools, "max_tokens": 2},
         )
@@ -308,7 +294,7 @@ def test_vllm_tool_call_parser_adapts_vllm_extraction(finish_reason: str) -> Non
         assert "training" not in response
 
         stream = await backend.inference_stream(
-            _live_artifact(),
+            live_artifact(),
             "/v1/messages",
             {
                 "model": "m",
@@ -325,7 +311,7 @@ def test_vllm_tool_call_parser_adapts_vllm_extraction(finish_reason: str) -> Non
         assert inference_aborted(stream.record_response) is (finish_reason == "abort")
         assert stream.record_response["content"][0]["type"] == "tool_use"
 
-    asyncio.run(_serve(_generate_response(finish_reason=finish_reason), run))
+    asyncio.run(serve(generate_response(finish_reason=finish_reason), run))
 
 
 @pytest.mark.unit

@@ -15,8 +15,6 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._strategies import resolve_task_scorer
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import (
     backend_step,
     drive_job,
@@ -50,6 +48,8 @@ from tests.support.harness_steps import (
 )
 from tests.support.records import memory_records
 from tests.support.samples import data_storage, sample_store
+from tests.support.strategies import resolve_task_scorer
+from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact import Artifact
 from reef.core.activation import MadeArtifact

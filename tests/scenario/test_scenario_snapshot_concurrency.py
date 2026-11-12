@@ -9,9 +9,9 @@ from pathlib import Path
 from threading import Event
 
 import pytest
-from tests.support._threshold_processor import threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
+from tests.support.threshold_processor import threshold_pipeline
 
 from reef.artifact import Artifact, ArtifactPublicationError, DefaultStart, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
