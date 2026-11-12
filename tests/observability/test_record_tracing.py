@@ -316,13 +316,13 @@ def test_feedback_joins_the_first_referenced_trace_and_links_the_rest() -> None:
 
 
 @pytest.mark.unit
-def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
+def test_commit_adds_a_child_span_below_every_consumed_record() -> None:
     observer, exporter = observer_and_exporter()
     from reef.observability.open_telemetry import commit_span_context, record_span_context
 
     commit = CommitRecord(
         scenario="math",
-        step=3,
+        commit_number=3,
         snapshot=SnapshotRef(revision="v3", parent_revision="v2"),
         selection=ArtifactSelection({"harness": "artifact:h3", "weights": "artifact:w2"}),
         checkpoint=True,
@@ -339,11 +339,11 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     observer.close()
     spans = exporter.get_finished_spans()
 
-    (step,) = [span for span in spans if span.name == "training step 3"]
+    (step,) = [span for span in spans if span.name == "training commit 3"]
     assert step.context.trace_id == commit_span_context("math", 3).trace_id
     assert step.context.span_id == commit_span_context("math", 3).span_id
     assert step.parent is None
-    assert step.attributes["reef.step"] == 3
+    assert step.attributes["reef.commit_number"] == 3
     assert step.attributes["reef.component"] == "harness"
     assert step.attributes["reef.artifact_id"] == "artifact:h3"
     assert step.attributes["reef.artifacts.weights"] == "artifact:w2"
@@ -357,7 +357,7 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     assert "reef.metrics.nan" not in step.attributes
     assert "reef.metrics.nested" not in step.attributes
 
-    consumed = {span.attributes["reef.agent_record_id"]: span for span in spans if span.name == "trained in step 3"}
+    consumed = {span.attributes["reef.agent_record_id"]: span for span in spans if span.name == "trained in commit 3"}
     assert set(consumed) == {"i1", "i2"}
     for agent_record_id, span in consumed.items():
         expected_parent = record_span_context("math", agent_record_id)
@@ -413,7 +413,7 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
         assert store.records.read("math", "i1") is not None
         commit = CommitRecord(
             scenario="math",
-            step=1,
+            commit_number=1,
             snapshot=SnapshotRef(revision="v1", parent_revision=None),
             checkpoint=False,
             algorithm_state=None,
@@ -421,14 +421,14 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
             high_water_offset=0,
             consumed_ids=frozenset({"i1", "r1"}),
         )
-        recorded = store.commit_step(expected_step=0, commit=commit)
+        recorded = store.append_commit(expected_commit_number=0, commit=commit)
         assert store.history() == (recorded,)
     finally:
         store.close()
         storage.close()
 
     assert observer.accepted == ["i1", "r1"]
-    assert [commit.step for commit in observer.committed] == [1]
+    assert [commit.commit_number for commit in observer.committed] == [1]
     assert observer.committed[0].consumed_ids == frozenset({"i1", "r1"})
     assert observer.closed
 
@@ -459,7 +459,7 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
 
     assert observer.accepted == ["i1", "r1"]
     # The job's submission consumes the records; its checkpoint and its end commit after it.
-    assert [(commit.scenario, commit.step, commit.consumed_ids) for commit in observer.committed] == [
+    assert [(commit.scenario, commit.commit_number, commit.consumed_ids) for commit in observer.committed] == [
         ("math", 1, frozenset({"i1", "r1", consumed_sample_id(stage_item_id("math", "r1:0"))})),
         ("math", 2, frozenset()),
         ("math", 3, frozenset()),

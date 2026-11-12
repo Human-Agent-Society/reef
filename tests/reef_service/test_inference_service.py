@@ -49,7 +49,7 @@ class Engines(EngineClients):
 def commit(release_id: str) -> CommitRecord:
     return CommitRecord(
         scenario="math",
-        step=1,
+        commit_number=1,
         snapshot=SnapshotRef(release_id, "base"),
         checkpoint=True,
         algorithm_state={},
@@ -67,7 +67,7 @@ def inference_records(records: Any) -> tuple[Any, ...]:
 async def ask(tmp_path: Path, *, write: bool = True) -> tuple[int, dict[str, Any], Any]:
     storage = SQLiteScenarioStorage(tmp_path / "records")
     store = storage.open("math")
-    store.commit_step(expected_step=0, commit=commit("release-1"))
+    store.append_commit(expected_commit_number=0, commit=commit("release-1"))
     coordination = memory_coordination()
     table = coordination.served_models
     number = coordination.control_lease.acquire("control-1").number
@@ -119,7 +119,7 @@ class BrokenStorage(SQLiteScenarioStorage):
 async def ask_failing(tmp_path: Path, *, engine_url: str | None, refuse_records: bool) -> int:
     storage = BrokenStorage(tmp_path / "records")
     storage.refuse = False
-    storage.open("math").commit_step(expected_step=0, commit=commit("release-1"))
+    storage.open("math").append_commit(expected_commit_number=0, commit=commit("release-1"))
     storage.refuse = refuse_records
     coordination = memory_coordination()
     table = coordination.served_models
@@ -162,7 +162,7 @@ def refusing_engine_app(status: int, message: str) -> web.Application:
 
 async def ask_refused(tmp_path: Path, status: int, message: str, *, stream: bool) -> tuple[int, str]:
     storage = SQLiteScenarioStorage(tmp_path / "records")
-    storage.open("math").commit_step(expected_step=0, commit=commit("release-1"))
+    storage.open("math").append_commit(expected_commit_number=0, commit=commit("release-1"))
     coordination = memory_coordination()
     table = coordination.served_models
     number = coordination.control_lease.acquire("control-1").number

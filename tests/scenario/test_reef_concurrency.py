@@ -1,6 +1,6 @@
 """Concurrency protocol tests for scenario commits (issue #78, phase 1).
 
-The version pointer (serving head + scenario_step) must move under one
+The version pointer (serving head + commit_number) must move under one
 concurrency protocol: per-scenario latches serialize the commit flow, and
 every serving-head move is fenced with the head the writer observed.
 """
@@ -147,7 +147,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
     assert component.train_calls == total
     assert len({job.job_id for job in component.submitted}) == total
     assert scenario.trainer.state["jobs"] == []
-    assert scenario.scenario_step == COMMITS_PER_JOB * total
+    assert scenario.commit_number == COMMITS_PER_JOB * total
     # Each job published one saved checkpoint; the head is the last one.
     head = Path(dispatcher.current_artifact("math").materialize().local_path)
     assert (head / "model.txt").read_text() == f"w{total}"
@@ -159,7 +159,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
 
     Accepts can wake the training worker while it is committing pending result
     P. The worker must finish that trainer and version-chain commit before preparing
-    another batch; otherwise P could be recorded as two scenario steps.
+    another batch; otherwise P could be recorded as two commits.
     """
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     component = CountingComponent(tmp_path / "checkpoints")
@@ -190,7 +190,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     assert errors == []
     wait_for_jobs(dispatcher, 4)
     assert component.train_calls == 4
-    assert scenario.scenario_step == COMMITS_PER_JOB * 4
+    assert scenario.commit_number == COMMITS_PER_JOB * 4
 
 
 @pytest.mark.unit
@@ -218,7 +218,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
     assert errors == []
     total = commits_per_thread * thread_count
     scenario = dispatcher.get_or_create_scenario("chat")
-    assert scenario.scenario_step == total
+    assert scenario.commit_number == total
 
     backend = scenario.repository.backend
     assert backend.current() == scenario.repository.current_artifact

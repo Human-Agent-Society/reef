@@ -20,7 +20,7 @@ from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 def commit(step: int = 1) -> CommitRecord:
     return CommitRecord(
         scenario="math",
-        step=step,
+        commit_number=step,
         snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},

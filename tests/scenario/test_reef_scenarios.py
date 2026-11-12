@@ -54,13 +54,13 @@ def test_scenario_owns_recipe_derived_policy_and_its_root_release() -> None:
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact == root
 
 
-def test_scenario_step_is_owned_by_scenario() -> None:
+def test_commit_number_is_owned_by_scenario() -> None:
     scenario = build_default_dispatcher(
         scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     ).get_or_create_scenario("math")
 
     assert not hasattr(scenario.repository.start_artifact, "scenario")
-    assert scenario.scenario_step == 0
+    assert scenario.commit_number == 0
     assert scenario.repository.current_artifact.revision
     assert scenario.repository.checkpoint_artifact.revision
     assert not hasattr(scenario, "release_id")
@@ -76,7 +76,7 @@ def test_scenario_owns_scenario_scoped_repository() -> None:
 
     assert not hasattr(repository, "scenario")
     assert not hasattr(repository.start_artifact, "scenario")
-    assert scenario.scenario_step == 0
+    assert scenario.commit_number == 0
     assert repository.checkpoint_artifact == repository.current_artifact
     assert not hasattr(scenario, "base_artifact")
     assert not hasattr(scenario, "current_artifact")
@@ -90,13 +90,13 @@ def test_scenario_metadata_round_trips() -> None:
         scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     ).get_or_create_scenario("math")
     source = RootSource("default", inputs={"seed": "s"})
-    metadata = scenario_metadata_for(name=scenario.name, source=source, scenario_step=scenario.scenario_step)
+    metadata = scenario_metadata_for(name=scenario.name, source=source, commit_number=scenario.commit_number)
 
-    assert metadata["format"] == "reef-scenario/7"
+    assert metadata["format"] == "reef-scenario/8"
     # The registration is carried by the root snapshot, so it names no start_artifact.
     assert "start_artifact" not in metadata
     assert metadata["source"] == {"kind": "default", "inputs": {"seed": "s"}}
-    assert metadata["scenario_step"] == 0
+    assert metadata["commit_number"] == 0
     assert metadata["operation"] == "training"
     assert "recipe" not in metadata
     checkpoint_head = scenario.repository.require_current_artifact()
@@ -121,7 +121,7 @@ def test_checkpoint_metadata_names_only_a_training_step(operation) -> None:
     from reef.storage.commits import parse_scenario_metadata, scenario_metadata_for
 
     base = SnapshotRef("base", None)
-    metadata = scenario_metadata_for(name="math", source=RootSource("default"), start_artifact=base, scenario_step=1)
+    metadata = scenario_metadata_for(name="math", source=RootSource("default"), start_artifact=base, commit_number=1)
     metadata["operation"] = operation
     metadata["record_progress"] = {"high_water_sequence": 0, "high_water_offset": 0, "consumed_ids": []}
     with pytest.raises(ValueError, match="operation must be 'training'"):
@@ -274,14 +274,14 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
 
     base = SnapshotRef("base-release", None)
     head = SnapshotRef("checkpoint-release", base.revision)
-    # Persisted reef-scenario/7 metadata contains registration and recovery
+    # Persisted reef-scenario/8 metadata contains registration and recovery
     # fields; the containing artifact supplies the checkpoint release identity.
     metadata = {
-        "format": "reef-scenario/7",
+        "format": "reef-scenario/8",
         "scenario": "math",
         "source": {"kind": "item", "item": "upload-1", "uri": "s3://bucket/upload-1/", "version": ""},
         "start_artifact": encode_snapshot_ref(base),
-        "scenario_step": 3,
+        "commit_number": 3,
         "algorithm_state": {"steps": 3},
         "record_progress": {
             "high_water_sequence": 7,
@@ -301,7 +301,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     assert source == RootSource("item", item="upload-1", uri="s3://bucket/upload-1/", version="")
     assert isinstance(checkpoint, CommitRecord)
     assert checkpoint.snapshot == head
-    assert checkpoint.step == 3
+    assert checkpoint.commit_number == 3
     assert checkpoint.checkpoint is True
     # Metadata that names no active_artifact belongs to a checkpoint the activation rule activated.
     assert checkpoint.activated is True
@@ -318,7 +318,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
         name=name,
         source=source,
         start_artifact=registered_base,
-        scenario_step=checkpoint.step,
+        commit_number=checkpoint.commit_number,
         algorithm_state=checkpoint.algorithm_state,
         record_progress=RecordProgress(
             checkpoint.high_water_sequence,
@@ -330,7 +330,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     )
     assert encoded == {
         **metadata,
-        "format": "reef-scenario/7",
+        "format": "reef-scenario/8",
         "operation": "training",
         "record_progress": {
             "high_water_sequence": 7,
@@ -365,7 +365,7 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
         name="math",
         source=source,
         start_artifact=base,
-        scenario_step=2,
+        commit_number=2,
         record_progress=progress,
         active_artifact=served,
     )
@@ -375,14 +375,14 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
     assert active_snapshot((checkpoint,), served_snapshot(held, checkpoint_head=head)) == served
 
     activated = scenario_metadata_for(
-        name="math", source=source, start_artifact=base, scenario_step=2, record_progress=progress
+        name="math", source=source, start_artifact=base, commit_number=2, record_progress=progress
     )
     assert served_snapshot(activated, checkpoint_head=head) == head
     with pytest.raises(ValueError, match="active_artifact must be an object"):
         served_snapshot({**held, "active_artifact": "served-release"}, checkpoint_head=head)
     with pytest.raises(ValueError, match="names no active_artifact"):
         scenario_metadata_for(name="math", source=source, active_artifact=served)
-    with pytest.raises(ValueError, match="start_artifact exactly after step zero"):
+    with pytest.raises(ValueError, match="start_artifact exactly after commit number zero"):
         scenario_metadata_for(name="math", source=source, start_artifact=base)
 
 
@@ -390,14 +390,14 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
     "changes, message",
     [
         ({"record_progress": None}, "requires record_progress"),
-        ({"scenario_step": True}, "scenario_step must be non-negative"),
+        ({"commit_number": True}, "commit_number must be non-negative"),
         ({"operation": "promote"}, "operation must be 'training'"),
-        ({"start_artifact": None}, "after step zero requires start_artifact"),
+        ({"start_artifact": None}, "after commit number zero requires start_artifact"),
         ({"source": {"kind": "base"}}, "a root source is"),
         # A scenario that an earlier Reef stored is refused, not read: it is created again.
         (
             {"format": "reef-scenario/4"},
-            r"format 'reef-scenario/4'; this Reef reads reef-scenario/7",
+            r"format 'reef-scenario/4'; this Reef reads reef-scenario/8",
         ),
     ],
 )
@@ -407,11 +407,11 @@ def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) ->
 
     base = SnapshotRef("base", None)
     metadata = {
-        "format": "reef-scenario/7",
+        "format": "reef-scenario/8",
         "scenario": "math",
         "source": {"kind": "default", "inputs": {}},
         "start_artifact": encode_snapshot_ref(base),
-        "scenario_step": 1,
+        "commit_number": 1,
         "record_progress": {
             "high_water_sequence": 0,
             "high_water_offset": 0,
@@ -515,7 +515,7 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
     """A registration in ``reef-scenario/4`` named a shared base snapshot; this Reef refuses it with a clear error."""
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     (tmp_path / "old-root").mkdir()
-    stored = {"format": "reef-scenario/4", "scenario": "math", "base_artifact": {}, "scenario_step": 0}
+    stored = {"format": "reef-scenario/4", "scenario": "math", "base_artifact": {}, "commit_number": 0}
     backend_factory("math").register(Artifact.local(tmp_path / "old-root"), metadata={SCENARIO_METADATA_KEY: stored})
     dispatcher = build_default_dispatcher(
         backend_factory=backend_factory, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
@@ -523,7 +523,7 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
     try:
         with pytest.raises(
             ValueError,
-            match=r"'reef-scenario/4'; this Reef reads reef-scenario/7",
+            match=r"'reef-scenario/4'; this Reef reads reef-scenario/8",
         ):
             dispatcher.get_or_create_scenario("math")
     finally:

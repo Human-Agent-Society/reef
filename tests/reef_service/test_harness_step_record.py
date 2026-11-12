@@ -127,9 +127,9 @@ def steps_dir(tmp_path: Path) -> Path:
     return (tmp_path / "harness" / "demo" / COMPONENT / "steps").resolve()
 
 
-def step(backend: HarnessBackend, state=None, scenario_step: int | None = None) -> TrainingCommit:
+def step(backend: HarnessBackend, state=None, commit_number: int | None = None) -> TrainingCommit:
     state = HarnessState().to_json() if state is None else state
-    return backend_step(backend, JobData("demo:1"), state, scenario_step=scenario_step)
+    return backend_step(backend, JobData("demo:1"), state, commit_number=commit_number)
 
 
 def read_json(path: Path):
@@ -313,12 +313,12 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
     before = {path.relative_to(first): path.stat().st_mtime_ns for path in first.rglob("*")}
 
     # The same step number again (a crash between prepare and commit) lands beside the first attempt.
-    result = step(backend, scenario_step=0)
+    result = step(backend, commit_number=0)
     second = root / "1-2"
     assert result.metrics["step_record"] == str(second)
     assert {path.relative_to(first): path.stat().st_mtime_ns for path in first.rglob("*")} == before
     assert {path.relative_to(second) for path in second.rglob("*")} == set(before)
-    step(backend, scenario_step=0)
+    step(backend, commit_number=0)
     assert sorted(path.name for path in root.iterdir()) == ["1", "1-2", "1-3"]
 
     with pytest.raises(FileExistsError):

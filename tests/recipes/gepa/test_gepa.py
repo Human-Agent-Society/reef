@@ -102,7 +102,7 @@ def gepa_backend(
 def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainingCommit:
     """Step ``number`` on ``samples``, decided by the compare policy on the mean."""
     policy = ComparePolicy(backend, statistic="mean")
-    return backend_step(backend, JobData(f"demo:{number}", samples), state, policy, scenario_step=number - 1)
+    return backend_step(backend, JobData(f"demo:{number}", samples), state, policy, commit_number=number - 1)
 
 
 def sample(name: str, score: float, prompt: str = TASK) -> TrajectorySample:

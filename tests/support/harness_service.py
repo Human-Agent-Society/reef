@@ -212,8 +212,8 @@ def catalog(scenario: Scenario) -> list[dict[str, Any]]:
     return rows
 
 
-#: Each backend's scenario step: the steps ``backend_step`` ran on it.
-SCENARIO_STEPS: WeakKeyDictionary[HarnessBackend, int] = WeakKeyDictionary()
+#: Each backend's commit number: the number of steps that ``backend_step`` ran on it.
+COMMIT_NUMBERS: WeakKeyDictionary[HarnessBackend, int] = WeakKeyDictionary()
 
 
 def backend_step(
@@ -222,17 +222,17 @@ def backend_step(
     state: Mapping[str, Any],
     policy: CandidateEvaluationPlugin | None = None,
     *,
-    scenario_step: int | None = None,
+    commit_number: int | None = None,
 ) -> TrainingCommit:
     """One step of ``backend`` on its ``head_of`` head as a job runs it, decided by ``policy`` (a win-count
     comparison by default).
 
     The steps of one backend number 1, 2, ... as a scenario numbers its commits: a step that raised keeps its
-    number for its retry. ``scenario_step`` sets the scenario step the step follows instead, as a retry after a
+    number for its retry. ``commit_number`` sets the commit number that the step follows instead, as a retry after a
     lost commit or a resumed scenario sees it. A failure aborts the step.
     """
-    scenario_step = SCENARIO_STEPS.get(backend, 0) if scenario_step is None else scenario_step
-    prepared = backend.prepare_job(data, state, scenario_step, head=head_of(backend))
+    commit_number = COMMIT_NUMBERS.get(backend, 0) if commit_number is None else commit_number
+    prepared = backend.prepare_job(data, state, commit_number, head=head_of(backend))
     if prepared.candidate is None:
         result = TrainingCommit(prepared.state, prepared.metrics)
     else:
@@ -243,7 +243,7 @@ def backend_step(
         except BaseException:
             backend.abort_job(prepared)
             raise
-    SCENARIO_STEPS[backend] = scenario_step + 1
+    COMMIT_NUMBERS[backend] = commit_number + 1
     return result
 
 

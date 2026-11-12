@@ -48,9 +48,9 @@ def record_span_context(scenario: str, agent_record_id: str) -> SpanContext:
     return _span_context("record", scenario, agent_record_id)
 
 
-def commit_span_context(scenario: str, step: int) -> SpanContext:
-    """The trace and span ids a committed step's span carries."""
-    return _span_context("commit", scenario, str(step))
+def commit_span_context(scenario: str, commit_number: int) -> SpanContext:
+    """The trace and span ids a commit's span carries."""
+    return _span_context("commit", scenario, str(commit_number))
 
 
 def _span_context(*identity: str) -> SpanContext:
@@ -84,7 +84,7 @@ class PlannedIdGenerator(IdGenerator):
 
 
 class OpenTelemetryRecordObserver(RecordObserver):
-    """Export accepted records and committed steps as OpenTelemetry spans over OTLP/HTTP."""
+    """Export accepted records and commits as OpenTelemetry spans over OTLP/HTTP."""
 
     def __init__(self, config: TracingSettings, *, span_exporter: SpanExporter | None = None) -> None:
         self.config = config
@@ -144,7 +144,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
         attributes: dict[str, AttributeValue] = {
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,
-            "reef.step": commit.step,
+            "reef.commit_number": commit.commit_number,
             "reef.commit_operation": commit.operation,
             "reef.checkpoint": commit.checkpoint,
             "reef.consumed_record_count": len(commit.consumed_ids),
@@ -158,9 +158,9 @@ class OpenTelemetryRecordObserver(RecordObserver):
             metric = _attribute_value(value)
             if metric is not None:
                 attributes[f"reef.metrics.{key}"] = metric
-        commit_context = commit_span_context(commit.scenario, commit.step)
+        commit_context = commit_span_context(commit.scenario, commit.commit_number)
         self._emit(
-            f"{commit.operation} step {commit.step}",
+            f"{commit.operation} commit {commit.commit_number}",
             planned=commit_context,
             parent=None,
             kind=SpanKind.INTERNAL,
@@ -171,7 +171,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
         consumed_attributes: dict[str, AttributeValue] = {
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,
-            "reef.step": commit.step,
+            "reef.commit_number": commit.commit_number,
             **commit_artifact_attributes(commit),
         }
         if commit.training_job_id is not None:
@@ -180,8 +180,8 @@ class OpenTelemetryRecordObserver(RecordObserver):
             consumed_attributes["reef.component"] = commit.component
         for agent_record_id in sorted(commit.consumed_ids):
             self._emit(
-                f"trained in step {commit.step}",
-                planned=_span_context("consumed", commit.scenario, str(commit.step), agent_record_id),
+                f"trained in commit {commit.commit_number}",
+                planned=_span_context("consumed", commit.scenario, str(commit.commit_number), agent_record_id),
                 parent=record_span_context(commit.scenario, agent_record_id),
                 kind=SpanKind.INTERNAL,
                 attributes={**consumed_attributes, "reef.agent_record_id": agent_record_id},

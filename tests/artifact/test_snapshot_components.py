@@ -471,7 +471,7 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
                 assert view.component(WEIGHTS).artifact_id == after_first[WEIGHTS]
                 assert view.component(HARNESS).artifact_id == after_first[HARNESS]
                 with pytest.raises(ValueError, match="earlier operation history is unavailable"):
-                    recovered.restore(recovered.scenario_step)
+                    recovered.restore(recovered.commit_number)
                 # The creation remains a known selection even when the intervening operations were lost.
                 assert recovered.restore(0) == initial
 
@@ -597,7 +597,7 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
             assert scenario.current_snapshot() == previous
             assert scenario.store.history()[-1].selection is not None
         with closing(factory.load_or_create("agent")) as recovered:
-            assert recovered.scenario_step == 2
+            assert recovered.commit_number == 2
             assert recovered.artifact_status()[HARNESS]["active"] == selected_id
             assert recovered.repository.require_checkpoint_artifact() == checkpoint
             assert (
@@ -635,7 +635,7 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
         assert served.components is not None
         assert served.components.entries[WEIGHTS].artifact_id == later.artifact_id
         assert components.read_files(served) == {"AGENTS.md": "held"}
-        assert scenario.scenario_step == 3
+        assert scenario.commit_number == 3
     finally:
         dispatcher.close()
 
@@ -664,10 +664,10 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
         )
         scenario.commit(TrainingCommit(state={}, artifact=weights, component=WEIGHTS))
         scenario.commit(TrainingCommit(state={}, metrics={"selected": False}), component=HARNESS)
-        steps = scenario.scenario_step
+        steps = scenario.commit_number
         # The first harness artifact serves already: activating it changes nothing.
         assert scenario.activate(first_harness_id, HARNESS).artifact_id == first_harness_id
-        assert scenario.scenario_step == steps
+        assert scenario.commit_number == steps
         rows = scenario.harness_rows()
         assert next(row["artifact_id"] for row in rows if row["active"]) == first_harness_id
         assert all("release_id" not in row and "snapshot" not in row for row in rows)
@@ -703,7 +703,7 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
         with pytest.raises(ReefError, match="refused by the validator"):
             scenario.activate(held.artifact_id, HARNESS)
         assert {path for path in staged_root.rglob("*") if path.is_dir()} == before
-        assert scenario.scenario_step == 1
+        assert scenario.commit_number == 1
         assert scenario.current_snapshot() == served
     finally:
         dispatcher.close()

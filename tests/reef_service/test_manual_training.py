@@ -662,12 +662,12 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     file_request(dispatcher, "one")
     assert became_true(lambda: committed_skip(dispatcher, "one") == UNCHANGED)
     # The step's job committed twice: its submission and its end.
-    assert became_true(lambda: dispatcher.get_or_create_scenario("s").scenario_step == 2)
+    assert became_true(lambda: dispatcher.get_or_create_scenario("s").commit_number == 2)
     dispatcher.close()
     # A new process loads the committed state and the stored mode.
     restarted = open_dispatcher(harness_recipe(tmp_path, method))
     loaded = restarted.get_or_create_scenario("s")
-    assert loaded.scenario_step == 2 and loaded.trainer.pipeline.training_mode == "manual"
+    assert loaded.commit_number == 2 and loaded.trainer.pipeline.training_mode == "manual"
     restarted.close()
     # A recipe that takes no requests keeps its default, so a person can still select a mode.
     without_requests = open_dispatcher(Recipe())
@@ -680,7 +680,7 @@ def committed_row(dispatcher, text):
     """The metrics of the step that answered the request ``text``, newest first; a job's submission names the
     request too, and is passed over."""
     for row in dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
-        dispatcher.get_or_create_scenario("s").scenario_step
+        dispatcher.get_or_create_scenario("s").commit_number
     ):
         metrics = row.get("metrics") or {}
         if metrics.get("training_job", {}).get("event") == "submitted":
@@ -845,14 +845,14 @@ def test_a_failed_request_is_skipped_alone_and_its_units_wait_for_the_next_reque
 
     restarted = open_dispatcher(recipe_in("manual", tmp_path, method_again))
     # The failed request's job committed twice: its submission and its end.
-    assert restarted.get_or_create_scenario("s").scenario_step == 2
+    assert restarted.get_or_create_scenario("s").commit_number == 2
     # Recovery never replays the request that the skip row named; the next request names the exchange's
     # sample, which waited.
     file_request(restarted, "after", stored_samples_of(restarted, "a"))
     assert became_true(lambda: committed_skip(restarted, "after") == UNCHANGED)
     assert seen == [("after", ("a",))]
     loaded = restarted.get_or_create_scenario("s")
-    assert loaded.scenario_step == 4
+    assert loaded.commit_number == 4
     assert "poison" not in {request.id for request in loaded.training_requests.queued()}
     assert loaded.pending_requests() == 0
 
@@ -881,7 +881,7 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
         assert not scenario.store.durable
         file_request(dispatcher, "poison")
         # The failed job's end is the last commit: its submission was the first.
-        assert became_true(lambda: scenario.scenario_step == 2)
+        assert became_true(lambda: scenario.commit_number == 2)
         assert dispatcher.get_or_create_scenario("s") is scenario
         skipped = last_committed(scenario)
         assert skipped["skipped"] == "request failed"
@@ -891,7 +891,7 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
         assert entered.wait(5)
         assert calls == ["poison", "fine"]
         release.set()
-        assert became_true(lambda: scenario.scenario_step == 4)
+        assert became_true(lambda: scenario.commit_number == 4)
         assert last_committed(scenario).get("skipped") == UNCHANGED
         assert scenario.pending_requests() == 0
         assert scenario.trainer.pipeline.failed_requests == {}
@@ -902,7 +902,7 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
 
 
 def last_committed(scenario):
-    committed = scenario.commit_status.get("last_committed_step")
+    committed = scenario.commit_status.get("last_training_commit")
     return {} if committed is None else committed.get("metrics") or {}
 
 
@@ -964,7 +964,7 @@ def job_events(dispatcher):
     """The (request text, job event) of every committed row, oldest first."""
     rows = reversed(
         dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
-            dispatcher.get_or_create_scenario("s").scenario_step
+            dispatcher.get_or_create_scenario("s").commit_number
         )
     )
     return [
@@ -1004,7 +1004,7 @@ def test_a_job_trainer_runs_each_request_as_a_job_and_a_failed_job_does_not_stop
         for job in component.submitted
     ] == [("one", ["a"]), ("two", ["b"])]
     artifacts = dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
-        dispatcher.get_or_create_scenario("s").scenario_step
+        dispatcher.get_or_create_scenario("s").commit_number
     )
     failed = next(
         row["metrics"] for row in artifacts if row.get("metrics", {}).get("training_job", {}).get("event") == "failed"
@@ -1275,9 +1275,9 @@ def test_reef_runs_a_managers_actions_and_drops_a_request_above_its_job_limit(tm
         [view] = dispatcher.manager_views()
         assert view.waiting_requests == 2
 
-        step = scenario.scenario_step
+        step = scenario.commit_number
         dispatcher.run_manager_action(view, TrainFrom(view.training_start), job_limit=1)
-        assert scenario.store.history()[-1].operation == "train_from" and scenario.scenario_step == step + 1
+        assert scenario.store.history()[-1].operation == "train_from" and scenario.commit_number == step + 1
         with pytest.raises(ArtifactNotFoundError):
             dispatcher.run_manager_action(view, TrainFrom("no-such-artifact"), job_limit=1)
     finally:

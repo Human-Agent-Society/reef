@@ -164,7 +164,7 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
 def training_commit(step: int, *consumed: str, component: str | None = None) -> CommitRecord:
     return CommitRecord(
         scenario="math",
-        step=step,
+        commit_number=step,
         snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
@@ -183,14 +183,16 @@ def train_counts(samples: SampleStore) -> dict[str, dict[str, int]]:
 def test_a_commit_counts_each_sample_it_consumed_once_for_its_trainer(scenario):
     session = scenario.session
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2", math="train")])
-    session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
+    session.append_commit(expected_commit_number=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
     assert train_counts(scenario.samples) == {"t1": {"": 1}, "t2": {}}
     # A retry of the stored commit counts nothing again; a later commit counts again.
-    session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
-    session.commit_step(expected_step=1, commit=training_commit(2, consumed_sample_id("t1"), consumed_sample_id("t2")))
+    session.append_commit(expected_commit_number=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
+    session.append_commit(
+        expected_commit_number=1, commit=training_commit(2, consumed_sample_id("t1"), consumed_sample_id("t2"))
+    )
     assert train_counts(scenario.samples) == {"t1": {"": 2}, "t2": {"": 1}}
     # The commit of one component of several counts for that component only.
-    session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("t2"), component="b"))
+    session.append_commit(expected_commit_number=2, commit=training_commit(3, consumed_sample_id("t2"), component="b"))
     _, second = scenario.samples.page()
     assert second.train_counts == {"": 1, "b": 1}
     assert (second.train_count(""), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
@@ -200,14 +202,16 @@ def test_a_commit_counts_more_samples_than_one_statement_can_name(scenario):
     # PostgreSQL takes at most 65535 parameters in one statement, and each count row has several.
     sample_ids = [f"t{index}" for index in range(20_000)]
     commit = training_commit(1, *(consumed_sample_id(sample_id) for sample_id in sample_ids))
-    scenario.session.commit_step(expected_step=0, commit=commit)
+    scenario.session.append_commit(expected_commit_number=0, commit=commit)
     counts = scenario.session.training_state.train_counts(sample_ids)
     assert len(counts) == len(sample_ids) and counts["t19999"] == {"": 1}
 
 
 def test_train_counts_survive_an_item_that_leaves_and_comes_back(scenario):
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2", math="train")])
-    scenario.session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), component="a"))
+    scenario.session.append_commit(
+        expected_commit_number=0, commit=training_commit(1, consumed_sample_id("t1"), component="a")
+    )
     last = scenario.samples.page()[-1].sequence
     scenario.data.update("acme", ["t1"], {"scenarios": {"math": None}})
     assert scenario.ids() == ["t2"]
@@ -229,7 +233,7 @@ def test_a_commit_that_fails_counts_no_sample(scenario, monkeypatch):
 
     monkeypatch.setattr(history, "append", append_then_fail)
     with pytest.raises(RuntimeError, match="after the counts"):
-        session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1")))
+        session.append_commit(expected_commit_number=0, commit=training_commit(1, consumed_sample_id("t1")))
     assert train_counts(scenario.samples) == {"t1": {}}
     assert session.history() == ()
 
@@ -297,12 +301,16 @@ def test_the_task_directories_of_many_tasks_are_read_at_the_same_time(scenario, 
 def test_a_restart_counts_the_trained_samples_from_the_commits(open_durable_storage):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         consumed = (consumed_sample_id("upload"), consumed_sample_id("a:r1:0"))
-        session.commit_step(expected_step=0, commit=training_commit(1, *consumed, component="a"))
+        session.append_commit(expected_commit_number=0, commit=training_commit(1, *consumed, component="a"))
 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
         assert state.train_counts(["upload", "a:r1:0", "untrained"]) == {"upload": {"a": 1}, "a:r1:0": {"a": 1}}
         # A later commit of the same trainer counts again, and one of another trainer counts for that trainer.
-        session.commit_step(expected_step=1, commit=training_commit(2, consumed_sample_id("upload"), component="a"))
-        session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("upload"), component="b"))
+        session.append_commit(
+            expected_commit_number=1, commit=training_commit(2, consumed_sample_id("upload"), component="a")
+        )
+        session.append_commit(
+            expected_commit_number=2, commit=training_commit(3, consumed_sample_id("upload"), component="b")
+        )
         assert state.train_counts(["upload"]) == {"upload": {"a": 2, "b": 1}}

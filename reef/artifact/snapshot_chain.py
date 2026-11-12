@@ -60,13 +60,15 @@ class ArtifactSnapshotChain:
             ref, expected=expected, expected_checkpoint=expected_checkpoint, activate=activate
         )
 
-    def stage(self, step: int, artifact: Artifact, *, parent: SnapshotRef | None = None) -> Artifact:
-        return self._repository.stage(step, artifact, parent=self.checkpoint if parent is None else parent)
+    def stage(self, commit_number: int, artifact: Artifact, *, parent: SnapshotRef | None = None) -> Artifact:
+        return self._repository.stage(commit_number, artifact, parent=self.checkpoint if parent is None else parent)
 
     def stage_composed(
-        self, step: int, components: Mapping[str, Artifact], *, parent: SnapshotRef | None = None
+        self, commit_number: int, components: Mapping[str, Artifact], *, parent: SnapshotRef | None = None
     ) -> Artifact:
-        return self._repository.stage_composed(step, components, parent=self.checkpoint if parent is None else parent)
+        return self._repository.stage_composed(
+            commit_number, components, parent=self.checkpoint if parent is None else parent
+        )
 
     def publish(
         self,

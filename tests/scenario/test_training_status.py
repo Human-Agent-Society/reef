@@ -56,7 +56,7 @@ def scenario_double(
     job_data_ready: bool = False,
     pipeline_status: dict | None = None,
     runtime=None,
-    last_committed_step: dict | None = None,
+    last_training_commit: dict | None = None,
     job_loop=None,
     state: dict | None = None,
 ) -> SimpleNamespace:
@@ -81,7 +81,7 @@ def scenario_double(
         trainers=(SimpleNamespace(component=None, trainer=trainer),),
         trainer_for=lambda component: trainer,
         runtime=runtime,
-        commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
+        commit_status={"commit_number": 0, "last_training_commit": last_training_commit},
         artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
         served_artifact_id=lambda: "base",
         close=lambda: None,
@@ -121,15 +121,15 @@ def test_status_exposes_the_ready_state() -> None:
     assert dispatcher.build_training_status()["scenarios"]["s"]["job_data_ready"] is True
 
 
-def test_status_exposes_the_last_committed_step_outcome() -> None:
+def test_status_exposes_the_last_training_commit() -> None:
     committed = {
-        "step": 3,
+        "commit_number": 3,
         "recorded_at": 1_756_400_000.0,
         "metrics": {"skipped": "no proposal", "selection": {"reason": "candidate lost"}},
     }
-    dispatcher = bound_dispatcher(scenario_double(last_committed_step=committed))
+    dispatcher = bound_dispatcher(scenario_double(last_training_commit=committed))
 
-    assert dispatcher.build_training_status()["scenarios"]["s"]["last_committed_step"] == committed
+    assert dispatcher.build_training_status()["scenarios"]["s"]["last_training_commit"] == committed
 
 
 def test_status_names_the_served_artifact_and_the_inference_admission() -> None:

@@ -70,7 +70,7 @@ def training_step_count() -> int | None:
         return None
     # This run activates nothing and sets no training start, so each commit of the scenario is a training step.
     scenario = payload["scenarios"].get(SCENARIO)
-    return 0 if scenario is None else int(scenario["scenario_step"])
+    return 0 if scenario is None else int(scenario["commit_number"])
 
 
 def wait_for_training() -> int:
