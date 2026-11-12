@@ -434,9 +434,9 @@ def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: Sta
 @pytest.mark.parametrize(
     ("environment", "has_compose", "gpu_count", "config"),
     [
-        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True}}),
-        ("modal", False, 0, {"type": "modal"}),
-        ("modal", True, 1, {"type": "modal"}),
+        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True, "sandbox_timeout_secs": 7200}}),
+        ("modal", False, 0, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
+        ("modal", True, 1, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
         ("e2b", True, 0, {"type": "e2b"}),
     ],
     ids=["modal-compose", "modal-dockerfile", "modal-compose-gpu", "e2b-compose"],
@@ -466,14 +466,13 @@ def test_only_a_modal_compose_task_with_no_gpu_runs_on_the_vm_runtime(
             {"sandbox_timeout_secs": 300 + 900 + 1200 + 3600},
         ),
         ("[agent]\ntimeout_sec = 86400\n", {"sandbox_timeout_secs": 86400}),
-        ("[verifier]\ntimeout_sec = 1200\n", None),
+        ("[verifier]\ntimeout_sec = 1200\n", {"sandbox_timeout_secs": 2 * 60 * 60}),
     ],
     ids=["agent-limit", "all-limits", "one-day-at-most", "no-agent-limit"],
 )
 def test_a_modal_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, task_toml: str, kwargs) -> None:
     (tmp_path / "task.toml").write_text(task_toml)
-    expected = {"type": "modal"} if kwargs is None else {"type": "modal", "kwargs": kwargs}
-    assert environment_config("modal", tmp_path) == expected
+    assert environment_config("modal", tmp_path) == {"type": "modal", "kwargs": kwargs}
     assert environment_config("e2b", tmp_path) == {"type": "e2b"}
 
 

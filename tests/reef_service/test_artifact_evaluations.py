@@ -1093,7 +1093,7 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
             assert answer["state"] == "finished", answer
 
     asyncio.run(run())
-    assert lab.overrides["environment"] == {"type": "modal"}
+    assert lab.overrides["environment"] == {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}
     assert lab.agent is not None and lab.agent.bridge_port is not None
     assert f"http://127.0.0.1:{lab.agent.bridge_port}" in "".join(lab.rendered.values())
 
