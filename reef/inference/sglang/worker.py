@@ -10,14 +10,14 @@ import ray
 from reef.execution.executor.placement import GpuBundles
 from reef.inference.process import retire_engines
 from reef.inference.recovery import InferenceControl, InferenceEngineGroup
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.launch import SGLangCluster
 
 
 class SGLangWorker:
     """Own the serving engines and the locally launched router."""
 
-    def __init__(self, config: SGLangConfig, pg: GpuBundles) -> None:
+    def __init__(self, config: SGLangSettings, pg: GpuBundles) -> None:
         self.config = config
         self.cluster = SGLangCluster(config, pg)
         self._closed = False

@@ -33,7 +33,7 @@ RECIPE_SECTION_PATHS: Mapping[tuple[str, ...], tuple[str, ...]] = {
 
 
 @dataclass(frozen=True)
-class DeploymentConfig:
+class DeploymentSettings:
     """Deployment-wide defaults; selected components declare their own fields."""
 
     run_dir: str = field(
@@ -49,7 +49,7 @@ class DeploymentConfig:
 
 
 def deployment_config_arguments() -> tuple[ConfigArgument, ...]:
-    return config_arguments(DeploymentConfig)
+    return config_arguments(DeploymentSettings)
 
 
 def _take(values: dict[str, Any], path: tuple[str, ...]) -> Any:

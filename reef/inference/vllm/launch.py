@@ -9,11 +9,11 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from reef.execution.executor.placement import GpuBundles
 from reef.inference.process import EngineGroup, EngineStartup
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 from reef.inference.vllm.engine import ReefVLLMEngine
 
 
-def engine_environment(config: VLLMConfig) -> dict[str, str]:
+def engine_environment(config: VLLMSettings) -> dict[str, str]:
     """Ray must leave device visibility alone: every engine names its own GPUs."""
     return {
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
@@ -30,7 +30,7 @@ class VLLMEngineGroup(EngineGroup):
     group, one bundle index per GPU and the physical GPU ids in bundle order.
     """
 
-    def __init__(self, config: VLLMConfig, placement: GpuBundles) -> None:
+    def __init__(self, config: VLLMSettings, placement: GpuBundles) -> None:
         self.config = config
         self.placement = placement
         self.all_engines: list[Any] = [None] * config.engine_count

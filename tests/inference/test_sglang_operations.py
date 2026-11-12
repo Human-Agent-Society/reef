@@ -10,7 +10,7 @@ from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
 from reef.inference.deployment import InferenceConnection
 from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.service import SGLangInferenceService
 
 
@@ -39,7 +39,7 @@ class Receiver:
 def test_service_adapts_only_connections_with_a_control_executor_without_owning_workers():
     receiver = Receiver()
     executor = UniProcExecutor.from_workers([receiver])
-    service = SGLangInferenceService(SGLangConfig("model", 1, 1, 1))
+    service = SGLangInferenceService(SGLangSettings("model", 1, 1, 1))
     operations = service.backend(InferenceConnection(executor))
 
     assert operations.inference_url() == "http://inference:8000"
@@ -257,7 +257,7 @@ def test_engine_control_reaches_live_engines_and_a_retracting_pause_flushes_thei
         handle.get_runtime_load_id = Remote(name, "get_runtime_load_id", "weights:1")
         return handle
 
-    config = SGLangConfig("model", 2, 1, 2, pause_mode="retract")
+    config = SGLangSettings("model", 2, 1, 2, pause_mode="retract")
     group = SGLangEngineGroup(config, None, ("router", 3000))
     live = engine("live")
     group.all_engines = [None, live]

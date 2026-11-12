@@ -27,7 +27,7 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.service.app import create_app
-from reef.train.pipeline import PipelineConfig
+from reef.train.pipeline import PipelineSettings
 
 #: Each patch strictly raises the marker count, so every evaluated step wins and publishes.
 PATCHES = (TreePatch(changed_rules("marker rules\n")), TreePatch(changed_rules("marker marker rules\n")))
@@ -77,7 +77,7 @@ def channel_dispatcher(
             seed=seed,
             score=evaluate,
         ),
-        pipeline_stages=PipelineConfig.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
+        pipeline_stages=PipelineSettings.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
     )
     dispatcher = harness_dispatcher(tmp_path, recipe)
     dispatcher.get_or_create_scenario("delivery")

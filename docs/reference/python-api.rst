@@ -386,7 +386,7 @@ Embed the service
 
 An application can run the complete Reef service in its own process.
 ``reef.service.assembly.build_app`` makes the dispatcher and the HTTP app from
-a ``ServiceConfig``. The app includes record retention, the inference routes,
+a ``ServiceSettings``. The app includes record retention, the inference routes,
 the evaluation token, readiness of local cycles, and cleanup.
 
 .. code:: python
@@ -2289,7 +2289,7 @@ Tinker integration
 
 ``reef.train.tinker_backend.launch.TinkerDeployment`` implements the optional
 ``tinker`` backend as an ``InProcessTrainingDeployment``. Its
-``component_factory`` builds, from ``TinkerConfig`` and only after deployment
+``component_factory`` builds, from ``TinkerSettings`` and only after deployment
 selection, a ``TinkerTrainingComponent``. Each job
 trains remotely from the job's start manifest. Its parameters are ``objective``,
 the optional ``learning_rate_schedule`` and ``scheduling``, optional ``batch_size``, ``kl_coef`` and

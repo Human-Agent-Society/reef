@@ -25,7 +25,7 @@ from reef.train.component import TrainingJob, job_id_for
 from reef.train.tinker_backend import client as client_module
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
-from reef.train.tinker_backend.config import SpindleFullConfig
+from reef.train.tinker_backend.config import SpindleFullSettings
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
 from reef.train.tinker_backend.launch import SpindleFullDeployment, spindle_full_settings
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow
@@ -43,9 +43,9 @@ RELEASES = "org/model-releases"
 FILES = {"config.json": b"{}", "model.safetensors": b"base-weights"}
 
 
-def settings(tmp_path: Path, **options: str) -> SpindleFullConfig:
+def settings(tmp_path: Path, **options: str) -> SpindleFullSettings:
     values = {"state_dir": str(tmp_path / "state"), "base_url": SPINDLE, "base": BASE, "release_repo": RELEASES}
-    return SpindleFullConfig(**{**values, **options})
+    return SpindleFullSettings(**{**values, **options})
 
 
 class Exporter(CheckpointExporter):
@@ -263,7 +263,7 @@ def test_the_component_trains_the_repo_of_its_base_on_a_spindle_deployment(tmp_p
     with pytest.raises(ValueError, match="not the repo of the base"):
         SpindleFullTrainingComponent("other/model", settings(tmp_path), client, Exporter())
     with pytest.raises(ValueError, match="requires base_url"):
-        SpindleFullConfig(state_dir=str(tmp_path), base=BASE, release_repo=RELEASES)
+        SpindleFullSettings(state_dir=str(tmp_path), base=BASE, release_repo=RELEASES)
     with pytest.raises(ValueError, match="40-digit commit SHA"):
         settings(tmp_path, base=f"hf://{MODEL}@main")
 

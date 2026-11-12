@@ -16,7 +16,7 @@ from reef.core.tasks import write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitError, write_split_manifest
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceConfig, normalize_service_config, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
 from reef.service.task_import import DataScenarioStorage, TaskImport, TaskImportError
 from reef.storage.data import ItemConflict
 from reef.storage.sql_data import SQLiteDataStore
@@ -146,4 +146,4 @@ def test_the_deployment_imports_its_tasks_into_each_scenario(tmp_path: Path) -> 
         dispatcher.close()
 
     with pytest.raises(ValueError, match="task-import needs both manifest and tasks-root"):
-        ServiceConfig(recipe="recipe", task_import_manifest=str(path))
+        ServiceSettings(recipe="recipe", task_import_manifest=str(path))

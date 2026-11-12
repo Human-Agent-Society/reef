@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from reef.inference.engine_control import EngineInferenceService
 from reef.inference.vllm.backend import VLLMInferenceBackend
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 from reef.inference.vllm.launch import engine_environment
 
 #: The control RPC vocabulary of :class:`reef.inference.vllm.control.VLLMControl`.
 
 
-class VLLMInferenceService(EngineInferenceService[VLLMConfig]):
+class VLLMInferenceService(EngineInferenceService[VLLMSettings]):
     """Own vLLM engines and the control actor; borrow the deployment allocation."""
 
     engine_name = "vLLM"

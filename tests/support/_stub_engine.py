@@ -12,7 +12,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from reef.execution.executor import ExecutorConfig, WorkerSpec
+from reef.execution.executor import ExecutorLaunch, WorkerSpec
 from reef.execution.executor.ray import RayExecutor
 from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
 from reef.inference.interfaces import InferenceBackend
@@ -133,7 +133,7 @@ class StubEngineService(InferenceService):
         if len(placement.bundle_indices) != int(self.config["num_gpus"]):
             raise ValueError("the stub engine expects one reserved bundle per inference GPU")
         self._control = RayExecutor(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend=RayExecutor,
                 workers=(WorkerSpec(worker_cls="tests.support._stub_engine:StubControl", args=(self.config,)),),
                 # Ray workers import this module by name; give them the driver's import path.

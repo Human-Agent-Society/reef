@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from reef.inference.engine_control import EngineInferenceService
 from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.launch import engine_environment
 
 
-class SGLangInferenceService(EngineInferenceService[SGLangConfig]):
+class SGLangInferenceService(EngineInferenceService[SGLangSettings]):
     """Own SGLang engines and the control actor; borrow the deployment allocation."""
 
     engine_name = "SGLang"

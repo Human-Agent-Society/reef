@@ -278,7 +278,7 @@ class InferenceProxyRuntime(InferenceRuntime):
 
 
 @dataclass(frozen=True)
-class InferenceProxyConfig:
+class InferenceProxySettings:
     """Connection configuration owned by the inference proxy adapter."""
 
     base_url: str = config_option("", help="Inference provider base URL.")
@@ -300,7 +300,7 @@ class InferenceProxyRuntimeFactory(RuntimeFactory):
     kind = "inference_proxy"
 
     def config_type(self) -> type:
-        return InferenceProxyConfig
+        return InferenceProxySettings
 
     def __call__(
         self,
@@ -354,9 +354,9 @@ __all__ = [
     "PROVIDER_APIS",
     "ArtifactRequestHeaders",
     "HttpInferenceHandler",
-    "InferenceProxyConfig",
     "InferenceProxyRuntime",
     "InferenceProxyRuntimeFactory",
+    "InferenceProxySettings",
     "ProviderRequestHeaders",
     "RequestHeadersFactory",
     "artifact_identity_headers",

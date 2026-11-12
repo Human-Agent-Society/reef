@@ -29,7 +29,7 @@ from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.commits import CommitRecord
 from reef.storage.data import NewItem
 from reef.storage.samples import SampleStore, consumed_sample_id
-from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.pipeline import PipelineSettings, TrainingPipeline
 from reef.train.types import JobData
 
 
@@ -62,14 +62,14 @@ INFERENCE_STAGES = {
 
 def harness_stages(
     *, inference: bool = False, buffer_size: int | None = None, job_samples: int | None = None
-) -> PipelineConfig:
+) -> PipelineSettings:
     """The harness evolution stages as a deployment's ``pipeline`` section configures them."""
     section: dict = dict(INFERENCE_STAGES) if inference else {}
     sizes = {"buffer_size": buffer_size, "job_samples": job_samples}
     stage_config = {key: value for key, value in sizes.items() if value is not None}
     if stage_config:
         section["sample2job"] = {"config": stage_config}
-    return PipelineConfig.from_setting(section, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
+    return PipelineSettings.from_setting(section, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
 
 
 def reports_pipeline(

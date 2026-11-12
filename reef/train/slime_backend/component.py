@@ -849,7 +849,7 @@ class SlimeSettings:
         if not isinstance(self.execution, Mapping) or set(self.execution) - {"execution", "executors"}:
             raise ValueError("SlimeSettings.execution holds only the execution and executors sections")
         if isinstance(self.train_timeout_s, bool) or not isinstance(self.train_timeout_s, int | float):
-            raise TypeError("SlimeSettings.train_timeout_s must be a number")
+            raise ValueError("SlimeSettings.train_timeout_s must be a number")
         if not self.train_timeout_s > 0:
             raise ValueError("SlimeSettings.train_timeout_s must be positive")
 

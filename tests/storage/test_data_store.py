@@ -23,7 +23,7 @@ from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink, ScenarioArchived
 from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key, read_job_data
@@ -804,8 +804,8 @@ def test_items_survive_a_restart(open_durable_store):
         assert second.delete("acme", "t1") is False
 
 
-def deployment(tmp_path, **storage) -> ServiceConfig:
-    return ServiceConfig(
+def deployment(tmp_path, **storage) -> ServiceSettings:
+    return ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),
@@ -849,7 +849,7 @@ def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, d
 )
 def test_the_deployment_refuses_an_invalid_data_store(data_store, reason):
     with pytest.raises(ValueError, match=reason):
-        ServiceConfig(recipe="recipe", data_store=data_store)
+        ServiceSettings(recipe="recipe", data_store=data_store)
 
 
 def test_archiving_a_scenario_never_moves_an_owners_task_files(tmp_path):

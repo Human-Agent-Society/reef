@@ -14,7 +14,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.service import assembly
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.storage.data import DataStore
 from reef.storage.record_items import record_item
 from reef.storage.records import RecordRetention
@@ -79,7 +79,7 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
 
     async def run():
         app = assembly.build_app(
-            ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), agent_record_retention_max_bytes=1)
+            ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path), agent_record_retention_max_bytes=1)
         )
         runner = web.AppRunner(app)
         await runner.setup()

@@ -35,7 +35,7 @@ from reef.service.deploy.routing.policy import RouterManagementClient, RouterPol
 from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, ReefLifecycleClient, RoutingControlError
 from reef.service.deploy.routing.registry import DeploymentOwnership
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.routing import DEFAULT_RULE, ENTRYPOINT_PREFIX, RoutingAdapter, RoutingRule, RoutingSnapshot
 from reef.service.routing_preview import EXPECTED_HASH_HEADER, READINESS_TEXT, RETURNED_HASH_HEADER, PreviewSettings
 from reef.storage.sql_coordination import memory_coordination
@@ -613,7 +613,7 @@ def controller_case(tmp_path: Path) -> Iterator[ControllerCase]:
         container_stop_timeout_seconds=0.03,
     )
     controller = RoutingDeploymentController(
-        ServiceConfig(recipe="base", routing_deployment=policy), runtime, registry_root=tmp_path / "registry"
+        ServiceSettings(recipe="base", routing_deployment=policy), runtime, registry_root=tmp_path / "registry"
     )
     controller.registry.acquire()
     controller.directory = tmp_path / "generation"

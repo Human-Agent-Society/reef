@@ -13,7 +13,7 @@ from reef.observability.base import (
     TrainingExperimentEvent,
 )
 from reef.observability.operations import OperationMetrics
-from reef.observability.wandb import WandbConfig, WandbExperimentTracker
+from reef.observability.wandb import WandbExperimentTracker, WandbSettings
 from reef.service.deploy.service_config import service_config_from_mapping
 
 
@@ -114,7 +114,7 @@ def _tracker(client: _StubClient, **overrides) -> WandbExperimentTracker:
     }
     values.update(overrides)
     return WandbExperimentTracker(
-        WandbConfig(**values),
+        WandbSettings(**values),
         model="Qwen/test",
         training_config={
             "global_batch_size": 2,
@@ -270,7 +270,7 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
 def test_disabled_and_failed_tracking_never_fail_training() -> None:
     disabled_client = _StubClient(fail_init=True)
     disabled = WandbExperimentTracker(
-        WandbConfig(enabled=True, mode="disabled"),
+        WandbSettings(enabled=True, mode="disabled"),
         model=None,
         training_config={},
         client=disabled_client,
@@ -302,10 +302,10 @@ def test_disabled_and_failed_tracking_never_fail_training() -> None:
 
 @pytest.mark.unit
 def test_config_surface_is_generic_and_rejects_credentials() -> None:
-    assert WandbConfig.from_mapping(None).active is False
-    assert WandbConfig.from_mapping({}).active is False
+    assert WandbSettings.from_mapping(None).active is False
+    assert WandbSettings.from_mapping({}).active is False
     default_group = WandbExperimentTracker(
-        WandbConfig(enabled=True, mode="offline"),
+        WandbSettings(enabled=True, mode="offline"),
         model=None,
         training_config={},
     ).correlation_metrics(_context())
@@ -324,15 +324,21 @@ def test_config_surface_is_generic_and_rejects_credentials() -> None:
             },
         }
     )
-    config = WandbConfig.from_mapping(settings.wandb_config)
+    config = WandbSettings.from_mapping(settings.wandb_config)
     assert config.project == "reef-smoke"
     assert config.tags == ("baseline", "cpu")
     assert config.active is True
 
     with pytest.raises(ValueError, match=r"unknown observability\.wandb settings"):
-        WandbConfig.from_mapping({"enabled": True, "api_key": "must-not-be-accepted"})
+        WandbSettings.from_mapping({"enabled": True, "api_key": "must-not-be-accepted"})
     with pytest.raises(ValueError, match=r"unknown observability\.wandb settings: group, name"):
-        WandbConfig.from_mapping({"group": "legacy", "name": "legacy"})
+        WandbSettings.from_mapping({"group": "legacy", "name": "legacy"})
+    assert WandbSettings.from_mapping({"enabled": True, "mode": " "}).mode == "online"
+    with pytest.raises(ValueError, match="tags must be a list of strings"):
+        WandbSettings.from_mapping({"tags": "baseline"})
+    # The constructor checks the same conditions as the section reader.
+    with pytest.raises(ValueError, match="mode must be online, offline, or disabled"):
+        WandbSettings(mode="dryrun")
 
 
 @pytest.mark.unit

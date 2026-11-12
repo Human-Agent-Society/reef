@@ -41,8 +41,15 @@ class WorkerSpec:
 
 
 @dataclass(frozen=True)
-class ExecutorConfig:
-    """Worker topology and executor selection; workers define rank order.
+class ExecutorLaunch:
+    """What one executor launches: its backend and its workers, which define rank order.
+
+    Values: ``backend`` is an ``Executor`` class or a non-empty built-in name or import path; ``workers`` is a
+    tuple of ``WorkerSpec``; ``options`` is a mapping; ``launch_timeout_s`` is positive or ``None``; ``node_id``
+    is a non-empty string or ``None``. Construction refuses other values with ``ValueError`` and copies
+    ``workers`` and ``options``.
+    Purpose: the code that needs a worker group makes it, from ``ExecutorSettings`` where a deployment selects
+    the backend; ``Executor.create`` and the executor read it.
 
     ``options`` contains backend-specific defaults. For Ray these are actor
     options, overridden per worker by ``WorkerSpec.options``. ``node_id``
@@ -58,17 +65,17 @@ class ExecutorConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.backend, (str, type)) or not self.backend:
-            raise TypeError("executor backend must be a class or a non-empty name/import path")
+            raise ValueError("executor backend must be a class or a non-empty name/import path")
         if not isinstance(self.workers, Sequence) or isinstance(self.workers, (str, bytes)):
-            raise TypeError("executor workers must be a sequence of WorkerSpec objects")
+            raise ValueError("executor workers must be a sequence of WorkerSpec objects")
         if any(not isinstance(worker, WorkerSpec) for worker in self.workers):
-            raise TypeError("executor workers must contain WorkerSpec objects")
+            raise ValueError("executor workers must contain WorkerSpec objects")
         if not isinstance(self.options, Mapping):
-            raise TypeError("executor options must be a mapping")
+            raise ValueError("executor options must be a mapping")
         if self.launch_timeout_s is not None and self.launch_timeout_s <= 0:
             raise ValueError("executor launch_timeout_s must be positive or None")
         if self.node_id is not None and (not isinstance(self.node_id, str) or not self.node_id):
-            raise TypeError("executor node_id must be a non-empty string or None")
+            raise ValueError("executor node_id must be a non-empty string or None")
         object.__setattr__(self, "workers", tuple(self.workers))
         object.__setattr__(self, "options", dict(self.options))
 
@@ -142,7 +149,7 @@ class Executor(ABC):
     does not promise live changes to the model's distributed process groups.
     """
 
-    def __init__(self, config: ExecutorConfig) -> None:
+    def __init__(self, config: ExecutorLaunch) -> None:
         self.config = config
         self._failure_state = FailureState()
         self._closed = False
@@ -173,7 +180,7 @@ class Executor(ABC):
         return candidate
 
     @classmethod
-    def create(cls, config: ExecutorConfig) -> Executor:
+    def create(cls, config: ExecutorLaunch) -> Executor:
         if config.backend == "auto":
             # Selection policy imports this module; resolve it lazily.
             from reef.execution.executor.config import ExecutorSettings, select_worker_executor

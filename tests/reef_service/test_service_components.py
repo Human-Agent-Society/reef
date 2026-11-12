@@ -43,7 +43,7 @@ from reef.service.components import build_component_app
 from reef.service.data_service import DataJob, DataWorker
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.scenario_files import artifact_directory
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
@@ -64,8 +64,8 @@ from reef.core.errors import ReefError
 from reef.dispatcher.dispatcher import build_default_dispatcher
 
 
-def settings(tmp_path: Path) -> ServiceConfig:
-    return ServiceConfig(
+def settings(tmp_path: Path) -> ServiceSettings:
+    return ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_work_dir=str(tmp_path / "work"),

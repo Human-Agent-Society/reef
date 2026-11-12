@@ -49,7 +49,7 @@ from reef.storage.tasks import LocalTaskFileStore
 from reef.train import Trainer, TrainingCommit
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.jobs import JobLoop
-from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
+from reef.train.pipeline import PipelineSettings, PipelineSpec, TrainingPipeline
 
 
 class _FileJobs(StubTrainingComponent):
@@ -222,7 +222,7 @@ def test_composite_recipe_merges_components_seeds_and_trainers(tmp_path: Path) -
 @pytest.mark.unit
 def test_each_component_trainer_takes_only_its_own_record2sample_keys(tmp_path: Path) -> None:
     trajectories = {"record2sample": {"module": "reef.record2sample.trajectories:TrajectorySamples"}}
-    stages = PipelineConfig.from_setting(trajectories, spec=PipelineSpec(), environ={})
+    stages = PipelineSettings.from_setting(trajectories, spec=PipelineSpec(), environ={})
     harness = _composite(tmp_path).components["harness"]
     recipe = CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe(pipeline_stages=stages)})
     components = recipe.build_components("agent")
@@ -306,9 +306,9 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
     from tests.support._training_deployment import LocalRuntime
 
     from reef.service.assembly import _serving_recipe
-    from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+    from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 
-    def composite_service(activation: Mapping[str, Any] | None = None, **reef: Any) -> ServiceConfig:
+    def composite_service(activation: Mapping[str, Any] | None = None, **reef: Any) -> ServiceSettings:
         settings = {
             "reef": {
                 "recipe": COMPOSITE,
@@ -794,7 +794,7 @@ def test_only_a_composite_evaluates_through_the_service(
     """A composite's evaluation calls come back to the service and hold its local cycles until it answers. A recipe of
     one component keeps calling its runtime's endpoint directly: it gets no served endpoint and runs at once."""
     from reef.service import assembly
-    from reef.service.deploy.service_config import ServiceConfig
+    from reef.service.deploy.service_config import ServiceSettings
 
     flat = _EndpointTreeRecipe(label="harness")
     recipe = (
@@ -811,7 +811,7 @@ def test_only_a_composite_evaluates_through_the_service(
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: recipe)
     monkeypatch.setattr(assembly, "Dispatcher", dispatcher)
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
-    settings = ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), port=8900)
+    settings = ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path), port=8900)
     assembly.build_dispatcher(
         settings, hold_local_cycles=True, evaluation_token="rollout", components=frozenset({"control"})
     )

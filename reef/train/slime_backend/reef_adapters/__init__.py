@@ -6,6 +6,6 @@ optimizer execution and checkpoint storage. Inference adapters live in
 ``reef.inference`` and are assembled independently by Reef.
 """
 
-from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig
+from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionSettings
 
-__all__ = ["RetentionConfig"]
+__all__ = ["RetentionSettings"]
