@@ -102,6 +102,43 @@ def test_a_recorded_call_with_an_image_is_left_out_with_a_warning(caplog) -> Non
     assert "sample call is left out of its job: training renders text only" in caplog.text
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "model": "m",
+            "input": [
+                {"role": "user", "content": "q"},
+                {
+                    "type": "computer_call_output",
+                    "call_id": "c",
+                    "output": {"type": "computer_screenshot", "image_url": "data:image/png;base64,AAAA"},
+                },
+            ],
+            "response": {
+                "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a"}]}]
+            },
+        },
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [TEXT, {"type": "image_url", "image_url": {"url": "data:image/bmp;base64,AAAA"}}],
+                }
+            ],
+            "response": {"choices": [{"message": {"role": "assistant", "content": "a"}}]},
+        },
+    ],
+)
+def test_a_recorded_image_that_atif_keeps_only_in_its_record_is_left_out(payload, caplog) -> None:
+    record = AgentRecord.create(
+        agent_record_id="call", scenario="s", request_type=RequestType.INFERENCE, payload=payload
+    )
+    data, left_out = rendered_job_data(JobData("d", (make_trajectory((record,), 1.0),)), CharTemplate())
+    assert left_out == (0,) and data.samples == ()
+    assert "sample call is left out of its job: training renders text only" in caplog.text
+
+
 def test_a_template_that_drops_earlier_turns_trains_each_turn_as_its_call_rendered_it() -> None:
     first, second = render_trajectory(
         CharTemplate(drop_history=True),

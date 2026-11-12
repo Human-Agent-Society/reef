@@ -1599,9 +1599,10 @@ it. ``reef.core.chat_rendering`` holds the shared rendering:
   before it continues that segment. Else it starts a new segment. The result
   is one ``RenderedTrajectory`` for each segment. It raises ``ValueError``
   when a message or an observation result holds a part that is not text, such
-  as an image. It also raises ``ValueError`` when the trajectory has no
-  trained step, or when the template does not render a turn after its own
-  generation prompt.
+  as an image, or when ``has_image_content`` finds an image that only the
+  captured records of the trajectory keep. It also raises ``ValueError`` when
+  the trajectory has no trained step, or when the template does not render a
+  turn after its own generation prompt.
 - ``TeacherRequest`` is the ``extra.reef.teacher`` value. Its
   ``teacher_tokens`` is the rendered teacher prompt followed by the student's
   reply tokens verbatim, or the student's own tokens when it names no

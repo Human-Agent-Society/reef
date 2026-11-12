@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.core.job_data import JobData, Sample, TrajectorySample
-from reef.core.trajectories import atif_messages, source_record_id
+from reef.core.trajectories import atif_messages, has_image_content, source_record_id
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,8 @@ def trained_turns(trajectory: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
     """The chat messages of an ATIF trajectory, normalized for a chat template, and the positions of its trained
     turns: the agent steps that are not copied context (``render_trajectory``).
 
-    ``ValueError``: a message or an observation result holds a part that is not text, such as an image;
+    ``ValueError``: a message or an observation result holds a part that is not text, such as an image, or the
+    trajectory holds an image that its steps do not keep as an image part (``has_image_content``);
     ``is_copied_context`` is not a boolean; the trajectory has no agent step that trains, or its first trained step has
     no step before it. A trajectory that passes may still fail to render, with a chat template that does not render a
     trained turn after its own generation prompt.
@@ -157,7 +158,8 @@ def trained_turns(trajectory: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
     steps = trajectory.get("steps") or []
     messages = atif_messages(trajectory)
     # The normalized messages keep only text parts, so the sample would train on the text without its images.
-    if any(
+    # ATIF keeps some images only in the captured records, such as a computer_call_output screenshot or a BMP.
+    if has_image_content(trajectory) or any(
         isinstance(message["content"], list) and any(part.get("type") != "text" for part in message["content"])
         for message in messages
     ):

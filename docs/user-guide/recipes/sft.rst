@@ -70,9 +70,9 @@ it in the job metric ``unrenderable_samples``.
 Training renders text only, so Reef refuses a recorded call, an imported
 record or a new data item with an image (see `Recipe
 <../../reference/python-api.rst#recipe>`__). An older record or upload can
-still hold an image. A sample with an image part cannot render. A sample can
-lose an image with no error when ATIF does not keep the image as an image
-part, such as the screenshot of a Responses ``computer_call_output``.
+still hold an image. A sample with an image cannot render, also when only its
+captured records keep the image, such as the screenshot of a Responses
+``computer_call_output``.
 
 The ``sft`` objective, built in on Slime and on Tinker, sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
