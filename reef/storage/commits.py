@@ -61,7 +61,7 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
     )
 
 
-RECORD_KIND = "reef-commit/8"
+RECORD_KIND = "reef-commit/9"
 #: The ``snapshot`` of a record read from storage until ``CommitSnapshots`` locates it: a record with a
 #: ``selection`` stores no storage location.
 UNLOCATED_SNAPSHOT = SnapshotRef("unlocated:", None)
@@ -354,7 +354,7 @@ class CommitRecord:
         value = {
             "record": RECORD_KIND,
             "scenario": self.scenario,
-            "step": self.commit_number,
+            "commit_number": self.commit_number,
             "checkpoint": self.checkpoint,
             "algorithm_state": self.algorithm_state,
             "record_progress": record_progress,
@@ -391,7 +391,7 @@ class CommitRecord:
         scenario = value.get("scenario")
         if not isinstance(scenario, str) or not scenario:
             raise CommitHistoryError("commit record requires scenario")
-        commit_number = value.get("step")
+        commit_number = value.get("commit_number")
         if not isinstance(commit_number, int):
             raise CommitHistoryError("commit record step must be an integer")
         raw_ref = value.get("snapshot")
@@ -487,7 +487,7 @@ def active_snapshot(records: Sequence[CommitRecord], fallback: SnapshotRef) -> S
 
 
 SCENARIO_METADATA_KEY = "scenario_commit_record"
-SCENARIO_METADATA_KIND = "reef-scenario/7"
+SCENARIO_METADATA_KIND = "reef-scenario/8"
 
 
 def scenario_metadata_for(
@@ -521,7 +521,7 @@ def scenario_metadata_for(
     metadata: dict[str, object] = {
         "format": SCENARIO_METADATA_KIND,
         "scenario": name,
-        "scenario_step": commit_number,
+        "commit_number": commit_number,
         "source": source.to_dict(),
         "operation": "training",
     }
@@ -573,9 +573,9 @@ def parse_scenario_metadata(
     if not isinstance(scenario, str) or not scenario:
         raise ValueError("scenario metadata requires scenario")
     source = RootSource.from_dict(value.get("source"))
-    commit_number = value.get("scenario_step", 0)
+    commit_number = value.get("commit_number", 0)
     if not isinstance(commit_number, int) or isinstance(commit_number, bool) or commit_number < 0:
-        raise ValueError("scenario metadata scenario_step must be non-negative")
+        raise ValueError("scenario metadata commit_number must be non-negative")
     algorithm_state = value.get("algorithm_state")
     if algorithm_state is not None and not isinstance(algorithm_state, Mapping):
         raise ValueError("scenario metadata algorithm_state must be an object")

@@ -144,7 +144,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
         attributes: dict[str, AttributeValue] = {
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,
-            "reef.step": commit.commit_number,
+            "reef.commit_number": commit.commit_number,
             "reef.commit_operation": commit.operation,
             "reef.checkpoint": commit.checkpoint,
             "reef.consumed_record_count": len(commit.consumed_ids),
@@ -160,7 +160,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
                 attributes[f"reef.metrics.{key}"] = metric
         commit_context = commit_span_context(commit.scenario, commit.commit_number)
         self._emit(
-            f"{commit.operation} step {commit.commit_number}",
+            f"{commit.operation} commit {commit.commit_number}",
             planned=commit_context,
             parent=None,
             kind=SpanKind.INTERNAL,
@@ -171,7 +171,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
         consumed_attributes: dict[str, AttributeValue] = {
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,
-            "reef.step": commit.commit_number,
+            "reef.commit_number": commit.commit_number,
             **commit_artifact_attributes(commit),
         }
         if commit.training_job_id is not None:
@@ -180,7 +180,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             consumed_attributes["reef.component"] = commit.component
         for agent_record_id in sorted(commit.consumed_ids):
             self._emit(
-                f"trained in step {commit.commit_number}",
+                f"trained in commit {commit.commit_number}",
                 planned=_span_context("consumed", commit.scenario, str(commit.commit_number), agent_record_id),
                 parent=record_span_context(commit.scenario, agent_record_id),
                 kind=SpanKind.INTERNAL,

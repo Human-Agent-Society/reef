@@ -49,7 +49,7 @@ def read_commits(
 ) -> dict[str, Any]:
     """Filter committed consumed_ids by exact record IDs; preserve their stored meaning."""
     if after_commit_number < 0 or not 1 <= limit <= 100:
-        raise ValueError("after_step must be non-negative and limit must be between 1 and 100")
+        raise ValueError("after_commit_number must be non-negative and limit must be between 1 and 100")
     if len(record_ids) > 100 or any(not value or len(value) > 256 for value in record_ids):
         raise ValueError("at most 100 non-empty record_id values of at most 256 characters are accepted")
     requested = frozenset(record_ids)
@@ -71,7 +71,7 @@ def read_commits(
         "scenario": scenario.name,
         "commits": [
             {
-                "step": commit.commit_number,
+                "commit_number": commit.commit_number,
                 "operation": commit.operation,
                 "operation_verified": commit.operation_verified,
                 "recorded_at": commit.recorded_at,
@@ -84,5 +84,5 @@ def read_commits(
             }
             for commit in matches[:limit]
         ],
-        "next_after_step": matches[limit - 1].commit_number if len(matches) > limit else None,
+        "next_after_commit_number": matches[limit - 1].commit_number if len(matches) > limit else None,
     }

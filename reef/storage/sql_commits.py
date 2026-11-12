@@ -27,20 +27,20 @@ def commit_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
     ``commit_json`` holds the canonical JSON object of ``CommitRecord.to_dict``.
     If ``foreign_key`` names a column, the table also has the column
     ``storage_id``, which refers to it. The adapter then gives ``storage_id``
-    in ``ScopedTable.scope``. The column ``step`` holds the commit number, which is unique in each namespace.
+    in ``ScopedTable.scope``. Commit numbers are unique in each namespace.
     """
     if foreign_key is None:
         return Table(
             "scenario_commit",
             metadata,
-            Column("step", Integer, primary_key=True, autoincrement=False),
+            Column("commit_number", Integer, primary_key=True, autoincrement=False),
             Column("commit_json", Text, nullable=False),
         )
     return Table(
         "scenario_commit",
         metadata,
         Column("storage_id", String(32), ForeignKey(foreign_key), primary_key=True),
-        Column("step", BigInteger, primary_key=True),
+        Column("commit_number", BigInteger, primary_key=True),
         Column("commit_json", Text, nullable=False),
     )
 
@@ -132,7 +132,9 @@ class SQLCommitHistory(CommitHistory):
                     f"commit {record.commit_number} precedes existing commit {records[-1].commit_number}"
                 )
             connection.execute(
-                self.table.table.insert().values(**self.table.scope, step=record.commit_number, commit_json=encoded)
+                self.table.table.insert().values(
+                    **self.table.scope, commit_number=record.commit_number, commit_json=encoded
+                )
             )
 
     @contextmanager
@@ -148,8 +150,8 @@ class SQLCommitHistory(CommitHistory):
         last_commit_number = self._cached[-1].commit_number if self._cached else 0
         rows = connection.execute(
             select(table.c.commit_json)
-            .where(self.table.condition(), table.c.step > last_commit_number)
-            .order_by(table.c.step)
+            .where(self.table.condition(), table.c.commit_number > last_commit_number)
+            .order_by(table.c.commit_number)
         ).scalars()
         added = tuple(CommitRecord.from_dict(json.loads(row)) for row in rows)
         if added:

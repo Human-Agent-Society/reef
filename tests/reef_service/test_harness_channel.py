@@ -119,7 +119,7 @@ async def committed_step(client: TestClient) -> dict:
     deadline = asyncio.get_running_loop().time() + UPDATE_TIMEOUT_S
     while True:
         scenario = (await (await client.get("/reef/status")).json())["scenarios"]["delivery"]
-        committed = scenario["last_committed_step"]
+        committed = scenario["last_training_commit"]
         if committed is not None and committed["metrics"]["training_job"]["event"] != "submitted":
             return scenario
         if asyncio.get_running_loop().time() >= deadline:
@@ -153,12 +153,12 @@ def test_status_reports_a_commit_that_published_no_harness(tmp_path) -> None:
     async def run() -> None:
         async with served(channel_dispatcher(tmp_path, ())) as client:
             status = await (await client.get("/reef/status")).json()
-            assert status["scenarios"]["delivery"]["last_committed_step"] is None
+            assert status["scenarios"]["delivery"]["last_training_commit"] is None
             await scored_exchange(client)
             scenario = await committed_step(client)
-            committed = scenario["last_committed_step"]
+            committed = scenario["last_training_commit"]
             # The step's job committed its submission, then its end.
-            assert scenario["scenario_step"] == committed["step"] == 2
+            assert scenario["commit_number"] == committed["commit_number"] == 2
             assert isinstance(committed["recorded_at"], float)
             assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
             # The empty seed serves nothing until a step publishes a tree.
@@ -174,8 +174,8 @@ def test_status_reports_a_committed_rejection(tmp_path) -> None:
         async with served(channel_dispatcher(tmp_path, (TreePatch(changed_rules("no help\n")),))) as client:
             await scored_exchange(client)
             scenario = await committed_step(client)
-            committed = scenario["last_committed_step"]
-            assert scenario["scenario_step"] == committed["step"] == 2
+            committed = scenario["last_training_commit"]
+            assert scenario["commit_number"] == committed["commit_number"] == 2
             assert committed["metrics"]["selected"] is False
             assert committed["metrics"]["selection"]["selected"] is False
             assert (await client.get("/reef/harness", headers=HEADERS)).status == 404

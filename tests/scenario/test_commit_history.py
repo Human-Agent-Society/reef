@@ -105,9 +105,9 @@ def test_commit_record_round_trips_through_the_history(open_history) -> None:
     assert second.metrics == metrics
     assert second.training_job_id == "job-1"
     assert second.to_dict()["training_job_id"] == "job-1"
-    # The stored record keeps the key "step" for the commit number.
+    # The stored record names the commit number "commit_number".
     encoded = second.to_dict()
-    assert encoded["step"] == 2 and "commit_number" not in encoded
+    assert encoded["commit_number"] == 2 and "step" not in encoded
     assert CommitRecord.from_dict(encoded) == second
     # A fresh reader over the same database sees the same history.
     assert open_history().records() == records
@@ -377,7 +377,9 @@ def committed_records(agent_record_dir, scenario: str = "math") -> tuple[CommitR
 def delete_commits(agent_record_dir, *steps: int) -> None:
     """Remove commits behind the store's back, as a lost write or a damaged file would."""
     with closing(sqlite3.connect(scenario_database(agent_record_dir))) as connection, connection:
-        deleted = connection.executemany("DELETE FROM scenario_commit WHERE step = ?", [(step,) for step in steps])
+        deleted = connection.executemany(
+            "DELETE FROM scenario_commit WHERE commit_number = ?", [(step,) for step in steps]
+        )
         assert deleted.rowcount == len(steps)
 
 
@@ -505,7 +507,7 @@ def test_each_commit_appends_one_atomic_record_and_a_restart_recovers_from_the_l
     assert committed_state["last_job"]["job_id"] == second_job
     # The checkpoint's metadata carries its commit record; the checkpoint commit consumes nothing.
     metadata = scenario.repository.backend.metadata()["scenario_commit_record"]
-    assert metadata["scenario_step"] == 5
+    assert metadata["commit_number"] == 5
     assert metadata["algorithm_state"] == records[4].algorithm_state
     assert metadata["training_job_id"] == second_job
     assert metadata["record_progress"] == {"high_water_sequence": 4, "high_water_offset": 4, "consumed_ids": []}
@@ -732,8 +734,8 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert adopted.operation == "training"
     assert adopted.operation_verified is True
     assert adopted.metrics == checkpoint.metrics
-    recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert recovered_status["step"] == 2
+    recovered_status = second.build_training_status()["scenarios"]["math"]["last_training_commit"]
+    assert recovered_status["commit_number"] == 2
     assert recovered_status["metrics"] == checkpoint.metrics
 
     # The recovered trainer polls the job on, commits its end, and trains nothing again.
@@ -776,8 +778,8 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     store = first.get_or_create_scenario("math").store
     assert not store.durable
     assert [record.commit_number for record in store.history()] == [1, 2]
-    committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert committed["step"] == 2
+    committed = first.build_training_status()["scenarios"]["math"]["last_training_commit"]
+    assert committed["commit_number"] == 2
     # The component saved no checkpoint, so the job failed and published no snapshot.
     assert component.submitted[0].parameters == {"objective": "sft"}
     assert committed["metrics"]["training_job"]["event"] == "failed"
@@ -789,7 +791,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     recovered = second.get_or_create_scenario("math")
     assert recovered.commit_number == 0
     assert recovered.store.history() == ()
-    assert second.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
+    assert second.build_training_status()["scenarios"]["math"]["last_training_commit"] is None
 
 
 @pytest.mark.unit
@@ -808,8 +810,8 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     # The snapshot chain ends at the checkpoint, so recovery returns to its step and metrics.
     assert recovered.commit_number == 2
     assert not recovered.store.durable
-    recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert recovered_status["step"] == 2
+    recovered_status = second.build_training_status()["scenarios"]["math"]["last_training_commit"]
+    assert recovered_status["commit_number"] == 2
     assert recovered_status["metrics"] == checkpoint.metrics
     assert not list(tmp_path.rglob("*.sqlite3"))
 
@@ -895,8 +897,8 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
         assert status_returned.wait(5), "status waited for harness growth"
         status = status_values[0]["scenarios"]["skills-a"]
         # The step's job is submitted, and runs while the scenario takes reports.
-        assert status["scenario_step"] == 1
-        assert status["last_committed_step"]["metrics"]["training_job"]["event"] == "submitted"
+        assert status["commit_number"] == 1
+        assert status["last_training_commit"]["metrics"]["training_job"]["event"] == "submitted"
         dispatcher.accept_record(trace_inference("b-i1", scenario="skills-b"))
         dispatcher.accept_record(
             trace_report("b-r1", "b-i1", scenario="skills-b"),
@@ -931,7 +933,7 @@ def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_
 
     # The step's job fails, and its end names the error: the job consumed the batch, and no step runs it again.
     wait_for_commit(dispatcher, 2, scenario="skills")
-    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_committed_step"]
+    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_training_commit"]
     assert committed["metrics"]["skipped"] == "step failed"
     assert committed["metrics"]["error"] == "RuntimeError: the method failed"
     assert committed["metrics"]["training_job"]["event"] == "failed"
@@ -942,7 +944,7 @@ def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_
     dispatcher.accept_record(trace_report("r2", "i2"))
     wait_for_commit(dispatcher, 4, scenario="skills")
     assert calls == 2
-    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_committed_step"]
+    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_training_commit"]
     assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
     assert dispatcher.build_training_status()["error"] is None
     dispatcher.close()
@@ -1191,9 +1193,9 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     assert recovered.records.read("skills", "i1") is not None
     assert recovered.records.read("skills", "r1") is not None
     status = dispatcher.build_training_status()["scenarios"]["skills"]
-    assert status["scenario_step"] == 2
-    assert status["last_committed_step"]["step"] == 2
-    assert status["last_committed_step"]["metrics"]["skipped"] == "the method left the head tree unchanged"
+    assert status["commit_number"] == 2
+    assert status["last_training_commit"]["commit_number"] == 2
+    assert status["last_training_commit"]["metrics"]["skipped"] == "the method left the head tree unchanged"
     records = committed_records(agent_record_dir, scenario="skills")
     assert [record.commit_number for record in records] == [1, 2]
     assert records[1].metrics is not None
@@ -1205,8 +1207,8 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
 
     assert [record.commit_number for record in committed_records(agent_record_dir, scenario="skills")] == [1, 2, 3, 4]
     status = dispatcher.build_training_status()["scenarios"]["skills"]
-    assert status["scenario_step"] == 4
-    assert status["last_committed_step"]["step"] == 4
+    assert status["commit_number"] == 4
+    assert status["last_training_commit"]["commit_number"] == 4
     dispatcher.close()
 
 
@@ -1229,8 +1231,8 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     wait_for_commit(first, 2, scenario="skills")
     scenario = first.get_or_create_scenario("skills")
     assert scenario.commit_number == 2
-    committed = first.build_training_status()["scenarios"]["skills"]["last_committed_step"]
-    assert committed["step"] == 2
+    committed = first.build_training_status()["scenarios"]["skills"]["last_training_commit"]
+    assert committed["commit_number"] == 2
     assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
     submitted, ended = committed_records(agent_record_dir, scenario="skills")
     assert (submitted.commit_number, ended.commit_number) == (1, 2)
@@ -1247,6 +1249,6 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     recovered = second.get_or_create_scenario("skills")
     assert recovered.commit_number == 2
     assert recovered.trainer.state == ended.algorithm_state
-    assert second.build_training_status()["scenarios"]["skills"]["last_committed_step"] == committed
+    assert second.build_training_status()["scenarios"]["skills"]["last_training_commit"] == committed
     first.close()
     second.close()

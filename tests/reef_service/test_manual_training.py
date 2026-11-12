@@ -902,7 +902,7 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
 
 
 def last_committed(scenario):
-    committed = scenario.commit_status.get("last_committed_step")
+    committed = scenario.commit_status.get("last_training_commit")
     return {} if committed is None else committed.get("metrics") or {}
 
 

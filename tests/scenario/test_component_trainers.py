@@ -373,7 +373,7 @@ def test_a_weights_job_waits_for_the_harness_cycle_of_its_scenario(tmp_path: Pat
     time.sleep(0.2)
     assert training.submitted == []
     assert scenario.trainer_for(WEIGHTS).pending_job_data is None
-    assert dispatcher.build_training_status()["scenarios"]["agent"]["scenario_step"] == 0
+    assert dispatcher.build_training_status()["scenarios"]["agent"]["commit_number"] == 0
     slow.release.set()
     harness.join(10)
     assert not harness.is_alive()

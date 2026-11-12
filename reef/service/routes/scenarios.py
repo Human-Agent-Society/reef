@@ -46,7 +46,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
         result = await asyncio.to_thread(
             request_service.dispatcher.read_commits,
             request.match_info["scenario"],
-            after_commit_number=int(request.query.get("after_step", "0")),
+            after_commit_number=int(request.query.get("after_commit_number", "0")),
             limit=int(request.query.get("limit", "50")),
             record_ids=tuple(request.query.getall("record_id", [])),
         )
@@ -56,7 +56,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
         result = await asyncio.to_thread(
             request_service.dispatcher.read_commits,
             request.match_info["scenario"],
-            after_commit_number=int(request.query.get("after_step", "0")),
+            after_commit_number=int(request.query.get("after_commit_number", "0")),
             limit=int(request.query.get("limit", "50")),
             record_ids=tuple(request.query.getall("record_id", [])),
         )
@@ -222,11 +222,11 @@ def register_scenario_writes(
 
     async def restore_selection(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if set(payload) != {"step"}:
-            raise ValueError("restore takes one step naming the scenario selection to restore")
-        commit_number = payload["step"]
+        if set(payload) != {"commit_number"}:
+            raise ValueError("restore takes one commit_number naming the scenario selection to restore")
+        commit_number = payload["commit_number"]
         if not isinstance(commit_number, int) or isinstance(commit_number, bool) or commit_number < 0:
-            raise ValueError("restore step must be a non-negative integer")
+            raise ValueError("restore commit_number must be a non-negative integer")
         scenario = request.match_info["scenario"]
         components = await asyncio.to_thread(request_service.dispatcher.restore, scenario, commit_number)
         return web.json_response({"scenario": scenario, "components": dict(components)})

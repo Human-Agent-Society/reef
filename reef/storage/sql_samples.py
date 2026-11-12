@@ -62,9 +62,9 @@ class SQLTrainingState(TrainingState):
         with self.lock:
             with self.database._transaction(write=False) as connection:
                 rows = connection.execute(
-                    select(table.c.step, table.c.commit_json)
-                    .where(self.commits.condition(), table.c.step > self.read_commit_number)
-                    .order_by(table.c.step)
+                    select(table.c.commit_number, table.c.commit_json)
+                    .where(self.commits.condition(), table.c.commit_number > self.read_commit_number)
+                    .order_by(table.c.commit_number)
                 ).all()
             for commit_number, commit_json in rows:
                 record = CommitRecord.from_dict(json.loads(commit_json))

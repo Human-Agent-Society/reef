@@ -170,13 +170,13 @@ class ScenarioCommitter:
         """Current commit number and latest training outcome read without blocking."""
         commit_number, record, head_sync = self._commit_status
         return {
-            "scenario_step": commit_number,
+            "commit_number": commit_number,
             "artifact_head_sync": asdict(head_sync),
-            "last_committed_step": (
+            "last_training_commit": (
                 None
                 if record is None
                 else {
-                    "step": record.commit_number,
+                    "commit_number": record.commit_number,
                     "recorded_at": record.recorded_at,
                     "metrics": None if record.metrics is None else deepcopy(record.metrics),
                 }

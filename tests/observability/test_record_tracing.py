@@ -339,11 +339,11 @@ def test_commit_adds_a_child_span_below_every_consumed_record() -> None:
     observer.close()
     spans = exporter.get_finished_spans()
 
-    (step,) = [span for span in spans if span.name == "training step 3"]
+    (step,) = [span for span in spans if span.name == "training commit 3"]
     assert step.context.trace_id == commit_span_context("math", 3).trace_id
     assert step.context.span_id == commit_span_context("math", 3).span_id
     assert step.parent is None
-    assert step.attributes["reef.step"] == 3
+    assert step.attributes["reef.commit_number"] == 3
     assert step.attributes["reef.component"] == "harness"
     assert step.attributes["reef.artifact_id"] == "artifact:h3"
     assert step.attributes["reef.artifacts.weights"] == "artifact:w2"
@@ -357,7 +357,7 @@ def test_commit_adds_a_child_span_below_every_consumed_record() -> None:
     assert "reef.metrics.nan" not in step.attributes
     assert "reef.metrics.nested" not in step.attributes
 
-    consumed = {span.attributes["reef.agent_record_id"]: span for span in spans if span.name == "trained in step 3"}
+    consumed = {span.attributes["reef.agent_record_id"]: span for span in spans if span.name == "trained in commit 3"}
     assert set(consumed) == {"i1", "i2"}
     for agent_record_id, span in consumed.items():
         expected_parent = record_span_context("math", agent_record_id)

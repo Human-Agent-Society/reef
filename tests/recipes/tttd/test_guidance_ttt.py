@@ -418,12 +418,12 @@ def _job_commits(*, end_event: str = "finished", rollout_id: int = 0, error: str
     job = {"job_id": "job-1", "backend": "slime"}
     end = {**job, "event": end_event, **({} if error is None else {"error": error})}
     return [
-        {"step": 1, "metrics": {"training_job": {**job, "event": "submitted"}}},
+        {"commit_number": 1, "metrics": {"training_job": {**job, "event": "submitted"}}},
         {
-            "step": 2,
+            "commit_number": 2,
             "metrics": {**TRAIN_METRICS, "selected": True, "training_job": {**job, "event": "checkpoint", "step": 1}},
         },
-        {"step": 3, "metrics": {"rollout_id": rollout_id, "training_job": end}},
+        {"commit_number": 3, "metrics": {"rollout_id": rollout_id, "training_job": end}},
     ]
 
 
@@ -516,7 +516,7 @@ def _reef_status(
         "preload_errors": {},
         "scenarios": {
             "guidance-run": {
-                "scenario_step": commit_number,
+                "commit_number": commit_number,
                 "training_job": training_job,
                 "finished_jobs": finished_jobs,
                 "served_artifact_id": served_artifact_id,
@@ -532,10 +532,13 @@ def test_status_progress_reads_reef_over_http(monkeypatch) -> None:
     commits = _job_commits()
     pages = {
         "/reef/status": {"error": None, "scenarios": {}},
-        "/reef/scenarios/guidance-run/commits?after_step=0&limit=100": {"commits": commits[:2], "next_after_step": 2},
-        "/reef/scenarios/guidance-run/commits?after_step=2&limit=100": {
+        "/reef/scenarios/guidance-run/commits?after_commit_number=0&limit=100": {
+            "commits": commits[:2],
+            "next_after_commit_number": 2,
+        },
+        "/reef/scenarios/guidance-run/commits?after_commit_number=2&limit=100": {
             "commits": commits[2:],
-            "next_after_step": None,
+            "next_after_commit_number": None,
         },
     }
     seen = []

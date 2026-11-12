@@ -133,7 +133,7 @@ def training_step_count() -> int | None:
     except (urllib.error.URLError, TimeoutError):
         return None
     scenario = payload["scenarios"].get(SCENARIO)
-    return 0 if scenario is None else int(scenario["scenario_step"])
+    return 0 if scenario is None else int(scenario["commit_number"])
 
 
 def serving_artifact() -> str | None:

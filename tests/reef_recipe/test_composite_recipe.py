@@ -494,8 +494,8 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         assert checkpoint is not None
         assert all(record.consumed_ids == frozenset() for record in scenario.store.history()[1:])
         status = dispatcher.build_training_status()["scenarios"]["agent"]
-        assert status["components"]["harness"]["last_committed_step"]["step"] == 3
-        assert status["components"]["config"]["last_committed_step"] is None
+        assert status["components"]["harness"]["last_training_commit"]["commit_number"] == 3
+        assert status["components"]["config"]["last_training_commit"] is None
         manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"}, form="source")
         assert manifest["files"] == {"harness.txt": "harness step 1"}
         assert set(manifest["components"]) == {"harness", "config"}

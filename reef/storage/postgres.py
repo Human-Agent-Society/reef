@@ -42,7 +42,7 @@ from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 MAX_PARAMETERS = 65535
 
 #: The version of the record schema that this adapter writes and reads; it opens no other version.
-POSTGRES_SCHEMA_VERSION = 22
+POSTGRES_SCHEMA_VERSION = 23
 
 
 class PostgresRecordDatabase:

@@ -136,7 +136,7 @@ def await_update(
         or published["operation"] != "training"
     ):
         raise RuntimeError("Expected exactly one new weight artifact descended from the preceding one")
-    commits = native.get(f"{SCENARIO_PATH}/commits?after_step=0&limit=100")["commits"]
+    commits = native.get(f"{SCENARIO_PATH}/commits?after_commit_number=0&limit=100")["commits"]
     submissions = [
         c
         for c in commits
@@ -161,7 +161,7 @@ def await_update(
         or not checkpoints[0]["operation_verified"]
         or checkpoints[0]["consumed_ids"]
         or submission["components"]["weights"] != previous
-        or submission["step"] >= checkpoints[0]["step"]
+        or submission["commit_number"] >= checkpoints[0]["commit_number"]
     ):
         raise RuntimeError(f"No matching published checkpoint for submitted training job {job_id}")
     return history, {"submission": submission, "checkpoint": checkpoints[0]}

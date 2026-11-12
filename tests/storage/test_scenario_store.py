@@ -350,7 +350,7 @@ def test_memory_sessions_wait_for_another_sessions_transaction(write: bool) -> N
         with ThreadPoolExecutor(max_workers=1) as pool:
             with database._transaction(write=write) as connection:
                 # Shared-cache reads lock the table until their transaction ends.
-                connection.exec_driver_sql("SELECT step FROM scenario_commit").fetchall()
+                connection.exec_driver_sql("SELECT commit_number FROM scenario_commit").fetchall()
                 pending = pool.submit(append)
                 assert started.wait(5)
                 with pytest.raises(TimeoutError):

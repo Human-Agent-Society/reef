@@ -95,7 +95,7 @@ class TrainingPosition:
     running_job_id: str | None
 
     def __post_init__(self) -> None:
-        for name, value in (("scenario_step", self.commit_number), ("finished_jobs", self.finished_jobs)):
+        for name, value in (("commit_number", self.commit_number), ("finished_jobs", self.finished_jobs)):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise RuntimeError(f"Reef returned an invalid {name}: {value!r}")
         if self.running_job_id is not None and (not isinstance(self.running_job_id, str) or not self.running_job_id):
@@ -110,7 +110,7 @@ class TrainingPosition:
         if job is not None and not isinstance(job, Mapping):
             raise RuntimeError(f"Reef returned an invalid training job: {job!r}")
         return cls(
-            commit_number=status.get("scenario_step"),
+            commit_number=status.get("commit_number"),
             finished_jobs=status["finished_jobs"],
             running_job_id=None if job is None else job.get("job_id"),
         )
@@ -196,12 +196,14 @@ class StatusTrainingProgress(TrainingProgress):
         commits: list[dict[str, Any]] = []
         after_commit_number: int | None = commit_number
         while after_commit_number is not None:
-            page = self.get_json(f"{path}?{urllib.parse.urlencode({'after_step': after_commit_number, 'limit': 100})}")
+            page = self.get_json(
+                f"{path}?{urllib.parse.urlencode({'after_commit_number': after_commit_number, 'limit': 100})}"
+            )
             entries = page.get("commits")
             if not isinstance(entries, list) or not all(isinstance(entry, Mapping) for entry in entries):
                 raise RuntimeError(f"Reef returned invalid commits: {page!r}")
             commits.extend(dict(entry) for entry in entries)
-            after_commit_number = page.get("next_after_step")
+            after_commit_number = page.get("next_after_commit_number")
         return commits
 
     def get_json(self, path: str) -> Mapping[str, Any]:

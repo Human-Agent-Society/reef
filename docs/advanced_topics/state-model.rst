@@ -199,7 +199,7 @@ therefore rejects the step before its records are consumed. In-memory commit his
 only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
-under ``scenario_commit_record`` (format ``reef-scenario/7``): the root's
+under ``scenario_commit_record`` (format ``reef-scenario/8``): the root's
 ``source``, and after commit number zero the root snapshot as ``start_artifact``.
 Recovery refuses other formats. It decodes the metadata into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration

@@ -169,7 +169,7 @@ class ReefTrainingStatusClient(TrainingStatusReader):
                 )
             )
         # The last commit's job outcome: a failed job ends with event "failed" and its error.
-        last_commit = value.get("last_committed_step")
+        last_commit = value.get("last_training_commit")
         metrics = last_commit.get("metrics") if isinstance(last_commit, Mapping) else None
         last_job = metrics.get("training_job") if isinstance(metrics, Mapping) else None
         failed_job_error = (

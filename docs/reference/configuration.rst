@@ -2529,7 +2529,7 @@ binds and another after each train-from. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A
 train-from finishes the current run and records each component's training-start
 artifact ID in ``reef/train_from_artifact_ids``. It resets ``train/step`` to zero. An activation
-does not end a run. The globally monotonic ``reef/step`` stays attached for
+does not end a run. The globally monotonic ``reef/commit_number`` stays attached for
 joining a run back to the commit history. A scenario with several
 trainers shares the run: each step's metrics carry its component name as a
 prefix (``harness/train/loss``) on the same ``train/step`` axis with
@@ -2712,11 +2712,11 @@ id, so a restart or a second Reef host produces the same ids. The span carries:
 
 A feedback record becomes a ``feedback`` span inside the trace of the first
 inference it references, with ``reef.score`` and ``reef.references``; further
-references are span links. A committed step adds a ``training step N`` span
-with the commit's step, component artifact IDs, job id, consumed record counts,
+references are span links. A training commit adds a ``training commit N`` span
+with the commit number as ``reef.commit_number``, component artifact IDs, job id, consumed record counts,
 its component as ``reef.component`` when the scenario runs several trainers,
-and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
-child span below every record the step consumed, linked back to the commit
+and its scalar metrics as ``reef.metrics.*``, plus one ``trained in commit N``
+child span below every record the commit consumed, linked back to the commit
 span. Records carry one timestamp, so their spans have zero duration and start
 at the record's creation time.
 

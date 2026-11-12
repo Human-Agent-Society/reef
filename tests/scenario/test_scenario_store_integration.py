@@ -196,7 +196,7 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
         scenario.commit(TrainingCommit(state={}))
         assert scenario.commit_number == 1
         assert ("commit", "math") in factory.events
-        assert [row["step"] for row in dispatcher.read_commits("math")["commits"]] == [1]
+        assert [row["commit_number"] for row in dispatcher.read_commits("math")["commits"]] == [1]
         stored = dispatcher.read_record("math", "first")
         assert stored is not None
         assert stored["payload"] == {"text": "first"}
@@ -217,7 +217,7 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
         assert recovered is not None
         assert recovered.commit_number == 1
         assert recovered.records.read("math", "first") is not None
-        assert [row["step"] for row in reopened.read_commits("math")["commits"]] == [1]
+        assert [row["commit_number"] for row in reopened.read_commits("math")["commits"]] == [1]
         assert ("recover", "math") in reopened_factory.events
     finally:
         reopened.close()

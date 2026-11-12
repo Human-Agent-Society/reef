@@ -439,7 +439,7 @@ class ScenarioSnapshots:
         components: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
-            "step": commit_number,
+            "commit_number": commit_number,
             "snapshot": snapshot,
             "checkpoint": checkpoint,
             "restorable": checkpoint,

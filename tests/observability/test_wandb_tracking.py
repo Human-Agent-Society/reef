@@ -165,7 +165,7 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
     logged, step = client.runs[0].logged[0]
     assert step is None
     assert logged["train/step"] == 0
-    assert logged["reef/step"] == 7
+    assert logged["reef/commit_number"] == 7
     assert logged["train/loss"] == pytest.approx(0.25)
     assert logged["selection/score"] == pytest.approx(1.0)
     assert "selection/label" not in logged
@@ -215,7 +215,7 @@ def test_train_from_finishes_one_curve_and_next_commit_starts_another_run() -> N
 
     assert first_run.finished is True
     assert first_run.summary["reef/ended_by"] == "train_from"
-    assert first_run.summary["reef/train_from_step"] == 8
+    assert first_run.summary["reef/train_from_commit_number"] == 8
     tracker.record(_event(commit_number=9, run_segment=8, run_step=0))
 
     assert len(client.runs) == 2
@@ -367,7 +367,7 @@ def test_wandb_logs_every_optimizer_step_of_a_job_before_the_job_row() -> None:
     # Two jobs, five optimizer steps in a run-wide sequence, each job's rows before its summary row.
     assert [row["step/step"] for row in step_rows] == [0, 1, 2, 3, 4]
     assert [row["step/loss"] for row in step_rows] == pytest.approx([0.5, 0.4, 0.3, 0.25, 0.22])
-    assert [row["reef/step"] for row in step_rows] == [1, 1, 2, 2, 2]
+    assert [row["reef/commit_number"] for row in step_rows] == [1, 1, 2, 2, 2]
     assert rows.index(job_rows[0]) == 2 and rows.index(job_rows[1]) == 6
     assert "train_steps" not in job_rows[0] and "step/loss" not in job_rows[0]
     assert run.summary["reef/optimizer_steps"] == 5
@@ -429,7 +429,7 @@ def test_operational_metrics_use_wall_time_without_advancing_the_training_axis()
     rows = [metrics for metrics, _ in run.logged]
     assert [row["operations/records/unread_count"] for row in rows] == [2, 3]
     assert all(before <= row["operations/time_seconds"] <= time.time() for row in rows)
-    assert all("train/step" not in row and "reef/step" not in row for row in rows)
+    assert all("train/step" not in row and "reef/commit_number" not in row for row in rows)
     assert (("operations/*",), {"step_metric": "operations/time_seconds"}) in run.defined
     tracker.record_train_from(
         TrainFromExperimentEvent(
@@ -479,7 +479,7 @@ def test_a_component_trainers_metrics_keep_their_own_names() -> None:
     assert logged["harness/train/loss"] == pytest.approx(0.25)
     assert "train/loss" not in logged
     assert logged["reef/component"] == "harness"
-    assert logged["train/step"] == 0 and logged["reef/step"] == 7
+    assert logged["train/step"] == 0 and logged["reef/commit_number"] == 7
     # The component's metrics sit on the run's train/step axis, and the config names each trainer's backend.
     assert (("harness/*",), {"step_metric": "train/step"}) in run.defined
     assert run.config["reef"]["backend"] is None
@@ -502,7 +502,7 @@ def test_a_component_trainers_metrics_keep_their_own_names() -> None:
     stepped = dataclasses.replace(weights, metrics={**weights.metrics, "train_steps": [{"train/loss": 0.9}]})
     tracker.record(stepped)
     step_rows = [row for row, _ in run.logged if "weights/step/loss" in row]
-    assert step_rows == [{"weights/step/loss": 0.9, "weights/step/step": 0, "reef/step": 7}]
+    assert step_rows == [{"weights/step/loss": 0.9, "weights/step/step": 0, "reef/commit_number": 7}]
     assert run.summary["reef/weights/optimizer_steps"] == 1 and "reef/optimizer_steps" not in run.summary
     # The step key is bound exactly, once: a second glob under the prefix would overlap weights/* in W&B.
     assert (("weights/step/step",), {}) in run.defined

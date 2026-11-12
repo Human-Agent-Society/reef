@@ -110,11 +110,11 @@ class TrainingStatus:
                         if component_trainer.trainer is stepping_trainer
                         else component_trainer.trainer.pipeline_status()
                     ),
-                    "last_committed_step": (
+                    "last_training_commit": (
                         None
                         if last is None
                         else {
-                            "step": last.commit_number,
+                            "commit_number": last.commit_number,
                             "recorded_at": last.recorded_at,
                             "metrics": None if last.metrics is None else dict(last.metrics),
                         }

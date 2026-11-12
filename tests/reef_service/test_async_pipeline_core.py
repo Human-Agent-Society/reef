@@ -280,7 +280,7 @@ def test_backend_failure_reaches_reef_status(start_dispatcher, monkeypatch) -> N
     # The training service runs the job on the component: the component's failure ends the job, and the job's
     # end reaches the status.
     _wait_for_jobs(dispatcher, 1)
-    status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
+    status = dispatcher.build_training_status()["scenarios"]["math"]["last_training_commit"]
     assert status["metrics"]["training_job"]["event"] == "failed"
     assert status["metrics"]["training_job"]["error"] == "RuntimeError: backend submission failed"
 
@@ -355,7 +355,7 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _, dispatcher = start_dispatcher(complete_metrics=metrics)
     dispatcher.get_or_create_scenario("math")
 
-    assert dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
+    assert dispatcher.build_training_status()["scenarios"]["math"]["last_training_commit"] is None
 
     _submit_pair(dispatcher)
     _wait_for_jobs(dispatcher, 1)
@@ -371,12 +371,12 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     [checkpoint] = [record for record in scenario.store.history() if record.checkpoint]
     assert checkpoint.activated and scenario.current_snapshot() == checkpoint.snapshot
     # The last commit is the job's end.
-    status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert status["step"] == 3
+    status = dispatcher.build_training_status()["scenarios"]["math"]["last_training_commit"]
+    assert status["commit_number"] == 3
     assert isinstance(status["recorded_at"], float)
     assert status["metrics"]["training_job"]["event"] == "finished"
     status["metrics"]["training_job"]["event"] = "failed"
-    refreshed = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
+    refreshed = dispatcher.build_training_status()["scenarios"]["math"]["last_training_commit"]
     assert refreshed["metrics"]["training_job"]["event"] == "finished"
 
 
