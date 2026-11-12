@@ -297,12 +297,10 @@ def check_root_start(recipe: Recipe, live: LiveObjects, root: ScenarioRoot) -> N
     """
     for component, child in component_recipes(recipe):
         view = root if component is None else component_root(root, component)
-        if isinstance(child, WeightTrainingRecipe):
-            if live.training_facts is not None:
-                live.training_facts.check_root_start(view)
-        elif isinstance(child, HarnessEvolutionRecipe):
-            if live.harness_component is not None:
-                live.harness_component.root_start(view)
+        if isinstance(child, WeightTrainingRecipe) and live.training_facts is not None:
+            live.training_facts.check_root_start(view)
+        if isinstance(child, HarnessEvolutionRecipe) and live.harness_component is not None:
+            live.harness_component.root_start(view)
 
 
 def harness_models(
