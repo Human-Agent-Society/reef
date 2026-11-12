@@ -2364,7 +2364,9 @@ check looks there, so ``generator.harbor`` must come from the same Python
 environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
 compose services), an agent inside the sandbox cannot reach a
 ``generator.agent-host`` on a private host, and E2B builds a template for each
-new task image. ``execution.generator`` selects the generator's executor, so a
+new task image. ``modal`` runs each task in a Modal sandbox. It needs
+``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve``
+starts, and ``reef-infra[modal]`` in the generator's interpreter. ``execution.generator`` selects the generator's executor, so a
 deployment can place it on another host. The generator runs its proposals,
 checks and rollouts at the same time.
 ``generator.concurrency`` limits only the rollouts in flight, so a proposal or a check never waits behind rollouts.
@@ -2393,7 +2395,7 @@ checks and rollouts at the same time.
        the harbor command line for the oracle check
 
    ``generator.environment`` : docker
-       the Harbor environment of the oracle and nop checks and of the rollouts: ``docker`` or ``e2b``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker
+       the Harbor environment of the oracle and nop checks and of the rollouts: ``docker``, ``e2b`` or ``modal``. With ``e2b``, the readiness check waits for ``E2B_API_KEY`` and the e2b package instead of Docker. With ``modal``, it waits for ``MODAL_TOKEN_ID``, ``MODAL_TOKEN_SECRET`` and the modal package
 
    ``generator.concurrency`` : 2
        rollouts in flight across all rollout requests of the generator service
