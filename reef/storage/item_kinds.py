@@ -239,7 +239,7 @@ class TaskRules(ItemKindRules):
             raise ValueError(f"task item {item_id!r} needs a task directory as its content")
         if content.name != item_id:
             raise ValueError(f"task item {item_id!r} needs a task directory of the same name")
-        return task_files.put(task_partition(owner), content)
+        return task_files.write(task_partition(owner), content)
 
 
 #: The rules of each item kind.

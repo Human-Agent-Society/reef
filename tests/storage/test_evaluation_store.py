@@ -80,12 +80,12 @@ def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(
         assert created == StoredEvaluation("e1", "service-a", REQUEST, "running", 10.0)
         evaluations.create(evaluation_id="e2", owner="service-a", request=REQUEST, created_at=20.0)
         finished = evaluations.finish("e1", result=RESULT, finished_at=15.0)
-        assert finished.state == "finished" and finished.result == RESULT and evaluations.get("e1") == finished
+        assert finished.state == "finished" and finished.result == RESULT and evaluations.read("e1") == finished
         failed = evaluations.fail("e2", error="the sandbox did not start", finished_at=25.0)
-        assert evaluations.get("e2") == failed and failed.error == "the sandbox did not start"
+        assert evaluations.read("e2") == failed and failed.error == "the sandbox did not start"
         assert [item.evaluation_id for item in evaluations.newest()] == ["e2", "e1"]
         assert [item.evaluation_id for item in evaluations.newest(limit=1)] == ["e2"]
-        assert evaluations.get("missing") is None and other.evaluations.newest() == ()
+        assert evaluations.read("missing") is None and other.evaluations.newest() == ()
         with pytest.raises(EvaluationStateConflict):
             evaluations.fail("e1", error="again", finished_at=30.0)
         with pytest.raises(EvaluationStateConflict):
@@ -106,7 +106,7 @@ def test_an_evaluation_runs_then_ends_once_and_the_store_lists_the_newest_first(
         with pytest.raises(ValueError, match="finished_at"):
             evaluations.create(evaluation_id="e3", owner="service-a", request=REQUEST, created_at=50.0)
             evaluations.fail("e3", error="too early", finished_at=1.0)
-        assert evaluations.get("e3").state == "running", "an invalid end writes nothing"
+        assert evaluations.read("e3").state == "running", "an invalid end writes nothing"
         assert finished.to_json()["mean_score"] == 1.0 and failed.to_json()["policy_evaluation"] is None
 
 
@@ -119,7 +119,7 @@ def test_an_ended_evaluation_reopens_and_ends_again(storage):
         evaluations.finish("e1", result=RESULT, finished_at=15.0)
         reopened = evaluations.reopen("e1")
         assert reopened == StoredEvaluation("e1", "service-a", REQUEST, "running", 10.0)
-        assert evaluations.get("e1") == reopened
+        assert evaluations.read("e1") == reopened
         assert evaluations.fail("e1", error="too many rollouts failed", finished_at=20.0).state == "failed"
         assert evaluations.reopen("e1").error is None
         assert evaluations.finish("e1", result=RESULT, finished_at=30.0).finished_at == 30.0
@@ -132,7 +132,7 @@ def test_evaluations_survive_a_restart(open_durable_storage):
         session.evaluations.create(evaluation_id="e1", owner="service-a", request=REQUEST, created_at=10.0)
         session.evaluations.finish("e1", result=RESULT, finished_at=12.0)
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
-        assert session.evaluations.get("e1").result == RESULT
+        assert session.evaluations.read("e1").result == RESULT
 
 
 def test_a_request_configures_exactly_one_side_of_the_policy():

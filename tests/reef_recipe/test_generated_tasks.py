@@ -533,7 +533,7 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
         sourced("eval-task", "eval-source", port=9101),
     )
     store.begin_generation(generation=100, source_record_ids=())
-    store.save_candidates(
+    store.write_candidates(
         generation=100, directories=tuple(write_harbor_task(task, tmp_path / "earlier") for task in earlier)
     )
     store.publish_task(generation=100, index=0, split="train")

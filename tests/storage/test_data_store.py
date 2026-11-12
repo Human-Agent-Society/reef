@@ -356,13 +356,13 @@ def test_a_task_names_its_benchmarks_and_a_query_keeps_the_tasks_of_one(store, t
 
 def test_an_owner_stores_replaces_and_removes_its_collections(store):
     coding = TaskCollection("coding", benchmarks=("lite", "full"))
-    store.put_collection("acme", coding)
-    store.put_collection("acme", TaskCollection("all", collections=("coding",), average="benchmark"))
+    store.write_collection("acme", coding)
+    store.write_collection("acme", TaskCollection("all", collections=("coding",), average="benchmark"))
     assert store.collections("acme") == (TaskCollection("all", (), ("coding",), "benchmark"), coding)
     assert store.collections("globex") == ()
-    store.put_collection("acme", TaskCollection("coding", benchmarks=("lite",)))
+    store.write_collection("acme", TaskCollection("coding", benchmarks=("lite",)))
     assert [collection.benchmarks for collection in store.collections("acme")] == [(), ("lite",)]
-    assert store.remove_collection("acme", "coding") and not store.remove_collection("acme", "coding")
+    assert store.delete_collection("acme", "coding") and not store.delete_collection("acme", "coding")
     assert [collection.name for collection in store.collections("acme")] == ["all"]
 
 
@@ -584,7 +584,7 @@ def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
     with pytest.raises(ValueError, match="stays in 'coding'"):
         store.update("acme", [made.item_id], {"scenarios": {"coding": None}})
 
-    assert store.remove_scenario("acme", "coding") == 2
+    assert store.delete_scenario("acme", "coding") == 2
     assert store.query("acme", scenario="coding") == ()
     assert store.scenario_items("acme", "coding", kinds=("record", "trajectory")) == ()
     assert [(item.item_id, dict(item.scenarios)) for item in store.query("acme")] == [
@@ -592,8 +592,8 @@ def test_removing_a_scenario_drops_all_its_uses_and_keeps_the_items(store):
         ("t1", {"review": "train"}),
     ]
     assert store.scenarios_with_records("acme") == ("review",)
-    assert store.remove_scenario("acme", "coding") == 0
-    assert store.remove_scenario("globex", "review") == 0
+    assert store.delete_scenario("acme", "coding") == 0
+    assert store.delete_scenario("globex", "review") == 0
 
 
 def test_a_write_of_an_ended_generation_stores_nothing(store):
@@ -605,7 +605,7 @@ def test_a_write_of_an_ended_generation_stores_nothing(store):
     with pytest.raises(ScenarioArchived, match="no longer current"):
         store.create("acme", [second], generation="other")
 
-    store.remove_scenario("acme", "coding")
+    store.delete_scenario("acme", "coding")
     with pytest.raises(ScenarioArchived):
         store.create("acme", [second], generation=generation)
     assert store.read("acme", second.item_id) is None
@@ -913,7 +913,7 @@ def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_jo
     other = store.write_job_directory(JobData("s:data:2", (sample, sample)))
     assert other.uri != first.uri
     # A directory that no job used since the time goes; a used one stays.
-    store.record_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
+    store.write_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
     assert store.delete_unused_job_directories(100.0) == 1
     with pytest.raises(FileNotFoundError):
         store.open_job_directory(first.to_dict())

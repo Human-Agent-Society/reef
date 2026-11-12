@@ -128,7 +128,7 @@ a unit ready when the samples of all its record sets are made.
 
 When a unit is ready, the pipeline saves each of the unit's samples
 (``unit_samples``) as a data item of the scenario's owner that the scenario
-uses (``TrainerSamples.add_record_samples``, RFC #1140). Then the scenario's
+uses (``TrainerSamples.write_record_samples``, RFC #1140). Then the scenario's
 training state records the unit's records as consumed by the trainer. The stage
 then ends the unit (``consume``) and forgets its samples. Sample ``i`` of record
 set ``s`` is the item ``<scenario>.<trainer>:<s>:<i>``, or

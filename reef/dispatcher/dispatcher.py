@@ -1124,7 +1124,7 @@ class Dispatcher(
         """The directory of the Harbor task ``task_name`` of ``scenario`` here (``CandidateArtifacts``)."""
         with self.locked_scenario(scenario) as current:
             samples = self.storage.sample_store(scenario, current.store)
-            found = () if samples is None else samples.get((task_name,))
+            found = () if samples is None else samples.read((task_name,))
         sample = found[0].sample if found else None
         if not isinstance(sample, TaskSample):
             raise ReefError(f"scenario {scenario!r} uses no task {task_name!r}")

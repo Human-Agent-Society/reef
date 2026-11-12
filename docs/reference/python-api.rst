@@ -645,7 +645,7 @@ them sets the class attribute ``accepts_imported_tasks``. An upload to the
 tasks.
 
 A store holds generations. A generation holds its source record ids and its
-candidates. ``save_candidates`` saves a copy of each candidate task directory
+candidates. ``write_candidates`` saves a copy of each candidate task directory
 in the task file store. Each ``TaskCandidate`` holds the task ``name``, the
 ``files_digest`` of its directory, and its outcome:
 
@@ -670,7 +670,7 @@ its split. The published tasks are the candidates with a split. A
    * - ``begin_generation(generation=..., source_record_ids=...)``
      - Create the checkpoint of a generation. A retry with the same source
        record ids returns the checkpoint.
-   * - ``save_candidates(generation=..., directories=...)``
+   * - ``write_candidates(generation=..., directories=...)``
      - Save a copy of each candidate task directory once, before validation or
        rollouts. The name of a candidate is the name of its directory.
    * - ``publish_task(generation=..., index=..., split=...)``
@@ -688,7 +688,7 @@ its split. The published tasks are the candidates with a split. A
        name once. Give a ``split`` to return only the tasks of that split.
    * - ``path(files_digest)``
      - Return the local directory of a candidate, a published task or a
-       ``save_files`` call, for example for ``read_harbor_task`` or
+       ``write_files`` call, for example for ``read_harbor_task`` or
        ``TaskRolloutRunner.run``. Do not change it.
    * - ``write_document(key=..., document=...)``, ``documents()``
      - Save a text document under a non-empty key, or return every document by
@@ -696,7 +696,7 @@ its split. The published tasks are the candidates with a split. A
        raises ``TaskStoreError``. The store does not read a document: the stage
        that writes the store keeps its own state about its tasks here.
    * - ``write_state_document(key=..., document=...)``,
-       ``remove_state_document(key=...)``, ``state_document(key)``,
+       ``delete_state_document(key=...)``, ``state_document(key)``,
        ``state_document_keys(prefix="")``
      - Save, remove or read a state document, or return the keys that start
        with ``prefix`` in increasing string order. A state document is text
@@ -704,7 +704,7 @@ its split. The published tasks are the candidates with a split. A
        and removed. The two kinds of document have separate keys. The stage
        keeps there the state that changes in place: the generated-task stage
        gives it to its task generator as ``GeneratorState``.
-   * - ``save_files(directory)``
+   * - ``write_files(directory)``
      - Save a copy of a directory in the task files of the scenario and return
        the digest of its files, which ``path`` takes. The call makes no
        candidate and changes no generation.
@@ -743,7 +743,7 @@ uses a ``LocalTaskFileStore`` in ``task-files`` under its directory.
    * - ``from_config(config, *, directory)``
      - Class method that builds the store a deployment names. ``directory``
        is ``storage.task_file_dir``. A remote store can use it as a local cache.
-   * - ``put(scenario, source)``
+   * - ``write(scenario, source)``
      - Save a copy of the task directory ``source`` and return the digest.
        The copy is durable when the method returns. Raise ``TaskStoreError``
        for a symbolic link or a special file.
@@ -848,22 +848,22 @@ partition per owner. A deployment selects the store in
      - Class method that builds the store a deployment names. ``directory``
        is ``<storage.agent_record_dir>/segments``. A remote store can use it
        as a local cache.
-   * - ``put(partition, segment_id, data)``
+   * - ``write(partition, segment_id, data)``
      - Store the bytes ``data``. The segment is durable when the method
-       returns. The data store never puts one ID twice.
+       returns. The data store never writes one ID twice.
    * - ``read(partition, lines)``
      - The bytes of each ``SegmentLine`` (``segment_id``, ``offset``,
        ``length``), in order. Raise ``SegmentNotFound`` for a missing
        segment or a line past its end.
    * - ``delete(partition, segment_id)``
      - Remove the segment. A missing segment is not an error.
-   * - ``find_directory(key)``
+   * - ``read_directory_uri(key)``
      - The URI of the directory ``key``, or ``None`` when the store does not
        hold all of it. A key is ``/``-separated names. The data store keeps
        each job data directory as ``job-data/<key>``.
-   * - ``put_directory(key, source)``
+   * - ``write_directory(key, source)``
      - Keep a copy of the files under ``source`` as the directory ``key``,
-       and return its URI. A put of a key that the store holds keeps the
+       and return its URI. A write of a key that the store holds keeps the
        first copy.
    * - ``open_directory(uri)``
      - A local directory with the files of the directory at ``uri``. A remote
@@ -1086,7 +1086,7 @@ visibility or deleting bodies. Record-to-sample stages expose
 service calls for memory management. Storage controls capacity
 independently of these buffers.
 
-``get``, ``replay``, ``replay_page``, and ``count`` read all retained records.
+``read``, ``replay``, ``replay_page``, and ``count`` read all retained records.
 
 .. list-table::
    :header-rows: 1
@@ -1094,7 +1094,7 @@ independently of these buffers.
 
    * - Method
      - Result
-   * - ``get_for_audit(scenario, agent_record_id)``
+   * - ``read_for_audit(scenario, agent_record_id)``
      - A ``StoredRecord``, or ``None`` if no body is retained in that scenario.
    * - ``audit_page(scenario, after_sequence=0, limit=256)``
      - A bounded tuple of ``StoredRecord`` entries, in append order, including
@@ -1123,7 +1123,7 @@ For example, inspect one trace without making it available to training again:
 
 .. code:: python
 
-   entry = scenario.records.get_for_audit(scenario.name, record_id)
+   entry = scenario.records.read_for_audit(scenario.name, record_id)
    if entry is not None:
        payload = entry.item.payload
        references = entry.item.references

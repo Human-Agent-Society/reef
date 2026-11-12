@@ -118,7 +118,7 @@ def test_a_listing_shows_the_samples_without_reading_their_content(scenario, mon
 
 def test_get_reads_the_samples_of_the_ids_that_the_scenario_uses_in_item_order(scenario):
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2"), upload("t3", math="train")])
-    assert [stored.sample_id for stored in scenario.samples.get(("t3", "t1", "t2", "missing"))] == ["t1", "t3"]
+    assert [stored.sample_id for stored in scenario.samples.read(("t3", "t1", "t2", "missing"))] == ["t1", "t3"]
 
 
 def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(scenario):
@@ -127,9 +127,9 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
     made = trajectory("a1", group_id="g", source_agent_record_ids=("r1",))
     task = made_task("x", source_agent_record_ids=("r2",), metadata={"task": {"name": "x"}})
     grid = (("a:r1:0", made), ("generated-tasks/x", task))
-    assert samples.for_trainer("a").add_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 2
-    assert samples.for_trainer("a").add_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 0
-    samples.for_trainer("b").add_record_samples(None, ("r3",), (("b:r3:0", trajectory("b")),))
+    assert samples.for_trainer("a").write_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 2
+    assert samples.for_trainer("a").write_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 0
+    samples.for_trainer("b").write_record_samples(None, ("r3",), (("b:r3:0", trajectory("b")),))
 
     item_id = stage_item_id("math", "a:r1:0")
     assert (item_id, stage_item_id("math", "generated-tasks/x")) == ("math.a:r1:0", "math.generated-tasks.x")
@@ -154,8 +154,8 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
     assert (other.component, other.group, other.sample.source_agent_record_ids) == ("b", None, ())
 
     # An item that exists stays as it is.
-    assert samples.for_trainer("a").add_record_samples(None, ("r4",), (("a:r1:0", trajectory("other")),)) == 0
-    assert samples.get((item_id,))[0].sample == made
+    assert samples.for_trainer("a").write_record_samples(None, ("r4",), (("a:r1:0", trajectory("other")),)) == 0
+    assert samples.read((item_id,))[0].sample == made
     state = samples.state
     assert state.consumed_record_ids("a") == {"r1", "i1", "r2", "r4"}
     assert state.consumed_record_ids("b") == {"r3"} and state.consumed_record_ids("") == frozenset()
@@ -212,7 +212,7 @@ def test_train_counts_survive_an_item_that_leaves_and_comes_back(scenario):
     scenario.data.update("acme", ["t1"], {"scenarios": {"math": None}})
     assert scenario.ids() == ["t2"]
     scenario.data.update("acme", ["t1"], {"scenarios": {"math": "train"}})
-    (again,) = scenario.samples.get(("t1",))
+    (again,) = scenario.samples.read(("t1",))
     assert again.train_counts == {"a": 1}
     assert scenario.samples.page()[-1].sample_id == "t1" and scenario.samples.page()[-1].sequence > last
 
@@ -239,7 +239,7 @@ def test_imported_tasks_are_the_tasks_that_no_stage_made(scenario):
     scenario.data.create("acme", [upload("t1", math="train")])
     scenario.task("task-a", "train")
     scenario.task("held", "eval", 9001)
-    samples.for_trainer("").add_record_samples(
+    samples.for_trainer("").write_record_samples(
         None, (), (("generated-tasks/g", made_task("g", metadata={"task": {"name": "g"}})),)
     )
     assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [
@@ -258,7 +258,7 @@ def test_the_listing_of_the_imported_tasks_reads_no_task_files(scenario, monkeyp
     samples = scenario.samples
     scenario.task("task-a", "train")
     scenario.task("held", "eval", 9001)
-    samples.for_trainer("").add_record_samples(
+    samples.for_trainer("").write_record_samples(
         None, (), (("generated-tasks/g", made_task("g", metadata={"task": {"name": "g"}})),)
     )
     imported = samples.imported_tasks()
@@ -280,7 +280,7 @@ def test_the_task_directories_of_many_tasks_are_read_at_the_same_time(scenario, 
     for name in names:
         scenario.task(name, "eval")
     scenario.data.create("acme", [upload("trajectory", math="train")])
-    expected = tuple(stored.sample.task_path for stored in samples.get(names))
+    expected = tuple(stored.sample.task_path for stored in samples.read(names))
 
     # Each read waits until every reader has started one: a store that reads one directory at a time never ends.
     started = threading.Barrier(TASK_PATH_READERS, timeout=10)

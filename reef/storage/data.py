@@ -290,7 +290,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
 
     The patch may not change a key of ``FIXED_KEYS``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
-    that scenario's record store keeps the record. An evaluation call stays in no scenario. Only ``DataStore.remove_scenario`` removes that use.
+    that scenario's record store keeps the record. An evaluation call stays in no scenario. Only ``DataStore.delete_scenario`` removes that use.
     The patched ``benchmarks`` must pass ``check_benchmarks``.
     """
     if not isinstance(patch, Mapping):
@@ -471,7 +471,7 @@ class DataStore(Plugin, ABC):
       ``ItemNotFound``; an item of another kind, or a directory of another name, is a ``ValueError``, and nothing
       changes. The files of the old digest stay, so a reader that opened them can go on.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
-    * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
+    * ``delete_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
       the record items that it made, and returns their number. It also ends the scenario's generation. The archive
       of a scenario calls it, so that a new scenario with that name uses nothing. The items stay.
     * ``scenario_generation(owner, scenario)`` returns the current generation of ``scenario``: an opaque string,
@@ -493,8 +493,8 @@ class DataStore(Plugin, ABC):
       ``key`` in their metadata (``ItemGroup``). It returns the groups whose ``first_sequence`` is below ``before``,
       when given, newest first, at most ``limit``.
     * ``collections(owner)`` returns the ``TaskCollection`` values of ``owner``, in name order.
-      ``put_collection(owner, collection)`` stores ``collection``, in place of the one with its name if there is one.
-      ``remove_collection(owner, name)`` removes it and returns True, or returns False for an unknown name. No
+      ``write_collection(owner, collection)`` stores ``collection``, in place of the one with its name if there is one.
+      ``delete_collection(owner, name)`` removes it and returns True, or returns False for an unknown name. No
       collection operation changes an item. The store keeps each collection as it is given; the service checks that
       the collections of an owner name each other without a cycle (``reef.service.collections``).
     * ``maintain()`` does the store's periodic work: it deletes the job data directories that no job used for
@@ -513,7 +513,7 @@ class DataStore(Plugin, ABC):
 
     A subclass sets ``job_directories`` and ``job_directory_ttl_seconds``, and keeps the time of the last use of each
     directory, by its key:
-    ``record_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
+    ``write_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
     ``delete_job_directory_record(key)``.
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
@@ -545,9 +545,12 @@ class DataStore(Plugin, ABC):
         """
 
     @abstractmethod
-    def create(
-        self, owner: str, items: Sequence[NewItem], *, generation: str | None = None
-    ) -> tuple[StoredItem, ...]: ...
+    def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
+        """Store each new item and give it its sequence, all or none.
+
+        The store checks each ID that the owner holds: the same digest leaves the item unchanged, and another
+        digest is an ``ItemConflict``. It never replaces an item.
+        """
 
     @abstractmethod
     def scenario_generation(self, owner: str, scenario: str) -> str: ...
@@ -637,7 +640,7 @@ class DataStore(Plugin, ABC):
     def delete(self, owner: str, item_id: str) -> bool: ...
 
     @abstractmethod
-    def remove_scenario(self, owner: str, scenario: str) -> int: ...
+    def delete_scenario(self, owner: str, scenario: str) -> int: ...
 
     @abstractmethod
     def task_path(self, item: StoredItem) -> Path: ...
@@ -649,10 +652,10 @@ class DataStore(Plugin, ABC):
     def collections(self, owner: str) -> tuple[TaskCollection, ...]: ...
 
     @abstractmethod
-    def put_collection(self, owner: str, collection: TaskCollection) -> None: ...
+    def write_collection(self, owner: str, collection: TaskCollection) -> None: ...
 
     @abstractmethod
-    def remove_collection(self, owner: str, name: str) -> bool: ...
+    def delete_collection(self, owner: str, name: str) -> bool: ...
 
     def groups(
         self,
@@ -692,7 +695,7 @@ class DataStore(Plugin, ABC):
     job_directory_ttl_seconds: float
 
     @abstractmethod
-    def record_job_directory_use(self, key: str, time: float) -> None: ...
+    def write_job_directory_use(self, key: str, time: float) -> None: ...
 
     @abstractmethod
     def job_directories_unused_since(self, time: float) -> tuple[str, ...]: ...
@@ -703,13 +706,13 @@ class DataStore(Plugin, ABC):
     def write_job_directory(self, data: JobData) -> JobDataRef:
         key = job_data_key(data)
         name = f"{JOB_DATA_PREFIX}/{key}"
-        uri = self.job_directories.find_directory(name)
+        uri = self.job_directories.read_directory_uri(name)
         if uri is None:
             with tempfile.TemporaryDirectory() as staging:
                 directory = Path(staging) / key
                 write_job_data(data, directory)
-                uri = self.job_directories.put_directory(name, directory)
-        self.record_job_directory_use(key, time.time())
+                uri = self.job_directories.write_directory(name, directory)
+        self.write_job_directory_use(key, time.time())
         return JobDataRef(
             uri, self.job_directories.open_directory(uri), data.data_id, len(data.samples), job_data_kind(data)
         )
@@ -720,7 +723,7 @@ class DataStore(Plugin, ABC):
             raise ValueError("a job data reference has a uri")
         path = self.job_directories.open_directory(uri)
         header = json.loads((path / JOB_FILE).read_text(encoding="utf-8"))
-        self.record_job_directory_use(header["key"], time.time())
+        self.write_job_directory_use(header["key"], time.time())
         return JobDataRef.from_dict(value, path)
 
     def delete_unused_job_directories(self, time: float) -> int:
@@ -906,7 +909,7 @@ class MemoryDataStore(DataStore):
             raise PluginConfigError(f"MemoryDataStore takes no config, got {', '.join(sorted(map(str, config)))}")
         return cls(task_files, job_directory_ttl_seconds)
 
-    def record_job_directory_use(self, key: str, time: float) -> None:
+    def write_job_directory_use(self, key: str, time: float) -> None:
         self.job_directory_uses[key] = time
 
     def job_directories_unused_since(self, time: float) -> tuple[str, ...]:
@@ -1136,7 +1139,7 @@ class MemoryDataStore(DataStore):
         self.write_uses(owner, item_id, {})
         return self.items.get(owner, {}).pop(item_id, None) is not None
 
-    def remove_scenario(self, owner: str, scenario: str) -> int:
+    def delete_scenario(self, owner: str, scenario: str) -> int:
         check_owner(owner)
         stored = self.items.get(owner, {})
         used = [item for item in stored.values() if scenario in item.scenarios]
@@ -1213,11 +1216,11 @@ class MemoryDataStore(DataStore):
         stored = self.stored_collections.get(owner, {})
         return tuple(stored[name] for name in sorted(stored))
 
-    def put_collection(self, owner: str, collection: TaskCollection) -> None:
+    def write_collection(self, owner: str, collection: TaskCollection) -> None:
         check_owner(owner)
         self.stored_collections.setdefault(owner, {})[collection.name] = collection
 
-    def remove_collection(self, owner: str, name: str) -> bool:
+    def delete_collection(self, owner: str, name: str) -> bool:
         check_owner(owner)
         return self.stored_collections.get(owner, {}).pop(name, None) is not None
 
