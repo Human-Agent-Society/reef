@@ -293,7 +293,7 @@ request. These checks precede Scenario creation and provider execution:
 * A missing Scenario or model, an unknown target, a private router entrypoint
   as ``model``, a repeated ``x-reef-*`` header, a client-supplied
   ``x-reef-routing-*``, ``x-reef-sr-decision`` or ``x-selected-model`` header,
-  and a nonempty ``x-reef-artifact-id`` or legacy ``x-reef-release-id`` return 400.
+  and a nonempty ``x-reef-artifact-id`` return 400.
 * A disabled target returns 503.
 * A managed deployment returns 408 when the request body does not finish
   uploading within 30 seconds.
@@ -2666,9 +2666,6 @@ An artifact that training makes names its training starts in its own metadata,
 own training starts. A runtime uses them, so that a training artifact is served
 as its start is, unless it has its own setting.
 
-Items that RFC #1233 made can have ``serving_profile`` in their metadata. Reef
-ignores it, and a metadata patch can remove it.
-
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
 
@@ -3324,8 +3321,7 @@ requests may use GET, POST or DELETE with Authorization, Content-Type and
 x-reef-scenario headers. Cookies are not enabled through CORS.
 
 CORS headers also cover errors and streamed responses, exposing
-``x-reef-agent-record-id``, ``x-reef-artifact-id`` and ``x-reef-artifact-version``
-to the browser. Clients without an Origin header keep their existing behavior.
+``x-reef-agent-record-id`` and ``x-reef-artifact-id`` to the browser. Clients without an Origin header keep their existing behavior.
 A browser can also require local network permission or HTTPS. An origin that
 Reef allows does not override browser policy.
 

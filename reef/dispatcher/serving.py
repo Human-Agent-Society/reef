@@ -327,7 +327,7 @@ class ServingWorker(QueueWorker):
             return repository.select(ArtifactSelection.from_dict(value["selection"]))
 
         artifact = selected_artifact(item.payload)
-        components = self.recipe.scenario_components(item.scenario)
+        components = self.recipe.build_components(item.scenario)
         # The runtime reports each artifact's startup phases to the item's progress (RFC #1283).
         reporter = QueueStartupReporter(self.queue, item, self.worker_id)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
@@ -409,7 +409,7 @@ class ServingWorker(QueueWorker):
         time, so a second item for a served artifact starts nothing."""
         selection = ArtifactSelection.from_dict(item.payload["selection"])
         component = require_text(item.payload.get("component"), "component")
-        components = self.recipe.scenario_components(item.scenario)
+        components = self.recipe.build_components(item.scenario)
         artifact = components.component_artifact(self.repository(item.scenario).select(selection), component)
         runtime.apply_serving_config(item.scenario, self.routes.read_serving_config(item.scenario))
         served = runtime.serve_artifact(artifact, scenario=item.scenario)

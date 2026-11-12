@@ -105,7 +105,7 @@ class ArtifactClient:
         _, manifest = self._request("GET", f"/reef/harness?{urllib.parse.urlencode(query)}")
         if not isinstance(manifest, Mapping) or "files" not in manifest or not manifest.get("artifact_id"):
             raise ArtifactClientError("the harness answered no artifact manifest")
-        return {key: value for key, value in manifest.items() if key != "content_id"}
+        return dict(manifest)
 
 
 class HeadWatch:

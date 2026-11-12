@@ -28,12 +28,10 @@ from reef.core.evaluation import (
     UpdateCandidate,
 )
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate
-from reef.evaluation.evaluators import AlwaysSelectMixin, RegressionCheckMixin
 
 __all__ = [
     "ActivationRule",
     "AlwaysActivate",
-    "AlwaysSelectMixin",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
@@ -41,7 +39,6 @@ __all__ = [
     "EvaluationResult",
     "MadeArtifact",
     "NeverActivate",
-    "RegressionCheckMixin",
     "SelectionDecision",
     "UpdateCandidate",
 ]

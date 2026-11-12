@@ -318,8 +318,8 @@ def test_commit_record_validates_its_schema() -> None:
     with pytest.raises(CommitHistoryError, match="record kind"):
         CommitRecord.from_dict({"record": "something-else"})
     encoded = sample_record().to_dict()
-    encoded["record_progress"] = {"high_water_sequence": 0, "high_water_offset": 0, "compacted_ids": [1]}
-    with pytest.raises(CommitHistoryError, match="compacted_ids"):
+    encoded["record_progress"] = {"high_water_sequence": 0, "high_water_offset": 0, "consumed_ids": [1]}
+    with pytest.raises(CommitHistoryError, match="consumed_ids"):
         CommitRecord.from_dict(encoded)
 
 

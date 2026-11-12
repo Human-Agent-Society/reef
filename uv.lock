@@ -217,20 +217,6 @@ wheels = [
 ]
 
 [[package]]
-name = "alembic"
-version = "1.19.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "mako" },
-    { name = "sqlalchemy" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/34/10/181eecdd552217d0342492bd6f3b8a96e973083379aace3d3402830ddc03/alembic-1.19.2.tar.gz", hash = "sha256:297950a8a91f6770eb82bfbce9bea55c728b90a5386c6e81430191a319d138b0", size = 2082643, upload-time = "2026-09-04T17:10:11.212Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/9c/cb/9014784dcb0585977ae23b6f43331d0a33c51ac0d692506d12b4f5ee9f3b/alembic-1.19.2-py3-none-any.whl", hash = "sha256:32d553dcd577e6fe5c3c63e91468526d35e4dcecafe865d7db4e9b328fa93cb2", size = 267399, upload-time = "2026-09-04T17:10:12.796Z" },
-]
-
-[[package]]
 name = "annotated-doc"
 version = "0.0.5"
 source = { registry = "https://pypi.org/simple" }
@@ -2161,18 +2147,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/20/18/35fb14dd6baccbffa6daeb2369802f04a94e3f73db3c7bb405dbab009729/lxml-6.1.2-cp315-cp315t-win32.whl", hash = "sha256:87534cec6ea325435e4adf2326b0cf3110eee9a47abf73652eb155db639c08c6", size = 3901151, upload-time = "2026-08-19T05:04:58.671Z" },
     { url = "https://files.pythonhosted.org/packages/f0/b6/07530896ca062bc3d2f09d5cb8a48e799c05b12c496205db03159ba13b6c/lxml-6.1.2-cp315-cp315t-win_amd64.whl", hash = "sha256:4e220a9c297e5d36895d489a08c9a3f1f6193b6414e702c5fb751e4a3767f8d0", size = 4395355, upload-time = "2026-08-19T05:05:01.651Z" },
     { url = "https://files.pythonhosted.org/packages/31/a8/237d8de1d77085cfd41d0c6049a044d8d01886f3afb7f1eda2f43d900a96/lxml-6.1.2-cp315-cp315t-win_arm64.whl", hash = "sha256:f16a407766bac51c65d605b06d900821751a79aa20e12185f273f14a17180e7b", size = 3822823, upload-time = "2026-08-19T05:05:04.63Z" },
-]
-
-[[package]]
-name = "mako"
-version = "1.4.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "markupsafe" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/05/7f/0b891a82379ffd96d2d8cc6d435fb1055cdaed52829287f81d2a43fd71cb/mako-1.4.2.tar.gz", hash = "sha256:7227a060ee3af55a493af61d73d6beef13044b81dba9586736c13945f09464ce", size = 412231, upload-time = "2026-09-22T20:40:55.06Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f0/bb/0e4c30a18858adebc75496ea8a8c3fb65cbf4b36ea1c5028ed8a0a5fa196/mako-1.4.2-py3-none-any.whl", hash = "sha256:e70a2a4308952b33a21208bfd6725da79fae5a8c224578f8cfdeb60e5ace03df", size = 80163, upload-time = "2026-09-22T20:40:56.423Z" },
 ]
 
 [[package]]
@@ -4264,7 +4238,6 @@ name = "reef-infra"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
-    { name = "alembic" },
     { name = "harbor" },
     { name = "huggingface-hub" },
     { name = "pyyaml" },
@@ -4303,7 +4276,6 @@ s3 = [
     { name = "boto3" },
 ]
 sglang = [
-    { name = "httpx" },
     { name = "psutil" },
     { name = "ray", extra = ["default"] },
     { name = "requests" },
@@ -4333,7 +4305,6 @@ tinker = [
     { name = "tinker-cookbook" },
 ]
 vllm = [
-    { name = "httpx" },
     { name = "psutil" },
     { name = "ray", extra = ["default"] },
     { name = "requests" },
@@ -4350,7 +4321,6 @@ runtime = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.14" },
-    { name = "alembic", specifier = ">=1.13,<2" },
     { name = "boto3", marker = "extra == 's3'" },
     { name = "connectrpc", marker = "extra == 'e2b'", specifier = ">=0.11.1,<0.14" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = ">=2.46" },
@@ -4358,8 +4328,6 @@ requires-dist = [
     { name = "harbor", specifier = ">=0.24,<0.26" },
     { name = "harbor", extras = ["e2b"], marker = "extra == 'e2b'" },
     { name = "harbor", extras = ["modal"], marker = "extra == 'modal'" },
-    { name = "httpx", marker = "extra == 'sglang'" },
-    { name = "httpx", marker = "extra == 'vllm'" },
     { name = "httpx", extras = ["http2"], marker = "extra == 'slime'" },
     { name = "huggingface-hub" },
     { name = "jinja2", marker = "extra == 'tinker'", specifier = ">=3.1.0" },

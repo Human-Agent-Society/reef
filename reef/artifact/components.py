@@ -140,8 +140,7 @@ class ScenarioComponents:
     Values: ``components`` maps valid component names to ``ComponentSpec``s, in
     declaration order; it may be empty. At most one component is ``loaded`` and
     at most one has ``files``. ``validator`` is the whole snapshot's admission
-    check, run before each component's; it carries the
-    ``build_artifact_validator`` of a recipe that serves no component.
+    check, run before each component's.
 
     A snapshot with at most one component is flat: the whole artifact is the
     component. A snapshot with several keeps each one in a directory named after

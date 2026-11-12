@@ -47,7 +47,6 @@ from reef.record2sample.generator.designer import (
 )
 from reef.record2sample.generator.harbor import (
     GeneratedHarborTask,
-    HarborRuns,
     OracleResult,
     OracleUnavailable,
     content_hash,
@@ -81,7 +80,6 @@ __all__ = [
     "GeneratorService",
     "HarborChecks",
     "HarborReply",
-    "HarborRuns",
     "HttpGenerator",
     "JobRunner",
     "OracleResult",

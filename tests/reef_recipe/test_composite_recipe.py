@@ -842,55 +842,18 @@ class _RefuseAll(ArtifactValidator):
 
 
 @dataclass(frozen=True)
-class _GuardedTreeRecipe(_TreeRecipe):
-    """A recipe written before admission moved onto the component components: it overrides build_artifact_validator."""
+class _CheckedRecordOnlyRecipe(Recipe):
+    """A record only recipe (no component) that checks its whole snapshot."""
 
-    def build_artifact_validator(self) -> ArtifactValidator:
-        return _RefuseAll()
-
-
-@pytest.mark.unit
-def test_a_recipe_that_overrides_build_artifact_validator_still_admits_through_it(tmp_path: Path) -> None:
-    """The check joins the served component's own, alone or as a component of a composite; a recipe serving
-    several components cannot say which one it admits, so it is refused at build."""
-    flat = _GuardedTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
-    with closing(_serve(flat, tmp_path / "flat")) as dispatcher:
-        scenario = dispatcher.get_or_create_scenario("agent")
-        assert scenario is not None
-        head = scenario.current_snapshot()
-        evolved = tmp_path / "evolved"
-        evolved.mkdir()
-        (evolved / "AGENTS.md").write_text("unvetted")
-        with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(evolved)))
-        assert scenario.current_snapshot() == head
-    composite = CompositeRecipe(components={"harness": flat, "config": _ConfigRecipe()})
-    with pytest.raises(ValueError, match="validator refused the artifact"):
-        composite.build_components("agent").components["harness"].validator.validate(Artifact.local(evolved))
-
-    @dataclass(frozen=True)
-    class GuardedComposite(CompositeRecipe):
-        def build_artifact_validator(self) -> ArtifactValidator:
-            return _RefuseAll()
-
-    guarded = GuardedComposite(components={"harness": _TreeRecipe(label="harness"), "config": _ConfigRecipe()})
-    with pytest.raises(RecipeConfigError, match="overrides build_artifact_validator but serves components"):
-        guarded.scenario_components("agent")
-
-
-@dataclass(frozen=True)
-class _GuardedRecordOnlyRecipe(Recipe):
-    """A record only recipe (the default components, no component) that keeps main's admission hook."""
-
-    def build_artifact_validator(self) -> ArtifactValidator:
-        return _RefuseAll()
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(validator=_RefuseAll())
 
 
 @pytest.mark.unit
 def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_validator(tmp_path: Path) -> None:
-    """With no component to join, the check admits the snapshot as a whole, as every recipe's did before components
-    existed: the scenario builds, and a snapshot the check refuses is not published."""
-    dispatcher = _serve(_GuardedRecordOnlyRecipe(), tmp_path)  # type: ignore[arg-type]
+    """With no component, the check admits the snapshot as a whole: the scenario builds, and a snapshot the check
+    refuses is not published."""
+    dispatcher = _serve(_CheckedRecordOnlyRecipe(), tmp_path)  # type: ignore[arg-type]
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None and scenario.components.names == ()
@@ -918,14 +881,11 @@ class _RefuseUnvetted(ArtifactValidator):
 
 
 @dataclass(frozen=True)
-class _LegacyTreeRecipe(_TreeRecipe):
-    """A recipe written before components: the default components, a tree it publishes, and main's admission hook."""
+class _SnapshotCheckedTreeRecipe(_TreeRecipe):
+    """A recipe that declares no component, publishes a tree, and checks its whole snapshot."""
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        return ScenarioComponents()
-
-    def build_artifact_validator(self) -> ArtifactValidator:
-        return _RefuseUnvetted()
+        return ScenarioComponents(validator=_RefuseUnvetted())
 
 
 def _tree(tmp_path: Path, name: str, text: str) -> Artifact:
@@ -943,12 +903,12 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
     check admits that component's steps as it admitted its whole snapshot flat."""
     composite = CompositeRecipe(
         components={
-            "notes": _LegacyTreeRecipe(label="notes", artifact_dir=tmp_path / "steps"),
+            "notes": _SnapshotCheckedTreeRecipe(label="notes", artifact_dir=tmp_path / "steps"),
             "config": _ConfigRecipe(),
         }
     )
     with pytest.raises(ValueError, match="validator refused the artifact"):
-        composite.scenario_components("agent").components["notes"].validator.validate(_tree(tmp_path, "u", "unvetted"))
+        composite.build_components("agent").components["notes"].validator.validate(_tree(tmp_path, "u", "unvetted"))
     with closing(_serve(composite, tmp_path / "svc")) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
@@ -1014,14 +974,14 @@ class _CountedChecks(_RefuseUnvetted):
 
 
 @dataclass(frozen=True)
-class _CountedTreeRecipe(_LegacyTreeRecipe):
-    """The legacy tree recipe whose admission hook counts what it judged."""
+class _CountedTreeRecipe(_SnapshotCheckedTreeRecipe):
+    """The tree recipe whose snapshot check counts what it judged."""
 
     checks: _CountedChecks | None = None
 
-    def build_artifact_validator(self) -> ArtifactValidator:
+    def build_components(self, scenario: str) -> ScenarioComponents:
         assert self.checks is not None
-        return self.checks
+        return ScenarioComponents(validator=self.checks)
 
 
 @dataclass(frozen=True)

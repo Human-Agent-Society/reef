@@ -243,29 +243,6 @@ def test_a_scenario_reads_its_items_in_the_order_that_their_uses_began(store, tm
     assert [item_id for item_id, _ in used()] == ["t3", "fix-bug"]
 
 
-def test_an_upgrade_gives_each_use_its_own_sequence_and_split(open_durable_store):
-    with closing(open_durable_store()) as store:
-        store.create("acme", [trajectory("t1"), trajectory("t2", "two")])
-        uses = store.scenarios_table
-        # The table of a store from before RFC #1140: one row per use, without a sequence or a split.
-        legacy = sqlalchemy.Table(
-            uses.name,
-            sqlalchemy.MetaData(schema=uses.schema),
-            *(sqlalchemy.Column(name, sqlalchemy.Text, primary_key=True) for name in ("owner", "item_id", "scenario")),
-        )
-        with store.transaction() as connection:
-            uses.drop(connection)
-            legacy.create(connection)
-            connection.execute(legacy.insert(), [{"owner": "acme", "item_id": "t1", "scenario": "coding"}])
-    with closing(open_durable_store()) as store:
-        assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("trajectory",))] == ["t1"]
-        store.update("acme", ["t2"], {"scenarios": {"coding": "train"}})
-        assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("trajectory",))] == [
-            "t1",
-            "t2",
-        ]
-
-
 def index_names(store) -> set[str]:
     """The names of the indexes of the ``data_item`` table of the SQL data store ``store``."""
     items = store.items_table
@@ -277,15 +254,6 @@ def index_names(store) -> set[str]:
             "SELECT indexname FROM pg_indexes WHERE schemaname = :schema AND tablename = :table"
         )
         return set(connection.execute(statement, {"schema": items.schema, "table": items.name}).scalars())
-
-
-def test_an_upgrade_replaces_the_evaluation_index_that_has_no_sequence(open_durable_store):
-    # The index of a store from before ``sequence`` was in it: a page of an evaluation's calls read every call.
-    with closing(open_durable_store()) as store, store.transaction() as connection:
-        sqlalchemy.Index("data_item_by_evaluation", store.items_table.c.owner).create(connection)
-    with closing(open_durable_store()) as store:
-        names = index_names(store)
-    assert "data_item_by_evaluation_sequence" in names and "data_item_by_evaluation" not in names
 
 
 def test_an_update_never_changes_the_fixed_metadata_and_refuses_as_a_whole(store):
@@ -797,26 +765,6 @@ def test_an_owner_keeps_a_node_while_a_record_item_needs_its_messages(open_durab
         assert node_counts(store) == (1, 1)
 
 
-def test_an_upgrade_links_the_stored_record_items(open_durable_store):
-    items = calls(1, 2, 3)
-    with closing(open_durable_store()) as store:
-        store.create("acme", [*items, trajectory("t1")])
-        table = store.items_table
-        with store.transaction() as connection:
-            # Write the rows back as the earlier version kept them: the whole content, and no node table.
-            for item in items:
-                connection.execute(
-                    table.update()
-                    .where(table.c.item_id == item.item_id)
-                    .values(content_json=canonical_json(item.content))
-                )
-            connection.exec_driver_sql(f"ALTER TABLE {table.fullname} DROP COLUMN message_field")
-            store.nodes_table.drop(connection)
-    with closing(open_durable_store()) as store:
-        assert [item.content for item in store.query("acme", kind="record")] == [item.content for item in items]
-        assert node_counts(store) == (3, 5)
-
-
 def test_query_and_count_keep_the_records_of_one_origin_and_request_type(store):
     report = AgentRecord.create(
         scenario="coding", request_type=RequestType.REPORT, payload={"score": 1.0}, agent_record_id="rep"
@@ -845,17 +793,6 @@ def test_query_and_count_keep_the_records_of_one_origin_and_request_type(store):
         store.query("acme", origin="coding")
     with pytest.raises(ValueError, match="request_type"):
         store.count("acme", kind="record", request_type="training")
-
-
-def test_an_upgrade_fills_the_request_type_of_the_stored_record_items(open_durable_store):
-    with closing(open_durable_store()) as store:
-        store.create("acme", calls(1, 2))
-        table = store.items_table
-        with store.transaction() as connection:
-            connection.exec_driver_sql(f"ALTER TABLE {table.fullname} DROP COLUMN request_type")
-    with closing(open_durable_store()) as store:
-        assert store.count("acme", kind="record", request_type="inference") == 2
-        assert store.count("acme", kind="record", request_type="report") == 0
 
 
 def test_items_survive_a_restart(open_durable_store):
@@ -954,58 +891,16 @@ def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_
             store.close()
 
 
-def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable(store):
-    content = artifact_content("s3://bucket/weights", None)
-    legacy_content = {**content, "content_id": "old-checksum"}
-    item = NewItem("weights", legacy_content, {"kind": "artifact"})
-    (created,) = store.create("acme", [item])
-    assert store.read("acme", "weights").content == content
-    assert created.digest == json_digest(content)
-    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (created,)
-
-    # Seed a row written before the migration; a retry must not rewrite its immutable content or digest.
-    legacy = replace(created, content=legacy_content, digest=json_digest(legacy_content))
-    if isinstance(store, MemoryDataStore):
-        store.items["acme"]["weights"] = legacy
-    else:
-        table = store.items_table
-        with store.transaction() as connection:
-            connection.execute(
-                table.update()
-                .where(table.c.owner == "acme", table.c.item_id == "weights")
-                .values(content_json=canonical_json(legacy_content), digest=legacy.digest)
-            )
-    assert store.create("acme", [item]) == (replace(legacy, content=None),)
-    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (replace(legacy, content=None),)
-    with pytest.raises(ItemConflict, match="other content"):
-        store.create("acme", [NewItem("weights", {**content, "source_uri": "s3://other/weights"}, item.metadata)])
-    assert store.read("acme", "weights") == legacy
-
-
-def test_a_record_retry_with_a_new_time_matches_also_when_the_stored_digest_has_the_time(store):
+def test_a_record_retry_with_a_new_time_matches(store):
     (item,) = calls(1)
     (created,) = store.create("acme", [item])
     retry = NewItem(item.item_id, {**item.content, "created_at": item.content["created_at"] + 5}, item.metadata)
     assert store.create("acme", [retry]) == (created,)
-
-    # Seed the digest of a row written before, which had created_at in it.
     stored = store.read("acme", item.item_id)
-    legacy = replace(stored, digest=json_digest(stored.content))
-    if isinstance(store, MemoryDataStore):
-        store.items["acme"][item.item_id] = legacy
-    else:
-        table = store.items_table
-        with store.transaction() as connection:
-            connection.execute(
-                table.update()
-                .where(table.c.owner == "acme", table.c.item_id == item.item_id)
-                .values(digest=legacy.digest)
-            )
-    assert store.create("acme", [retry]) == (replace(legacy, content=None),)
     changed = {**item.content, "references": ["other"]}
     with pytest.raises(ItemConflict, match="other content"):
         store.create("acme", [NewItem(item.item_id, changed, item.metadata)])
-    assert store.read("acme", item.item_id) == legacy
+    assert store.read("acme", item.item_id) == stored
 
 
 def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_job_uses_it(store):

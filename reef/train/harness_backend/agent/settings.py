@@ -72,17 +72,13 @@ def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path)
     start stops the sandboxes a stopped run left. ``sandbox: none`` runs it
     unisolated with the service's privileges, and must be chosen. Left empty
     (and ``REEF_AGENT_SANDBOX`` unset), the agent is jailed where the host
-    can, and off where it cannot. No section runs no agent. The variable's
-    old name, ``REEF_PROPOSER_SANDBOX``, is refused, so a deployment that
-    still sets it does not start without the isolation it names. Raises
+    can, and off where it cannot. No section runs no agent. Raises
     ValueError for a bad value.
     """
     if section is None:
         return None
     if not isinstance(section, Mapping):
         raise ValueError("evolution.agent must be a mapping")
-    if "REEF_PROPOSER_SANDBOX" in environ:
-        raise ValueError("REEF_PROPOSER_SANDBOX is no longer read: set REEF_AGENT_SANDBOX instead")
     adapter = section.get("adapter", DEFAULT_ADAPTER)
     binary = section.get("binary")
     if not isinstance(adapter, str) or not adapter.strip():

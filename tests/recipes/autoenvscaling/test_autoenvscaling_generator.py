@@ -693,7 +693,6 @@ def test_from_config_builds_the_designer_and_keeps_its_snapshots_in_a_temporary_
     [
         ({"rollouts": 2}, "does not take rollouts"),
         ({"generator_url": "${endpoints.generator}"}, "generator_url"),
-        ({"state_dir": "state"}, r"does not take state_dir: .* \(RFC #1370\)"),
         ({"sources_path": ""}, "needs a sources_path"),
         ({"sources_path": "/no/such/sources.json"}, "No such file"),
         ({"designer": "human"}, "designer must be one of"),

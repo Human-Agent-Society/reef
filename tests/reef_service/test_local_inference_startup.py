@@ -90,12 +90,12 @@ def test_model_is_resolved_once_and_shared_with_the_children(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "extra,match",
     [
-        (["--tensor-parallel-size", "0"], "must be positive"),
-        (["--tensor-parallel-size", "oops"], "tensor_parallel_size"),
-        (["--inference-backend", "unknown"], "supports"),
-        (["--upstream-url", "http://localhost:8000"], "cannot be combined"),
-        (["--upstream-model", "remote"], "cannot be combined"),
-        (["--port", "0"], "valid --reef.port"),
+        (["--inference.tensor-parallel-size", "0"], "must be positive"),
+        (["--inference.tensor-parallel-size", "oops"], "tensor_parallel_size"),
+        (["--inference.backend", "unknown"], "supports"),
+        (["--inference.upstream-url", "http://localhost:8000"], "cannot be combined"),
+        (["--inference.upstream-model", "remote"], "cannot be combined"),
+        (["--reef.port", "0"], "valid --reef.port"),
     ],
 )
 def test_local_invalid_settings_fail_before_downloads(monkeypatch, capsys, extra, match):

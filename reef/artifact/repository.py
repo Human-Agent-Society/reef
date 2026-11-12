@@ -612,8 +612,7 @@ class Repository(ArtifactRepository):
         existing = self.selections.get(ref.revision)
         if existing is not None and existing != selection:
             raise ArtifactPublicationError("stored selections disagree for the same local view")
-        # Older cache keys included storage locators. Keep them as recovery aliases;
-        # select() derives filesystem paths only from the canonical component mapping.
+        # select() derives filesystem paths only from the selection's component mapping.
         self.selections[ref.revision] = selection
 
     def stage(
