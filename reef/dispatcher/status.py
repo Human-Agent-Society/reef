@@ -98,7 +98,7 @@ class TrainingStatus:
         if runtime is not None and runtime.per_scenario_adapters:
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(current.name)
         if len(current.trainers) > 1:
-            # Each component's trainer commits on its own; report each one beside the scenario-wide step.
+            # Each component's trainer commits on its own; report each one beside the scenario-wide commit number.
             components: dict[str, Any] = {}
             for component_trainer in current.trainers:
                 last = current.last_commit_for(component_trainer.component)
@@ -114,7 +114,7 @@ class TrainingStatus:
                         None
                         if last is None
                         else {
-                            "step": last.step,
+                            "step": last.commit_number,
                             "recorded_at": last.recorded_at,
                             "metrics": None if last.metrics is None else dict(last.metrics),
                         }

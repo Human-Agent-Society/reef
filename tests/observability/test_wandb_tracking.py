@@ -69,14 +69,14 @@ class _StubConfig(dict):
 def _context(
     *,
     scenario: str = "math",
-    step: int = 7,
+    commit_number: int = 7,
     run_segment: int = 0,
     run_step: int = 0,
 ) -> TrainingExperimentContext:
     return TrainingExperimentContext(
         scenario=scenario,
         recipe="openclawrl",
-        step=step,
+        commit_number=commit_number,
         source_artifacts=ArtifactSelection({"weights": "artifact:7"}),
         run_segment=run_segment,
         run_step=run_step,
@@ -88,12 +88,12 @@ def _context(
 def _event(
     *,
     scenario: str = "math",
-    step: int = 7,
+    commit_number: int = 7,
     run_segment: int = 0,
     run_step: int = 0,
 ) -> TrainingExperimentEvent:
     return TrainingExperimentEvent(
-        context=_context(scenario=scenario, step=step, run_segment=run_segment, run_step=run_step),
+        context=_context(scenario=scenario, commit_number=commit_number, run_segment=run_segment, run_step=run_step),
         produced_artifacts=ArtifactSelection({"weights": "artifact:8"}),
         metrics={"train/loss": 0.25, "reward": 0.8, "selection": {"score": 1.0, "label": "ok"}},
         outcome="committed",
@@ -200,14 +200,14 @@ def test_run_identity_is_stable_across_restart_and_separate_per_scenario() -> No
 def test_train_from_finishes_one_curve_and_next_commit_starts_another_run() -> None:
     client = _StubClient()
     tracker = _tracker(client)
-    tracker.record(_event(step=7, run_segment=0, run_step=3))
+    tracker.record(_event(commit_number=7, run_segment=0, run_step=3))
     first_run = client.runs[0]
 
     tracker.record_train_from(
         TrainFromExperimentEvent(
             scenario="math",
             recipe="openclawrl",
-            step=8,
+            commit_number=8,
             run_segment=0,
             start_artifacts=_context().source_artifacts,
         )
@@ -216,7 +216,7 @@ def test_train_from_finishes_one_curve_and_next_commit_starts_another_run() -> N
     assert first_run.finished is True
     assert first_run.summary["reef/ended_by"] == "train_from"
     assert first_run.summary["reef/train_from_step"] == 8
-    tracker.record(_event(step=9, run_segment=8, run_step=0))
+    tracker.record(_event(commit_number=9, run_segment=8, run_step=0))
 
     assert len(client.runs) == 2
     assert client.init_calls[0]["group"] == client.init_calls[1]["group"] == "pg/math"
@@ -254,7 +254,7 @@ def test_recipe_and_processor_share_the_scenario_logger_without_wandb_imports() 
         TrainFromExperimentEvent(
             scenario="math",
             recipe="openclawrl",
-            step=8,
+            commit_number=8,
             run_segment=0,
             start_artifacts=_context().source_artifacts,
         )
@@ -282,7 +282,7 @@ def test_disabled_and_failed_tracking_never_fail_training() -> None:
     failing_client = _StubClient(fail_init=True)
     failing = _tracker(failing_client, mode="online")
     failing.record(_event())
-    failing.record(_event(step=8))
+    failing.record(_event(commit_number=8))
     assert len(failing_client.init_calls) == 1
 
     logging_client = _StubClient(fail_log=True)
@@ -346,14 +346,14 @@ def test_wandb_logs_every_optimizer_step_of_a_job_before_the_job_row() -> None:
     client = _StubClient()
     tracker = _tracker(client)
     first = dataclasses.replace(
-        _event(step=1, run_step=0),
+        _event(commit_number=1, run_step=0),
         metrics={
             "train/loss": 0.25,
             "train_steps": [{"train/loss": 0.5, "train/step": 0}, {"train/loss": 0.4, "train/step": 1}],
         },
     )
     second = dataclasses.replace(
-        _event(step=2, run_step=1),
+        _event(commit_number=2, run_step=1),
         metrics={"train/loss": 0.2, "train_steps": [{"train/loss": 0.3}, {"train/loss": 0.25}, {"train/loss": 0.22}]},
     )
 
@@ -378,10 +378,12 @@ def test_wandb_logs_every_optimizer_step_of_a_job_before_the_job_row() -> None:
 def test_wandb_optimizer_step_counter_resumes_from_the_run_summary() -> None:
     client = _StubClient()
     tracker = _tracker(client)
-    tracker.record(_event(step=1))  # initializes the run
+    tracker.record(_event(commit_number=1))  # initializes the run
     client.runs[0].summary["reef/optimizer_steps"] = 40  # a resumed run that logged 40 steps before restart
 
-    tracker.record(dataclasses.replace(_event(step=2, run_step=1), metrics={"train_steps": [{"train/loss": 0.1}]}))
+    tracker.record(
+        dataclasses.replace(_event(commit_number=2, run_step=1), metrics={"train_steps": [{"train/loss": 0.1}]})
+    )
 
     step_rows = [m for m, _ in client.runs[0].logged if "step/step" in m]
     assert [row["step/step"] for row in step_rows] == [40]
@@ -396,7 +398,7 @@ def test_backend_train_step_in_metrics_never_overrides_the_run_step_axis() -> No
     client = _StubClient()
     tracker = _tracker(client)
     event = dataclasses.replace(
-        _event(step=3, run_step=2),
+        _event(commit_number=3, run_step=2),
         metrics={"train/loss": 0.2, "train/step": 76, "train_steps": [{"train/loss": 0.3, "train/step": 76}]},
     )
 
@@ -433,7 +435,7 @@ def test_operational_metrics_use_wall_time_without_advancing_the_training_axis()
         TrainFromExperimentEvent(
             scenario=context.scenario,
             recipe=context.recipe,
-            step=8,
+            commit_number=8,
             run_segment=0,
             start_artifacts=context.source_artifacts,
         )

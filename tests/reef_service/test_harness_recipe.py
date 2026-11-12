@@ -1360,7 +1360,7 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
     try:
         recovered = restarted.get_or_create_scenario("leak-476")
         # The step's job committed its submission and its end.
-        assert recovered is not None and recovered.scenario_step == 2
+        assert recovered is not None and recovered.commit_number == 2
         assert run_step(recovered, "2").metrics["skipped"] == UNCHANGED
     finally:
         restarted.close()

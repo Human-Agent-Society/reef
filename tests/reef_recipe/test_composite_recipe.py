@@ -475,7 +475,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         assert result is not None
         scenario.commit(result, component="harness")
 
-        rows = scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)
+        rows = scenario.snapshot_queries.snapshot_rows(scenario.commit_number)
         assert rows[0]["component"] == "harness"
         assert "component" not in rows[1]
         # The config component runs no step: the one commit is the harness's job submission, naming the rows it

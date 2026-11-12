@@ -589,7 +589,7 @@ def write_commits(directory: Path, *commits: dict) -> None:
         training = commit.get("operation", "training") == "training"
         base = CommitRecord(
             scenario="x",
-            step=commit["step"],
+            commit_number=commit["step"],
             snapshot=SnapshotRef("storage:base", None),
             checkpoint=training,
             algorithm_state={} if training else None,

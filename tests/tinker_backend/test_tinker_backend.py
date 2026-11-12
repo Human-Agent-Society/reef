@@ -945,7 +945,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         wait_for_serving(first)
         assert inference.served_model_name("math") == "tinker://update-1/sampler"
         assert TinkerCheckpoint.read(Path(state.start)).state_path == "tinker://update-1/state"
-        step = scenario.scenario_step
+        step = scenario.commit_number
     finally:
         first.close()
         component.close()
@@ -954,7 +954,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     second, component, inference = build(RemoteClient())
     try:
         scenario = second.get_or_create_scenario("math")
-        assert scenario.scenario_step == step
+        assert scenario.commit_number == step
         assert loop_state(scenario) == state
         # The creation is the scenario's root snapshot: its artifact_id is the root's release ID.
         base_artifact = scenario.snapshot_queries.artifact_for_version(base).artifact_id
@@ -962,7 +962,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         assert scenario.repository.start_artifact.revision == base
         scenario.activate(base_artifact)
         scenario.train_from(base_artifact)
-        assert scenario.scenario_step == step + 2
+        assert scenario.commit_number == step + 2
         assert scenario.current_snapshot().revision == base
         wait_for_serving(second)
         assert inference.served_model_name("math") == UNTRAINED.sampler_path

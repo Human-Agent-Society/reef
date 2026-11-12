@@ -56,7 +56,7 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
         assert log is not None
         commit = CommitRecord(
             scenario="one",
-            step=1,
+            commit_number=1,
             snapshot=scenario.current_snapshot(),
             checkpoint=False,
             algorithm_state={"private_state": "not part of the public history"},
@@ -66,7 +66,7 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             metrics={"selected": False, "selection": {"candidate_id": "candidate-one", "reason": "regressed"}},
         )
         log.append(commit)
-        log.append(replace(commit, step=2, consumed_ids=frozenset()))
+        log.append(replace(commit, commit_number=2, consumed_ids=frozenset()))
         before = scenario.records.count("one")
         client = TestClient(TestServer(create_app(dispatcher, tokens="inspection-test-token")))
         await client.start_server()

@@ -94,13 +94,13 @@ class RepositoryCommitSnapshots(CommitSnapshots):
             self.start_ids = frozenset(artifact_components(self.backend.materialize(self.start)))
         made = [id_ for id_ in artifact_ids.values() if id_ not in seen and id_ not in self.start_ids]
         if not made:
-            raise CommitHistoryError(f"commit step {record.step} made an artifact, but names no new artifact ID")
+            raise CommitHistoryError(f"commit {record.commit_number} made an artifact, but names no new artifact ID")
         return made[0]
 
     def snapshot(self, record: CommitRecord, seen: set[str], active: SnapshotRef) -> SnapshotRef:
         selection = record.selection
         if selection is None:
-            raise CommitHistoryError(f"commit step {record.step} has no selection")
+            raise CommitHistoryError(f"commit {record.commit_number} has no selection")
         if record.checkpoint:
             return self.binding(self.made_artifact(record, seen))
         if record.operation == "training":
@@ -129,7 +129,7 @@ class RepositoryCommitSnapshots(CommitSnapshots):
                 try:
                     record = replace(record, snapshot=self.snapshot(record, seen, active))
                 except ArtifactNotFound as exc:
-                    raise CommitHistoryError(f"commit step {record.step} names a missing artifact: {exc}") from exc
+                    raise CommitHistoryError(f"commit {record.commit_number} names a missing artifact: {exc}") from exc
             seen.update((record.artifact_ids or {}).values())
             if record.activates:
                 active = record.snapshot
@@ -141,7 +141,7 @@ def committed_records(store: ScenarioStore, head_record: CommitRecord | None) ->
     records = store.history()
     if not records and head_record is not None:
         # No durable log: the head adopted from checkpoint metadata is the
-        # only committed step there is.
+        # only commit there is.
         records = (head_record,)
     return records
 
@@ -431,7 +431,7 @@ class ScenarioFactory:
         # What served after the artifact head's commit; the commit history's activations come after it.
         served_at_head = served_snapshot(registration, checkpoint_head=checkpoint_head)
         start_artifact = backend.resolve_snapshot(start_artifact.revision)
-        checkpoint_step = 0 if checkpoint is None else checkpoint.step
+        checkpoint_commit_number = 0 if checkpoint is None else checkpoint.commit_number
         runtime = self._recipe.runtime
         store = self._storage.open(name)
         store.use_snapshots(RepositoryCommitSnapshots(backend, start_artifact))
@@ -439,7 +439,7 @@ class ScenarioFactory:
         trainers: tuple[ComponentTrainer, ...] = ()
         try:
             head_record = store.recover(checkpoint=checkpoint)
-            scenario_step = 0 if head_record is None else head_record.step
+            commit_number = 0 if head_record is None else head_record.commit_number
             recovered_states = recovered_trainer_states(store, name, head_record, components)
 
             # Publication stages durable bytes before the commit record is durable, while
@@ -447,7 +447,9 @@ class ScenarioFactory:
             # two leaves the commit history's checkpoint ahead of that pointer.
             if store.durable:
                 checkpoints = [
-                    record for record in store.history() if record.trained_artifact and record.step >= checkpoint_step
+                    record
+                    for record in store.history()
+                    if record.trained_artifact and record.commit_number >= checkpoint_commit_number
                 ]
                 if checkpoints:
                     checkpoint_head = checkpoints[-1].snapshot
@@ -514,7 +516,7 @@ class ScenarioFactory:
                     scenario=name,
                     recipe=self._recipe.name,
                     source_artifacts=root_artifacts,
-                    scenario_step=scenario_step,
+                    commit_number=commit_number,
                     store=store,
                     reports=self.experiment_reports,
                 )
@@ -534,7 +536,7 @@ class ScenarioFactory:
                 repository=repository,
                 root_source=root_source,
                 trainers=trainers,
-                scenario_step=scenario_step,
+                commit_number=commit_number,
                 store=store,
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,

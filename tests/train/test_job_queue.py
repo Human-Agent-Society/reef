@@ -313,7 +313,7 @@ class RunTracker(ExperimentTracker):
 def job_event(job_id: str | None) -> TrainingExperimentEvent:
     ref = SnapshotRef(revision="r1", parent_revision=None)
     context = TrainingExperimentContext(
-        scenario="s", recipe="recipe", step=1, source_artifacts=ArtifactSelection({"weights": ref.revision})
+        scenario="s", recipe="recipe", commit_number=1, source_artifacts=ArtifactSelection({"weights": ref.revision})
     )
     return TrainingExperimentEvent(context, context.source_artifacts, {}, "committed", training_job_id=job_id)
 

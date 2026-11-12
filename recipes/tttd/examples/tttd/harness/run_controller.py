@@ -2,7 +2,7 @@
 
 One search step is one Reef training job. Reef commits a job at its
 submission, at each saved checkpoint and at its end, so the controller counts
-finished jobs (``finished_jobs`` in ``GET /reef/status``), not scenario steps.
+finished jobs (``finished_jobs`` in ``GET /reef/status``), not commits.
 """
 
 from __future__ import annotations

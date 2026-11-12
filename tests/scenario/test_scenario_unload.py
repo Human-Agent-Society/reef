@@ -124,11 +124,11 @@ def loaded_names(dispatcher: Dispatcher) -> list[str]:
 
 def trained(dispatcher: Dispatcher, name: str, step: int) -> Scenario:
     """Accept one scored pair, and wait until the local worker commits the job of ``step``: its submission, its
-    checkpoint and its end, scenario step ``3 * step``."""
+    checkpoint and its end, commit number ``3 * step``."""
     current = dispatcher.get_or_create_scenario(name)
     assert current is not None
     dispatcher.accept_records(scored_pair(name, step))
-    wait_until(lambda: current.scenario_step == 3 * step and not current.trainer.holds_untrained_records())
+    wait_until(lambda: current.commit_number == 3 * step and not current.trainer.holds_untrained_records())
     return current
 
 
@@ -137,7 +137,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
     dispatcher = make_dispatcher(tmp_path, backend=StepJobs(tmp_path / "candidates"))
     try:
         before = trained(dispatcher, "math", 1)
-        artifacts = before.snapshot_queries.snapshot_rows(before.scenario_step)
+        artifacts = before.snapshot_queries.snapshot_rows(before.commit_number)
 
         # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
         wait_until(lambda: dispatcher.unload_if_idle("math"))
@@ -147,8 +147,8 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
 
         after = dispatcher.get_or_create_scenario("math")
         assert after is not None and after is not before
-        assert after.scenario_step == 3
-        assert after.snapshot_queries.snapshot_rows(after.scenario_step) == artifacts
+        assert after.commit_number == 3
+        assert after.snapshot_queries.snapshot_rows(after.commit_number) == artifacts
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)

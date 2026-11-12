@@ -234,7 +234,7 @@ def test_report_returns_and_inference_resolves_while_training_job_is_blocked(sta
     component.release.set()
     _wait_for_jobs(dispatcher, 1)
     assert len(component.calls) == 1
-    assert scenario.scenario_step == 3
+    assert scenario.commit_number == 3
 
 
 @pytest.mark.unit

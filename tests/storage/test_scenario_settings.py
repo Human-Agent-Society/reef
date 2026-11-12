@@ -19,7 +19,7 @@ EVALUATION = {"harness": {"name": "terminus-2"}}
 def committed(step: int = 1) -> CommitRecord:
     return CommitRecord(
         scenario="math",
-        step=step,
+        commit_number=step,
         snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
@@ -72,7 +72,7 @@ def test_postgres_session_of_an_archived_scenario_refuses_commit_reads(postgres_
     url, schema = postgres_config
     with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
         store = storage.open("math")
-        store.commit_step(expected_step=0, commit=committed())
+        store.append_commit(expected_commit_number=0, commit=committed())
         storage.archive("math")
         with pytest.raises(RuntimeError, match="archived"):
             store.history()
@@ -84,7 +84,7 @@ def test_postgres_session_of_an_archived_scenario_refuses_commit_reads(postgres_
 def test_archive_retires_settings_with_records_and_commits(open_storage):
     storage = open_storage()
     with closing(storage.open("math")) as store:
-        store.commit_step(expected_step=0, commit=committed())
+        store.append_commit(expected_commit_number=0, commit=committed())
     storage.write_settings("math", ScenarioSettings(artifact_evaluation=EVALUATION))
     storage.archive("math")
     assert storage.read_settings("math") == ScenarioSettings()
@@ -112,8 +112,8 @@ def test_postgres_restart_on_an_empty_directory_finds_commits_and_settings(postg
     settings = ScenarioSettings(artifact_evaluation=EVALUATION, training_mode="manual")
     with closing(PostgresScenarioStorage(url, tmp_path / "first", schema=schema)) as storage:
         with closing(storage.open("math")) as store:
-            store.commit_step(expected_step=0, commit=committed())
-            store.commit_step(expected_step=1, commit=committed(2))
+            store.append_commit(expected_commit_number=0, commit=committed())
+            store.append_commit(expected_commit_number=1, commit=committed(2))
         storage.write_settings("math", settings)
     assert [path for path in (tmp_path / "first").rglob("*") if path.is_file()] == []
     with closing(PostgresScenarioStorage(url, tmp_path / "second", schema=schema)) as storage:
@@ -130,7 +130,7 @@ def test_postgres_commit_table_keeps_identical_retries_and_rejects_different_con
         closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage,
         closing(storage.open("math")) as store,
     ):
-        store.commit_step(expected_step=0, commit=committed())
+        store.append_commit(expected_commit_number=0, commit=committed())
         commits = store.commit_history
         commits.append(CommitRecord.from_dict({**committed().to_dict(), "recorded_at": 5.0}))
         with pytest.raises(CommitHistoryError, match="conflicts with its existing record"):

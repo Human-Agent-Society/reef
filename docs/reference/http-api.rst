@@ -3240,7 +3240,8 @@ commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
 step that skipped or rejected its candidate. An activation, a train-from, an
 import or a sync advances ``scenario_step`` without replacing the latest
-training outcome.
+training outcome. ``scenario_step`` is the commit number: the number of the
+scenario's newest commit.
 
 ``serving`` is runtime-wide but recipe-shaped, keyed by recipe name. A runtime
 that serves per-scenario adapters reports the engines' shared adapter

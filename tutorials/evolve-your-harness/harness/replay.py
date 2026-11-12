@@ -87,7 +87,7 @@ def collect(work: Path) -> dict:
             releases.append(
                 {
                     "artifact_id": artifact_id,
-                    "step": commit.step,
+                    "step": commit.commit_number,
                     "kind": operation,
                     "recorded_at": commit.recorded_at,
                     "patch": [],
@@ -109,7 +109,7 @@ def collect(work: Path) -> dict:
         releases.append(
             {
                 "artifact_id": artifact_id if published else None,
-                "step": commit.step,
+                "step": commit.commit_number,
                 "kind": "published" if published else ("skipped" if metrics.get("skipped") else "rejected"),
                 "skipped": metrics.get("skipped"),
                 "recorded_at": commit.recorded_at,

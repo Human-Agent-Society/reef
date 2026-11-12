@@ -182,17 +182,17 @@ def test_a_failed_activation_record_leaves_the_active_artifact_and_a_retry_compl
     try:
         scenario = _scenario(dispatcher, runtime)
         trained = _step(scenario, WEIGHTS, 1)
-        commit_step = scenario.store.commit_step
+        append_commit = scenario.store.append_commit
 
         def store_away(**keywords):
             raise OSError("commit storage away")
 
-        monkeypatch.setattr(scenario.store, "commit_step", store_away)
+        monkeypatch.setattr(scenario.store, "append_commit", store_away)
         with pytest.raises(OSError, match="commit storage away"):
             scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
         assert scenario.current_snapshot().revision == trained
         assert scenario.store.history()[-1].operation == "training"
-        monkeypatch.setattr(scenario.store, "commit_step", commit_step)
+        monkeypatch.setattr(scenario.store, "append_commit", append_commit)
 
         activated = scenario.activate(
             component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS
@@ -222,14 +222,14 @@ def test_a_weights_start_the_training_component_refuses_is_refused_before_anythi
             result = _job_step(scenario, WEIGHTS)
             scenario.commit(result, component=WEIGHTS)
         served = scenario.current_snapshot().revision
-        steps = scenario.scenario_step
+        steps = scenario.commit_number
         assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights job 1"
         with pytest.raises(TrainingStartRefused, match="cannot train from these weights"):
             scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
         with pytest.raises(ValueError, match="name the component"):
             scenario.train_from(base)
         assert scenario.current_snapshot().revision == served
-        assert scenario.scenario_step == steps
+        assert scenario.commit_number == steps
         assert dispatcher.recipe.runtime is not None
         assert dispatcher.recipe.runtime.inference_admission_status["open"]
     finally:

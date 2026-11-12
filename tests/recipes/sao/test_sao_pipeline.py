@@ -623,11 +623,11 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         result = first.advance_job()
         assert result is not None
         prepared = first.prepare_commit(result)
-        first_session.commit_step(
-            expected_step=step - 1,
+        first_session.append_commit(
+            expected_commit_number=step - 1,
             commit=CommitRecord(
                 scenario="math",
-                step=step,
+                commit_number=step,
                 snapshot=SnapshotRef("release:base", "base"),
                 checkpoint=False,
                 algorithm_state=prepared.algorithm_state,

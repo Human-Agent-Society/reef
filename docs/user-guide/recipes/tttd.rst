@@ -224,7 +224,7 @@ groups of two rollouts, one step, and thinking disabled; that run checks the
 integration path rather than the sampling budget used for the formal results.
 
 Reef writes its service log to ``work/erdos_min_overlap/reef.log``. The public
-status endpoint reports the scenario step and the served artifact
+status endpoint reports the commit number (``scenario_step``) and the served artifact
 (``served_artifact_id``):
 
 .. code:: bash

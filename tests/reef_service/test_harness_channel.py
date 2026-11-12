@@ -149,7 +149,7 @@ async def evaluated_step(client: TestClient) -> dict:
 
 
 @pytest.mark.unit
-def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> None:
+def test_status_reports_a_commit_that_published_no_harness(tmp_path) -> None:
     async def run() -> None:
         async with served(channel_dispatcher(tmp_path, ())) as client:
             status = await (await client.get("/reef/status")).json()

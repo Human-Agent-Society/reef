@@ -94,7 +94,7 @@ class ExperimentReportQueue:
             else:
                 self.tracker.record(event)
         except Exception:
-            logger.exception("experiment tracker failed to report a committed step")
+            logger.exception("experiment tracker failed to report a commit")
 
 
 def training_starts(source: ArtifactSelection, commit: CommitRecord) -> ArtifactSelection:
@@ -131,7 +131,7 @@ class CommitExperimentObserver(RecordObserver):
         scenario: str,
         recipe: str,
         source_artifacts: ArtifactSelection,
-        scenario_step: int,
+        commit_number: int,
         store: ScenarioStore,
         reports: ExperimentReportQueue | None = None,
     ) -> None:
@@ -148,7 +148,7 @@ class CommitExperimentObserver(RecordObserver):
         self.start_artifacts = source_artifacts
         for record in records:
             self.start_artifacts = training_starts(self.start_artifacts, record)
-        self.last_reported_step = scenario_step
+        self.last_reported_commit_number = commit_number
         self.run_segment, self.run_step = store.training_run_position() if store.durable else (0, 0)
         self.durable = store.durable
         self.store: ScenarioStore = ObservedScenarioStore(store, self)
@@ -170,20 +170,20 @@ class CommitExperimentObserver(RecordObserver):
             return {}
 
     def record_committed(self, commit: CommitRecord) -> None:
-        if commit.step <= self.last_reported_step:
+        if commit.commit_number <= self.last_reported_commit_number:
             return
         prepared = self.prepared
         source = self.start_artifacts
         run_segment, run_step = self.run_segment, self.run_step
         # Advance even when the provider fails: a storage retry must not rotate
         # the same run twice or report a training row twice in this session.
-        self.last_reported_step = commit.step
+        self.last_reported_commit_number = commit.commit_number
         self.prepared = None
         if commit.sets_training_start:
             self.start_artifacts = training_starts(self.start_artifacts, commit)
         if self.durable:
             if commit.operation == "train_from":
-                self.run_segment, self.run_step = commit.step, 0
+                self.run_segment, self.run_step = commit.commit_number, 0
             elif commit.operation == "training":
                 self.run_step += 1
         if commit.operation in ("activate", "import", "sync", "serve", "stop_serving"):
@@ -194,7 +194,7 @@ class CommitExperimentObserver(RecordObserver):
                 TrainFromExperimentEvent(
                     scenario=commit.scenario,
                     recipe=self.recipe,
-                    step=commit.step,
+                    commit_number=commit.commit_number,
                     run_segment=run_segment,
                     start_artifacts=self.start_artifacts,
                     component=commit.component,
@@ -203,14 +203,14 @@ class CommitExperimentObserver(RecordObserver):
             return
         # Storage can also receive a shipped-content update without a training
         # result. Its record supplies the event; runtime-only fields stay absent.
-        if prepared is not None and prepared.context.step == commit.step:
+        if prepared is not None and prepared.context.commit_number == commit.commit_number:
             context = prepared.context
         else:
             prepared = None
             context = TrainingExperimentContext(
                 scenario=self.scenario,
                 recipe=self.recipe,
-                step=commit.step,
+                commit_number=commit.commit_number,
                 source_artifacts=source,
                 run_segment=run_segment,
                 run_step=run_step,

@@ -25,7 +25,7 @@ Check health and status
 
 It reports these values for every scenario:
 
-- the step counter and the latest committed step outcome
+- the commit number (``scenario_step``) and the outcome of the latest training commit
 - the artifact that answers the scenario's requests (``served_artifact_id``)
 - whether a job's data is waiting, and the processor's state
 - whether inference is admitted or paused while a snapshot loads

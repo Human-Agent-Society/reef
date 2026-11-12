@@ -347,11 +347,11 @@ def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_com
     add_tasks(samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
     first = offline_pipeline(samples, job_samples=1)
     durable = first.build_job_data(1)
-    session.commit_step(
-        expected_step=0,
+    session.append_commit(
+        expected_commit_number=0,
         commit=CommitRecord(
             scenario="offline",
-            step=1,
+            commit_number=1,
             snapshot=SnapshotRef("release:1", "base"),
             checkpoint=True,
             algorithm_state={},

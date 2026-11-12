@@ -256,7 +256,7 @@ def test_a_lost_activation_record_leaves_the_release_the_log_names(tmp_path) -> 
     newest = scenario.current_snapshot()
     value.activate("math", value.list_artifacts("math")[-2]["artifact_id"])
     assert isinstance(scenario.store, CommitHistoryScenarioStore)
-    last_step = scenario.store.history()[-1].step
+    last_step = scenario.store.history()[-1].commit_number
     value.close()
     # Lose the activation behind the store's back, as a crash before its append would.
     database = tmp_path / "agent-record" / f"{hashlib.sha256(b'math').hexdigest()}.sqlite3"
@@ -293,7 +293,7 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
         *((8, run_step) for run_step in range(3)),
     ]
     (start,) = tracker.starts
-    assert (start.step, start.run_segment) == (8, 0)
+    assert (start.commit_number, start.run_segment) == (8, 0)
     assert start.start_artifacts.components == {"weights": creation["artifact_id"]}
     # The steps after the new start name the training start as their source, not the active selection.
     assert {event.context.source_artifacts.components["weights"] for event in tracker.events[6:7]} == {
@@ -315,7 +315,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
     restarted, _ = restart(tmp_path, backend_factory)
     recovered = restarted.get_or_create_scenario("math")
-    assert [version["operation"] for version in recovered.snapshot_queries.snapshot_rows(recovered.scenario_step)] == [
+    assert [version["operation"] for version in recovered.snapshot_queries.snapshot_rows(recovered.commit_number)] == [
         *(["training"] * 9),
         "creation",
     ]
@@ -529,11 +529,11 @@ def test_experiment_events_follow_durable_commits_and_a_new_training_start(
     advance_to = scenario._committer.advance_to
 
     def record(event: TrainingExperimentEvent) -> None:
-        observed.append((event.context.step, scenario.store.history()[-1].step))
+        observed.append((event.context.commit_number, scenario.store.history()[-1].commit_number))
         recorded.set()
 
     def record_start(event: TrainFromExperimentEvent) -> None:
-        observed.append((event.step, scenario.store.history()[-1].step))
+        observed.append((event.commit_number, scenario.store.history()[-1].commit_number))
         observed.append(runtime.inference.inference_admission_status["open"])
 
     def advance_after_report(step: int) -> None:
@@ -558,7 +558,7 @@ def test_experiment_events_follow_durable_commits_and_a_new_training_start(
         value.registry.experiment_reports.flush()
         # A new start leaves serving alone: the trained snapshot still serves.
         assert observed == [(4, 4), True]
-        assert scenario.scenario_step == 4
+        assert scenario.commit_number == 4
         assert scenario.current_snapshot() == trained
     finally:
         value.close()
@@ -634,7 +634,7 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
         commit = scenario.store.history()[0]
         assert commit.metrics["experiment/run_id"] == "run-0"
         assert event.metrics == commit.metrics
-        assert event.context.step == commit.step == 1
+        assert event.context.commit_number == commit.commit_number == 1
         assert event.context.source_artifacts.components == {
             "weights": scenario.repository.resolve(initial).artifact_id
         }
