@@ -243,6 +243,26 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
 
 
 @pytest.mark.unit
+def test_distributed_lora_load_checks_schema_before_sending_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_sglang_engine_module(monkeypatch)
+    engine = object.__new__(module.ReefSGLangEngine)
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def incompatible_schema() -> None:
+        raise RuntimeError("distributed schema unsupported")
+
+    def request(route: str, payload: dict[str, object] | None = None, **_kwargs: object) -> None:
+        calls.append((route, payload or {}))
+
+    monkeypatch.setattr(module, "require_lora_distributed_request_schema", incompatible_schema)
+    engine._make_request = request
+
+    with pytest.raises(RuntimeError, match="distributed schema unsupported"):
+        engine.load_lora_adapter_from_distributed("adapter", {}, [], [], [], "reef-lora")
+    assert calls == []
+
+
+@pytest.mark.unit
 def test_get_runtime_load_id_uses_model_info(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_sglang_engine_module(monkeypatch)
     requested: list[tuple[str, float]] = []
