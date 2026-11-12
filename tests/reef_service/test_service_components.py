@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent
-from tests.support.harness_steps import IdleMethod, harness_recipe
+from tests.support.harness_jobs import IdleMethod, harness_recipe
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.trajectories import policy_trajectory
@@ -190,7 +190,7 @@ def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_e
     def observe_start(worker: TrainingJobWorker) -> None:
         component = worker.component
         assert isinstance(component, HarnessTrainingComponent)
-        bindings.append(component.steps.recipe.model_binding("math"))
+        bindings.append(component.jobs.recipe.model_binding("math"))
         start(worker)
 
     monkeypatch.setattr(TrainingJobWorker, "start", observe_start)

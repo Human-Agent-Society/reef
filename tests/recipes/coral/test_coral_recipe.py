@@ -17,7 +17,7 @@ reef_recipe = pytest.importorskip("reef.recipe.base", reason="requires a reef ch
 from reef.core.plugins import PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.objectives import resolve_objective
 
 
 def _recipe_cls():
@@ -44,7 +44,7 @@ def test_the_recipe_binds_processor_and_grouped_machinery():
 
 def test_importing_the_recipe_registers_the_reused_objective():
     _recipe_cls()
-    assert resolve_slime_objective("tttd").loss_family == "tttd"
+    assert resolve_objective("tttd").loss_family == "tttd"
 
 
 def test_example_pipeline_section_builds_the_coral_stages():

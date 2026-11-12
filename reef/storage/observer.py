@@ -1,4 +1,4 @@
-"""Report storage events, accepted records and committed steps, to an observer.
+"""Report storage events, accepted records and commits, to an observer.
 
 Both events happen at the storage boundary: a record row is inserted for the
 first time, or a commit row lands. Wrapping the storage with
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class RecordObserver:
-    """Process-level observer of first-time record inserts and committed steps.
+    """Process-level observer of first-time record inserts and commits.
 
     Observation is a side effect. The wrappers below already isolate
     failures; implementations should still keep their own work off the
@@ -40,7 +40,7 @@ class RecordObserver:
         """One record the store inserted for the first time (retries are not reported)."""
 
     def record_committed(self, commit: CommitRecord) -> None:
-        """One committed step (training, activation or new training start), with the record ids its job data consumed."""
+        """One commit (training, activation or new training start), with the record ids its job data consumed."""
 
     def close(self) -> None:
         pass
@@ -146,12 +146,12 @@ class ObservedScenarioStore(ScenarioStore):
     def training_run_position(self) -> tuple[int, int]:
         return self._inner.training_run_position()
 
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
-        recorded = self._inner.commit_step(expected_step=expected_step, commit=commit)
+    def append_commit(self, *, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
+        recorded = self._inner.append_commit(expected_commit_number=expected_commit_number, commit=commit)
         try:
             self._observer.record_committed(recorded)
         except Exception:
-            logger.exception("record observer failed on committed step %s of %s", recorded.step, recorded.scenario)
+            logger.exception("record observer failed on commit %s of %s", recorded.commit_number, recorded.scenario)
         return recorded
 
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:

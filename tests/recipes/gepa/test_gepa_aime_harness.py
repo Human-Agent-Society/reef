@@ -18,8 +18,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support.harness_jobs import TreeArtifacts
 from tests.support.harness_service import job_backend, seed_root
-from tests.support.harness_steps import TreeArtifacts
 from tests.support.records import memory_records
 from tests.support.serving import wait_for_serving
 from tests.support.trainers import recipe_trainer

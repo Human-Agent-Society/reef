@@ -15,17 +15,7 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_service import (
-    backend_step,
-    drive_job,
-    harness_dispatcher,
-    harness_repository,
-    job_backend,
-    report_once,
-    run_step,
-    seed_root,
-)
-from tests.support.harness_steps import (
+from tests.support.harness_jobs import (
     COMPONENT,
     MODEL,
     PI_FAKE,
@@ -45,6 +35,16 @@ from tests.support.harness_steps import (
     marker_score,
     runtime,
     traced,
+)
+from tests.support.harness_service import (
+    backend_step,
+    drive_job,
+    harness_dispatcher,
+    harness_repository,
+    job_backend,
+    report_once,
+    run_step,
+    seed_root,
 )
 from tests.support.records import memory_records
 from tests.support.samples import data_storage, sample_store
@@ -102,7 +102,7 @@ MODELS = ModelBindings(served=MODEL)
 #: Where the run worker launches the harness; the tests spy on it.
 RUN_RUN = "reef.evaluation.harness.runner.run_task"
 #: The module of the test plugins that ``evolution_config`` names.
-SUPPORT = "tests.support.harness_steps"
+SUPPORT = "tests.support.harness_jobs"
 
 
 def from_config(settings: dict[str, Any], **options: Any) -> HarnessEvolutionRecipe:
@@ -442,7 +442,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
 
         def evaluation_tasks() -> list[str]:
             tasks = stage.job_parameters(batch)["evaluation_tasks"]
-            prepared = backend.prepare_step(
+            prepared = backend.prepare_job(
                 batch, HarnessState().to_json(), 0, head=head_of(backend), seed_tasks=tuple(tasks)
             )
             assert prepared.metrics["evaluation_task_count"] == len(tasks)
@@ -834,7 +834,7 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
         tasks=("task one", "task two"),
     )
     backend = backend_of(dataclasses.replace(recipe, worker_executor=ExecutorSettings(workers=4)))
-    prepared = backend.prepare_step(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
     try:
         evaluation = backend.evaluate(prepared.candidate)
         assert len(list(barrier.iterdir())) == 4
@@ -850,7 +850,7 @@ def test_real_runs_run_on_the_selected_worker_backend(tmp_path, workers, expecte
     backend = backend_of(dataclasses.replace(recipe, worker_executor=ExecutorSettings(workers=workers)))
     assert backend.evaluator.worker_pool.selection.settings.backend == expected
     assert backend.evaluator.worker_pool.requirements.gpus_per_worker == 0
-    prepared = backend.prepare_step(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
     with caplog.at_level("INFO"):
         result = backend.evaluate(prepared.candidate)
     assert flat(result.metrics["candidate_scores"]) == [1.0, 1.0]
@@ -1363,7 +1363,7 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
     try:
         recovered = restarted.get_or_create_scenario("leak-476")
         # The step's job committed its submission and its end.
-        assert recovered is not None and recovered.scenario_step == 2
+        assert recovered is not None and recovered.commit_number == 2
         assert run_step(recovered, "2").metrics["skipped"] == UNCHANGED
     finally:
         restarted.close()

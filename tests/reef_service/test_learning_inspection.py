@@ -56,7 +56,7 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
         assert log is not None
         commit = CommitRecord(
             scenario="one",
-            step=1,
+            commit_number=1,
             snapshot=scenario.current_snapshot(),
             checkpoint=False,
             algorithm_state={"private_state": "not part of the public history"},
@@ -66,7 +66,7 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             metrics={"selected": False, "selection": {"candidate_id": "candidate-one", "reason": "regressed"}},
         )
         log.append(commit)
-        log.append(replace(commit, step=2, consumed_ids=frozenset()))
+        log.append(replace(commit, commit_number=2, consumed_ids=frozenset()))
         before = scenario.records.count("one")
         client = TestClient(TestServer(create_app(dispatcher, tokens="inspection-test-token")))
         await client.start_server()
@@ -89,25 +89,25 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             assert commits["commits"][0]["consumed_ids"] == ["consumed"]
             assert commits["commits"][0]["metrics"] == commit.metrics
             assert "algorithm_state" not in commits["commits"][0]
-            assert commits["next_after_step"] == 1
+            assert commits["next_after_commit_number"] == 1
             tail_commits = await (
-                await client.get("/reef/scenarios/one/commits?after_step=1&limit=1", headers=headers)
+                await client.get("/reef/scenarios/one/commits?after_commit_number=1&limit=1", headers=headers)
             ).json()
-            assert tail_commits["commits"][0]["step"] == 2
-            assert tail_commits["next_after_step"] is None
+            assert tail_commits["commits"][0]["commit_number"] == 2
+            assert tail_commits["next_after_commit_number"] is None
             for record_id, expected in (("consumed", [1]), ("retired", []), ("waiting", []), ("other", [])):
                 filtered = await (
                     await client.get(f"/reef/scenarios/one/commits?record_id={record_id}", headers=headers)
                 ).json()
-                assert [c["step"] for c in filtered["commits"]] == expected
+                assert [c["commit_number"] for c in filtered["commits"]] == expected
             assert (await client.get("/reef/scenarios/one/commits")).status == 401
             assert (await client.get("/reef/scenarios/missing/commits", headers=headers)).status == 404
             assert (await (await client.get("/reef/scenarios/two/commits", headers=headers)).json())["commits"] == []
             for query in (
                 "limit=0",
                 "limit=101",
-                "after_step=-1",
-                "after_step=oops",
+                "after_commit_number=-1",
+                "after_commit_number=oops",
                 "record_id=",
                 "&".join(["record_id=x"] * 101),
             ):

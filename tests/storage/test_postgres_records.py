@@ -68,7 +68,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path):
     url, schema = postgres_config
     committed = CommitRecord(
         scenario="math",
-        step=1,
+        commit_number=1,
         snapshot=SnapshotRef("release:1", "base"),
         checkpoint=True,
         algorithm_state={"step": 1},
@@ -82,7 +82,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path):
         closing(factory.open("math")) as store,
     ):
         store.records.append(record())
-        store.commit_step(expected_step=0, commit=committed)
+        store.append_commit(expected_commit_number=0, commit=committed)
     with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as factory:
         with closing(factory.open("math")) as store:
             assert store.history() == (committed,)

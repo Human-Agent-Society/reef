@@ -91,8 +91,8 @@ Two other extension points have separate names and purposes:
   takes it as ``job_loop`` (see `Training jobs and components`_), and a
   trainer without one trains nothing. Every training step is a job of a
   training component; the harness recipe's ``HarnessTrainingComponent``
-  (``reef.train.harness_backend.component``) runs each harness step's
-  ``HarnessBackend`` as one job, in the training service.
+  (``reef.train.harness_backend.component``) runs each harness job on a
+  ``HarnessBackend``, in the training service.
   The trainer's job size is its sample-to-job stage's ``job_samples``.
 - ``reef.inference.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
@@ -552,15 +552,16 @@ The session contract is:
        the records that each trainer's stages consumed. It closes with the
        session and survives restarts when ``durable``.
    * - ``history()``
-     - Committed ``CommitRecord`` values in step order: training steps
+     - ``CommitRecord`` values in commit number order: training steps
        (including inactive artifacts), activations, and new training starts.
        This is authoritative after an ambiguous commit error.
    * - ``training_run_position()``
-     - The step of the last ``train_from`` commit and the count of training
+     - The commit number of the last ``train_from`` commit and the count of training
        commits after it, for experiment run numbering.
-   * - ``commit_step(expected_step=..., commit=...)``
+   * - ``append_commit(expected_commit_number=..., commit=...)``
      - Persist the ``CommitRecord`` and its consumption progress, returning the
-       canonical accepted record. Its step must equal ``expected_step + 1``.
+       canonical accepted record. Its ``commit_number`` must equal
+       ``expected_commit_number + 1``.
    * - ``recover(checkpoint=...)``
      - Accept a checkpoint ``CommitRecord`` (``None`` at initial registration),
        reconcile it with history, and return the head ``CommitRecord`` or ``None`` for a fresh
@@ -577,11 +578,11 @@ selection and leaves training starts unchanged. A sync selects its new
 artifact for serving and training in one commit. Activation and serving record a complete selection without
 publishing another artifact snapshot. A selection maps component names directly to artifact IDs.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
-the current step before accepting a new successor: two different commits
-prepared from the same step cannot both succeed. An identical recorded retry
-returns the original record, even after later steps have committed; only
+the current commit number before accepting a new successor: two different commits
+prepared from the same commit number cannot both succeed. An identical recorded retry
+returns the original record, even after later commits; only
 ``recorded_at`` is excluded from retry comparison. A new commit with a stale
-expected step, or a retry with conflicting content, raises
+expected commit number, or a retry with conflicting content, raises
 ``ScenarioStoreConflictError`` without advancing the store.
 
 ``CommitHistoryScenarioStore`` serializes writers through ``CommitHistory.locked()``.
@@ -593,7 +594,7 @@ commit's trainer for each sample whose ``sample:<sample_id>`` the commit lists. 
 durable when the transaction ends; an exception before then stores no commit
 and counts no sample. Direct writes through a ``CommitHistory``
 bypass this store contract.
-A failure after append can leave the step committed. Retry the exact commit or
+A failure after append can leave the commit stored. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses
 committed ``consumed_ids`` and separate skipped-batch receipts to rebuild
 processor memory without repeating work. It does not modify stored bodies.
@@ -1609,14 +1610,14 @@ A job names it in its ``objective`` parameter, usually from the recipe's
 ``default_parameters()``: a registered name, or a dotted
 ``my_method.slime:MyObjective`` reference.
 The dotted reference names a class with a zero-argument
-constructor or an existing instance; its module must be importable in both the
+constructor; its module must be importable in both the
 service and training processes.
 
 .. code:: python
 
-   from reef.train.algos.helpers import next_steps
-   from reef.train.algos.signals import TrainingSignal
    from reef.train.slime_backend.objectives import SlimeObjective
+   from reef.train.slime_backend.schedule import next_steps
+   from reef.train.slime_backend.signals import TrainingSignal
    from reef.train.types import JobData, trajectories
    from reef.core.trajectories import trajectory_reward
 
@@ -1634,11 +1635,16 @@ service and training processes.
                metrics={"steps": steps},
            )
 
-For a shared short name, decorate the class with ``@register_slime_objective``
-(or ``@register_tinker_objective``). The same function accepts an explicit
-instance. So that the name resolves where the module is not yet imported, a method
-package's public half calls ``register_objective_ref(name, "my_method.slime:MyObjective")``
-from ``reef.train.algos.registry``. Core never imports method packages. A built-in
+For a short name, a method package's public half calls
+``register_objective(name, "my_method.slime:MyObjective")`` from
+``reef.train.slime_backend.objectives`` (or from
+``reef.train.tinker_backend.objectives`` for a ``TinkerObjective``). The call
+records the reference and imports nothing; the backend imports the module when
+a job first names the objective. The same function accepts an instance in
+place of the reference. Each backend has its own ``register_objective``,
+``resolve_objective``, ``TrainingSignal``, ``next_steps`` and
+``StepScheduling``; the examples here show Slime's. Core never imports method
+packages. A built-in
 ``sft`` objective exists on each backend, and ``slime_dataset`` on Slime.
 
 The training component cuts each job's data into optimizer steps. The
@@ -1655,7 +1661,7 @@ objective set what the component may do with the job's data:
   computed once, which a clipped ratio tolerates.
 
 A job's optional ``scheduling`` parameter is a ``StepScheduling``
-(``reef.train.algos.schedule``) as an object:
+(``reef.train.slime_backend.schedule`` or ``reef.train.tinker_backend.schedule``) as an object:
 
 .. container:: config
 
@@ -1682,7 +1688,7 @@ accept a job and again when they run it.
 ``TrainingComponent.parameters_schema(kind)`` returns the JSON Schema of those
 parameters for a sample kind, or None; the scenario contract serves it.
 
-``reef.train.algos.schedule.pack_rollouts(token_counts, packing_length)`` is
+``pack_rollouts(token_counts, packing_length)`` of each backend's ``schedule`` module is
 the packing: best-fit decreasing, which puts each rollout, longest first, into
 the pack whose free tokens it fills most closely. The packs decide only which
 rollouts share a step. The loss and the micro-batches stay the component's.
@@ -1730,8 +1736,8 @@ Harness method
 --------------
 
 This section lists the harness method API. `Write a harness method
-<../developer-guide/write-a-harness-method.rst>`__ explains the step, the
-plugin settings (``from_config`` and ``PluginSettings``), and when a step is
+<../developer-guide/write-a-harness-method.rst>`__ explains the job, the
+plugin settings (``from_config`` and ``PluginSettings``), and when a job is
 skipped or fails.
 
 .. code:: python
@@ -1741,11 +1747,11 @@ skipped or fails.
    from reef.harness.adapters.parts import Format, Part, TreeLayout
    from reef.harness.tree import HarnessTree, TreePatch
    from reef.train.harness_backend import (
-       AgentMethod, AgentOutcome, Method, ModelCalls, Services, StepContext, Trace, Workspace,
+       AgentMethod, AgentOutcome, Method, MethodJob, ModelCalls, Services, Trace, Workspace,
    )
 
    class MyMethod(Method):
-       def step(self, context: StepContext) -> None: ...
+       def run(self, job: MethodJob) -> None: ...
 
    class MyScorer(TaskScorer):
        def score(self, task, result) -> float: ...
@@ -1756,10 +1762,10 @@ skipped or fails.
 
    * - Member
      - Contract
-   * - ``Method.step(context)``
-     - edit ``context.workspace.harness`` into the step's candidate, or leave
-       it unchanged to skip the step; say what the step did with
-       ``context.workspace.write_output``
+   * - ``Method.run(job)``
+     - edit ``job.workspace.harness`` into the job's candidate, or leave
+       it unchanged to skip the job; say what the job did with
+       ``job.workspace.write_output``
    * - ``Method.runs_agent``
      - a class attribute, ``False`` by default; ``True`` for a method that
        calls ``Services.run_agent``, which then gets ``evolution.agent`` and is
@@ -1767,12 +1773,12 @@ skipped or fails.
    * - ``AgentMethod``
      - a method that is a folder of prompts (``config``: ``prompts``, the
        folder, and ``model``, ``served`` by default): ``START.md``, an
-       optional ``RESUME.md``, and the agent's own tree; each step runs the
+       optional ``RESUME.md``, and the agent's own tree; each job runs the
        agent once and reads ``output/summary.md``, ``notes.json`` and
        ``requires.json``
-   * - ``StepContext``
-     - ``workspace``, the step's ``Workspace``, and ``services``, the step's
-       ``Services``; the backend makes one per step
+   * - ``MethodJob``
+     - ``workspace``, the job's ``Workspace``, and ``services``, the job's
+       ``Services``; the backend makes one per job
    * - ``Workspace``
      - ``root``, ``history_dir`` and ``step`` (1 or more); the directory
        paths ``harness``, ``material``, ``state``, ``scratch`` and ``output``;
@@ -1788,7 +1794,7 @@ skipped or fails.
        ``output/summary.md`` (the commit's ``method_summary``),
        ``output/notes.json`` (a JSON object, the commit's ``method_notes``)
        and ``output/requires.json`` (``reef.core.requirements`` items, read on
-       a request step only), and raises ``ValueError`` before writing when
+       a request job only), and raises ``ValueError`` before writing when
        ``notes`` or ``requires`` is not valid
    * - ``TreeLayout``
      - the parts of an adapter's tree, from the ``evolve`` section of its ``adapter.yaml``; a method gets
@@ -1811,10 +1817,10 @@ skipped or fails.
        against ``evolution.max_model_calls_per_step`` and lands in
        ``calls.json``
    * - ``Services.calls``
-     - the step's ``ModelCalls``: ``spend()`` counts one call and raises
+     - the job's ``ModelCalls``: ``spend()`` counts one call and raises
        ``RuntimeError`` past the budget, ``record(entry)`` appends one call
        to ``calls.json``, and ``note(kind, text, *, failed=False)`` adds one
-       line to the step's activity
+       line to the job's activity
    * - ``Services.check(tree)``
      - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``,
        ``problems`` and ``message()``
@@ -1851,7 +1857,7 @@ skipped or fails.
        ``reply``, ``residue``, ``agents``, ``path`` and ``transcript_read``
    * - ``DecisionRecord``
      - ``step``, ``tree`` (the candidate's checksum), ``head`` (the checksum
-       of the head tree that the step started from), ``selected``
+       of the head tree that the job started from), ``selected``
        (published; the activation rule decides whether it serves),
        ``policy`` and ``reason``
    * - ``TaskScorer.score(task, result)``
@@ -1860,11 +1866,11 @@ skipped or fails.
        ``trajectory`` and ``residue``. The evaluation calls
        ``score_with_models(task, result, models)``, whose default calls
        ``score``. A model-based judge overrides ``score_with_models`` to use
-       the step's model bindings, and still implements the abstract
+       the job's model bindings, and still implements the abstract
        ``score``, for example by raising. A scorer that needs a local GPU
        overrides ``execution_requirements()``
    * - ``TaskCollector.collect(samples)``
-     - the prompts to collect from the step's trace samples, with
+     - the prompts to collect from the job's trace samples, with
        ``evolution.evaluation.collect_failures``
    * - ``evaluation.metrics``
      - holds ``candidate_scores`` and ``current_scores`` under
@@ -2245,7 +2251,7 @@ Weight training and harness evolution share the loop: every job carries the
 same fields. The loop sets ``TrainingJob.component``, the scenario component
 that the trainer trains, and ``TrainingJob.previous_job_id``, the last job
 whose end the trainer committed. A harness continues its state after that
-job, since a step that keeps no tree still advances it; a weight component
+job, since a job that keeps no tree still advances it; a weight component
 ignores it. What a job needs beside its data comes from its stage's
 ``job_parameters``: the harness stage (``TraceJobData``) adds the training
 request and the task paths of the scenario's eval split. On each checkpoint's
@@ -2323,9 +2329,9 @@ defaults to true; hosted integrations set it to false to preserve remote
 model identifiers during deployment resolution.
 
 Methods implement ``TinkerLoss`` from ``reef.train.tinker_backend.losses``
-and register it with ``register_loss_family_ref(name, "package.module:CLASS",
-backend="tinker")`` from ``reef.train.algos.registry``, the same table that
-holds their Slime reference. ``loss_fn`` names the Tinker built-in loss the
+with a ``loss_family`` name, and decorate the class with ``@register_loss_family``
+from ``reef.train.tinker_backend.loss_families``, in the module that defines
+their ``TinkerObjective``. ``loss_fn`` names the Tinker built-in loss the
 family trains with; ``inputs(rows, base_logprobs, kl_coef=...)`` returns that
 function's token-aligned ``loss_fn_inputs``, one dictionary per row; and
 ``needs_base_logprobs`` requests frozen-base scores for a nonzero KL

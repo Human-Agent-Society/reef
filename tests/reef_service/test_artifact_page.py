@@ -22,8 +22,8 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import UNCHANGED, harness_recipe
 from tests.support.harness_service import catalog, harness_dispatcher, report_records, wait_for_rows
-from tests.support.harness_steps import UNCHANGED, harness_recipe
 
 from reef.core.plugins import PluginReference
 from reef.dispatcher import Dispatcher

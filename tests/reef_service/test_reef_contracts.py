@@ -258,7 +258,7 @@ def test_new_dispatcher_recovers_scenario_metadata_from_repository(tmp_path) -> 
 
     assert recovered.repository.start_artifact == created.repository.start_artifact
     assert recovered.repository.current_artifact == created.repository.checkpoint_artifact
-    assert recovered.scenario_step == 0
+    assert recovered.commit_number == 0
 
 
 @pytest.mark.unit
@@ -914,19 +914,19 @@ def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_p
     dispatcher.registry.get("math").commit(TrainingCommit(state={"label": "no artifact"}))
     # A no-artifact commit advances the step (the trainer consumed records and
     # state) but does not move the serving head: there is no candidate to publish.
-    assert dispatcher.get_or_create_scenario("math").scenario_step == 1
+    assert dispatcher.get_or_create_scenario("math").commit_number == 1
     assert dispatcher.get_or_create_scenario("math").repository.require_current_artifact() == math_head
 
     for scenario in ("math", "code", "math", "code"):
-        version = dispatcher.get_or_create_scenario(scenario).scenario_step + 1
+        version = dispatcher.get_or_create_scenario(scenario).commit_number + 1
         candidate = tmp_path / f"{scenario}-{version}"
         candidate.mkdir()
         dispatcher.registry.get(scenario).commit(
             TrainingCommit(state={"version": version}, artifact=Artifact.local(candidate))
         )
 
-    assert dispatcher.get_or_create_scenario("math").scenario_step == 3
-    assert dispatcher.get_or_create_scenario("code").scenario_step == 2
+    assert dispatcher.get_or_create_scenario("math").commit_number == 3
+    assert dispatcher.get_or_create_scenario("code").commit_number == 2
 
 
 @pytest.mark.unit
@@ -943,7 +943,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
         coordination=memory_coordination(),
     )
     runtime = dispatcher.get_or_create_scenario("chat")
-    previous = (runtime.repository.current_artifact, runtime.repository.checkpoint_artifact, runtime.scenario_step)
+    previous = (runtime.repository.current_artifact, runtime.repository.checkpoint_artifact, runtime.commit_number)
     candidate = tmp_path / "candidate"
     candidate.mkdir()
 
@@ -955,7 +955,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
     assert (
         runtime.repository.current_artifact,
         runtime.repository.checkpoint_artifact,
-        runtime.scenario_step,
+        runtime.commit_number,
     ) == previous
     assert list((tmp_path / "local").rglob("*")) == []
 

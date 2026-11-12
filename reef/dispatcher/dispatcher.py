@@ -453,13 +453,13 @@ class Dispatcher(
 
     def follow_commits(self, current: Scenario) -> Scenario:
         """``current`` as the commit history holds it: ``current`` itself, or a new instance of the scenario when a
-        control process committed past the step that ``current`` loaded.
+        control process committed past the commit number that ``current`` loaded.
 
         A process that runs no control, such as the harness service, calls it before it reads what a scenario
         serves; control's own instance is never behind its history.
         """
         history = current.store.history()
-        if not history or history[-1].step <= current.scenario_step:
+        if not history or history[-1].commit_number <= current.commit_number:
             return current
         return self.registry.reload(current.name)
 
@@ -581,13 +581,16 @@ class Dispatcher(
             return read_record(self.registry.require(scenario), record_id)
 
     def read_commits(
-        self, scenario: str, *, after_step: int = 0, limit: int = 50, record_ids: tuple[str, ...] = ()
+        self, scenario: str, *, after_commit_number: int = 0, limit: int = 50, record_ids: tuple[str, ...] = ()
     ) -> dict[str, Any]:
         from reef.scenario.history import read_commits
 
         with self.registry.lock_for(scenario):
             return read_commits(
-                self.registry.require(scenario), after_step=after_step, limit=limit, record_ids=record_ids
+                self.registry.require(scenario),
+                after_commit_number=after_commit_number,
+                limit=limit,
+                record_ids=record_ids,
             )
 
     def scenario_contract(self, scenario: str) -> dict[str, Any]:
@@ -714,11 +717,11 @@ class Dispatcher(
                 mapping[name] = {artifact_id: 100 if artifact_id == active_id else 0 for artifact_id in sorted(served)}
         return mapping
 
-    def restore(self, scenario: str, step: int) -> Mapping[str, str]:
-        """Restore the complete selection at a recorded scenario step and queue its serving startup."""
+    def restore(self, scenario: str, commit_number: int) -> Mapping[str, str]:
+        """Restore the complete selection at a recorded commit number and queue its serving startup."""
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
-            selection = current.restore(step)
+            selection = current.restore(commit_number)
             if self.publisher is not None:
                 self.publisher.publish(current, retry_failed=True)
             self.scenario_committed(current)

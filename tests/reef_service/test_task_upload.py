@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_steps import evolution_config, runtime
+from tests.support.harness_jobs import evolution_config, runtime
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import dispatcher_for
 

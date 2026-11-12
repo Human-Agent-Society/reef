@@ -19,10 +19,10 @@ from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
 from reef.record2sample import NoSamples
 from reef.train import PipelineContext, Trainer
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import TrajectorySample, trajectory_groups
 
 
@@ -184,7 +184,7 @@ def test_tttd_job_data_needs_the_tttd_sample_stage() -> None:
 @pytest.mark.unit
 def test_tttd_backend_contract_owns_its_dynamic_function_paths() -> None:
     pytest.importorskip("torch")
-    from reef.train.slime_backend.algorithm import resolve_objective_paths
+    from reef.train.slime_backend.loss_families import resolve_objective_paths
 
     args = SimpleNamespace(
         loss_family="tttd",
@@ -601,13 +601,13 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
     # The processor keeps one constant-reward group when every group is
     # constant; the objective reports that batch, whose advantages carry no
     # signal, through constant_groups_retained.
-    from reef.train.slime_backend.objectives import resolve_slime_objective
+    from reef.train.slime_backend.objectives import resolve_objective
     from reef.train.types import JobData
 
     def sample(record_id: str, reward: float) -> TrajectorySample:
         return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
-    objective = resolve_slime_objective("tttd")
+    objective = resolve_objective("tttd")
     constant = JobData(
         "b",
         tuple(

@@ -91,9 +91,9 @@ matrices on the attention and MLP projections. Reef publishes the adapter to
 SGLang after the optimizer step succeeds.
 
 The controller writes the updated PUCT archive to
-``tttd-search-state.json`` with phase ``pending``. It waits for Reef's scenario
-step to advance and for the served artifact (``served_artifact_id``) to
-change. It then records phase ``committed`` with the new scenario step and
+``tttd-search-state.json`` with phase ``pending``. It waits for Reef's commit
+number to advance and for the served artifact (``served_artifact_id``) to
+change. It then records phase ``committed`` with the new commit number and
 starts the next search step.
 
 Configuration
@@ -224,7 +224,7 @@ groups of two rollouts, one step, and thinking disabled; that run checks the
 integration path rather than the sampling budget used for the formal results.
 
 Reef writes its service log to ``work/erdos_min_overlap/reef.log``. The public
-status endpoint reports the scenario step and the served artifact
+status endpoint reports the commit number (``commit_number``) and the served artifact
 (``served_artifact_id``):
 
 .. code:: bash
@@ -233,7 +233,7 @@ status endpoint reports the scenario step and the served artifact
      -H "Authorization: Bearer reef-local" \
      http://127.0.0.1:8900/reef/status
 
-The controller returns an error when the rollout count, scenario step, served
+The controller returns an error when the rollout count, commit number, served
 artifact, or stored search identity does not match the current run. A successful
 exit confirms that Reef committed the requested number of training steps.
 
@@ -514,11 +514,11 @@ before it can use an incompatible archive.
 
 A ``pending`` state contains the evaluated children for a step that the
 controller has not observed as committed. On restart, the controller waits for
-that transaction. A ``committed`` state records the scenario step and the
+that transaction. A ``committed`` state records the commit number and the
 served artifact ID that completed it. The served artifact can change without a
 step, for example when an operator activates another artifact. On restart, the
 controller accepts the artifact that serves after Reef restores the expected
-scenario step, and records it. The controller refuses a state file of an older
+commit number, and records it. The controller refuses a state file of an older
 format, such as one that names a runtime load ID.
 
 The repository example creates a checkpoint every two versions and retains the

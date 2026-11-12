@@ -10,11 +10,11 @@ failure. Reef serves each item as an Agent Skill, so the agent opens the items t
 - Example deployment: [examples/serve.yaml](examples/serve.yaml), online on pi
 - Tests: [tests/recipes/reasoning_bank/](../../tests/recipes/reasoning_bank/)
 
-## What one step does
+## What one job does
 
 1. **Find the runs.** A trace with a task is a run when it has a score, or when its last step is a reply and not a
    tool call. Unscored traffic arrives one model call at a time. The call that ends with a reply carries the
-   transcript of the whole run, so the step skips the calls before it.
+   transcript of the whole run, so the job skips the calls before it.
 2. **Label each run.** A run with a score of at least `success_score` is a success, and a run with a lower score
    is a failure. A run without a score goes to the judge model ([prompts/judge.md](prompts/judge.md)). The judge
    reads the task, the transcript, the final reply and the client's feedback, and returns `success` or `failure`.
@@ -25,16 +25,16 @@ failure. Reef serves each item as an Agent Skill, so the agent opens the items t
 4. **Update the bank.** An item's slug is its title in lowercase ASCII words joined by hyphens. An item with a new
    slug joins the bank, and an item with a slug that the bank holds replaces that item. Past `max_items` items,
    the oldest items leave the bank.
-5. **Write the tree.** The step writes one skill per item and removes every other `skills/rb-*` skill. The other
-   files of the tree do not change. The step checks the new tree with `services.check`. When the check fails, neither
+5. **Write the tree.** The job writes one skill per item and removes every other `skills/rb-*` skill. The other
+   files of the tree do not change. The job checks the new tree with `services.check`. When the check fails, neither
    the tree nor the bank changes.
 
 A reply that is not the asked JSON skips its run. An item that carries a credential or an instruction override
-stays out of the bank, because every session reads the tree. The step's notes (`method_notes`) count the runs and
-the outcomes, name the items that the step added, replaced and dropped, and give the reason for each skip.
+stays out of the bank, because every session reads the tree. The job's notes (`method_notes`) count the runs and
+the outcomes, name the items that the job added, replaced and dropped, and give the reason for each skip.
 
 The bank is the method's state, `state/memory.json`: a list of items `{slug, title, description, content,
-outcome, step}`, oldest first. Reef commits the state at the end of each step, whether or not the step publishes a
+outcome, step}`, oldest first. Reef commits the state at the end of each job, whether or not the job publishes a
 tree.
 
 ## Memory items as skills
@@ -70,10 +70,10 @@ The settings go under `evolution.method.config`:
 | `success_score` | `1.0` | A run with at least this score is a success. A run with a lower score is a failure. |
 | `max_items_per_trace` | `3` | The most items that one run adds. |
 | `max_items` | `50` | The most items that the bank keeps. The oldest items leave first. `0` sets no limit. |
-| `max_traces_per_step` | `0` | The most runs that one step learns from, in trace order. `0` sets no limit. |
+| `max_traces_per_step` | `0` | The most runs that one job learns from, in trace order. `0` sets no limit. |
 
 Each run costs at most two model calls: one for the judge (only without a score) and one for the extractor. If you
-set `evolution.max_model_calls_per_step`, allow two calls per run. A step that runs out of calls fails.
+set `evolution.max_model_calls_per_step`, allow two calls per run. A job that runs out of calls fails.
 
 ## Deploy it
 
@@ -81,7 +81,7 @@ set `evolution.max_model_calls_per_step`, allow two calls per run. A step that r
 
 - The `pipeline` section names the inference stages. Every model call that a client sends through Reef is a
   trace, and no client has to report a score. The judge labels each run.
-- `evolution.evaluation.policy: none` runs no task. Every step whose tree passes validation publishes.
+- `evolution.evaluation.policy: none` runs no task. Every job whose tree passes validation publishes.
 - The served model judges and extracts, as in the paper.
 
 The example serves `qwen3-8b` from `http://127.0.0.1:8000`; edit the `inference` section for another model. Start
@@ -101,7 +101,7 @@ Other setups change one part of the example:
 - For a stronger judge, declare the model under `evolution.models` (`url`, `model`, `api_key_env`) and set
   `judge_model` to its name.
 - With `evaluation.policy: compare` or `floor`, Reef runs tasks on each new tree before it publishes. The bank
-  keeps every item that it learned, whether or not the tree was published, and each step proposes the whole bank
+  keeps every item that it learned, whether or not the tree was published, and each job proposes the whole bank
   again.
 
 ## Differences from the paper
@@ -116,7 +116,7 @@ Other setups change one part of the example:
 - **Screening.** The paper keeps every item. Here an item with a credential-shaped literal or an instruction
   override stays out of the bank.
 - **Inputs.** The judge and the extractor read one JSON view of the run: the task, the transcript without the
-  system prompt, the final reply, the feedback and the failure. The run of an offline step (a run) has no
+  system prompt, the final reply, the feedback and the failure. The run of an offline job (a run) has no
   transcript in its trace. Past 30,000 characters, the view loses the middle of its transcript. The paper's judge
   for web tasks also reads the final page state.
 - **Prompts.** The prompts are Reef's own and ask for JSON. Reef sends no sampling parameters, and the paper

@@ -28,7 +28,7 @@ class EvaluationSettings(Settings):
 
     Values: at most one task source is set: ``tasks`` (instructions or task
     directories), ``task_manifest`` with ``tasks_root``, or ``imported_tasks``
-    (the eval split of the scenario's imported tasks, as each step reads it);
+    (the eval split of the scenario's imported tasks, as each job reads it);
     one is required unless ``policy`` is ``none``. ``scorer`` and ``collector``
     are plugin settings (a ``package.module:Class`` reference, or a mapping
     with ``module`` and ``config``); the recipe requires a scorer unless
@@ -46,7 +46,7 @@ class EvaluationSettings(Settings):
     task_manifest: str | None = config_option(None, help="A split manifest whose eval side names the tasks.")
     tasks_root: str | None = config_option(None, help="The directory of the task manifest's task directories.")
     imported_tasks: bool = config_option(
-        False, help="Evaluate each step on the eval split of the scenario's imported tasks."
+        False, help="Evaluate each job on the eval split of the scenario's imported tasks."
     )
     scorer: str | Mapping[str, Any] | None = config_option(None, help="The TaskScorer that scores each run.")
     policy: str = config_option("compare", help="The publication policy: compare, floor or none.")

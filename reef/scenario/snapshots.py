@@ -62,9 +62,9 @@ class ScenarioSnapshots:
         self.recorded_creation_components: Mapping[str, str] | None = None
         self.creation_components_read = False
         self.creation_read_failed_at: int | None = None
-        #: The scenario step that ``served_beside`` last read, and what it returned then.
+        #: The commit number that ``served_beside`` last read, and what it returned then.
         self.served_read: tuple[int, Mapping[str, ServedBesideArtifact]] | None = None
-        #: The scenario step and current revision that ``manifests`` last read, and what it returned then.
+        #: The commit number and current revision that ``manifests`` last read, and what it returned then.
         self.manifests_read: tuple[int, str, dict[str, Mapping[str, str]]] | None = None
 
     @property
@@ -72,7 +72,7 @@ class ScenarioSnapshots:
         """The scenario's root snapshot, which the scenario was created with."""
         return self._artifacts.start
 
-    def creation_components(self, scenario_step: int, *, retry: bool = False) -> Mapping[str, str] | None:
+    def creation_components(self, commit_number: int, *, retry: bool = False) -> Mapping[str, str] | None:
         """The ``artifact_id`` of each component the creation artifact binds; ``None`` without a manifest or when it cannot be read.
 
         The creation artifact has no commit record to carry its manifest, so
@@ -82,12 +82,12 @@ class ScenarioSnapshots:
         seconds must not repeat while the remote is away.
         """
         if not self.creation_components_read:
-            if self.creation_read_failed_at == scenario_step and not retry:
+            if self.creation_read_failed_at == commit_number and not retry:
                 return None
             try:
                 manifest = self._artifacts.resolve(self.creation_artifact).components
             except ArtifactError:
-                self.creation_read_failed_at = scenario_step
+                self.creation_read_failed_at = commit_number
                 return None
             self.creation_components_read = True
             if manifest is not None:
@@ -98,7 +98,7 @@ class ScenarioSnapshots:
         """The durable commit history; empty for a store that keeps none."""
         return self._store.history() if self._store.durable else ()
 
-    def snapshot_rows(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
+    def snapshot_rows(self, commit_number: int) -> tuple[dict[str, Any], ...]:
         """List the creation, every training step, every import and every sync, newest first; activations and new
         training starts are not listed. The creation row is the scenario's root snapshot, with its ``source``.
 
@@ -106,20 +106,20 @@ class ScenarioSnapshots:
         :func:`active_record`), and ``activated`` on each row whose snapshot
         has been active at some point; the creation always has been. A step
         that made no artifact names the snapshot it ran on. Without a durable
-        log a scenario past step zero lists its creation and a ``recovery``
+        log a scenario past commit number zero lists its creation and a ``recovery``
         row for the active selection.
         """
         with self.publication_lock:
             records = self.records()
             # Without a durable log nothing names the active selection but the chain: a recovery row stands for it.
-            recovered = not records and scenario_step > 0
+            recovered = not records and commit_number > 0
             activating = [record for record in records if record.activates]
             active_id = activating[-1].snapshot.revision if activating else self._artifacts.current.revision
             activated = {self.creation_artifact.revision, active_id} | {
                 record.snapshot.revision for record in activating
             }
             creation = self.snapshot_row(
-                step=0,
+                commit_number=0,
                 snapshot=self.creation_artifact,
                 checkpoint=True,
                 recorded_at=None,
@@ -130,7 +130,7 @@ class ScenarioSnapshots:
             rows = [{**creation, "source": self.root_source.to_dict()}]
             rows.extend(
                 self.snapshot_row(
-                    step=record.step,
+                    commit_number=record.commit_number,
                     snapshot=record.snapshot,
                     checkpoint=record.checkpoint,
                     recorded_at=record.recorded_at,
@@ -149,7 +149,7 @@ class ScenarioSnapshots:
             if recovered:
                 rows.append(
                     self.snapshot_row(
-                        step=scenario_step,
+                        commit_number=commit_number,
                         snapshot=self._artifacts.current,
                         checkpoint=True,
                         recorded_at=None,
@@ -160,19 +160,19 @@ class ScenarioSnapshots:
                 )
             return tuple(reversed(rows))
 
-    def manifests(self, scenario_step: int) -> dict[str, Mapping[str, str]]:
+    def manifests(self, commit_number: int) -> dict[str, Mapping[str, str]]:
         """The ``artifact_id`` of each component, by snapshot revision, for every snapshot whose manifest is known.
 
         A training record that made a snapshot and an activation that
         published one carry their manifest; the creation's is read from the
         snapshot. Without a durable journal, the current snapshot supplies its own manifest.
-        Each ``scenario_step`` and current revision is read once.
+        Each ``commit_number`` and current revision is read once.
         """
         current_revision = self._artifacts.current.revision
-        if self.manifests_read is not None and self.manifests_read[:2] == (scenario_step, current_revision):
+        if self.manifests_read is not None and self.manifests_read[:2] == (commit_number, current_revision):
             return self.manifests_read[2]
         known: dict[str, Mapping[str, str]] = {}
-        creation = self.creation_components(scenario_step)
+        creation = self.creation_components(commit_number)
         if creation is not None:
             known[self.creation_artifact.revision] = creation
         for record in self.records():
@@ -182,10 +182,10 @@ class ScenarioSnapshots:
             current = self._artifacts.resolve(self._artifacts.current)
             if current.components is not None:
                 known[current.ref.revision] = current.components.artifact_ids(current.ref.revision)
-        self.manifests_read = (scenario_step, current_revision, known)
+        self.manifests_read = (commit_number, current_revision, known)
         return known
 
-    def active_components(self, scenario_step: int) -> Mapping[str, str] | None:
+    def active_components(self, commit_number: int) -> Mapping[str, str] | None:
         """The ``artifact_id`` of each component the active selection binds; ``None`` for a flat snapshot or when unknown."""
         record = active_record(self.records())
         if record is None:
@@ -193,10 +193,10 @@ class ScenarioSnapshots:
                 artifact = self._artifacts.resolve(self._artifacts.current)
                 manifest = artifact.components
                 return None if manifest is None else manifest.artifact_ids(artifact.ref.revision)
-            return self.creation_components(scenario_step)
+            return self.creation_components(commit_number)
         return record.artifact_ids
 
-    def artifact_parents(self, scenario_step: int, components: tuple[str, ...]) -> dict[str, str | None]:
+    def artifact_parents(self, commit_number: int, components: tuple[str, ...]) -> dict[str, str | None]:
         """The parent artifact of each output, derived from that component's training start or synced active tree.
 
         Creation and external imports have no local parent. Training follows the start that its job named
@@ -204,11 +204,11 @@ class ScenarioSnapshots:
         operations. A sync follows its previously active artifact. Storage
         commit ancestry never substitutes for these component relationships.
         """
-        active = self.bound_artifact_ids(self.creation_artifact.revision, components, scenario_step)
+        active = self.bound_artifact_ids(self.creation_artifact.revision, components, commit_number)
         starts = dict(active)
         parents: dict[str, str | None] = dict.fromkeys(active.values())
         for record in self.records():
-            bound = record.artifact_ids or self.bound_artifact_ids(record.snapshot.revision, components, scenario_step)
+            bound = record.artifact_ids or self.bound_artifact_ids(record.snapshot.revision, components, commit_number)
             changed = components if record.component is None else (record.component,)
             if record.made_artifact:
                 for name in changed:
@@ -228,7 +228,7 @@ class ScenarioSnapshots:
                 active = dict(bound)
         return parents
 
-    def artifacts(self, scenario_step: int, components: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
+    def artifacts(self, commit_number: int, components: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
         """List the artifacts of each component in ``components``, newest first, with each component's active one.
 
         Each artifact appears once, at the first retained publication that
@@ -240,16 +240,16 @@ class ScenarioSnapshots:
         import's row has ``source``: where its content was read from.
         """
         with self.publication_lock:
-            made = [row for row in self.snapshot_rows(scenario_step) if row["checkpoint"]]
-            beside = self.served_beside(scenario_step, components)
-            active = self.active_components(scenario_step) or self.bound_artifact_ids(
-                self._artifacts.current.revision, components, scenario_step
+            made = [row for row in self.snapshot_rows(commit_number) if row["checkpoint"]]
+            beside = self.served_beside(commit_number, components)
+            active = self.active_components(commit_number) or self.bound_artifact_ids(
+                self._artifacts.current.revision, components, commit_number
             )
-            activated = self.activated_artifacts(scenario_step, components)
+            activated = self.activated_artifacts(commit_number, components)
             seen: set[tuple[str, str]] = set()
             listed: list[dict[str, Any]] = []
             for row in reversed(made):
-                bound = self.bound_artifact_ids(row["snapshot"].revision, components, scenario_step)
+                bound = self.bound_artifact_ids(row["snapshot"].revision, components, commit_number)
                 for component in components:
                     artifact_id = bound.get(component)
                     if artifact_id is None or (component, artifact_id) in seen:
@@ -267,18 +267,18 @@ class ScenarioSnapshots:
                     )
             return tuple(reversed(listed))
 
-    def bound_artifact_ids(self, revision: str, components: tuple[str, ...], scenario_step: int) -> dict[str, str]:
+    def bound_artifact_ids(self, revision: str, components: tuple[str, ...], commit_number: int) -> dict[str, str]:
         """The ``artifact_id`` of each of ``components`` that the snapshot ``revision`` binds, as the records name it.
 
         ``components`` are all the components of the scenario. A snapshot with a known manifest gives its entries;
         a component that the manifest does not name is left out. Otherwise, the result is empty.
         """
-        manifest = self.manifests(scenario_step).get(revision)
+        manifest = self.manifests(commit_number).get(revision)
         if manifest is None:
             return {}
         return {name: manifest[name] for name in components if name in manifest}
 
-    def served_history(self, scenario_step: int, component: str, components: tuple[str, ...]) -> tuple[str, ...]:
+    def served_history(self, commit_number: int, component: str, components: tuple[str, ...]) -> tuple[str, ...]:
         """The artifacts of ``component`` that the active snapshots of the scenario bound, oldest first, with no two
         neighbors equal: the creation's, then each activating record's. Empty for a store without a durable history."""
         records = self.records()
@@ -287,46 +287,46 @@ class ScenarioSnapshots:
         history: list[str] = []
         revisions = (self.creation_artifact.revision, *(r.snapshot.revision for r in records if r.activates))
         for revision in revisions:
-            artifact_id = self.bound_artifact_ids(revision, components, scenario_step).get(component)
+            artifact_id = self.bound_artifact_ids(revision, components, commit_number).get(component)
             if artifact_id is not None and (not history or history[-1] != artifact_id):
                 history.append(artifact_id)
         return tuple(history)
 
-    def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedBesideArtifact]:
+    def served_beside(self, commit_number: int, components: tuple[str, ...]) -> Mapping[str, ServedBesideArtifact]:
         """The artifacts that the scenario serves beside its active selection, by ``artifact_id``.
 
         The result is the fold of the commit history. A ``"serve"`` record adds its artifact, and a
         ``"stop_serving"`` record removes it. An activation changes nothing here, so the result can hold an
-        artifact of the active selection. A store without a durable history serves none. Each ``scenario_step``
+        artifact of the active selection. A store without a durable history serves none. Each ``commit_number``
         is read once.
         """
-        if self.served_read is not None and self.served_read[0] == scenario_step:
+        if self.served_read is not None and self.served_read[0] == commit_number:
             return self.served_read[1]
         served: dict[str, ServedBesideArtifact] = {}
         for record in self.records():
             if record.operation in ("serve", "stop_serving"):
                 component = components[0] if record.component is None else record.component
                 bound = record.components or self.bound_artifact_ids(
-                    record.snapshot.revision, components, scenario_step
+                    record.snapshot.revision, components, commit_number
                 )
                 artifact_id = bound[component]
                 if record.operation == "serve":
                     served[artifact_id] = ServedBesideArtifact(component, artifact_id, ArtifactSelection(bound))
                 else:
                     served.pop(artifact_id, None)
-        self.served_read = (scenario_step, served)
+        self.served_read = (commit_number, served)
         return served
 
-    def activated_artifacts(self, scenario_step: int, components: tuple[str, ...]) -> dict[str, set[str]]:
+    def activated_artifacts(self, commit_number: int, components: tuple[str, ...]) -> dict[str, set[str]]:
         """The ``artifact_id`` values that each of ``components`` has served.
 
         These are the creation's, each activating record's, and the active ones. ``components`` are all the
         components of the scenario, so a one-component tuple means a flat scenario.
         """
         served: dict[str, set[str]] = {name: set() for name in components}
-        selections = [self.creation_components(scenario_step) or {}, self.active_components(scenario_step) or {}]
+        selections = [self.creation_components(commit_number) or {}, self.active_components(commit_number) or {}]
         selections.extend(
-            self.bound_artifact_ids(record.snapshot.revision, components, scenario_step)
+            self.bound_artifact_ids(record.snapshot.revision, components, commit_number)
             for record in self.records()
             if record.activates
         )
@@ -425,7 +425,7 @@ class ScenarioSnapshots:
     @staticmethod
     def snapshot_row(
         *,
-        step: int,
+        commit_number: int,
         snapshot: SnapshotRef,
         checkpoint: bool,
         recorded_at: float | None,
@@ -439,7 +439,7 @@ class ScenarioSnapshots:
         components: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
-            "step": step,
+            "commit_number": commit_number,
             "snapshot": snapshot,
             "checkpoint": checkpoint,
             "restorable": checkpoint,

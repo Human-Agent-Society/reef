@@ -84,7 +84,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
 
             monkeypatch.setattr(journal, "append", durable_append)
             scenario.commit(result)
-            assert scenario.scenario_step == 2
+            assert scenario.commit_number == 2
             assert scenario.trainer.state == result.state
             assert scenario.current_snapshot() == scenario.repository.backend.current() != head
             assert len(scenario.store.history()) == 2
@@ -101,7 +101,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
     try:
         scenario = restarted.get_or_create_scenario("selected-commit")
         assert scenario.trainer.state == (result.state if recovery == "retry" else previous)
-        assert scenario.scenario_step == (2 if recovery == "retry" else 1)
+        assert scenario.commit_number == (2 if recovery == "retry" else 1)
         assert scenario.current_snapshot() == scenario.repository.backend.current()
         assert len(chat.prompts) == 1
     finally:
@@ -129,7 +129,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         with monkeypatch.context() as patch:
             patch.setattr(scenario.repository.backend, "commit_snapshot", unavailable)
             scenario.commit(result)
-        assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
+        assert scenario.commit_number == 2 and scenario.trainer.state == result.state
         committed_head = scenario.current_snapshot()
         assert committed_head != old_head
         assert scenario.repository.backend.current() == old_head
@@ -153,7 +153,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
     )
     try:
         scenario = restarted.get_or_create_scenario("stale-artifact-head")
-        assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
+        assert scenario.commit_number == 2 and scenario.trainer.state == result.state
         assert scenario.current_snapshot() == scenario.repository.backend.current() == committed_head
         assert len(scenario.store.history()) == 2 and len(chat.prompts) == 1
     finally:
@@ -206,20 +206,20 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
         scenario = dispatcher.get_or_create_scenario("lost-journal-ack")
         report_once(scenario, "1")
         result = checkpoint_result(scenario)
-        commit_step = scenario.store.commit_step
+        append_commit = scenario.store.append_commit
 
         def lose_ack(**keywords):
-            commit_step(**keywords)
+            append_commit(**keywords)
             raise OSError("journal acknowledgment lost")
 
         with monkeypatch.context() as patch:
-            patch.setattr(scenario.store, "commit_step", lose_ack)
+            patch.setattr(scenario.store, "append_commit", lose_ack)
             with pytest.raises(OSError, match="acknowledgment lost"):
                 scenario.commit(result)
         committed = scenario.store.history()[-1]
         scenario.commit(result)
 
-        assert scenario.scenario_step == 2 and len(chat.prompts) == 1
+        assert scenario.commit_number == 2 and len(chat.prompts) == 1
         assert scenario.current_snapshot() == committed.snapshot
         assert scenario.repository.resolve(committed.snapshot).local_path.is_dir()
         assert len(scenario.store.history()) == 2
@@ -263,7 +263,7 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
             scenario.commit(result)
 
         committed = scenario.store.history()[-1]
-        assert scenario.scenario_step == committed.step == 2
+        assert scenario.commit_number == committed.commit_number == 2
         assert scenario.trainer.state == committed.algorithm_state == result.state
         assert scenario.current_snapshot() == committed.snapshot
         assert backend.current() == unrelated, scenario.commit_status

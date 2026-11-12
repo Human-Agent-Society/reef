@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
-from tests.support.harness_steps import build_harness_backend, harness_recipe
+from tests.support.harness_jobs import build_harness_backend, harness_recipe
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
 from reef.evaluation.harness import EvaluationWorkerPool, TaskScorer, evaluation_selection

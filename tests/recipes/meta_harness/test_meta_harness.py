@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.harness_jobs import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe, head_of
 from tests.support.harness_methods import (
     ALTERNATE,
     IMPROVED,
@@ -28,7 +29,6 @@ from tests.support.harness_methods import (
     served_runtime,
 )
 from tests.support.harness_service import backend_step, drive_job, harness_dispatcher, report_once, seed_root
-from tests.support.harness_steps import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe, head_of
 from tests.support.records import memory_records
 from tests.support.strategies import resolve_task_scorer
 from tests.support.trainers import recipe_trainer
@@ -250,7 +250,7 @@ def test_a_proposer_model_that_the_deployment_does_not_declare_is_refused(tmp_pa
     backend, _ = meta_harness_backend(tmp_path, QueueChat(), model="typo")
     with pytest.raises(ValueError, match=r"is not declared under evolution\.models"):
         request = TrainingRequest("Propose the next candidate.", "", "", "ask-1")
-        backend.prepare_step(
+        backend.prepare_job(
             JobData("demo:request:ask-1", (), request=request), HarnessState().to_json(), 0, head=head_of(backend)
         )
 

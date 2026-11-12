@@ -1,12 +1,12 @@
 """Reefine's recipe: the harness evolution recipe with Reefine's defaults, its agent and its multimodal gateway.
 
-``ReefineRecipe`` answers a person's training requests, one step per
+``ReefineRecipe`` answers a person's training requests, one job per
 request (``training_mode: manual``), with ``ReefineMethod``. It merges
 Reefine's defaults into the deployment's ``evolution`` section: the method,
 the seed beside this module, and an evaluation that runs the candidate alone
 on the deployment's tasks, scored by ``AnswerScorer``, and keeps it when every
 task meets the floor. On the health task the floor checks that the tree still
-works, not that the requested change does; the step's design and review and
+works, not that the requested change does; the job's design and review and
 the person judge that. By default, a person activates a tree that changes an
 extension (the ``activation`` rule's ``review_kinds``).
 

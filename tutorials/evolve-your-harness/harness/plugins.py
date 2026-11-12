@@ -1,8 +1,8 @@
 """The classes the serve files name: ``evolution.method`` and ``evolution.evaluation.scorer``.
 
 ``RulesMethod`` is the pi variant's method and ``NativeMethod`` the native
-variant's. A step of either one shows the served model the step's failing
-traces in one call and writes the change the model answers into the step's
+variant's. A job of either one shows the served model the job's failing
+traces in one call and writes the change the model answers into the job's
 workspace. The scorers grade a run's final answer with the grader of
 ``evolution.py``. These classes import Reef, so they live apart from
 ``evolution.py``, which ``run.py`` imports with only reef-client installed.
@@ -21,14 +21,14 @@ from reef.evaluation.harness import TaskScorer
 from reef.harness.tasks.model_binding import ModelBindingError
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import TreePatch
-from reef.train.harness_backend import Method, StepContext, Trace
+from reef.train.harness_backend import Method, MethodJob, Trace
 
 from . import evolution, native_evolution
 
-#: The prompt of ``RulesMethod``: ``$traces`` and ``$rules`` take the step's values.
+#: The prompt of ``RulesMethod``: ``$traces`` and ``$rules`` take the job's values.
 RULES_PROMPT = Template(Path(__file__).with_name("rules_prompt.md").read_text(encoding="utf-8"))
-#: The limits of the one model call of a step. A stalled endpoint holds the training thread for the whole timeout
-#: before the step skips. Raise both for a local thinking model, which spends its reply budget on reasoning first.
+#: The limits of the one model call of a job. A stalled endpoint holds the training thread for the whole timeout
+#: before the job skips. Raise both for a local thinking model, which spends its reply budget on reasoning first.
 MAX_TOKENS = 2048
 TIMEOUT_S = 120.0
 #: The text of one fenced block in a reply.
@@ -53,20 +53,20 @@ def failures_text(traces: Sequence[Trace]) -> str:
 
 
 class RulesMethod(Method):
-    """The pi variant's method: one model call reads the step's failing traces and rewrites ``rules.md``.
+    """The pi variant's method: one model call reads the job's failing traces and rewrites ``rules.md``.
 
     Values: the method holds no state, so every instance behaves the same.
     Purpose: ``serve.yaml`` and ``deployment.yaml`` name it in
-    ``evolution.method``; the harness backend calls ``step`` once per step.
+    ``evolution.method``; the harness backend calls ``run`` once per job.
 
-    ``step`` shows the served model the failing traces and the current
+    ``run`` shows the served model the failing traces and the current
     ``rules.md``. The rules the model answers become the new ``rules.md``.
-    A step without a failing trace, or whose model call fails, leaves the
-    tree unchanged: the step skips, and its summary says why.
+    A job without a failing trace, or whose model call fails, leaves the
+    tree unchanged: the job skips, and its summary says why.
     """
 
-    def step(self, context: StepContext) -> None:
-        workspace, services = context.workspace, context.services
+    def run(self, job: MethodJob) -> None:
+        workspace, services = job.workspace, job.services
         traces = failing(workspace.traces())
         if not traces:
             workspace.write_output("no failing trace to learn from")
@@ -93,22 +93,22 @@ class RulesMethod(Method):
 
 
 class NativeMethod(Method):
-    """The native variant's method: one model call turns the step's failing traces into one change of the loop.
+    """The native variant's method: one model call turns the job's failing traces into one change of the loop.
 
     Values: the method holds no state, so every instance behaves the same.
     Purpose: ``serve-native.yaml`` names it in ``evolution.method``; the
-    harness backend calls ``step`` once per step.
+    harness backend calls ``run`` once per job.
 
-    ``step`` shows the served model the failing traces and the tree's skill
+    ``run`` shows the served model the failing traces and the tree's skill
     and native files. The change the model answers is a skill, a native tool,
     a native hook, a native agent or the main graph (``native_evolution``),
-    and it is written into the tree. A step without a failing trace, whose
+    and it is written into the tree. A job without a failing trace, whose
     model call fails, or whose reply holds no usable change leaves the tree
-    unchanged: the step skips, and its summary says why.
+    unchanged: the job skips, and its summary says why.
     """
 
-    def step(self, context: StepContext) -> None:
-        workspace, services = context.workspace, context.services
+    def run(self, job: MethodJob) -> None:
+        workspace, services = job.workspace, job.services
         traces = failing(workspace.traces())
         if not traces:
             workspace.write_output("no failing trace to learn from")

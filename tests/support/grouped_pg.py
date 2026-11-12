@@ -9,7 +9,7 @@ uses them — the grouping machinery they exercise (group keys, slots, the
 runtime) IS production code, and these suites are what keep it pinned.
 
 ``GROUPED_PG_OBJECTIVE`` is the dotted ``module:Objective`` spelling the
-resolver (``reef.train.slime_backend.objectives.resolve_slime_objective``) accepts, so tests exercise
+resolver (``reef.train.slime_backend.objectives.resolve_objective``) accepts, so tests exercise
 the same custom-objective path a reader's package would.
 """
 
@@ -25,10 +25,10 @@ from reef.pipeline_context import PipelineContext
 from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import TrainingSignal
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.objectives import SlimeObjective
+from reef.train.slime_backend.schedule import next_steps
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, Sample, TrajectorySample, trajectory_groups
 
 GROUPED_PG_OBJECTIVE = "tests.support.grouped_pg:GroupedPolicyObjective"

@@ -34,8 +34,8 @@ def same_commit(left: CommitRecord, right: CommitRecord) -> bool:
 class CommitHistory(ABC):
     """The ordered commits of one scenario generation.
 
-    Values: ``records()`` is a tuple of ``CommitRecord`` whose steps strictly
-    increase, so each step occurs at most once. Steps need not be consecutive;
+    Values: ``records()`` is a tuple of ``CommitRecord`` whose commit numbers strictly
+    increase, so each commit number occurs at most once. Commit numbers need not be consecutive;
     ``CommitHistoryScenarioStore.recover`` rejects a gap after a checkpoint.
     The history does not check which scenario a record names; the scenario
     store does. ``label`` names where the history is kept, and ``durable`` is
@@ -46,14 +46,14 @@ class CommitHistory(ABC):
 
     Operations, for a history whose records are ``H`` before the call:
 
-    - ``append(r)``: if ``e`` in ``H`` has ``e.step == r.step``, the call does
+    - ``append(r)``: if ``e`` in ``H`` has ``e.commit_number == r.commit_number``, the call does
       nothing when ``same_commit(e, r)`` and raises ``CommitHistoryError``
-      otherwise. If ``r.step`` is below the last step of ``H``, it raises
+      otherwise. If ``r.commit_number`` is below the last commit number of ``H``, it raises
       ``CommitHistoryError``. Otherwise ``records()`` is ``(*H, r)`` afterwards.
     - ``locked()``: no other session or process appends while the block runs.
-    - ``training_run_position()`` is ``(s, n)``: ``s`` is the step of the last
+    - ``training_run_position()`` is ``(s, n)``: ``s`` is the commit number of the last
       ``"train_from"`` record in ``H``, or 0 when there is none, and ``n`` is
-      the number of training records in ``H`` with a step above ``s``. An
+      the number of training records in ``H`` with a commit number above ``s``. An
       activation does not start a new training run.
     """
 
@@ -69,7 +69,7 @@ class CommitHistory(ABC):
 
     @abstractmethod
     def records(self) -> tuple[CommitRecord, ...]:
-        """Every commit in increasing step order."""
+        """Every commit in increasing commit number order."""
 
     @abstractmethod
     def append(self, record: CommitRecord) -> None:
@@ -80,14 +80,14 @@ class CommitHistory(ABC):
         """Serialize a read-check-append sequence with other sessions and processes."""
 
     def training_run_position(self) -> tuple[int, int]:
-        """Return the step of the latest new training start and the number of training steps after it."""
+        """Return the commit number of the latest new training start and the number of training commits after it."""
         run_segment = 0
         run_step = 0
         for record in self.records():
             if record.operation == "train_from":
-                run_segment = record.step
+                run_segment = record.commit_number
                 run_step = 0
-            elif record.operation == "training" and record.step > run_segment:
+            elif record.operation == "training" and record.commit_number > run_segment:
                 run_step += 1
         return run_segment, run_step
 
@@ -108,9 +108,9 @@ class CommitHistoryScenarioStore(ScenarioStore):
     scenario's state; the bundled storages keep the records as record items, and the rest in one database,
     ``database``, which the session closes with itself. Every record in the
     history names ``scenario``; a read that finds another name raises
-    ``ReefError``. ``initial_step`` is a non-negative step for an existing
-    scenario constructed at a saved step. The current step is the last step in
-    the history, or ``initial_step`` when the history is empty. ``durable`` is
+    ``ReefError``. ``initial_commit_number`` is a non-negative commit number for an existing
+    scenario constructed at a saved commit. The current commit number is the last one in
+    the history, or ``initial_commit_number`` when the history is empty. ``durable`` is
     ``commit_history.durable``. After ``close``, every operation raises
     ``RuntimeError``.
 
@@ -128,12 +128,16 @@ class CommitHistoryScenarioStore(ScenarioStore):
         training_state: TrainingState,
         evaluations: EvaluationStore,
         database: Closeable | None = None,
-        initial_step: int = 0,
+        initial_commit_number: int = 0,
     ) -> None:
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
-        if not isinstance(initial_step, int) or isinstance(initial_step, bool) or initial_step < 0:
-            raise ValueError("initial_step must be a non-negative integer")
+        if (
+            not isinstance(initial_commit_number, int)
+            or isinstance(initial_commit_number, bool)
+            or initial_commit_number < 0
+        ):
+            raise ValueError("initial_commit_number must be a non-negative integer")
         self._scenario = scenario
         self._records = records
         self._database = database
@@ -141,11 +145,11 @@ class CommitHistoryScenarioStore(ScenarioStore):
         self._training_state = training_state
         self._evaluations = evaluations
         self._commit_history = commit_history
-        self._initial_step = initial_step
+        self._initial_commit_number = initial_commit_number
         self._read_history: tuple[CommitRecord, ...] = ()
         self._cached_history: tuple[CommitRecord, ...] = ()
         self._snapshots: CommitSnapshots | None = None
-        self._commits_by_step: dict[int, CommitRecord] = {}
+        self._commits_by_number: dict[int, CommitRecord] = {}
         self._lock = RLock()
         self._closed = False
 
@@ -189,7 +193,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
             self._snapshots = snapshots
             self._read_history = ()
             self._cached_history = ()
-            self._commits_by_step.clear()
+            self._commits_by_number.clear()
 
     def history(self) -> tuple[CommitRecord, ...]:
         # Commits are append-only, so a read needs no lock against other writers.
@@ -202,26 +206,34 @@ class CommitHistoryScenarioStore(ScenarioStore):
             self._ensure_open()
             return self._commit_history.training_run_position()
 
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
+    def append_commit(self, *, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
         with self._locked():
-            if not isinstance(expected_step, int) or isinstance(expected_step, bool) or expected_step < 0:
-                raise ValueError("expected_step must be a non-negative integer")
+            if (
+                not isinstance(expected_commit_number, int)
+                or isinstance(expected_commit_number, bool)
+                or expected_commit_number < 0
+            ):
+                raise ValueError("expected_commit_number must be a non-negative integer")
             if commit.scenario != self._scenario:
                 raise ScenarioStoreConflictError(
                     f"commit belongs to scenario {commit.scenario!r}, not {self._scenario!r}"
                 )
-            if commit.step != expected_step + 1:
-                raise ScenarioStoreConflictError(f"commit step must be {expected_step + 1}, got {commit.step}")
+            if commit.commit_number != expected_commit_number + 1:
+                raise ScenarioStoreConflictError(
+                    f"commit number must be {expected_commit_number + 1}, got {commit.commit_number}"
+                )
             history = self._history()
-            existing = self._commits_by_step.get(commit.step)
+            existing = self._commits_by_number.get(commit.commit_number)
             if existing is not None:
                 if not same_commit(existing, commit):
-                    raise ScenarioStoreConflictError(f"commit step {commit.step} conflicts with its existing record")
+                    raise ScenarioStoreConflictError(
+                        f"commit {commit.commit_number} conflicts with its existing record"
+                    )
                 return existing
-            current_step = history[-1].step if history else self._initial_step
-            if expected_step != current_step:
+            current_commit_number = history[-1].commit_number if history else self._initial_commit_number
+            if expected_commit_number != current_commit_number:
                 raise ScenarioStoreConflictError(
-                    f"expected scenario step {expected_step}, current step is {current_step}"
+                    f"expected commit number {expected_commit_number}, current commit number is {current_commit_number}"
                 )
             self._commit_history.append(commit)
             return commit
@@ -233,33 +245,33 @@ class CommitHistoryScenarioStore(ScenarioStore):
                     raise ReefError(f"checkpoint belongs to scenario {checkpoint.scenario!r}, not {self._scenario!r}")
                 if not checkpoint.checkpoint:
                     raise ReefError("recovery requires a checkpoint commit")
-            checkpoint_step = 0 if checkpoint is None else checkpoint.step
+            checkpoint_commit_number = 0 if checkpoint is None else checkpoint.commit_number
             records = self._history()
             history_label = self._commit_history.label
-            applicable = [record for record in records if record.step > checkpoint_step]
+            applicable = [record for record in records if record.commit_number > checkpoint_commit_number]
             for previous, current in itertools.pairwise(applicable):
-                if current.step != previous.step + 1:
+                if current.commit_number != previous.commit_number + 1:
                     raise ReefError(
-                        f"commit history {history_label} jumps from step {previous.step} to {current.step}; "
+                        f"commit history {history_label} jumps from commit {previous.commit_number} to {current.commit_number}; "
                         "the history is corrupt"
                     )
-            if applicable and applicable[0].step != checkpoint_step + 1:
+            if applicable and applicable[0].commit_number != checkpoint_commit_number + 1:
                 raise ReefError(
-                    f"commit history {history_label} resumes at step {applicable[0].step}, "
-                    f"expected {checkpoint_step + 1} after the checkpointed step "
-                    f"{checkpoint_step}; the history is corrupt"
+                    f"commit history {history_label} resumes at commit {applicable[0].commit_number}, "
+                    f"expected {checkpoint_commit_number + 1} after the checkpointed commit "
+                    f"{checkpoint_commit_number}; the history is corrupt"
                 )
-            last_step = records[-1].step if records else 0
-            if checkpoint is not None and checkpoint_step > last_step:
+            last_commit_number = records[-1].commit_number if records else 0
+            if checkpoint is not None and checkpoint_commit_number > last_commit_number:
                 head = checkpoint
                 self._commit_history.append(head)
             elif applicable:
                 head = applicable[-1]
-            elif records and last_step == checkpoint_step:
+            elif records and last_commit_number == checkpoint_commit_number:
                 head = records[-1]
             else:
                 head = None
-            self._initial_step = checkpoint_step if head is None else head.step
+            self._initial_commit_number = checkpoint_commit_number if head is None else head.commit_number
             return head
 
     def close(self) -> None:
@@ -289,7 +301,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         previous = self._read_history
         appended = len(previous) <= len(records) and (not previous or records[len(previous) - 1] is previous[-1])
         if not appended:
-            self._commits_by_step.clear()
+            self._commits_by_number.clear()
         for record in records[len(previous) if appended else 0 :]:
             if record.scenario != self._scenario:
                 raise ReefError(
@@ -297,7 +309,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
                     f"not {self._scenario!r}"
                 )
         located = records if self._snapshots is None else self._snapshots.locate(records)
-        self._commits_by_step.update({record.step: record for record in located})
+        self._commits_by_number.update({record.commit_number: record for record in located})
         self._read_history = records
         self._cached_history = located
         return located

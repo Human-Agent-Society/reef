@@ -30,11 +30,11 @@ from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.record2sample.distill import student_call
 from reef.sample2job import DistillJobData
 from reef.train import PipelineContext
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData
 
 QUESTION = "What is the boiling point of water?"

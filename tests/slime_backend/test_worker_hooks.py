@@ -70,14 +70,14 @@ def test_external_batch_and_step_size_hooks_are_idempotent(monkeypatch: pytest.M
         loss_function=lambda _args, batch, _count, step_size, _logits: (batch, step_size),
     )
 
-    from reef.train.slime_backend.loss_families import LOSS_FAMILIES
+    from reef.train.slime_backend.loss_families import resolve_loss_family
 
     # The forwarded keys come from the family's declaration alone: the spec
     # resolved from loss_family (the direct-start_bridge fallback) unioned
     # with the driver-stamped reef_external_batch_keys.
     args = types.SimpleNamespace(
         loss_family="openclawrl",
-        reef_external_batch_keys=LOSS_FAMILIES.resolve("openclawrl").external_batch_keys,
+        reef_external_batch_keys=resolve_loss_family("openclawrl").external_batch_keys,
     )
     worker_hooks._install_external_batch_keys(args)
     wrapped_get_batch = model.get_batch
@@ -138,11 +138,11 @@ def test_metric_and_rollout_logging_hooks_keep_reef_fields_local(monkeypatch: py
         "topk_log_probs": [torch.tensor([[-0.2]])],
         "producing_artifact_ids": ["artifact-4"],
     }
-    from reef.train.slime_backend.loss_families import LOSS_FAMILIES
+    from reef.train.slime_backend.loss_families import resolve_loss_family
 
     log_args = types.SimpleNamespace(
         loss_family="openclawrl",
-        reef_rollout_log_skip_keys=LOSS_FAMILIES.resolve("openclawrl").rollout_log_skip_keys,
+        reef_rollout_log_skip_keys=resolve_loss_family("openclawrl").rollout_log_skip_keys,
     )
     assert data.log_rollout_data(3, log_args, values) == "stored"
     assert "topk_log_probs" not in captured[0]

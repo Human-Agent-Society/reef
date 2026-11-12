@@ -11,8 +11,8 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import COMPONENT, TreeArtifacts, changed_rules, harness_backend, harness_recipe
 from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher, seed_root
-from tests.support.harness_steps import COMPONENT, TreeArtifacts, changed_rules, harness_backend, harness_recipe
 from tests.support.records import memory_records
 from tests.support.samples_service import make_samples
 from tests.support.trainers import recipe_trainer
@@ -78,7 +78,7 @@ def answered(workspace: Workspace, patch: TreePatch, **output) -> None:
 def request_rows(scenario) -> list[dict]:
     """The committed rows that answered a request, oldest first."""
     rows = [row for row in catalog(scenario) if row.get("metrics", {}).get("training_request")]
-    return sorted(rows, key=lambda row: row["step"])
+    return sorted(rows, key=lambda row: row["commit_number"])
 
 
 async def committed(scenario: Scenario, count: int, seconds: float = 30.0) -> list[dict]:

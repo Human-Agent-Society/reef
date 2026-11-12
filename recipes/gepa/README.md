@@ -27,7 +27,7 @@ pipeline:
     config: {job_samples: 3}
 ```
 
-A step reads the traces of the reports that close its batch, so its minibatch
+A job reads the traces of the reports that close its batch, so its minibatch
 holds at most `job_samples` traces. Set `job_samples` to `minibatch_size`.
 
 The reflection prompt is upstream's prompt word for word, so it carries the
@@ -40,7 +40,7 @@ before Reef serves it.
 
 ```text
 gepa/
-  method.py             GEPA: its settings, the Feedback hook, and one GEPA iteration per step
+  method.py             GEPA: its settings, the Feedback hook, and one GEPA iteration per job
   archive.py            candidates, Pareto fronts, seeded sampling, and search budget, kept in state/archive.json
   components.py         the tree's evolvable files as named prompt texts
   reflection.py         attributed upstream reflection prompt rendering and extractor

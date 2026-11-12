@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from reef_terminus.runner import trial_record
-from tests.support.harness_steps import build_harness_backend
+from tests.support.harness_jobs import build_harness_backend
 
 from recipes.beta.reefine import ReefineMethod, ReefineRecipe
 from recipes.beta.reefine.recipe import SEED_DIRECTORY

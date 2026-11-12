@@ -342,7 +342,7 @@ class CommittingPipeline(TrainingPipeline):
         step = len(self.session.history())
         commit = CommitRecord(
             scenario="tasks",
-            step=step + 1,
+            commit_number=step + 1,
             snapshot=SnapshotRef(f"release:{step + 1}", "base"),
             checkpoint=True,
             algorithm_state={},
@@ -351,7 +351,7 @@ class CommittingPipeline(TrainingPipeline):
             consumed_ids=consumed,
             recorded_at=1000.0 + step,
         )
-        self.session.commit_step(expected_step=step, commit=commit)
+        self.session.append_commit(expected_commit_number=step, commit=commit)
         return consumed
 
 
@@ -638,11 +638,11 @@ def test_a_restart_hands_out_the_saved_tasks_that_did_not_train_without_generati
     session.tasks.open("generated-tasks").write_document(
         key="rollout/harbor-00000-000", document=TaskRolloutResult("harbor-00000-000", (1.0, 0.0)).document()
     )
-    session.commit_step(
-        expected_step=0,
+    session.append_commit(
+        expected_commit_number=0,
         commit=CommitRecord(
             scenario="tasks",
-            step=1,
+            commit_number=1,
             snapshot=SnapshotRef("release:1", "base"),
             checkpoint=True,
             algorithm_state={},

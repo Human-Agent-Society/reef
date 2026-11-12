@@ -25,12 +25,12 @@ from reef.recipe.sft import SFTJobData, SFTRecipe, SFTSamples, SFTSettings
 from reef.sample2job import DistillJobData
 from reef.storage.data import NewItem
 from reef.train import PipelineContext
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.objectives import SftObjective, resolve_slime_objective
+from reef.train.slime_backend.objectives import SftObjective, resolve_objective
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.slime_backend.sft import SftAlgorithm
 
 GENERATION_PROMPT = 900
@@ -343,7 +343,7 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
     assert recipe.name == "sft"
     assert recipe.report_type is TeacherContextReport
     assert SFTRecipe.default_parameters() == {"trajectory": {"objective": "sft"}}
-    assert resolve_slime_objective("sft").loss_family == "sft"
+    assert resolve_objective("sft").loss_family == "sft"
     assert SftObjective.rollout_unit == "sample"
     pipeline = recipe.stages().build(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SFTSamples)
@@ -379,7 +379,7 @@ def test_objective_trains_every_batch_without_advantages_and_allows_several_epoc
     assert signal.metrics == {"steps": 3, "samples": 1}
     SftObjective().validate_scheduling(StepScheduling(epochs=3))
     # Another recipe selects the objective for a job by its name.
-    assert isinstance(resolve_slime_objective("sft"), SftObjective)
+    assert isinstance(resolve_objective("sft"), SftObjective)
 
 
 @pytest.mark.unit

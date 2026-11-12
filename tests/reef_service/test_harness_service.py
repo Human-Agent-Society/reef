@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import PI_SEED, harness_recipe
 from tests.support.harness_service import harness_repository
-from tests.support.harness_steps import PI_SEED, harness_recipe
 
 import reef.service.harness_imports as harness_imports
 from reef.dispatcher import Dispatcher

@@ -48,11 +48,11 @@ from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 from reef.train import ComponentTrainer, PipelineContext, Trainer, TrainingPipeline
-from reef.train.algos.schedule import StepScheduling
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.trainer import PendingTrainingResult
 from reef.train.trainer_builder import SpecTrainerBuilder, TrainerSpec
 from reef.train.types import JobData, PreparedCommit, TrainingCommit
@@ -109,11 +109,11 @@ def finish(trainer: Trainer) -> None:
 def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> None:
     """Append ``prepared`` to the commit history as training step ``step``, as the scenario committer does, so the
     sample store counts the samples that the step trained."""
-    session.commit_step(
-        expected_step=step - 1,
+    session.append_commit(
+        expected_commit_number=step - 1,
         commit=CommitRecord(
             scenario="math",
-            step=step,
+            commit_number=step,
             snapshot=SnapshotRef(f"release:{step}", "base"),
             checkpoint=True,
             algorithm_state=prepared.algorithm_state,

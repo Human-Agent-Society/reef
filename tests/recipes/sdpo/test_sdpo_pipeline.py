@@ -28,7 +28,7 @@ from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill.algorithm import settings_from_args
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.objectives import resolve_objective
 from reef.train.types import JobData
 
 QUESTION = [{"role": "user", "content": "What is the boiling point of water?"}]
@@ -263,7 +263,7 @@ def recipe_from(config: Mapping[str, Any]) -> SDPORecipe:
 def test_sdpo_recipe_trains_samples_from_the_paper_grid() -> None:
     recipe = recipe_from({})
     assert recipe.report_type is SDPOReport
-    assert resolve_slime_objective(recipe.default_parameters()["trajectory"]["objective"]).rollout_unit == "sample"
+    assert resolve_objective(recipe.default_parameters()["trajectory"]["objective"]).rollout_unit == "sample"
     pipeline = recipe.stages().build(PipelineContext("science", SDPOReport))
     record2sample, sample2job = pipeline.record2sample, pipeline.sample2job
     assert isinstance(record2sample, SDPOSamples)
