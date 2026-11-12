@@ -354,8 +354,8 @@ Method
 
 The learning algorithm itself. A recipe is the object that binds one method to a
 scenario; ``HarnessEvolutionRecipe`` is one mechanism running many possible
-methods. Each is a ``Method`` whose ``step`` edits the harness tree in a
-step's workspace, with a scorer when its evaluation runs tasks.
+methods. Each is a ``Method`` whose ``run`` edits the harness tree in a
+job's workspace, with a scorer when its evaluation runs tasks.
 
 Adapter
 -------

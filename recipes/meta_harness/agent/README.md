@@ -1,17 +1,17 @@
 # Meta-Harness with a coding agent as the proposer
 
-This folder is a method made of prompts (`reef.train.harness_backend:AgentMethod`). Each step, the deployment's
+This folder is a method made of prompts (`reef.train.harness_backend:AgentMethod`). In each job, the deployment's
 coding agent reads the search's history as files, branches from any candidate, writes one complete tree in
 `harness/`, and checks and scores it through Reef's tools. This is the upstream Meta-Harness proposer: a coding
 agent with the filesystem of the search. `recipes.meta_harness:MetaHarness` is the same search with one model call
-per step, which sees an excerpt of the history in its prompt.
+per job, which sees an excerpt of the history in its prompt.
 
-`START.md` is the prompt of every step. The search keeps its state in the history, so the folder has no
-`RESUME.md`. Start the steps and select as for `MetaHarness`: a training request starts each step, and the
+`START.md` is the prompt of every job. The search keeps its state in the history, so the folder has no
+`RESUME.md`. Start the jobs and select as for `MetaHarness`: a training request starts each job, and the
 `compare` policy on means selects:
 
 ```yaml
-training_mode: manual            # each POST /reef/train runs one step
+training_mode: manual            # each POST /reef/train runs one job
 evolution:
   method:
     module: reef.train.harness_backend:AgentMethod

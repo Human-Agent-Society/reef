@@ -72,14 +72,14 @@ serve.yaml carries the endpoint (`inference.upstream-url: http://127.0.0.1:8000`
 
 ## The method
 
-A harness evolution method is a `Method` subclass that implements `step(context)`, which runs once per evolve step. `context.workspace` is the step's directory: `workspace.harness` holds the served tree, and the tree the method leaves there is the step's candidate. `context.services` are the services Reef runs for the method, such as model calls. `RulesMethod.step` in `harness/plugins.py` is the whole method of the pi variant:
+A harness evolution method is a `Method` subclass that implements `run(job)`, which runs once for each evolve job. `job.workspace` is the job's directory: `workspace.harness` holds the served tree, and the tree the method leaves there is the job's candidate. `job.services` are the services Reef runs for the method, such as model calls. `RulesMethod.run` in `harness/plugins.py` is the whole method of the pi variant:
 
-1. `workspace.traces()` reads the step's traces, each with its task, the agent's reply, its score and the report's feedback; the method keeps the failing ones (score below 1.0). `workspace.request()` is the person's request on a step that answers one.
-2. One call through `services.models.served` asks the served model to rewrite `rules.md`. The prompt is `harness/rules_prompt.md`. The call counts against the step's model-call budget and is kept in the step's record.
+1. `workspace.traces()` reads the job's traces, each with its task, the agent's reply, its score and the report's feedback; the method keeps the failing ones (score below 1.0). `workspace.request()` is the person's request on a job that answers one.
+2. One call through `services.models.served` asks the served model to rewrite `rules.md`. The prompt is `harness/rules_prompt.md`. The call counts against the job's model-call budget and is kept in the job's record.
 3. `workspace.write_tree(...)` leaves the tree with the new `rules.md`. The backend then checks the tree and runs the evaluation.
-4. `workspace.write_output(...)` says what the step did: the summary is text for people, and the notes are JSON for the commit metrics.
+4. `workspace.write_output(...)` says what the job did: the summary is text for people, and the notes are JSON for the commit metrics.
 
-A step that leaves the tree unchanged is skipped, and its `method_summary` metric says why: no failing trace, a failed model call, or an empty reply. `NativeMethod` follows the same steps with the prompt in `harness/native_prompt.md`, and its reply becomes one file of the native loop.
+A job that leaves the tree unchanged is skipped, and its `method_summary` metric says why: no failing trace, a failed model call, or an empty reply. `NativeMethod` follows the same steps with the prompt in `harness/native_prompt.md`, and its reply becomes one file of the native loop.
 
 ## Worker execution
 

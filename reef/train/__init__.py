@@ -37,7 +37,7 @@ packages.
 
 from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
-from reef.train.backend import PreparedStep
+from reef.train.backend import PreparedHarnessJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import JobData, Sample, TaskSample, TrainingCommit, TrajectorySample
@@ -46,7 +46,7 @@ __all__ = [
     "ComponentTrainer",
     "JobData",
     "PipelineContext",
-    "PreparedStep",
+    "PreparedHarnessJob",
     "Sample",
     "Sample2Job",
     "TaskSample",

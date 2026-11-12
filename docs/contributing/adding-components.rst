@@ -90,8 +90,8 @@ Implementation
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
 
-- Add method tests under ``tests/recipes/<name>/``. Run a step as the trainer
-  does with ``backend_step`` in ``tests/support/harness_service.py``, or call ``step``
+- Add method tests under ``tests/recipes/<name>/``. Run a job as the trainer
+  does with ``backend_step`` in ``tests/support/harness_service.py``, or call ``run``
   on a workspace from ``Workspace.create`` with a fake model binding.
 - Put runnable deployments under ``recipes/<name>/examples/``. The method's
   ``README.md`` says what it does, how it uses the workspace, and where it

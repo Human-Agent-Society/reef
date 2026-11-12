@@ -20,7 +20,7 @@ The work directory resumes: the scenario's commit history, which carries the
 method's ``archive.json``, the harness history under ``harness/``, and the
 checkpoints survive a restart. Each round reads the archive from the latest
 commit, settles it from the history, and draws the iteration's plan exactly as
-the method will (``archive_for_step``, ``Archive.plan``), so the problems it
+the method will (``archive_for_job``, ``Archive.plan``), so the problems it
 sends are the minibatch GEPA's order names. ``--dry-run`` boots the recipe and
 prints the plan without a model call.
 """
@@ -50,7 +50,7 @@ from harness.heldout import CheckpointedEvaluator
 from recipes.gepa import GEPA
 from recipes.gepa.archive import Archive
 from recipes.gepa.components import texts_of
-from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
+from recipes.gepa.method import ARCHIVE_FILE, archive_for_job
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
@@ -389,7 +389,7 @@ def committed_archive(service: RunService, tasks: Sequence[str], served: Harness
     """The archive as the next step starts from it: the latest commit's, settled from the history, current with
     ``served``."""
     state = service.committed_state()
-    return archive_for_step(
+    return archive_for_job(
         state.method_files.get(ARCHIVE_FILE),
         service.history(),
         tasks,

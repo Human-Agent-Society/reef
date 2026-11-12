@@ -1,7 +1,7 @@
 """Worker sizing is generic; only component capability checks know the role."""
 
 import pytest
-from tests.support.harness_steps import evolution_config
+from tests.support.harness_jobs import evolution_config
 from tests.support.strategies import resolve_task_scorer
 
 from reef.evaluation.harness import evaluation_selection

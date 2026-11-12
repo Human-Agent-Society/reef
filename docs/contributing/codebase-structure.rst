@@ -227,8 +227,8 @@ In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
 ``JobLoop`` and the committed ``JobLoopState``;
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
-definitions; and ``backend.py`` holds ``PreparedStep`` and the committed
-snapshots that a harness step reads its head from. ``train/slime_backend/component.py`` and
+definitions; and ``backend.py`` holds ``PreparedHarnessJob`` and the committed
+snapshots that a harness job reads its head from. ``train/slime_backend/component.py`` and
 ``train/tinker_backend/component.py`` supply the Slime and Tinker training
 components, and each ``launch.py`` supplies its deployment definition and
 runtime factory. Both components render each sample that has no tokens with
@@ -346,17 +346,17 @@ The extension points those packages expose are in `Python API
   evaluation and release are Reef's, shared with weight training; evolve and
   sync are the harness's own. ``reef/harness/tree/`` holds the tree that
   every part reads, and ``reef/train/harness_backend/backend.py`` runs one
-  step through evolve, evaluation and release. ``component.py`` is the
-  ``harness`` training component: it runs each step as one training job, in
+  job through evolve, evaluation and release. ``component.py`` is the
+  ``harness`` training component: it runs each job in
   the training service, and keeps the harness state after each job in the
   job's outcome.
 
   - Data: the training pipeline below turns the agent's recorded calls,
-    their reports and the uploaded tasks into a step's job data. The harness
+    their reports and the uploaded tasks into a job's data. The harness
     backend only reads job data.
-  - Evolve: ``HarnessBackend.propose`` in ``backend.py`` makes the step's
+  - Evolve: ``HarnessBackend.propose`` in ``backend.py`` makes the job's
     candidate. The backend holds the deployment's ``Method``; ``propose``
-    calls ``Method.step`` once in the step's workspace (``workspace.py``)
+    calls ``Method.run`` once in the job's workspace (``workspace.py``)
     and reads back the tree. ``contract.py`` is the method contract.
     ``agent/`` runs the deployment's coding agent for a method
     (``evolution.agent``, ``AgentMethod``, ``protocol.md``). It starts the
@@ -368,7 +368,7 @@ The extension points those packages expose are in `Python API
     ``decide``). ``reef/evaluation/harness/evaluator.py`` scores trees by
     running tasks, with the history as the score cache, and ``policy.py``
     decides.
-  - Release: the harness backend turns a selected tree into the step's
+  - Release: the harness backend turns a selected tree into the job's
     snapshot, and the harness component names the parts that it changes from
     the job's start (``TrainingComponent.changed_parts``, which the job loop
     puts in ``changed_kinds``). The scenario

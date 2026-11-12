@@ -91,8 +91,8 @@ Two other extension points have separate names and purposes:
   takes it as ``job_loop`` (see `Training jobs and components`_), and a
   trainer without one trains nothing. Every training step is a job of a
   training component; the harness recipe's ``HarnessTrainingComponent``
-  (``reef.train.harness_backend.component``) runs each harness step's
-  ``HarnessBackend`` as one job, in the training service.
+  (``reef.train.harness_backend.component``) runs each harness job on a
+  ``HarnessBackend``, in the training service.
   The trainer's job size is its sample-to-job stage's ``job_samples``.
 - ``reef.inference.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
@@ -1730,8 +1730,8 @@ Harness method
 --------------
 
 This section lists the harness method API. `Write a harness method
-<../developer-guide/write-a-harness-method.rst>`__ explains the step, the
-plugin settings (``from_config`` and ``PluginSettings``), and when a step is
+<../developer-guide/write-a-harness-method.rst>`__ explains the job, the
+plugin settings (``from_config`` and ``PluginSettings``), and when a job is
 skipped or fails.
 
 .. code:: python
@@ -1741,11 +1741,11 @@ skipped or fails.
    from reef.harness.adapters.parts import Format, Part, TreeLayout
    from reef.harness.tree import HarnessTree, TreePatch
    from reef.train.harness_backend import (
-       AgentMethod, AgentOutcome, Method, ModelCalls, Services, StepContext, Trace, Workspace,
+       AgentMethod, AgentOutcome, Method, MethodJob, ModelCalls, Services, Trace, Workspace,
    )
 
    class MyMethod(Method):
-       def step(self, context: StepContext) -> None: ...
+       def run(self, job: MethodJob) -> None: ...
 
    class MyScorer(TaskScorer):
        def score(self, task, result) -> float: ...
@@ -1756,10 +1756,10 @@ skipped or fails.
 
    * - Member
      - Contract
-   * - ``Method.step(context)``
-     - edit ``context.workspace.harness`` into the step's candidate, or leave
-       it unchanged to skip the step; say what the step did with
-       ``context.workspace.write_output``
+   * - ``Method.run(job)``
+     - edit ``job.workspace.harness`` into the job's candidate, or leave
+       it unchanged to skip the job; say what the job did with
+       ``job.workspace.write_output``
    * - ``Method.runs_agent``
      - a class attribute, ``False`` by default; ``True`` for a method that
        calls ``Services.run_agent``, which then gets ``evolution.agent`` and is
@@ -1767,12 +1767,12 @@ skipped or fails.
    * - ``AgentMethod``
      - a method that is a folder of prompts (``config``: ``prompts``, the
        folder, and ``model``, ``served`` by default): ``START.md``, an
-       optional ``RESUME.md``, and the agent's own tree; each step runs the
+       optional ``RESUME.md``, and the agent's own tree; each job runs the
        agent once and reads ``output/summary.md``, ``notes.json`` and
        ``requires.json``
-   * - ``StepContext``
-     - ``workspace``, the step's ``Workspace``, and ``services``, the step's
-       ``Services``; the backend makes one per step
+   * - ``MethodJob``
+     - ``workspace``, the job's ``Workspace``, and ``services``, the job's
+       ``Services``; the backend makes one per job
    * - ``Workspace``
      - ``root``, ``history_dir`` and ``step`` (1 or more); the directory
        paths ``harness``, ``material``, ``state``, ``scratch`` and ``output``;
@@ -1788,7 +1788,7 @@ skipped or fails.
        ``output/summary.md`` (the commit's ``method_summary``),
        ``output/notes.json`` (a JSON object, the commit's ``method_notes``)
        and ``output/requires.json`` (``reef.core.requirements`` items, read on
-       a request step only), and raises ``ValueError`` before writing when
+       a request job only), and raises ``ValueError`` before writing when
        ``notes`` or ``requires`` is not valid
    * - ``TreeLayout``
      - the parts of an adapter's tree, from the ``evolve`` section of its ``adapter.yaml``; a method gets
@@ -1811,10 +1811,10 @@ skipped or fails.
        against ``evolution.max_model_calls_per_step`` and lands in
        ``calls.json``
    * - ``Services.calls``
-     - the step's ``ModelCalls``: ``spend()`` counts one call and raises
+     - the job's ``ModelCalls``: ``spend()`` counts one call and raises
        ``RuntimeError`` past the budget, ``record(entry)`` appends one call
        to ``calls.json``, and ``note(kind, text, *, failed=False)`` adds one
-       line to the step's activity
+       line to the job's activity
    * - ``Services.check(tree)``
      - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``,
        ``problems`` and ``message()``
@@ -1851,7 +1851,7 @@ skipped or fails.
        ``reply``, ``residue``, ``agents``, ``path`` and ``transcript_read``
    * - ``DecisionRecord``
      - ``step``, ``tree`` (the candidate's checksum), ``head`` (the checksum
-       of the head tree that the step started from), ``selected``
+       of the head tree that the job started from), ``selected``
        (published; the activation rule decides whether it serves),
        ``policy`` and ``reason``
    * - ``TaskScorer.score(task, result)``
@@ -1860,11 +1860,11 @@ skipped or fails.
        ``trajectory`` and ``residue``. The evaluation calls
        ``score_with_models(task, result, models)``, whose default calls
        ``score``. A model-based judge overrides ``score_with_models`` to use
-       the step's model bindings, and still implements the abstract
+       the job's model bindings, and still implements the abstract
        ``score``, for example by raising. A scorer that needs a local GPU
        overrides ``execution_requirements()``
    * - ``TaskCollector.collect(samples)``
-     - the prompts to collect from the step's trace samples, with
+     - the prompts to collect from the job's trace samples, with
        ``evolution.evaluation.collect_failures``
    * - ``evaluation.metrics``
      - holds ``candidate_scores`` and ``current_scores`` under
@@ -2245,7 +2245,7 @@ Weight training and harness evolution share the loop: every job carries the
 same fields. The loop sets ``TrainingJob.component``, the scenario component
 that the trainer trains, and ``TrainingJob.previous_job_id``, the last job
 whose end the trainer committed. A harness continues its state after that
-job, since a step that keeps no tree still advances it; a weight component
+job, since a job that keeps no tree still advances it; a weight component
 ignores it. What a job needs beside its data comes from its stage's
 ``job_parameters``: the harness stage (``TraceJobData``) adds the training
 request and the task paths of the scenario's eval split. On each checkpoint's

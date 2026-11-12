@@ -18,13 +18,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.harness_jobs import TreeArtifacts, build_harness_backend, harness_recipe
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import TreeArtifacts, build_harness_backend, harness_recipe
 from tests.support.trajectories import recorded_trajectory
 
 from recipes.gepa import GEPA, GEPASettings, ScoreFeedback, components, reflection
 from recipes.gepa.archive import Archive, Candidate
-from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
+from recipes.gepa.method import ARCHIVE_FILE, archive_for_job
 from reef.core.evaluation import RolloutScore
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
@@ -325,9 +325,9 @@ def test_with_repeats_a_tasks_validation_is_the_mean_of_its_runs_and_each_run_is
             history.add_run(record)
     history.add_decision(DecisionRecord(1, child.checksum(), seed.checksum(), True, "compare", "a higher mean"))
 
-    seeded = archive_for_step(None, history, TASKS, seed.files, repeats=2)
+    seeded = archive_for_job(None, history, TASKS, seed.files, repeats=2)
     seeded.add(child.files, 0, [1.0], step=1)
-    settled = archive_for_step(json.dumps(seeded.to_state()), history, TASKS, child.files, repeats=2)
+    settled = archive_for_job(json.dumps(seeded.to_state()), history, TASKS, child.files, repeats=2)
     assert (settled.candidates[1].val_scores, settled.candidates[0].val_scores) == ([0.5, 0.5], [0.0, 1.0])
     # Each validation pass ran 2 tasks with 2 runs each: the seed's, then the candidate's.
     assert (seeded.metric_calls, settled.metric_calls, settled.served) == (4, 8, 1)

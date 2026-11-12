@@ -21,8 +21,8 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import UNCHANGED, harness_recipe
 from tests.support.harness_service import harness_dispatcher
-from tests.support.harness_steps import UNCHANGED, harness_recipe
 
 from reef.core import AgentRecord, RequestType
 from reef.harness.tree import TreePatch
@@ -36,7 +36,7 @@ from reef.service.request_page import (
     build_request_page,
     settled_step,
 )
-from reef.train.harness_backend.backend import StepProgress
+from reef.train.harness_backend.backend import JobProgress
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
 REFRESH = f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
@@ -162,7 +162,7 @@ def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
 
 
 def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_its_evaluation_size() -> None:
-    evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", runs_total=2)
+    evaluating = JobProgress(RECORD_ID, "evaluating", started_at=900.0, job_record="/work/steps/1", runs_total=2)
     page = request_page(_record(), [CREATION], progress=evaluating, now=1_100.0)
     progress = _section(page, "Progress")
     assert REFRESH in page and '<span class="evaluating">Checking the harness</span>' in progress
@@ -172,7 +172,7 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_its_evalua
     assert '<dt>Step record</dt><dd class="id">/work/steps/1</dd>' in progress
     assert "<dt>Waiting</dt>" not in progress
 
-    proposing = StepProgress(RECORD_ID, "proposing", started_at=1_058.0, step_record="/work/steps/2")
+    proposing = JobProgress(RECORD_ID, "proposing", started_at=1_058.0, job_record="/work/steps/2")
     page = request_page(_record(), [CREATION], progress=proposing, now=1_100.0)
     progress = _section(page, "Progress")
     assert (
@@ -406,7 +406,7 @@ def test_a_running_request_lists_the_methods_activity_newest_first() -> None:
         {"at": 1_065.0, "kind": "agent", "text": "write harness/extensions/speak.ts"},
         {"at": 1_130.0, "kind": "provider", "text": "/v1/audio/speech not/real -> 400: <no model>", "failed": True},
     )
-    proposing = StepProgress(RECORD_ID, "proposing", started_at=1_000.0, step_record="/steps/1", activity=activity)
+    proposing = JobProgress(RECORD_ID, "proposing", started_at=1_000.0, job_record="/steps/1", activity=activity)
     page = request_page(_record(), [CREATION], progress=proposing, now=1_200.0)
     assert _sections(page) == ["Request", "Progress", "Activity"]
     listed = _section(page, "Activity")

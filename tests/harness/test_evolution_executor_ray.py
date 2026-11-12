@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 import tests
-from tests.support.harness_steps import PI_SEED, harness_backend
+from tests.support.harness_jobs import PI_SEED, harness_backend
 
 from reef.evaluation.harness import HarnessCandidate, TaskScorer
 from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec

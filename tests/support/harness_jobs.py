@@ -6,7 +6,7 @@ one component, and a recipe and a backend built over them. Tasks run the
 fake binary through the real adapter path, so render, launch and the
 trajectory read are the production code. ``evolution_config`` is a
 deployment config for the tests that build a recipe from its config, over
-the plugins below; ``traced`` makes trace samples of prompts; ``step_services``
+the plugins below; ``traced`` makes trace samples of prompts; ``job_services``
 gives a method that runs on a workspace of its own the backend's services.
 """
 
@@ -33,11 +33,11 @@ from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
-from reef.train.harness_backend import Method, StepContext, Workspace
+from reef.train.harness_backend import Method, MethodJob, Workspace
 from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.backend import HarnessBackend
-from reef.train.harness_backend.calls import StepCalls
-from reef.train.harness_backend.services import StepServices
+from reef.train.harness_backend.calls import JobCalls
+from reef.train.harness_backend.services import JobServices
 from reef.train.pipeline import PipelineSettings
 
 #: The fake pi scores itself: its session event carries the rendered rules text, so a scorer can prefer a tree whose
@@ -70,7 +70,7 @@ PI_SEED = HarnessTree(
 #: The component a flat harness scenario evolves.
 COMPONENT = "harness"
 
-#: Why a step skips when its method leaves the head tree as it was.
+#: Why a job skips when its method leaves the head tree as it was.
 UNCHANGED = "the method left the head tree unchanged"
 
 
@@ -134,7 +134,7 @@ def harness_recipe(
     ``EvolutionSettings`` fields. ``worker_executor`` places the run workers (``execution.evolution``),
     ``agent`` is the method's coding agent, ``models`` the method's named models, and ``activation`` the
     scenario's activation rule (the ``activation`` section; none is ``always``). ``job_samples`` is the
-    traces of one step (``pipeline.sample2job.config.job_samples``); None keeps the stage's default of 1.
+    traces of one job (``pipeline.sample2job.config.job_samples``); None keeps the stage's default of 1.
     """
     return HarnessEvolutionRecipe(
         method=resolve_method(method),
@@ -161,14 +161,14 @@ def harness_recipe(
     )
 
 
-#: The snapshots whose head each test backend steps on, as a job names its start.
+#: The snapshots whose head each test backend runs its jobs on, as a job names its start.
 BACKEND_RELEASES: WeakKeyDictionary[HarnessBackend, TreeArtifacts] = WeakKeyDictionary()
 
 
 def build_harness_backend(
     recipe: HarnessEvolutionRecipe, scenario: str = "demo", artifacts: TreeArtifacts | None = None
 ) -> HarnessBackend:
-    """``recipe``'s backend of ``COMPONENT`` in ``scenario``, whose steps run on the head of ``releases`` (an
+    """``recipe``'s backend of ``COMPONENT`` in ``scenario``, whose jobs run on the head of ``releases`` (an
     in-memory history whose base is the seed by default)."""
     backend = recipe.build_backend(scenario, COMPONENT)
     BACKEND_RELEASES[backend] = TreeArtifacts(recipe.seed) if artifacts is None else artifacts
@@ -176,7 +176,7 @@ def build_harness_backend(
 
 
 def head_of(backend: HarnessBackend) -> ArtifactTextFiles:
-    """The head that ``backend``'s next step runs on: the latest snapshot of its ``build_harness_backend`` history."""
+    """The head that ``backend``'s next job runs on: the latest snapshot of its ``build_harness_backend`` history."""
     return BACKEND_RELEASES[backend].head(COMPONENT)
 
 
@@ -210,12 +210,12 @@ def traced(*prompts: str, clients: tuple[str | None, ...] = ()) -> tuple[Traject
 
 
 class IdleMethod(Method):
-    """A method that leaves the tree unchanged, so each of its steps skips.
+    """A method that leaves the tree unchanged, so each of its jobs skips.
 
-    Purpose: ``evolution_config`` names it, for a test that builds a recipe from its config and never steps.
+    Purpose: ``evolution_config`` names it, for a test that builds a recipe from its config and never runs a job.
     """
 
-    def step(self, context: StepContext) -> None:
+    def run(self, job: MethodJob) -> None:
         return None
 
 
@@ -254,10 +254,10 @@ def evolution_config(*, evaluation: Mapping[str, Any] | None = None, **evolution
     """
     return {
         "evolution": {
-            "method": "tests.support.harness_steps:IdleMethod",
+            "method": "tests.support.harness_jobs:IdleMethod",
             "evaluation": {
                 "tasks": ["t"],
-                "scorer": "tests.support.harness_steps:FixedScorer",
+                "scorer": "tests.support.harness_jobs:FixedScorer",
                 **dict(evaluation or {}),
             },
             **evolution,
@@ -265,19 +265,19 @@ def evolution_config(*, evaluation: Mapping[str, Any] | None = None, **evolution
     }
 
 
-def step_services(
+def job_services(
     workspace: Workspace, models: ModelBindings, record: list[dict[str, Any]] | None = None
-) -> StepServices:
-    """The backend's services of ``workspace``'s step, made before the method runs: ``models`` with no budget, every
+) -> JobServices:
+    """The backend's services of ``workspace``'s job, made before the method runs: ``models`` with no budget, every
     call in ``record``, and no scorer. The head is the tree in ``harness/``."""
-    return StepServices(
+    return JobServices(
         workspace=workspace,
         descriptor=get_adapter(str(workspace.host()["adapter"])),
         evaluator=None,
         history=History.open(workspace.history_dir),
         head=workspace.tree().checksum(),
         models=models,
-        step_calls=StepCalls(0, [] if record is None else record),
+        job_calls=JobCalls(0, [] if record is None else record),
     )
 
 
@@ -295,9 +295,9 @@ __all__ = [
     "evolution_config",
     "harness_backend",
     "harness_recipe",
+    "job_services",
     "make_pi_binary",
     "marker_score",
     "runtime",
-    "step_services",
     "traced",
 ]

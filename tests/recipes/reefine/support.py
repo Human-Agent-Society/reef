@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from tests.support.harness_steps import harness_backend, head_of
+from tests.support.harness_jobs import harness_backend, head_of
 
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER, Answer, answer_request
 from reef.core.job_data import TrajectorySample
@@ -29,7 +29,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
 from reef.train.harness_backend import AgentOutcome, Method, Services, Trace, Workspace
-from reef.train.harness_backend.calls import StepCalls
+from reef.train.harness_backend.calls import JobCalls
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData, TrainingCommit
 
@@ -79,7 +79,7 @@ class Model:
 class ModelServices(Services):
     """The services of a text answer's step around a canned model.
 
-    Values: ``bindings`` answer every model call; ``step_calls`` keeps the
+    Values: ``bindings`` answer every model call; ``job_calls`` keeps the
     step's activity and sets no budget; ``descriptor`` is the adapter that
     ``check`` validates a tree for. No tree is scored.
     Purpose: ``answer`` and the answer loop's tests pass it to
@@ -88,7 +88,7 @@ class ModelServices(Services):
 
     def __init__(self, models: Model | ModelBindings, adapter: str = EXTENSION_ADAPTER) -> None:
         self.bindings = models
-        self.step_calls = StepCalls(0, [])
+        self.job_calls = JobCalls(0, [])
         self.descriptor = get_adapter(adapter)
 
     @property
@@ -96,8 +96,8 @@ class ModelServices(Services):
         return self.bindings
 
     @property
-    def calls(self) -> StepCalls:
-        return self.step_calls
+    def calls(self) -> JobCalls:
+        return self.job_calls
 
     def check(self, tree: HarnessTree) -> ValidationResult:
         return validate_tree(tree, self.descriptor)
@@ -211,20 +211,20 @@ def step_workspace(
 def reefine_step(
     root: Path, method: Method, data: JobData, models: ModelBindings
 ) -> tuple[TrainingCommit, tuple[Mapping[str, Any], ...]]:
-    """One step of ``method`` through the backend's phases on the pi seed of ``tests.support.harness_steps``, its
+    """One step of ``method`` through the backend's phases on the pi seed of ``tests.support.harness_jobs``, its
     state under ``root``, ``models`` the deployment's, and the evaluation off: a changed tree publishes. Beside
     the result, the step's activity as the request page reads it while the candidate is evaluated; none for a
     skipped step."""
     backend, _ = harness_backend(root, method, evaluation={"policy": "none"})
     backend.models = models
-    prepared = backend.prepare_step(data, HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(data, HarnessState().to_json(), 0, head=head_of(backend))
     if prepared.candidate is None:
         return TrainingCommit(prepared.state, prepared.metrics), ()
     # A step with a candidate keeps its progress, the request page's view of it, until it settles.
-    activity = backend.step_progress.activity
+    activity = backend.job_progress.activity
     policy = NoEvaluationPolicy()
     decision = policy.decide(prepared.candidate, policy.evaluate(prepared.candidate))
-    return backend.settle_step(prepared, decision), activity
+    return backend.settle_job(prepared, decision), activity
 
 
 __all__ = [
