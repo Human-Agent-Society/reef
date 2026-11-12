@@ -13,7 +13,7 @@ import pytest
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang import plugin as sglang_plugin
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.lora_schema import adapter_scoped_prefix_cache_supported
 from reef.inference.sglang.plugin import (
     REEF_SGLANG_PLUGIN_ENV,
@@ -128,7 +128,7 @@ def test_get_runtime_load_id_uses_model_info(monkeypatch: pytest.MonkeyPatch) ->
     engine = object.__new__(module.ReefSGLangEngine)
     engine.server_host = "127.0.0.1"
     engine.server_port = 30000
-    engine.config = SGLangConfig("model", 1, 1, 1)
+    engine.config = SGLangSettings("model", 1, 1, 1)
 
     assert engine.get_runtime_load_id() == "training-incarnation:3"
     assert requested == [("http://127.0.0.1:30000/model_info", 30.0)]
@@ -208,7 +208,7 @@ def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch):
         executor_options={},
         environ={},
     )
-    config = pickle.loads(pickle.dumps(SGLangConfig(**values)))
+    config = pickle.loads(pickle.dumps(SGLangSettings(**values)))
     engine = module.ReefSGLangEngine(config, 0)
     assert engine.config.options["enable_lora"] is True
     assert engine.config.options["lora_target_modules"] == ["q_proj"]
@@ -242,7 +242,7 @@ def test_server_options_keep_only_the_fields_of_either_server_args_kind(monkeypa
         server_args = type("ServerArgs", (), {"__struct_fields__": names})
     monkeypatch.setattr(sys.modules["sglang.srt.server_args"], "ServerArgs", server_args)
     monkeypatch.setattr(module, "local_gpu_id", lambda gpu: gpu)
-    config = SGLangConfig("model", 1, 1, 1, options={"mem_fraction_static": 0.5, "not_a_server_arg": 1})
+    config = SGLangSettings("model", 1, 1, 1, options={"mem_fraction_static": 0.5, "not_a_server_arg": 1})
     options = module.ReefSGLangEngine(config, 0)._server_options("10.0.0.1:5000", 30000, None, "10.0.0.1")
     assert set(options) <= set(names)
     assert "not_a_server_arg" not in options

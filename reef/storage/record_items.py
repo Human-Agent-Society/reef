@@ -333,7 +333,7 @@ class ItemRecordStore(RecordStore):
             raise RecordConflict(f"record {item.agent_record_id!r} is stored with other content")
         return self.record(stored)
 
-    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+    def read(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
         stored = self.stored(scenario, agent_record_id)
         return None if stored is None else self.record(stored)
 
@@ -372,7 +372,7 @@ class ItemRecordStore(RecordStore):
             return 0
         return self.data.last_sequence(self.owner, kind="record", scenario=scenario, origin=scenario)
 
-    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+    def read_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         stored = self.stored(scenario, agent_record_id)
         return None if stored is None else StoredRecord(stored.sequence, self.record(stored))
 

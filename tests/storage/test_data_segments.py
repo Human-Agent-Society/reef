@@ -10,7 +10,7 @@ from sqlalchemy import func, select
 from tests.support.conversations import conversation
 
 from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.storage import sql_data
 from reef.storage.data import NewItem
 from reef.storage.record_items import record_item
@@ -70,7 +70,7 @@ def segment_files(tmp_path) -> list:
 def test_a_segment_is_json_lines_and_a_reader_reads_only_its_lines(tmp_path):
     store = LocalSegmentStore(tmp_path)
     data, places = segment_lines("s1", ['{"a":1}', '{"b":"二"}'])
-    store.put("acme", "s1", data)
+    store.write("acme", "s1", data)
     assert [json.loads(line) for line in data.decode().splitlines()] == [{"a": 1}, {"b": "二"}]
     assert store.read("acme", list(reversed(places))) == ('{"b":"二"}'.encode(), b'{"a":1}')
     with pytest.raises(SegmentNotFound):
@@ -211,7 +211,7 @@ def test_a_store_without_segments_refuses_to_guess_moved_content(open_store):
 
 
 def test_the_deployment_gives_its_segment_store_to_the_data_store(tmp_path):
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),
@@ -227,4 +227,4 @@ def test_the_deployment_gives_its_segment_store_to_the_data_store(tmp_path):
         dispatcher.close()
     assert len(list((tmp_path / "records" / "segments").glob("*/*.jsonl"))) == 1
     with pytest.raises(ValueError, match="segment_backend"):
-        ServiceConfig(recipe="recipe", segment_backend="unknown")
+        ServiceSettings(recipe="recipe", segment_backend="unknown")

@@ -12,7 +12,7 @@ if not __package__:
     # file is always imported as part of the tests.plugin_contracts package.
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tests.plugin_contracts._shared import (
+from tests.plugin_contracts.support import (
     get_contract_path,
     install_paths,
     run_contract_test_for_file,

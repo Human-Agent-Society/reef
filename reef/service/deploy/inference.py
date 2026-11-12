@@ -18,7 +18,7 @@ from reef.execution.processes import http_readiness_command
 from reef.inference.http import PROVIDER_APIS
 from reef.inference.remote.config import RemoteInferenceSettings
 from reef.service.deploy.config_utils import DeployConfigError
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 
 
 @dataclass(frozen=True)
@@ -99,7 +99,7 @@ INFERENCE_COMMANDS = {
 }
 
 
-def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[str, Any]:
+def prepare_inference(config: dict[str, Any], settings: ServiceSettings) -> dict[str, Any]:
     """Resolve launch choices once, before model downloads or service creation."""
     backend = settings.inference_backend or "sglang"
     definition = INFERENCE_COMMANDS.get(backend)
@@ -167,7 +167,7 @@ def free_loopback_port(reserved: int) -> int:
 INFERENCE_COMPONENT_SERVICE = "inference"
 
 
-def local_inference_component(config: dict[str, Any], settings: ServiceConfig) -> dict[str, Any]:
+def local_inference_component(config: dict[str, Any], settings: ServiceSettings) -> dict[str, Any]:
     """Start an inference component on this host, and record its address as the ``inference.remote`` section.
 
     The component (``python -m reef.inference.remote``) listens on a free
@@ -318,7 +318,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         config["services"].insert(0, local_service)
 
 
-def local_service_url(settings: ServiceConfig) -> str:
+def local_service_url(settings: ServiceSettings) -> str:
     """The Reef HTTP service's address on its own host: a wildcard bind is reached through loopback."""
     if settings.host == "0.0.0.0":
         host = "127.0.0.1"
@@ -330,7 +330,7 @@ def local_service_url(settings: ServiceConfig) -> str:
     return f"http://{host}:{settings.port}"
 
 
-def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str, Any]:
+def http_service(config: Mapping[str, Any], settings: ServiceSettings) -> dict[str, Any]:
     """Build the standard local HTTP child and its readiness probe. Check authentication first."""
     require_authentication(settings)
     endpoint = local_service_url(settings)
@@ -345,7 +345,7 @@ def http_service(config: Mapping[str, Any], settings: ServiceConfig) -> dict[str
     }
 
 
-def require_authentication(settings: ServiceConfig) -> None:
+def require_authentication(settings: ServiceSettings) -> None:
     """Refuse to serve without bearer tokens on an address that other machines can reach."""
     if settings.tokens or settings.allow_unauthenticated or is_loopback_host(settings.host):
         return

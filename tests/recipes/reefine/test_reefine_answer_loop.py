@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from tests.recipes.reefine.reefine_support import (
+from tests.recipes.reefine.support import (
     DESIGN,
     REQUEST,
     REVIEW,
@@ -32,7 +32,7 @@ from tests.recipes.reefine.reefine_support import (
     skill,
     step_workspace,
 )
-from tests.support._trajectories import recorded_trajectory
+from tests.support.trajectories import recorded_trajectory
 
 from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import answer as reefine_answer

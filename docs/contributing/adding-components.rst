@@ -48,7 +48,7 @@ Implementation
   and names it in the objective's ``loss_family``;
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
-- Override ``build_components`` only when the method's releases bind
+- Override ``build_components`` only when the method's snapshots bind
   components beyond those of the recipe it extends.
 
 Surrounding changes
@@ -224,7 +224,7 @@ ownership, rank ordering and the Slime extension contract.
 Add a component or artifact type
 --------------------------------
 
-Artifacts own immutable bytes and release heads. A recipe's components own
+Artifacts own immutable bytes and snapshot heads. A recipe's components own
 admission, import layouts, kinds and client file trees. Runtimes own loading.
 Read `Scenario components <../developer-guide/components.rst>`__ and the
 release-chain section of `Architecture <../getting-started/core-loop.rst>`__.

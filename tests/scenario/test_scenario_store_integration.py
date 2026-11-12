@@ -216,7 +216,7 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
         recovered = reopened.get_or_create_scenario("math")
         assert recovered is not None
         assert recovered.scenario_step == 1
-        assert recovered.records.get("math", "first") is not None
+        assert recovered.records.read("math", "first") is not None
         assert [row["step"] for row in reopened.read_commits("math")["commits"]] == [1]
         assert ("recover", "math") in reopened_factory.events
     finally:

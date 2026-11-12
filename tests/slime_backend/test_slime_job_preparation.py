@@ -6,8 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE
-from tests.support._trajectories import policy_trajectory
+from tests.support.grouped_pg import GROUPED_PG_OBJECTIVE
+from tests.support.trajectories import policy_trajectory
 
 from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job

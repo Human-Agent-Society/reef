@@ -14,7 +14,7 @@ the only place aiohttp request/response types appear on the request path.
 ``task_import`` imports a deployment's Harbor tasks into each scenario's task
 store when the scenario opens; assembly wraps the scenario storage with it.
 
-``ServiceConfig`` is frozen, and recipe-specific config fields are not
+``ServiceSettings`` is frozen, and recipe-specific config fields are not
 fields on it: they ride in ``recipe_settings`` and each recipe extracts its
 own, so defaults live with the recipe. HTTP modules never import a concrete
 training backend; backend definitions load their optional execution adapters.

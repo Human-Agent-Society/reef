@@ -9,7 +9,7 @@ from reef.core.errors import UpstreamStatusError
 from reef.tinker.sampling import DEFAULT_MAX_TOKENS, SampleResult, TinkerSampler, TinkerSDKSampler, sample_chat
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerSDKClient
-from reef.train.tinker_backend.config import TinkerConfig
+from reef.train.tinker_backend.config import TinkerSettings
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TinkerCustomLoss, TokenRow
 
 
@@ -169,7 +169,7 @@ def client(tmp_path):
     value = object.__new__(TinkerSDKClient)
     value._sdk = SDK()
     value._model = "Qwen/Qwen3-8B"
-    value._config = TinkerConfig(state_dir=str(tmp_path), train_timeout_s=10)
+    value._config = TinkerSettings(state_dir=str(tmp_path), train_timeout_s=10)
     value._lora_rank = 32
     value._seed = 0
     value._api_key = "test-only"

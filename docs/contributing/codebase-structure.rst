@@ -110,7 +110,7 @@ import a concrete integration.
 |                         | selection, saved-weight serving, concrete inference      | decisions                                  |
 |                         | backends, native engine control, request adaptation      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/artifact/``      | artifact bytes, repositories, materialization, release   | commit policy, weight loading              |
+| ``reef/artifact/``      | artifact bytes, repositories, materialization, snapshot  | commit policy, weight loading              |
 |                         | heads, and the components a recipe declares              |                                            |
 |                         | (``components.py``)                                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
@@ -188,7 +188,7 @@ ownership and depends only on that interface and the standard library.
 Shared job data and candidate evaluation contracts live in ``core/job_data.py``
 and ``core/evaluation.py``. ``core/training_request.py`` validates training-request
 payloads and holds the queued request carried by a job's data. Request
-requirements and their release-chain interpretation live in ``core/requirements.py``.
+requirements and their snapshot-chain interpretation live in ``core/requirements.py``.
 Storage owns commit record encoding; scenario owns commit ordering and recovery. Artifact admission lives
 with the components a recipe declares (``artifact/components.py``).
 ``recipe/harness.py`` assembles the harness evolution backend.
@@ -254,8 +254,7 @@ because ``tinker/`` also serves training, and training never imports
 control classes that SGLang and vLLM share: the inference backend, the
 inference service, the control actor and its default serving executor.
 ``inference/sglang/`` owns SGLang engine launch, response parsing and control
-independently of training; ``inference/vllm/`` owns vLLM response parsing,
-the KV connector that stamps tokens with their weight version, and engine launch and
+independently of training; ``inference/vllm/`` owns vLLM response parsing, and engine launch and
 control over vLLM's HTTP control routes. ``inference/remote/`` is the inference
 component: ``python -m reef.inference.remote`` runs the engines and serves
 their control operations and requests over HTTP. ``RemoteInferenceBackend``
@@ -283,10 +282,10 @@ The extension points those packages expose are in `Python API
   abstract bases. ``storage/commits.py`` also encodes artifact metadata and decodes existing
   checkpoint metadata into registration information and a ``CommitRecord``.
   ``ScenarioFactory`` receives the storage service from deployment assembly
-  and handles registration, release selection, and recovery. It opens a
+  and handles registration, snapshot selection, and recovery. It opens a
   session, restores committed artifacts, builds the trainer, replays records,
   and returns a complete ``Scenario``; failure closes its owned resources. ``committer.py`` owns writes and retry ordering;
-  ``releases.py`` owns release and artifact queries under the same publication
+  ``snapshots.py`` owns snapshot and artifact queries under the same publication
   lock. ``history.py`` pages retained records and commits. ``registry.py`` owns
   loaded instances and scenario archival coordination. The registry reads and
   writes each scenario's settings (such as the training mode and the
@@ -484,11 +483,11 @@ Deployment modules
 * ``config_utils.py`` reads YAML, expands environment/config references and locates
   recipe source packages. It does not download models or validate process graphs.
 * ``service_config.py`` declares shared HTTP, storage and runtime fields and
-  converts effective values into ``ServiceConfig`` for app assembly. With a
+  converts effective values into ``ServiceSettings`` for app assembly. With a
   ``task-import`` section, assembly wraps the scenario storage in
   ``reef/service/task_import.py``, so that each scenario that opens imports the
   deployment's Harbor tasks.
-* ``deployment_config.py`` declares ``DeploymentConfig`` defaults, loads selected
+* ``deployment_config.py`` declares ``DeploymentSettings`` defaults, loads selected
   recipe/runtime declarations, translates the versioned public layout and
   validates component values.
 * ``cli.py`` builds help and applies dotted command-line overrides before shared

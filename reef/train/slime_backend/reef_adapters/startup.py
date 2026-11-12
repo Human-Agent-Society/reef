@@ -26,7 +26,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
 )
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     MEGATRON_TRACKER,
-    RetentionConfig,
+    RetentionSettings,
     retention_options,
 )
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def prepare_slime_arguments(
     arguments: Sequence[str], *, loss_family: str, recipe: str, execution: Mapping[str, Any]
-) -> tuple[SlimeArguments, object | None, RetentionConfig]:
+) -> tuple[SlimeArguments, object | None, RetentionSettings]:
     """Return the workers' Slime arguments, the startup loss family's driver config and the checkpoint retention.
 
     ``arguments`` are the native Slime arguments with Reef's retention

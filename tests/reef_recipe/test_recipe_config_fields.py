@@ -11,16 +11,16 @@ from dataclasses import KW_ONLY, dataclass
 
 import pytest
 import yaml
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.core.config import config_arguments
 from reef.evaluation.activation import AlwaysActivate
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
 @dataclass(frozen=True)
@@ -238,7 +238,7 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
 
 @pytest.mark.unit
 def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
-    stages = PipelineConfig.from_setting(
+    stages = PipelineSettings.from_setting(
         {"sample2job": {"config": {"job_samples": 2, "buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
     recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=stages)

@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from recipes.sao.slime import SaoObjective
 from recipes.tttd.objective import adaptive_entropic_advantages

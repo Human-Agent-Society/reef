@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import TreeArtifacts, build_harness_backend, harness_recipe
+from tests.support.trajectories import recorded_trajectory
 
 from recipes.gepa import GEPA, GEPASettings, ScoreFeedback, components, reflection
 from recipes.gepa.archive import Archive, Candidate

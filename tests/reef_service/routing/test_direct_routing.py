@@ -40,7 +40,7 @@ from reef.dispatcher import Dispatcher
 from reef.service import routing_preview
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.assembly import build_app
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.errors import translate_error
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
 from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, check_policy_change
@@ -964,7 +964,7 @@ def test_the_control_file_carries_the_selection_credential_and_router_runtime(tm
 
 def test_routing_runs_only_as_a_managed_deployment(tmp_path: Path) -> None:
     path = write_manifest(tmp_path / "routing.json", "http://127.0.0.1:9")
-    settings = ServiceConfig(recipe="recipe", routing_manifest=str(path), tokens=("service",))
+    settings = ServiceSettings(recipe="recipe", routing_manifest=str(path), tokens=("service",))
     with pytest.raises(ValueError, match="managed routing deployment"):
         build_app(settings, environ={})
     # A child without its private control socket cannot be managed.
@@ -976,7 +976,7 @@ def test_routing_runs_only_as_a_managed_deployment(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="sr_management_port"):
         build_app(
-            ServiceConfig(recipe="recipe", routing_manifest=str(path), tokens=("service",), port=50053),
+            ServiceSettings(recipe="recipe", routing_manifest=str(path), tokens=("service",), port=50053),
             environ={},
             lifecycle=managed,
         )

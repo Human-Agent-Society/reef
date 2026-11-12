@@ -20,10 +20,10 @@ import pytest
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
-from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
+from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import Artifact, ModelDirectory
 from reef.core.job_data import TaskSample, TrajectorySample
@@ -54,7 +54,7 @@ from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, Tr
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage, validate_slime_args
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     CheckpointStorage,
-    RetentionConfig,
+    RetentionSettings,
     _allocated_bytes,
     retention_options,
 )
@@ -944,7 +944,7 @@ def test_checkpoint_storage_records_each_rollout_and_refuses_a_job_it_cannot_hol
     pair_bytes = max(hf_bytes + _allocated_bytes(source_megatron / "iter_0000000"), 8 * hf_bytes)
     template = str(root / "hf" / "{rollout_id}")
     storage = CheckpointStorage(
-        RetentionConfig(max_storage_bytes=pair_bytes, min_free_space_bytes=0),
+        RetentionSettings(max_storage_bytes=pair_bytes, min_free_space_bytes=0),
         hf_template=template,
         megatron_root=megatron_root,
         source_hf=source_hf,
@@ -978,7 +978,7 @@ def test_storage_preflight_resolves_the_paths_and_refuses_a_storage_it_cannot_fi
         no_save_optim=False,
     )
     monkeypatch.setattr(CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False})
-    storage = prepare_checkpoint_storage(args, RetentionConfig())
+    storage = prepare_checkpoint_storage(args, RetentionSettings())
     assert args.save_hf == str(tmp_path / "checkpoints/hf/{rollout_id}") == storage.hf_template
     # The critic's weights and optimizer survive restarts beside the actor's.
     assert args.critic_save == str(tmp_path / "checkpoints/megatron-critic")
@@ -988,7 +988,7 @@ def test_storage_preflight_resolves_the_paths_and_refuses_a_storage_it_cannot_fi
         lambda self, **kwargs: {"blocked": True, "reasons": ["the filesystem free-space floor"]},
     )
     with pytest.raises(RuntimeError, match=r"storage preflight.*free-space floor"):
-        prepare_checkpoint_storage(args, RetentionConfig())
+        prepare_checkpoint_storage(args, RetentionSettings())
 
 
 # -- Closing
@@ -1231,7 +1231,7 @@ def test_the_component_starts_its_workers_on_the_training_gpus_without_rollout_e
     try:
         # Reef's retention options never reach Slime's parser.
         assert build_calls["arguments"] == ["--lr=1e-06"]
-        assert build_calls["retention"] == RetentionConfig(policy="best_reward", max_storage_bytes=100 * 1024**3)
+        assert build_calls["retention"] == RetentionSettings(policy="best_reward", max_storage_bytes=100 * 1024**3)
         assert build_calls["resources"] == {
             "ray_address": "ray://head:10001",
             "namespace": "test",
@@ -1373,7 +1373,7 @@ def test_the_workers_runtime_env_carries_the_cuda_defaults_and_this_processs_pyt
 @pytest.mark.unit
 def test_retention_options_are_parsed_with_units() -> None:
     retention, remaining = retention_options(["--reef-checkpoint-min-free-space=10GB", "--loss-type", "sft_loss"])
-    assert retention == RetentionConfig(min_free_space_bytes=10 * 1000**3)
+    assert retention == RetentionSettings(min_free_space_bytes=10 * 1000**3)
     assert remaining == ["--loss-type", "sft_loss"]
     for size in ("100", "0GB"):
         with pytest.raises(SystemExit):

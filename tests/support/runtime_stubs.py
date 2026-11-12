@@ -18,7 +18,7 @@ from reef.inference.interfaces import InferenceBackend
 from reef.inference.serving import OpenedEngines, ServingEngines
 from reef.storage.job_data import read_job_data
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 #: The artifact format of a stub component that does not name one.
 FULL_WEIGHTS = ArtifactFormat("full")
@@ -54,7 +54,7 @@ class StubTrainingComponent(TrainingComponent):
         self.checkpoint_root = checkpoint_root
         self.backend_name = name
         self.scenarios_shared = shares_scenarios
-        self.releases = artifact_format
+        self.snapshot_format = artifact_format
         self.submitted: list[TrainingJob] = []
         self.imported: list[Path] = []
         self.statuses: dict[str, JobStatus] = {}
@@ -70,7 +70,7 @@ class StubTrainingComponent(TrainingComponent):
 
     @property
     def artifact_format(self) -> ArtifactFormat | None:
-        return self.releases
+        return self.snapshot_format
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         if not isinstance(parameters.get("rollout"), Mapping):
@@ -88,9 +88,9 @@ class StubTrainingComponent(TrainingComponent):
         """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
         return self.base_start
 
-    def import_start(self, release: Path) -> str:
-        self.imported.append(release)
-        return str(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        self.imported.append(artifact_dir)
+        return str(artifact_dir)
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         """The checkpoints that ``job`` saves; raising fails the job."""
@@ -153,24 +153,46 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     """An inference proxy that records the snapshots it serves.
 
     A snapshot serves under the version its ``model.txt`` names, or under its
-    release ID when it holds no such file. ``activated`` lists the versions
+    artifact ID when it holds no such file. ``activated`` lists the versions
     of the snapshots it served, at commits, activations and starts, in order;
-    ``served`` is the last one, ``None`` before the first one.
+    ``served`` is the last one, ``None`` before the first one. For each
+    activation, ``activated_ids`` holds the artifact ID and
+    ``activated_scenarios`` the scenario that the activation named, or None.
 
     With ``answers_each_artifact``, the runtime answers each call from the artifact it names, as Tinker does: each
-    artifact has its own model name, ``sampler:<artifact_id>``.
+    artifact has its own model name, ``sampler:<artifact_id>``. ``per_scenario_adapters`` and
+    ``shared_by_training_scenarios`` are what the runtime reports for the properties of the same names.
     """
 
-    def __init__(self, base_url: str = "http://inference-runtime", **kwargs) -> None:
+    def __init__(
+        self,
+        base_url: str = "http://inference-runtime",
+        *,
+        per_scenario_adapters: bool = False,
+        shared_by_training_scenarios: bool = False,
+        **kwargs,
+    ) -> None:
         kwargs.setdefault("model_path", "stub-model")
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
+        self.activated_ids: list[str] = []
+        self.activated_scenarios: list[str | None] = []
         self.served: str | None = None
         self.answers_each_artifact = False
+        self.adapters_per_scenario = per_scenario_adapters
+        self.training_scenarios_share = shared_by_training_scenarios
 
     @property
     def serves_any_artifact(self) -> bool:
         return self.answers_each_artifact
+
+    @property
+    def per_scenario_adapters(self) -> bool:
+        return self.adapters_per_scenario
+
+    @property
+    def shared_by_training_scenarios(self) -> bool:
+        return self.training_scenarios_share
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         return PolicyModel("base", artifact.ref.revision)
@@ -179,6 +201,8 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         return ServedArtifact(artifact.artifact_id, self.base_url, f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
+        self.activated_ids.append(artifact.artifact_id)
+        self.activated_scenarios.append(scenario)
         version = self.serve(artifact)
         self.activated.append(version)
         return version
@@ -203,7 +227,7 @@ def runtime_bindings(
 
 def job_sized_stages(
     spec: PipelineSpec, section: Mapping[str, Any] | None = None, *, job_samples: int = 1
-) -> PipelineConfig:
+) -> PipelineSettings:
     """The stages of ``spec`` configured by a deployment ``pipeline`` section, with ``job_samples`` set.
 
     A weight recipe needs ``pipeline.sample2job.config.job_samples``; a ``job_samples`` in ``section`` wins.
@@ -211,7 +235,7 @@ def job_sized_stages(
     stages = {key: dict(value) for key, value in (section or {}).items()}
     sample2job = stages.setdefault("sample2job", {})
     sample2job["config"] = {"job_samples": job_samples, **sample2job.get("config", {})}
-    return PipelineConfig.from_setting(stages, spec=spec, environ={})
+    return PipelineSettings.from_setting(stages, spec=spec, environ={})
 
 
 class RunningEngines(ServingEngines):
@@ -230,3 +254,6 @@ class RunningEngines(ServingEngines):
 
     def open(self) -> OpenedEngines:
         return OpenedEngines(self.backend, attached=False)
+
+    def check_health(self) -> None:
+        return

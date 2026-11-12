@@ -7,10 +7,10 @@ import math
 from types import SimpleNamespace
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
-from reef.train.slime_backend.distill import DistillSettings
+from reef.train.slime_backend.distill import DistillAlgorithmSettings
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.slime_backend.score_centering import (
@@ -195,7 +195,7 @@ def test_driver_refuses_other_distillation_losses(changes: dict[str, object]) ->
 
 @pytest.mark.unit
 def test_disabled_importance_sampling_does_not_require_token_level() -> None:
-    settings = DistillSettings(divergence="reverse", top_k=32, importance_sampling_cap=0)
+    settings = DistillAlgorithmSettings(divergence="reverse", top_k=32, importance_sampling_cap=0)
     assert settings.score_centering_weight == PolicyGradientWeight("none")
 
 

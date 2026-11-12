@@ -9,8 +9,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from tests.support._trajectories import policy_trajectory, recorded_trajectory
 from tests.support.chat_templates import CharTemplate
+from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.prm import (

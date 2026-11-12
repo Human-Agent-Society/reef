@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.train.tinker_backend.schedule import StepRows, StepScheduling, next_steps, pack_rollouts, schedule_job_data
 from reef.train.types import JobData

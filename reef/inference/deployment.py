@@ -1,6 +1,6 @@
 """The inference component: its contracts, and the selection of its implementation without training code.
 
-An ``InferenceService`` owns its engines and borrows ``InferenceResources``.
+An ``InferenceService`` owns its engines and borrows the GPUs of an ``InferenceResources``.
 ``inference_service_for`` builds the service that the ``inference.backend``
 setting names.
 """
@@ -16,43 +16,69 @@ from typing import Any
 
 from reef.core.errors import DeployConfigError
 from reef.execution.executor import Executor
-from reef.execution.executor.placement import DeploymentResources
+from reef.execution.executor.placement import (
+    DeploymentResources,
+    GpuBundles,
+    ModelGpuLayout,
+    ModelGpuReservation,
+    reserve_model_gpus,
+)
 from reef.inference.interfaces import InferenceBackend
 
 
 class InferenceResources(DeploymentResources):
-    """Allocation that supplies a backend-native inference reservation."""
+    """The GPUs that one engine start reserves on this host, in the current Ray session.
+
+    ``num_gpus`` is a positive int. ``start`` reserves that many GPU bundles
+    for inference and ``close`` releases them; the Ray session outlives both.
+    ``inference_placement`` is the reserved bundles between ``start`` and
+    ``close``, and None otherwise.
+
+    Purpose: the remote inference component's server makes one for each
+    engine start; ``InferenceService.start`` reads ``inference_placement``.
+    """
+
+    def __init__(self, num_gpus: int) -> None:
+        if isinstance(num_gpus, bool) or not isinstance(num_gpus, int) or num_gpus <= 0:
+            raise ValueError("an engine start needs a positive GPU count")
+        self.num_gpus = num_gpus
+        self.reservation: ModelGpuReservation | None = None
 
     @property
-    @abstractmethod
-    def inference_placement(self) -> Any:
-        """Return the borrowed placement handle understood by the selected backend."""
+    def inference_placement(self) -> GpuBundles | None:
+        if self.reservation is None:
+            return None
+        return self.reservation.inference
+
+    def start(self) -> None:
+        self.reservation = reserve_model_gpus(ModelGpuLayout(training_gpus=0, inference_gpus=self.num_gpus))
+
+    def close(self) -> None:
+        reservation, self.reservation = self.reservation, None
+        if reservation is not None:
+            reservation.release()
 
 
 @dataclass(frozen=True)
 class InferenceConnection:
-    """What a started ``InferenceService`` returns: its control protocol and, when it has one, its control executor.
+    """What a started ``InferenceService`` returns: its control executor, when it has one.
 
-    ``protocol`` is the service's non-empty ``connection_protocol``; it names
-    the control vocabulary. ``control`` is the borrowed executor that the
-    service's ``InferenceBackend`` calls, or None for a receiver that the
-    backend reaches by other means, such as HTTP.
+    ``control`` is the borrowed executor that the service's
+    ``InferenceBackend`` calls, or None for a service whose backend reaches
+    the engines by other means, such as HTTP.
+
+    Purpose: ``InferenceService.start`` makes it; ``InferenceService.backend``
+    of the same service reads it.
     """
 
-    protocol: str
     control: Executor | None
 
 
 class InferenceService(ABC):
     """An inference component that owns its engines but borrows reservations."""
 
-    @property
     @abstractmethod
-    def connection_protocol(self) -> str:
-        """Control protocol provided by the selected engine integration."""
-
-    @abstractmethod
-    def start(self, resources: DeploymentResources) -> InferenceConnection:
+    def start(self, resources: InferenceResources) -> InferenceConnection:
         """Start engines in supplied resources and return a borrowed connection."""
 
     @abstractmethod

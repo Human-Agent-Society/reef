@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.conversations import conversation
 from tests.support.runtime_stubs import (
@@ -28,6 +27,7 @@ from tests.support.runtime_stubs import (
 from tests.support.samples import data_storage, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.trajectories import policy_trajectory
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOJobData, SAOSamples
@@ -49,7 +49,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.pipeline import PipelineSettings, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.schedule import StepScheduling
@@ -66,7 +66,7 @@ def sao_processor(context: PipelineContext, job_samples: int | None = None) -> T
     )
 
 
-def single_rollout_steps() -> PipelineConfig:
+def single_rollout_steps() -> PipelineSettings:
     """SAO's default stages with jobs of one sample; with a runtime batch size of 1 each rollout is one optimizer step."""
     return job_sized_stages(SAORecipe.pipeline_spec())
 

@@ -338,7 +338,7 @@ def test_scenario_factory_imports_without_a_cycle() -> None:
 def test_checkpoint_storage_import_does_not_require_ray() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; "
-        "from reef.train.slime_backend.reef_adapters import RetentionConfig; "
+        "from reef.train.slime_backend.reef_adapters import RetentionSettings; "
         "from reef.inference import recovery; "
         "from reef.train.slime_backend.reef_adapters.training_job import storage"
     )

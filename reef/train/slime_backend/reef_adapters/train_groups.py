@@ -14,7 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from reef.execution.executor import Executor, ExecutorConfig
+from reef.execution.executor import Executor, ExecutorLaunch
 from reef.execution.executor.failure import ExecutorFailureListener
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import (
@@ -43,7 +43,7 @@ class SlimeTrainGroup:
     """Training operations shared by actor and critic worker groups.
 
     Custom executors receive the Slime launch configuration in
-    ``ExecutorConfig.options`` and must provide workers with Slime's methods
+    ``ExecutorLaunch.options`` and must provide workers with Slime's methods
     and rollout-data transport. Selecting a launcher does not reshard model
     state or change the configured parallel topology.
     """
@@ -74,7 +74,7 @@ class SlimeTrainGroup:
         backend = args.reef_executor_backend if executor_backend is None else executor_backend
         # Resolve before reserving or launching any workers.
         executor_class = slime_executor_class(backend)
-        self._executor_config = ExecutorConfig(
+        self._executor_launch = ExecutorLaunch(
             backend=executor_class,
             options={
                 **args.reef_train_executor_options,
@@ -109,7 +109,7 @@ class SlimeTrainGroup:
         """
         if self._executor is not None:
             return None
-        executor = Executor.create(self._executor_config)
+        executor = Executor.create(self._executor_launch)
         self._executor = executor
         try:
             if self._failure_listener is not None:

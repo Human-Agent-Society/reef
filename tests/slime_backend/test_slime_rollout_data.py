@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.objectives import SlimeObjective

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, ImportingInference, dispatcher, train
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import runtime_bindings
+from tests.support.serving import wait_for_serving
 
 from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
 from reef.artifact.artifact import ArtifactNotFound
@@ -82,19 +82,6 @@ def two_artifacts(tmp_path):
     return value, runtime, backend_factory, newest, older
 
 
-def wait_for_serving(value: Dispatcher) -> None:
-    """Wait until inference publishes the scenario's current selection, or report its startup failure."""
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        item = value.coordination.served_models.current_request("math")
-        if item is not None and item.state == "finished":
-            return
-        if item is not None and item.state == "failed":
-            raise AssertionError(f"inference startup failed: {item.error}")
-        time.sleep(0.01)
-    raise AssertionError("inference did not publish the selected artifact")
-
-
 @pytest.mark.unit
 def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from_the_active_release(
     tmp_path,
@@ -128,7 +115,7 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
             assert handler.artifact_ids == [newest["artifact_id"], older["artifact_id"], newest["artifact_id"]]
             # The record names the snapshot that answered.
             record_id = beside.headers["x-reef-agent-record-id"]
-            record = value.get_or_create_scenario("math").records.get("math", record_id)
+            record = value.get_or_create_scenario("math").records.read("math", record_id)
             assert record.artifact_id == older["artifact_id"]
 
             missing = await client.post("/reef/scenarios/math/artifacts/missing/v1/chat/completions", json=CHAT)

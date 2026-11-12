@@ -31,7 +31,7 @@ from reef.train.slime_backend.schedule import next_steps
 from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, Sample, TrajectorySample, trajectory_groups
 
-GROUPED_PG_OBJECTIVE = "tests.support._grouped_pg:GroupedPolicyObjective"
+GROUPED_PG_OBJECTIVE = "tests.support.grouped_pg:GroupedPolicyObjective"
 
 
 class GroupedPolicyObjective(SlimeObjective):
@@ -51,7 +51,7 @@ class GroupedPolicyObjective(SlimeObjective):
         return TrainingSignal("train", {"steps": steps}, {"advantages": normalized}, normalized)
 
 
-def _comparison_set_id(report: AgentRecord) -> str | None:
+def comparison_set_id(report: AgentRecord) -> str | None:
     metadata = report.payload.get("metadata", {})
     set_id = metadata.get("comparison_set") if isinstance(metadata, Mapping) else None
     return set_id if isinstance(set_id, str) and set_id else None
@@ -61,7 +61,7 @@ class ComparisonSetGrouping(ReportGrouping):
     """Reports with one ``metadata.comparison_set`` form one group, ready at two members."""
 
     def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
-        return _comparison_set_id(context.report), None
+        return comparison_set_id(context.report), None
 
     def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
         return GroupDecision.READY if len(members) >= 2 else GroupDecision.INCOMPLETE
@@ -75,7 +75,7 @@ class ComparisonSetSamples(ReportSamples):
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
     def make_sample(self, context: ReportContext) -> TrajectorySample:
-        set_id = _comparison_set_id(context.report)
+        set_id = comparison_set_id(context.report)
         if set_id is None:
             raise ValueError("grouped training requires metadata.comparison_set")
         return replace(self.assembly.build(context, context.require_score()), group_id=set_id)

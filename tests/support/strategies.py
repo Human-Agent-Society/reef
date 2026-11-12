@@ -14,7 +14,7 @@ from reef.evaluation.harness import TaskScorer
 from reef.train.harness_backend import Method
 
 
-def _accepts(fn, name):
+def accepts(fn, name):
     parameters = inspect.signature(fn).parameters.values()
     return any(parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
 
@@ -41,7 +41,7 @@ class FunctionScorer(TaskScorer):
         return self.fn(task, result)
 
     def score_with_models(self, task, result, models):
-        if _accepts(self.fn, "models"):
+        if accepts(self.fn, "models"):
             return self.fn(task, result, models=models)
         return self.fn(task, result)
 

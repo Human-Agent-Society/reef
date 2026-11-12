@@ -21,7 +21,7 @@ from reef.record2sample import Record2Sample, Record2SampleSettings, SampleResul
 from reef.record2sample.service import Selection
 from reef.record2sample.sets import RecordSet
 from reef.service.app import create_app
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 STAGE = f"{__name__}:StalenessSamples"
 
@@ -59,7 +59,7 @@ class NoProgress(Selection):
 @pytest.fixture
 def dispatcher(tmp_path):
     section = {"record2sample": {"module": STAGE, "config": {"max_staleness": 1}}}
-    recipe = Recipe(pipeline_stages=PipelineConfig.from_setting(section, spec=PipelineSpec(), environ={}))
+    recipe = Recipe(pipeline_stages=PipelineSettings.from_setting(section, spec=PipelineSpec(), environ={}))
     opened = harness_dispatcher(tmp_path, recipe)
     opened.get_or_create_scenario("s")
     yield opened
