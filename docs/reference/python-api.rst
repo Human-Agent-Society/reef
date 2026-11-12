@@ -1190,6 +1190,29 @@ serving runtimes load such a snapshot from the revision's snapshot, which
 Hugging Face downloads once into its cache. A runtime that loads models from
 the Hub can read the reference and download nothing.
 
+An artifact of a weight component has one more form, the base root. It holds
+one file, ``base.json``, and no weight files. The artifact stands for the
+deployment's base model with no adapter:
+
+.. code:: json
+
+   {"format": "reef-base-root-1",
+    "inputs": {"model": "/models/qwen", "lora_rank": "8"}}
+
+``inputs`` are the inputs of the training backend's default start
+(``TrainingBackendFacts.default_start_inputs``). ``model`` is always there.
+Slime with LoRA adds ``lora_rank``, ``lora_alpha`` and ``lora_target_modules``.
+Tinker adds ``lora_rank``, and ``service`` when the deployment names a base
+URL. ``reef.artifact.BaseRoot`` is the value. ``read_base_root(directory)``
+reads it from an artifact directory and returns ``None`` for an artifact
+without the file. ``base_root_of(files)`` reads it from ``ArtifactFiles`` and
+refuses an artifact that holds other files beside it. A reader refuses a file
+with another ``format``.
+
+Reef reads a base root but does not write one yet: a default start still
+holds the files that ``default_start()`` gives. The ``spindle_full`` backend
+has no base root. Its default start is a reference to the base revision.
+
 Record storage and audit
 ------------------------
 
@@ -2244,9 +2267,21 @@ Startup status is available through the inference service's
   already.
 
 A root snapshot made from the default start has the layout of every other
-snapshot of its component, so no runtime treats it as a special case. An
-adapter runtime loads its untrained adapter, and the Tinker runtime samples
-its untrained adapter.
+snapshot of its component. An adapter runtime loads its untrained adapter,
+and the Tinker runtime samples its untrained adapter.
+
+Each runtime answers a base root (``base.json``, see `Artifact imports`_)
+with the base model and asks ``ArtifactWeights`` for nothing:
+
+* ``AdapterServingRuntime`` loads nothing. The scenario serves no adapter, so
+  its requests name the base model, and ``activate_checkpoint`` returns
+  ``base_version``. The adapter that the scenario served before stays
+  resident until its route stops or another adapter needs its slot.
+* ``FullWeightServingRuntime`` loads the directory ``model_path`` as full
+  weights under a new version. It raises ``ReefError`` when ``model_path`` is
+  no directory on its host.
+* ``TinkerInferenceRuntime`` samples the base model. It raises ``ValueError``
+  for a base root of another model or another service.
 
 Two training scenarios can share a deployment only if its training component
 allows it (``shares_scenarios``) and its runtime serves each scenario its own
@@ -2399,7 +2434,10 @@ loop:
        ``adapter_target_modules``. ``None`` refuses. Tinker checks its
        manifest and looks up its ``state_path`` on its service. The Tinker
        API describes no sampler or exported-adapter path, so those are
-       checked only for their ``tinker://`` form.
+       checked only for their ``tinker://`` form. The default and Tinker
+       first accept a base root whose ``inputs`` equal
+       ``default_start_inputs``, and raise ``ValueError`` that names each
+       input that differs.
    * - ``close()``
      - Release the component's resources; safe to call repeatedly.
 

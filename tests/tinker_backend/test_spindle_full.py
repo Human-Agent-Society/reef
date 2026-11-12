@@ -12,7 +12,15 @@ from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.job_data import job_data_ref
 
-from reef.artifact import REFERENCE_FILE, Artifact, DirectoryFiles, HuggingFaceRevision, read_reference
+from reef.artifact import (
+    BASE_FILE,
+    REFERENCE_FILE,
+    Artifact,
+    BaseRoot,
+    DirectoryFiles,
+    HuggingFaceRevision,
+    read_reference,
+)
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.core.weight_layout import ArtifactFormat
@@ -239,6 +247,11 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
     (copy / "model.safetensors").write_bytes(b"other-weights")
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
         component.check_artifact(DirectoryFiles(copy))
+    # The base of this component is its reference to the base revision, so it takes no base root.
+    (tmp_path / "base-root").mkdir()
+    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.default_start().inputs).to_text())
+    with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
+        component.check_artifact(DirectoryFiles(tmp_path / "base-root"))
 
 
 @pytest.mark.unit

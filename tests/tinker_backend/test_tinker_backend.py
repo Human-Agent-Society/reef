@@ -19,6 +19,7 @@ from tests.support.serving import wait_for_serving
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
+from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
 from reef.cli import main
 from reef.core.errors import RuntimeConfigError, UpstreamStatusError
@@ -470,6 +471,55 @@ def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(co
     (release / MANIFEST).write_text(json.dumps({**UNTRAINED.to_dict(), "unknown": 1}))
     with pytest.raises(ValueError, match="is no Tinker checkpoint manifest"):
         component.check_artifact(DirectoryFiles(release))
+
+
+def base_root(directory: Path, inputs: dict[str, str]) -> Artifact:
+    """A base root in the new directory ``directory``: the base file of ``inputs`` alone."""
+    directory.mkdir()
+    (directory / BASE_FILE).write_text(BaseRoot(inputs).to_text())
+    return Artifact.local(directory)
+
+
+def test_a_base_root_of_the_model_rank_and_service_is_admitted_and_samples_the_base_model(
+    component, client, inference, objective, tmp_path
+):
+    base = base_root(tmp_path / "base", {"model": MODEL, "lora_rank": "32"})
+    # Admission compares the inputs with the component's default start.
+    component.check_artifact(DirectoryFiles(base.local_path))
+    for name, inputs, message in (
+        ("rank", {"model": MODEL, "lora_rank": "8"}, "lora_rank: '8', not '32'"),
+        ("model", {"model": "org/other", "lora_rank": "32"}, "model: 'org/other', not"),
+        ("service", {"model": MODEL, "lora_rank": "32", "service": "http://spindle"}, "service: 'http://spindle'"),
+    ):
+        other = base_root(tmp_path / name, inputs)
+        with pytest.raises(ValueError, match=message):
+            component.check_artifact(DirectoryFiles(other.local_path))
+    UNTRAINED.write(base.local_path)
+    with pytest.raises(ValueError, match=r"holds base\.json alone"):
+        component.check_artifact(DirectoryFiles(base.local_path))
+    (base.local_path / MANIFEST).unlink()
+
+    # The runtime samples the base model for it, before and after a trained release.
+    first = inference.activate_checkpoint(base)
+    assert inference.served_model_name("s") == MODEL
+    assert inference.artifact_model(base) == PolicyModel(MODEL, None)
+    assert inference.serve_artifact(base, scenario="s").model_name == MODEL
+    (checkpoint,) = train(component, batch(), objective.name).checkpoints
+    trained = inference.activate_checkpoint(Artifact.local(Path(checkpoint.artifact_path)))
+    assert trained != first and inference.served_model_name("s") == "tinker://update-1/sampler"
+    again = inference.activate_checkpoint(base)
+    assert again not in (first, trained) and inference.served_model_name("s") == MODEL
+    assert inference.sampler_load(MODEL) == (None, again)
+    with pytest.raises(ValueError, match="stands for org/other on hosted Tinker, not for"):
+        inference.activate_checkpoint(base_root(tmp_path / "foreign", {"model": "org/other", "lora_rank": "32"}))
+    with pytest.raises(ValueError, match="on http://spindle, not for"):
+        inference.activate_checkpoint(
+            base_root(tmp_path / "elsewhere", {"model": MODEL, "lora_rank": "32", "service": "http://spindle"})
+        )
+    assert inference.served_model_name("s") == MODEL
+    # Training from a base root is not there yet: the component starts only from a checkpoint manifest.
+    with pytest.raises(ValueError, match=r"missing tinker-checkpoint\.json"):
+        component.import_start(base.local_path)
 
 
 def test_exclusive_state_dir_and_model_validation(component, config, inference, tmp_path):

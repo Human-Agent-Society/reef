@@ -14,12 +14,15 @@ from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import (
+    BASE_FILE,
     REFERENCE_FILE,
     ArtifactSourceReader,
     ArtifactSources,
+    BaseRoot,
     DirectorySource,
     SourceFiles,
     directory_checksum,
+    read_base_root,
     read_reference,
 )
 from reef.artifact.artifact import training_starts_of
@@ -83,6 +86,28 @@ def test_a_training_artifact_names_its_training_starts(tmp_path) -> None:
     assert starts(imported.artifact_id) == ()
     assert starts(first) == (imported.artifact_id,)
     assert starts(second) == (first, imported.artifact_id)
+    value.close()
+
+
+@pytest.mark.unit
+def test_a_base_root_is_imported_only_into_the_deployment_whose_default_start_it_names(tmp_path) -> None:
+    value, _, _ = dispatcher(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    for name, model in (("same", "stub"), ("other", "qwen")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / BASE_FILE).write_text(BaseRoot({"model": model}).to_text())
+    imported = value.import_artifact(
+        "math", opened(tmp_path / "same"), None, source=source(tmp_path / "same"), directory=store(tmp_path)
+    )
+    row = value.list_artifacts("math")[0]
+    assert (row["operation"], row["artifact_id"]) == ("import", imported.artifact_id)
+    _, stored_artifact = scenario.resolve_artifact(imported.artifact_id)
+    assert read_base_root(stored_artifact.local_path) == BaseRoot({"model": "stub"})
+    with pytest.raises(ValueError, match="model: 'qwen', not 'stub'"):
+        value.import_artifact(
+            "math", opened(tmp_path / "other"), None, source=source(tmp_path / "other"), directory=store(tmp_path)
+        )
+    assert len(value.list_artifacts("math")) == 2
     value.close()
 
 

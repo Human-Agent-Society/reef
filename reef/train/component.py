@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.base_root import base_root_of
 from reef.artifact.components import ArtifactLayout
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
@@ -353,6 +354,15 @@ class TrainingComponent(ABC):
         gives them as ``BaseModelFiles`` that make them on the first ``directory`` call.
         """
 
+    @property
+    def default_start_inputs(self) -> Mapping[str, str]:
+        """The ``inputs`` of ``default_start``, read without its model files.
+
+        The default reads them from ``default_start()``. A component whose ``default_start`` makes files states
+        them from its configuration instead.
+        """
+        return self.default_start().inputs
+
     def root_start(self, root: ScenarioRoot) -> str:
         """The start of the first job of a trainer whose scenario has the root snapshot ``root``.
 
@@ -415,7 +425,8 @@ class TrainingComponent(ABC):
         """Raise ``ValueError`` unless ``files`` are a snapshot in the layout of this component's snapshots.
 
         An artifact import calls it (RFC #980) on the directory it copied or on the revision it keeps by reference
-        (RFC #995). The default reads ``artifact_format``: ``"full"`` needs ``config.json`` and weight files at the
+        (RFC #995). The default first accepts a base root of this component's default start
+        (``is_own_base_root``). Otherwise it reads ``artifact_format``: ``"full"`` needs ``config.json`` and weight files at the
         root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank is at most ``adapter_rank`` and whose
         target modules are within ``adapter_target_modules``. It reads only file names and
         ``adapter/adapter_config.json``, so a revision is checked without downloading its weights. ``None``
@@ -425,6 +436,8 @@ class TrainingComponent(ABC):
         artifact_format = self.artifact_format
         if artifact_format is None:
             raise ValueError(f"the {self.name} training component takes no imported snapshots")
+        if self.is_own_base_root(files):
+            return
         paths = set(files.paths())
         if artifact_format.layout == "full":
             if "config.json" not in paths or not any(
@@ -447,6 +460,19 @@ class TrainingComponent(ABC):
         modules = config.get("target_modules")
         if targets != ("all",) and (not isinstance(modules, list) or not set(modules) <= set(targets)):
             raise ValueError(f"the adapter's target modules must be a list within {list(targets)}, got {modules!r}")
+
+    def is_own_base_root(self, files: ArtifactFiles) -> bool:
+        """Whether ``files`` are a base root (``reef.artifact.base_root``) of this component's default start.
+
+        False for files that are no base root. Raise ``ValueError`` for a base root that is not readable, that
+        holds other files, or whose inputs differ from ``default_start_inputs``: it stands for another base model
+        or another adapter configuration than this deployment's.
+        """
+        base = base_root_of(files)
+        if base is None:
+            return False
+        base.check_inputs(self.default_start_inputs)
+        return True
 
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         """The parts of the scenario component that ``checkpoint`` changed from ``start``, which the scenario's

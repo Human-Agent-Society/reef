@@ -312,6 +312,10 @@ class JobQueueComponent(TrainingComponent):
     def default_start(self) -> DefaultStart:
         return self.component.default_start()
 
+    @property
+    def default_start_inputs(self) -> Mapping[str, str]:
+        return self.component.default_start_inputs
+
     def root_start(self, root: ScenarioRoot) -> str:
         return self.component.root_start(root)
 

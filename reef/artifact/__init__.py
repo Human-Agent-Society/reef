@@ -29,6 +29,12 @@ snapshot. A root that holds the recipe's ``DefaultStart`` reads its model
 files (a ``BaseModelFiles``, for example a ``ModelDirectory``) only when the
 scenario is created, so a process that only opens scenarios makes none.
 
+An artifact of a weight component has one of three forms: its own weight files, a
+reference to a Hugging Face commit that holds them (``REFERENCE_FILE``, RFC #995), or
+a base root, which holds ``BASE_FILE`` alone and stands for the deployment's base
+model (``reef.artifact.base_root``). Readers accept a base root; no code in Reef
+writes one yet.
+
 Backends used with a scenario commit history must subclass
 ``StagedSnapshotRepositoryBackend``. ``publish`` must accept
 ``advance_head=False`` and persist resolvable bytes without advancing its head.
@@ -52,6 +58,7 @@ from reef.artifact.artifact import (
     ArtifactValidator,
     SnapshotRef,
 )
+from reef.artifact.base_root import BASE_FILE, BaseRoot, base_root_of, read_base_root
 from reef.artifact.composite import compose_snapshot
 from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_checksum
 from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
@@ -92,6 +99,7 @@ from reef.artifact.sources import (
 )
 
 __all__ = [
+    "BASE_FILE",
     "REFERENCE_FILE",
     "AdapterArtifactError",
     "Artifact",
@@ -107,6 +115,7 @@ __all__ = [
     "ArtifactSources",
     "ArtifactValidator",
     "BaseModelFiles",
+    "BaseRoot",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
     "DefaultStart",
@@ -135,10 +144,12 @@ __all__ = [
     "SnapshotRef",
     "SourceFiles",
     "StagedSnapshotRepositoryBackend",
+    "base_root_of",
     "compose_snapshot",
     "directory_checksum",
     "download_huggingface_snapshot",
     "parse_huggingface_source",
+    "read_base_root",
     "read_peft_config",
     "read_reference",
 ]
