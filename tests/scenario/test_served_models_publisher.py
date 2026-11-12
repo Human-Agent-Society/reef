@@ -114,7 +114,7 @@ def test_control_queues_the_selected_artifact_without_publishing_a_ready_route()
     assert publisher.run_once(now=101.0)
     second = store.served_models.current_request("math")
     assert second.id != first.id and second.payload["artifact_id"] == "release-2"
-    assert store.work_queue.get(first.queue, first.id).state == "failed"
+    assert store.work_queue.read(first.queue, first.id).state == "failed"
     assert store.served_models.read_scenario("math") == {}
     assert runtime.stopped == []
 
@@ -141,7 +141,7 @@ def test_control_queues_beside_artifacts_as_references_and_withdraws_the_current
     }
     publisher.withdraw("math", now=2)
     assert store.served_models.current_request("math").payload == {}
-    assert store.work_queue.get(request.queue, request.id).state == "failed"
+    assert store.work_queue.read(request.queue, request.id).state == "failed"
 
 
 @pytest.mark.unit

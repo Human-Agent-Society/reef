@@ -256,7 +256,7 @@ def test_manual_waits_for_a_request_and_trains_the_samples_that_it_names_whateve
     trainer.settle_commit(prepared)
     commit_running_job(trainer)
     assert not trainer.pipeline.held
-    assert records.get("s", "turn-1") is not None
+    assert records.read("s", "turn-1") is not None
     make_samples(trainer)
     assert trainer.advance_job() is None
     # A retry of the request returns its queue item and does not train again.
@@ -840,7 +840,7 @@ def test_a_failed_request_is_skipped_alone_and_its_units_wait_for_the_next_reque
         assert "poison" in skip.consumed_ids
         assert skip.consumed_ids <= {"poison", "a", "report-a"}
         assert not any(item.startswith(CONSUMED_SAMPLE_PREFIX) for item in skip.consumed_ids)
-        assert current.records.get("s", "report-a") is not None
+        assert current.records.read("s", "report-a") is not None
         assert current.pending_requests() == 0
         assert current.trainer.pipeline.failed_requests == {}
     finally:

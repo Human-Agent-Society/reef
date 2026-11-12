@@ -190,10 +190,6 @@ class ComponentEngines(ServingEngines):
     def base_url(self) -> str:
         return self.service.settings.url
 
-    @property
-    def watched(self) -> bool:
-        return True
-
     def open(self) -> OpenedEngines:
         attached = self.service.attach()
         if attached is not None:

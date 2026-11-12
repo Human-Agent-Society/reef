@@ -94,12 +94,12 @@ class CommitRecord:
     or a change of the artifacts served beside the active selection.
 
     Values: ``scenario`` is a non-empty name and ``step`` a positive int.
-    ``snapshot`` is where the record's release is stored, for use in this process. ``to_dict`` stores it only for a
+    ``snapshot`` is where the record's snapshot is stored, for use in this process. ``to_dict`` stores it only for a
     record without a ``selection``. A record that ``from_dict`` reads without one holds ``UNLOCATED_SNAPSHOT`` until
     ``CommitSnapshots`` locates it.
     ``recorded_at`` is the time of the commit in seconds. ``operation`` is a
     ``CommitOperation``. ``operation_verified`` is false only for a commit
-    read from release metadata that names no operation. ``component`` is
+    read from snapshot metadata that names no operation. ``component`` is
     ``None`` or a non-empty name, and ``components`` is ``None`` or a
     mapping of non-empty component names to non-empty artifact ids
     (``SnapshotComponents.artifact_ids``).
@@ -446,7 +446,7 @@ class CommitRecord:
         return self.to_dict() == other.to_dict()
 
     def __repr__(self) -> str:
-        return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, release={self.snapshot.revision!r})"
+        return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, snapshot={self.snapshot.revision!r})"
 
 
 class CommitSnapshots(ABC):

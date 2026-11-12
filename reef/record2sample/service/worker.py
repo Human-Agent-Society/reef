@@ -98,7 +98,7 @@ class ItemSelection(Selection):
             "samples_created": samples_created,
             "at": time.time(),
         }
-        self.queue.set_metadata(SAMPLES_QUEUE, self.item.id, "progress", progress)
+        self.queue.write_metadata(SAMPLES_QUEUE, self.item.id, "progress", progress)
 
 
 def selection_key(scenario: str, component: str) -> str:
@@ -125,7 +125,7 @@ def request_selection(
     key = f"trigger:{trigger}"
     if key in item.metadata:
         return item
-    return queue.set_metadata(SAMPLES_QUEUE, item.id, key, time.time()) or item
+    return queue.write_metadata(SAMPLES_QUEUE, item.id, key, time.time()) or item
 
 
 def selection_triggers(item: WorkItem) -> list[JsonValue]:
@@ -256,7 +256,7 @@ class SamplesWorker(QueueWorker):
             next_item = request_selection(
                 self.queue, item.scenario, component, trigger="background", available_at=time.time() + delay
             )
-            self.queue.set_metadata(SAMPLES_QUEUE, next_item.id, "background_poll_seconds", delay)
+            self.queue.write_metadata(SAMPLES_QUEUE, next_item.id, "background_poll_seconds", delay)
         elif result["due_in_seconds"] is not None:
             delay = cast(float, result["due_in_seconds"])
             request_selection(self.queue, item.scenario, component, trigger="due", available_at=time.time() + delay)

@@ -54,7 +54,7 @@ class StubTrainingComponent(TrainingComponent):
         self.checkpoint_root = checkpoint_root
         self.backend_name = name
         self.scenarios_shared = shares_scenarios
-        self.releases = artifact_format
+        self.snapshot_format = artifact_format
         self.submitted: list[TrainingJob] = []
         self.imported: list[Path] = []
         self.statuses: dict[str, JobStatus] = {}
@@ -70,7 +70,7 @@ class StubTrainingComponent(TrainingComponent):
 
     @property
     def artifact_format(self) -> ArtifactFormat | None:
-        return self.releases
+        return self.snapshot_format
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         if not isinstance(parameters.get("rollout"), Mapping):
@@ -88,9 +88,9 @@ class StubTrainingComponent(TrainingComponent):
         """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
         return self.base_start
 
-    def import_start(self, release: Path) -> str:
-        self.imported.append(release)
-        return str(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        self.imported.append(artifact_dir)
+        return str(artifact_dir)
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         """The checkpoints that ``job`` saves; raising fails the job."""
@@ -153,7 +153,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     """An inference proxy that records the snapshots it serves.
 
     A snapshot serves under the version its ``model.txt`` names, or under its
-    release ID when it holds no such file. ``activated`` lists the versions
+    artifact ID when it holds no such file. ``activated`` lists the versions
     of the snapshots it served, at commits, activations and starts, in order;
     ``served`` is the last one, ``None`` before the first one.
 
@@ -230,3 +230,6 @@ class RunningEngines(ServingEngines):
 
     def open(self) -> OpenedEngines:
         return OpenedEngines(self.backend, attached=False)
+
+    def check_health(self) -> None:
+        return

@@ -28,7 +28,7 @@ from their owning modules.
        C --> W[Framework workers: Slime, Tinker]
        C -- saved checkpoint --> T
        T -- evaluate, select --> E[Candidate evaluation]
-       T -- publish release --> R[Artifact repository]
+       T -- publish snapshot --> R[Artifact repository]
        R -- activate, restore --> I[InferenceRuntime]
        I --> S[Serving engines or provider]
 
@@ -56,7 +56,7 @@ model. Reef reads none of the parameters. The component contract is:
    The parts of the scenario component that the checkpoint changed from
    ``start``, which the scenario's activation rule reads. The default is
    none; the harness component diffs the trees.
-``import_start(release)``
+``import_start(artifact_dir)``
    Copy a published snapshot into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
    when the component cannot start from those weights.

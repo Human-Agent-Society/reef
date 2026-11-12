@@ -428,7 +428,7 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
         retry = store.records.append_result(_inference("i1"))
         assert first.inserted and not retry.inserted
         assert store.records.append(_report("r1", "i1")).agent_record_id == "r1"
-        assert store.records.get("math", "i1") is not None
+        assert store.records.read("math", "i1") is not None
         commit = CommitRecord(
             scenario="math",
             step=1,

@@ -8,8 +8,6 @@ from dataclasses import dataclass, fields
 from typing import Any
 from urllib.parse import urlsplit
 
-#: The control vocabulary of a remote inference component.
-CONTROL_PROTOCOL = "reef-remote-control-v1"
 #: Every control route is under this path. Any other path is an inference request for the engines.
 CONTROL_PATH = "/reef/control/v1"
 DEFAULT_CONTROL_TOKEN_ENV = "REEF_REMOTE_CONTROL_TOKEN"

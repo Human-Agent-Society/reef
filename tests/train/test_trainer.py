@@ -641,10 +641,10 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         finish(first)
         first_state = first.algorithm_state_dict()
 
-        assert first_store.get("math", first_inference.agent_record_id) == first_inference
-        assert first_store.get("math", first_report.agent_record_id) == first_report
-        assert first_store.get_for_audit("math", first_inference.agent_record_id).item == first_inference
-        assert first_store.get_for_audit("math", first_report.agent_record_id).item == first_report
+        assert first_store.read("math", first_inference.agent_record_id) == first_inference
+        assert first_store.read("math", first_report.agent_record_id) == first_report
+        assert first_store.read_for_audit("math", first_inference.agent_record_id).item == first_inference
+        assert first_store.read_for_audit("math", first_report.agent_record_id).item == first_report
         assert [item.agent_record_id for item in first_store.replay("math")] == [
             first_inference.agent_record_id,
             first_report.agent_record_id,
@@ -822,4 +822,4 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         make_samples(resumed)
         assert resumed.advance_job() is None
         assert resumed.pipeline_status()["evicted_record_count"] == 1
-        assert records.get("math", "i3") is not None
+        assert records.read("math", "i3") is not None

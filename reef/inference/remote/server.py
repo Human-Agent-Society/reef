@@ -16,7 +16,6 @@ from uuid import uuid4
 from aiohttp import ClientSession, ClientTimeout, web
 
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightFiles
-from reef.execution.executor.placement import ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
 from reef.inference.deployment import InferenceResources, InferenceService, inference_service_for
 from reef.inference.http import HOP_BY_HOP_HEADERS
 from reef.inference.interfaces import InferenceBackend
@@ -29,32 +28,6 @@ FORWARD_EXCLUDED_HEADERS = HOP_BY_HOP_HEADERS | {"host", "authorization"}
 #: Largest inference request body; weight uploads stream and are not bound by it.
 MAX_REQUEST_BYTES = 64 * 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
-
-
-class LocalEngineResources(InferenceResources):
-    """The GPUs that one engine start reserves on this host, in the component's Ray session.
-
-    ``num_gpus`` is positive. ``start`` reserves that many GPU bundles for
-    inference and ``close`` releases them; the Ray session outlives both.
-    """
-
-    def __init__(self, num_gpus: int) -> None:
-        if isinstance(num_gpus, bool) or not isinstance(num_gpus, int) or num_gpus <= 0:
-            raise ValueError("a remote engine start needs a positive GPU count")
-        self.num_gpus = num_gpus
-        self.reservation: ModelGpuReservation | None = None
-
-    @property
-    def inference_placement(self) -> Any:
-        return None if self.reservation is None else self.reservation.inference
-
-    def start(self) -> None:
-        self.reservation = reserve_model_gpus(ModelGpuLayout(training_gpus=0, inference_gpus=self.num_gpus))
-
-    def close(self) -> None:
-        reservation, self.reservation = self.reservation, None
-        if reservation is not None:
-            reservation.release()
 
 
 class RemoteInferenceServer:
@@ -92,7 +65,7 @@ class RemoteInferenceServer:
         self.work_dir = work_dir
         self.lock = asyncio.Lock()
         self.session: ClientSession | None = None
-        self.resources: LocalEngineResources | None = None
+        self.resources: InferenceResources | None = None
         self.service: InferenceService | None = None
         self.backend: InferenceBackend | None = None
         self.inference_url: str | None = None
@@ -132,7 +105,7 @@ class RemoteInferenceServer:
 
     def start_stack(self, backend_name: str, config: Mapping[str, Any], num_gpus: int) -> None:
         self.stop_stack()
-        resources = LocalEngineResources(num_gpus)
+        resources = InferenceResources(num_gpus)
         service: InferenceService | None = None
         try:
             resources.start()

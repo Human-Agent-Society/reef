@@ -806,7 +806,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     assert restored.advance_job() is None
     assert "later-report" in restored.skipped_record_ids
     # Consumption changes training eligibility, not the stored diagnostic payload.
-    assert records.get("s", "aborted") == aborted
+    assert records.read("s", "aborted") == aborted
 
 
 @pytest.mark.unit
@@ -814,8 +814,8 @@ def test_a_request_names_stored_samples_of_one_kind_that_the_trainer_can_train()
     context = PipelineContext("s", training_mode="manual")
     processor = TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
     upload(processor.store.store, "upload")
-    processor.store.add_record_samples(None, ("r1",), (("r1:0", named_task("task")),))
-    processor.store.store.for_trainer("other").add_record_samples(None, ("r2",), (("other:r2:0", TRAJECTORY),))
+    processor.store.write_record_samples(None, ("r1",), (("r1:0", named_task("task")),))
+    processor.store.store.for_trainer("other").write_record_samples(None, ("r2",), (("other:r2:0", TRAJECTORY),))
     processor.check_request(training_request("upload"))
     with pytest.raises(ValueError, match="one kind"):
         processor.check_request(training_request("upload", "s.r1:0"))
@@ -847,13 +847,13 @@ def test_a_request_reads_its_samples_in_batches_and_a_poll_does_not_read_them_ag
         return read_many(owner, item_ids, **options)
 
     monkeypatch.setattr(data, "read_many", counted)
-    get, held = SampleStore.get, []
+    read, held = SampleStore.read, []
 
-    def counted_get(store: SampleStore, sample_ids: Any) -> Any:
+    def counted_read(store: SampleStore, sample_ids: Any) -> Any:
         held.append(len(sample_ids))
-        return get(store, sample_ids)
+        return read(store, sample_ids)
 
-    monkeypatch.setattr(SampleStore, "get", counted_get)
+    monkeypatch.setattr(SampleStore, "read", counted_read)
     request = training_request(*names)
     processor.check_request(request)
     assert reads == [MAX_QUERY_LIMIT, 1]
@@ -878,7 +878,7 @@ def test_the_data_of_a_failed_request_holds_no_sample_and_reads_none(monkeypatch
     def refuse(store: SampleStore, sample_ids: Any) -> Any:
         raise AssertionError("a failed request reads no sample")
 
-    monkeypatch.setattr(SampleStore, "get", refuse)
+    monkeypatch.setattr(SampleStore, "read", refuse)
     # The queue gives the failure of a request that a client cancelled, or whose step failed.
     processor.queue_requests([request], {request.id: "cancelled by request"})
     assert processor.holds_job_data(None)

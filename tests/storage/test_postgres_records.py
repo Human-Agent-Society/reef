@@ -195,7 +195,7 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
             # The records are record items of the data store, which follows the record backend (RFC #1219).
             assert isinstance(scenario.records, ItemRecordStore)
             if restart:
-                assert scenario.records.get("math", "first") == record()
+                assert scenario.records.read("math", "first") == record()
             else:
                 scenario.records.append(record())
         finally:

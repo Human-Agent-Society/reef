@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.execution.executor.placement import GpuBundles
 from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.engine import ReefSGLangEngine
 from reef.inference.sglang.launch import SGLangEngineGroup
@@ -117,7 +118,7 @@ def test_group_places_each_engine_on_its_reserved_gpus_and_its_own_ports(monkeyp
     monkeypatch.setattr(launch.ray, "remote", lambda cls: ActorClass())
     monkeypatch.setattr(launch.ray, "get", lambda value: value)
     config = SGLangSettings("model", 8, 4, 8)
-    group = SGLangEngineGroup(config, (object(), list(range(8)), [0, 1, 2, 3, 4, 5, 6, 7]), ("router", 3000))
+    group = SGLangEngineGroup(config, GpuBundles(object(), list(range(8)), [0, 1, 2, 3, 4, 5, 6, 7]), ("router", 3000))
     group.start_engines({})
     assert [c["scheduling_strategy"].placement_group_bundle_index for c in calls] == [0, 4]
     assert constructed == [{"rank": 0, "base_gpu_id": 0}, {"rank": 1, "base_gpu_id": 4}]
@@ -132,7 +133,7 @@ def test_group_places_each_engine_on_its_reserved_gpus_and_its_own_ports(monkeyp
 
 def test_group_rejects_noncontiguous_gpu_reservations_before_launch(monkeypatch):
     config = SGLangSettings("model", 2, 2, 4)
-    group = SGLangEngineGroup(config, (object(), [0, 1], [0, 2]), ("router", 3000))
+    group = SGLangEngineGroup(config, GpuBundles(object(), [0, 1], [0, 2]), ("router", 3000))
     with pytest.raises(ValueError, match="contiguous"):
         group.start_engines({})
 

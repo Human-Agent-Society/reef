@@ -158,7 +158,7 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceSettings) ->
 def serving_runtime_config(
     settings: ServiceSettings, backend: TrainingDeployment, artifact_format: ArtifactFormat | None
 ) -> dict[str, Any]:
-    """The runtime config of the deployment's serving, for releases of ``artifact_format``.
+    """The runtime config of the deployment's serving, for snapshots of ``artifact_format``.
 
     ``engines`` gives a ``remote_serving`` config over the resolved engine
     settings, the inference component of ``inference.remote`` and the
@@ -166,7 +166,7 @@ def serving_runtime_config(
     and ``none`` the null runtime. A ``module:Factory`` gets
     ``inference.serving-config`` and the artifact format as ``artifact_format``
     (``None`` when the snapshots hold no weight files). Raise
-    ``DeployConfigError`` when Reef's engines would serve releases without
+    ``DeployConfigError`` when Reef's engines would serve snapshots without
     weight files.
     """
     mode = serving_mode(settings, backend)
@@ -190,7 +190,7 @@ def serving_runtime_config(
         engine_weights = backend.engine_weights(asdict(settings))
         if engine_weights is None:
             raise DeployConfigError(
-                "the training backend's releases hold no weight files that engines load, and it names no way to "
+                "the training backend's snapshots hold no weight files that engines load, and it names no way to "
                 "fetch them; set inference.serving: trainer"
             )
         artifact_format, weights = engine_weights.artifact_format, engine_weights.weights

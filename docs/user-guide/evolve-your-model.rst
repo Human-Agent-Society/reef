@@ -265,7 +265,7 @@ revision loads outside Reef with nothing but ``transformers`` and ``peft``:
    from transformers import AutoModelForCausalLM
 
    base = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-8B")
-   model = PeftModel.from_pretrained(base, "/path/to/release/adapter")
+   model = PeftModel.from_pretrained(base, "/path/to/snapshot/adapter")
 
 ``reef-adapter.json`` is what lets you check a revision, not just load it. It
 records:
@@ -290,7 +290,7 @@ Connect your agent
 ------------------
 
 Use the `HTTP API reference <../reference/http-api.rst>`__ for inference,
-feedback reports, and release queries. To compare learning signals before
+feedback reports, and artifact queries. To compare learning signals before
 choosing a training config, see `Choose a recipe for agent learning
 <recipes.rst>`__.
 

@@ -11,7 +11,7 @@ from reef.execution.executor.uniproc import UniProcExecutor
 from reef.inference.deployment import InferenceConnection
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.config import SGLangSettings
-from reef.inference.sglang.service import INFERENCE_PROTOCOL, SGLangInferenceService
+from reef.inference.sglang.service import SGLangInferenceService
 
 
 class Receiver:
@@ -36,11 +36,11 @@ class Receiver:
         self.closed = True
 
 
-def test_service_adapts_only_compatible_connections_without_owning_workers():
+def test_service_adapts_only_connections_with_a_control_executor_without_owning_workers():
     receiver = Receiver()
     executor = UniProcExecutor.from_workers([receiver])
     service = SGLangInferenceService(SGLangSettings("model", 1, 1, 1))
-    operations = service.backend(InferenceConnection(INFERENCE_PROTOCOL, executor))
+    operations = service.backend(InferenceConnection(executor))
 
     assert operations.inference_url() == "http://inference:8000"
     assert operations.runtime_load_ids() == ("weights:1", "weights:1")
@@ -52,8 +52,8 @@ def test_service_adapts_only_compatible_connections_without_owning_workers():
     assert not receiver.closed
     assert operations.runtime_load_ids() == ("weights:1", "weights:1")
 
-    with pytest.raises(ValueError, match="incompatible SGLang"):
-        service.backend(InferenceConnection("other-protocol", executor))
+    with pytest.raises(ValueError, match="SGLang inference connection has no control executor"):
+        service.backend(InferenceConnection(None))
 
 
 @pytest.mark.parametrize("versions", ["weights:1", [None], [1], [""], {"engine": "weights:1"}])
