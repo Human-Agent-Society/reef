@@ -26,9 +26,11 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.recipe.loading import build_recipe, load_recipe
+from reef.recipe.registry import recipe_class_for
 from reef.record2sample.distill import student_call
 from reef.sample2job import DistillJobData
+from reef.service.deploy.training import training_recipe_config
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
@@ -181,7 +183,7 @@ def test_processor_emits_one_sample_with_the_teacher_request() -> None:
 
 
 def sdft_recipe(config: Mapping[str, Any]) -> SDFTRecipe:
-    recipe = SDFTRecipe.from_environment({}, config=config, **runtime_bindings())
+    recipe = load_recipe(SDFTRecipe, config, {}, **runtime_bindings())
     assert isinstance(recipe, SDFTRecipe)
     return recipe
 
@@ -249,7 +251,7 @@ def test_sdft_recipe_refuses_stage_settings_in_the_recipe_config() -> None:
     with pytest.raises(RecipeConfigError, match="does not consume"):
         sdft_recipe({"data": {"batch_size": 4}})
     with pytest.raises(RecipeConfigError, match="does not consume"):
-        SDFTRecipe.service_config({"context-template": "Example: {context}"}, model_path="/models/served")
+        training_recipe_config(SDFTRecipe, {"context-template": "Example: {context}"}, model_path="/models/served")
     # A key in the wrong stage fails when the pipeline builds.
     recipe = sdft_recipe({"pipeline": {"record2sample": {"config": {"batch_size": 4}}}})
     with pytest.raises(PluginConfigError, match="batch_size"):

@@ -39,6 +39,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.config import recipe_config_from_file_layout
+from reef.recipe.loading import weight_training_selection
 from reef.scenario.factory import read_trainer_specs
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
@@ -301,17 +302,20 @@ _LOCAL_TRAINING = "tests.support.training_deployment:LocalDeployment"
 def test_composite_recipe_names_its_weight_training_component() -> None:
     from recipes.sao.recipe import SAORecipe
 
-    selected = CompositeRecipe.select_weight_training({"components": _WEIGHTS_AND_HARNESS})
+    selected = weight_training_selection(CompositeRecipe, {"components": _WEIGHTS_AND_HARNESS})
     assert selected is not None
     # The selected component's config comes back flat, as its recipe reads it.
     assert selected == (SAORecipe, {"implementation": "recipes.sao.recipe:SAORecipe", "data": {}})
-    assert CompositeRecipe.select_weight_training({"components": {"harness": _WEIGHTS_AND_HARNESS["harness"]}}) is None
-    assert _TreeRecipe.select_weight_training({}) is None
-    assert SAORecipe.select_weight_training({"data": {}}) == (SAORecipe, {"data": {}})
+    assert (
+        weight_training_selection(CompositeRecipe, {"components": {"harness": _WEIGHTS_AND_HARNESS["harness"]}})
+        is None
+    )
+    assert weight_training_selection(_TreeRecipe, {}) is None
+    assert weight_training_selection(SAORecipe, {"data": {}}) == (SAORecipe, {"data": {}})
     # A snapshot loads one component, so two weight components are refused before any runtime is connected.
     with pytest.raises(RecipeConfigError, match=r"\['weights', 'weights2'\] all train weights"):
-        CompositeRecipe.select_weight_training(
-            {"components": {**_WEIGHTS_AND_HARNESS, "weights2": _WEIGHTS_AND_HARNESS["weights"]}}
+        weight_training_selection(
+            CompositeRecipe, {"components": {**_WEIGHTS_AND_HARNESS, "weights2": _WEIGHTS_AND_HARNESS["weights"]}}
         )
 
 

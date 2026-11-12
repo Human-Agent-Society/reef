@@ -627,3 +627,41 @@ def test_a_recipe_builds_no_trainer_and_no_pipeline() -> None:
                     and item.name in TRAINER_CONSTRUCTION_METHODS
                 )
     assert found == KEPT_TRAINER_CONSTRUCTION_METHODS
+
+
+#: The methods that loaded a recipe, or decided for the launcher and the training service, on a recipe class
+#: before RFC #1390 moved that work to ``reef.recipe.loading`` and ``reef.service.deploy.training``.
+RECIPE_LOADING_METHODS = frozenset(
+    {
+        "from_environment",
+        "from_resolved_config",
+        "service_config",
+        "select_weight_training",
+        "resolve_training_component",
+    }
+)
+
+#: ``(file, class, method)`` of each such method, or method whose name begins with an underscore, that a later step
+#: of RFC #1390 still has to remove; none is left.
+KEPT_RECIPE_LOADING_METHODS: frozenset[tuple[str, str, str]] = frozenset()
+
+
+def test_a_recipe_class_does_not_load_itself_and_has_no_underscore_method() -> None:
+    # One loader makes the recipe value (RFC #1390): a recipe class declares its configuration. No class of the
+    # recipe packages has a loading method. A recipe class, which is a class with a base whose name ends in
+    # "Recipe", has no method whose name begins with an underscore either, other than a special method.
+    found: set[tuple[str, str, str]] = set()
+    paths = [*(REPO_ROOT / "reef" / "recipe").rglob("*.py"), *(REPO_ROOT / "recipes").rglob("*.py")]
+    for path in sorted(paths):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            bases = [base.attr if isinstance(base, ast.Attribute) else getattr(base, "id", "") for base in node.bases]
+            is_recipe = node.name == "Recipe" or any(base.endswith("Recipe") for base in bases)
+            for item in node.body:
+                if not isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef):
+                    continue
+                special = item.name.startswith("__") and item.name.endswith("__")
+                if item.name in RECIPE_LOADING_METHODS or (is_recipe and item.name.startswith("_") and not special):
+                    found.add((str(path.relative_to(REPO_ROOT)), node.name, item.name))
+    assert found == KEPT_RECIPE_LOADING_METHODS

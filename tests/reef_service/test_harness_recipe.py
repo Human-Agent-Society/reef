@@ -82,6 +82,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.service.app import create_app
@@ -106,7 +107,7 @@ SUPPORT = "tests.support.harness_jobs"
 
 
 def from_config(settings: dict[str, Any], **options: Any) -> HarnessEvolutionRecipe:
-    return HarnessEvolutionRecipe.from_environment({}, config=settings, **options)
+    return load_recipe(HarnessEvolutionRecipe, settings, {}, **options)
 
 
 def flat(scores: list[dict[str, object]]) -> list[object]:
@@ -653,7 +654,7 @@ def test_the_method_receives_the_served_model_binding(tmp_path: Path) -> None:
 def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
     """Told where Reef answers inference, runs sample the snapshot the scenario serves through it."""
     config = {"model": {"path": "qwen3-8b"}, **evolution_config()}
-    recipe = HarnessEvolutionRecipe.from_environment({"REEF_UPSTREAM_URL": "http://upstream.test"}, config=config)
+    recipe = load_recipe(HarnessEvolutionRecipe, config, {"REEF_UPSTREAM_URL": "http://upstream.test"})
     assert recipe.model_binding().base_url == "http://upstream.test"
     served = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900/", token="reef-local"))
     binding = served.model_binding("agent")

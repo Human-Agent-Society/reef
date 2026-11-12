@@ -20,6 +20,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, config_field
 from reef.recipe.config_fields import resolve_config_field_values
+from reef.recipe.loading import load_recipe
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
@@ -181,7 +182,7 @@ def test_runtime_definition_is_loaded_from_selected_dotted_factory(extension):
     assert runtime.parsed_config["label"] == "true"
     assert runtime.parsed_config["enabled"] is False
     assert runtime.parsed_config["type"] == "reef_config_extension:Runtime"
-    recipe = ExtensionServingRecipe.from_environment({}, config=config["reef"], **runtime_bindings(runtime))
+    recipe = load_recipe(ExtensionServingRecipe, config["reef"], {}, **runtime_bindings(runtime))
     assert recipe.label == "001"
 
 

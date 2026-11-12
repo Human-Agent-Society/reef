@@ -7,7 +7,6 @@ backend updates model weights.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -18,15 +17,13 @@ from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioC
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
-from reef.core.config import config_arguments
-from reef.core.errors import RuntimeConfigError
+from reef.core.config import Settings
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
-from reef.evaluation.activation import activation_reference, build_activation_rule
+from reef.evaluation.activation import build_activation_rule
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.inference.http import resolve_proxy_runtime
 from reef.inference.interfaces import InferenceRuntime
-from reef.recipe.config_fields import config_field, resolve_config_field_values
+from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.storage.data import DataStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind
@@ -93,6 +90,11 @@ class Recipe:
 
     config_sections: ClassVar[tuple[str, ...]] = ()
     """Opaque config sections validated by the recipe alongside its declared fields."""
+
+    refused_sections: ClassVar[Mapping[str, str]] = {}
+    """Config sections that this recipe refuses, each with the message of the ``RecipeConfigError`` that the loader
+    raises when the section is not empty: for example a weight recipe whose objective options belong to the backend
+    refuses ``optimization``."""
 
     name: str = "recipe"
     runtime: InferenceRuntime | None = None
@@ -186,82 +188,28 @@ class Recipe:
         return replace(self, training_component=components[self.training_component.name], data_store=data_store)
 
     @classmethod
-    def from_environment(
-        cls,
-        environ: Mapping[str, str] | None = None,
-        *,
-        config: Mapping[str, Any] | None = None,
-        runtime: InferenceRuntime | None = None,
-        training_component: TrainingComponent | None = None,
-    ) -> Recipe:
-        values = os.environ if environ is None else environ
-        settings = config or {}
-        data = settings.get("data", {})
-        resolved = resolve_config_field_values(cls, data, values)
-        return cls.from_resolved_config(
-            settings, resolved, environ=values, runtime=runtime, training_component=training_component
-        )
+    def config_with_defaults(cls, config: Mapping[str, Any]) -> Mapping[str, Any]:
+        """The flat recipe config that the loader reads for this class: ``config`` itself by default.
 
-    @classmethod
-    def from_resolved_config(
-        cls,
-        config: Mapping[str, Any],
-        field_values: Mapping[str, Any],
-        *,
-        environ: Mapping[str, str],
-        runtime: InferenceRuntime | None = None,
-        training_component: TrainingComponent | None = None,
-    ) -> Recipe:
-        """Construct from values resolved before runtime allocation.
-
-        ``field_values`` comes from ``resolve_config_field_values``. Domain
-        validation still runs in the constructor; no environment is re-read.
+        A class with defaults of its own for a section returns ``config`` with those defaults under the
+        deployment's keys. The result is a function of ``config`` alone. The loader (``reef.recipe.loading``) calls
+        it before it reads any section. Step 4 of RFC #1390 removes this hook with its one override, Reefine's.
         """
-        try:
-            return cls(
-                **cls._recipe_kwargs(config, environ),
-                runtime=cls._resolve_runtime(environ, runtime),
-                training_component=training_component,
-                **field_values,
-            )
-        except (RecipeConfigError, RuntimeConfigError):
-            raise
-        except ValueError as exc:
-            raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
+        return config
 
     @classmethod
-    def _resolve_runtime(cls, values: Mapping[str, str], runtime: InferenceRuntime | None) -> InferenceRuntime | None:
-        return resolve_proxy_runtime(values, runtime)
+    def built_fields(
+        cls, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]
+    ) -> dict[str, Any]:
+        """The constructor arguments that this class builds from ``config`` and cannot declare: none by default.
 
-    @classmethod
-    def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
-        """Recipe-specific keyword arguments resolved from config sections: the ``pipeline`` section's stages and
-        the ``activation`` section's rule."""
-        kwargs: dict[str, Any] = {}
-        pipeline = settings.get("pipeline")
-        activation = settings.get("activation")
-        try:
-            if pipeline is not None:
-                kwargs["pipeline_stages"] = PipelineSettings.from_setting(
-                    pipeline, spec=cls.pipeline_spec(), environ=values
-                )
-            if activation is not None:
-                kwargs["activation"] = activation_reference(activation)
-        except PluginConfigError as exc:
-            raise RecipeConfigError(str(exc)) from exc
-        return kwargs
-
-    @classmethod
-    def select_weight_training(
-        cls, config: Mapping[str, Any]
-    ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
-        """The weight training recipe class a deployment of this class trains with, and that recipe's own config.
-
-        Read from ``config`` alone, before anything is constructed: the service
-        decides from it whether to connect a training component and launch a
-        training backend. ``None`` for a recipe that trains no weights.
+        ``config`` is ``config_with_defaults`` of the deployment's config and ``sections`` holds the parsed
+        ``section_field`` values by field name. The loader (``reef.recipe.loading``) passes the result to the
+        constructor beside the declared fields. A harness recipe returns its method, scorer, collector and
+        executor here; step 4 of RFC #1390 moves that construction to the harness training component and removes
+        this hook.
         """
-        return None
+        return {}
 
     def with_served_endpoint(self, endpoint: ServedEndpoint) -> Recipe:
         """This recipe told where the service answers inference; the default has no calls of its own to point there."""
@@ -358,8 +306,9 @@ class WeightTrainingRecipe(Recipe):
 
     Configuration is declared as fields: a config field (see
     :mod:`reef.recipe.config_fields`) is simultaneously the YAML key, the
-    environment fallback, and the type-aware parser. :meth:`service_config`
-    and :meth:`from_environment` derive everything from those fields, so a
+    environment fallback, and the type-aware parser. The loader
+    (``reef.recipe.loading.load_recipe``) and the training deployment
+    (``reef.service.deploy.training.training_recipe_config``) derive everything from those fields, so a
     recipe never repeats a setting's name or type anywhere else.
     """
 
@@ -405,7 +354,14 @@ class WeightTrainingRecipe(Recipe):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.resolve_training_component(self.training_component)
+        if self.training_component is None:
+            raise RecipeConfigError(
+                f"{type(self).__name__} requires a training component; pass one via the 'training_component' argument"
+            )
+        if not isinstance(self.training_component, TrainingComponent):
+            raise TypeError(
+                f"{type(self).__name__} requires a TrainingComponent, got {type(self.training_component).__name__}"
+            )
         if not isinstance(self.runtime, InferenceRuntime):
             raise RecipeConfigError("weight recipes require an independent inference runtime")
 
@@ -418,69 +374,6 @@ class WeightTrainingRecipe(Recipe):
     def default_start(self) -> DefaultStart:
         """The training component's untrained checkpoint (``TrainingComponent.default_start``)."""
         return self.training_component.default_start()
-
-    @classmethod
-    def resolve_training_component(cls, component: TrainingComponent | None) -> TrainingComponent:
-        if component is None:
-            raise RecipeConfigError(
-                f"{cls.__name__} requires a training component; pass one via the 'training_component' argument"
-            )
-        if not isinstance(component, TrainingComponent):
-            raise TypeError(f"{cls.__name__} requires a TrainingComponent, got {type(component).__name__}")
-        return component
-
-    @classmethod
-    def select_weight_training(
-        cls, config: Mapping[str, Any]
-    ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
-        return cls, config
-
-    @classmethod
-    def service_config(cls, settings: Mapping[str, Any], *, model_path: str) -> dict[str, Any]:
-        """Assemble this recipe's ``from_environment`` config from flat service settings.
-
-        ``settings`` is the recipe-owned slice of the deployment's flat
-        ``reef`` section — the caller (``reef.service.assembly``) removes the
-        service's own keys first. Only keys the operator actually set are
-        forwarded, so every default lives with the recipe's own config fields,
-        never in the service layer. This step only translates the layout; shared
-        field resolution performs type conversion before construction. A key this recipe does not declare
-        is a loud error: the operator set a value nothing would consume.
-        """
-        field_names = {argument.name for argument in config_arguments(cls)}
-        data: dict[str, Any] = {}
-        unknown: list[str] = []
-        for key, value in settings.items():
-            if key in field_names:
-                # A YAML key left empty (None) is unset, not a value to parse.
-                if value is not None:
-                    data[key] = value
-            else:
-                unknown.append(key)
-        if unknown:
-            known = ", ".join(f"reef.{name}" for name in sorted(field_names))
-            raise RecipeConfigError(
-                f"{cls.__name__} does not consume {', '.join(f'reef.{key}' for key in sorted(unknown))}; "
-                f"the recipe would silently run with its defaults instead. "
-                f"Settings {cls.__name__} consumes: {known}. "
-                f"A new setting is declared with config_field() on the recipe dataclass "
-                f"(see reef.recipe.config_fields)."
-            )
-        return {"data": data, "model": {"path": model_path}}
-
-    @classmethod
-    def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
-        cls._validate_config(settings)
-        return super()._recipe_kwargs(settings, values)
-
-    @classmethod
-    def _validate_config(cls, settings: Mapping[str, Any]) -> None:
-        """Internal hook: reject config sections this recipe refuses to own.
-
-        Config field values never come through here; they resolve from
-        their field declarations. This exists only for structural rules such
-        as SAO refusing an ``optimization`` section.
-        """
 
 
 def close_runtimes(

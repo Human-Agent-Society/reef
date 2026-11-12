@@ -24,7 +24,7 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.recipe.registry import build_recipe
+from reef.recipe.loading import build_recipe
 
 #: What the scorer looks for in the rules a run completed with.
 MARKER = "META-HARNESS-WINNER"

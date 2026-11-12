@@ -40,7 +40,8 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.recipe.loading import build_recipe, load_recipe
+from reef.recipe.registry import recipe_class_for
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
@@ -137,11 +138,12 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
 
 @pytest.mark.unit
 def test_sao_recipe_reads_reef_side_config() -> None:
-    recipe = SAORecipe.from_environment(
-        {},
-        config={
+    recipe = load_recipe(
+        SAORecipe,
+        {
             "pipeline": {"sample2job": {"config": {"job_samples": 2, "buffer_size": 16}}},
         },
+        {},
         **runtime_bindings(),
     )
 
@@ -154,7 +156,7 @@ def test_sao_recipe_reads_reef_side_config() -> None:
 def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
     deployment = yaml.safe_load((EXAMPLES / example).read_text(encoding="utf-8"))
     pipeline_section = interpolate_config_values(deployment, deployment["pipeline"])
-    recipe = SAORecipe.from_environment({}, config={"pipeline": pipeline_section}, **runtime_bindings())
+    recipe = load_recipe(SAORecipe, {"pipeline": pipeline_section}, {}, **runtime_bindings())
     # One job is one optimizer step: job_samples names Slime's global batch size.
     global_batch_size = deployment["training"]["config"]["global_batch_size"]
     assert deployment["training"]["options"]["global-batch-size"] == "${training.config.global_batch_size}"
@@ -173,7 +175,7 @@ def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
 @pytest.mark.parametrize("key", ["batch_size", "batch-size"])
 def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
     with pytest.raises(RecipeConfigError, match="does not consume"):
-        SAORecipe.from_environment({}, config={"data": {key: 2}}, **runtime_bindings())
+        load_recipe(SAORecipe, {"data": {key: 2}}, {}, **runtime_bindings())
 
 
 @pytest.mark.unit
@@ -190,7 +192,7 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
 def test_sao_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(
     pipeline: dict[str, Any], message: str
 ) -> None:
-    recipe = SAORecipe.from_environment({}, config={"pipeline": pipeline}, **runtime_bindings())
+    recipe = load_recipe(SAORecipe, {"pipeline": pipeline}, {}, **runtime_bindings())
     with pytest.raises(PluginConfigError, match=message):
         recipe.stages().build(PipelineContext("math"))
 
@@ -200,11 +202,7 @@ def test_sao_recipe_rejects_backend_objective_config() -> None:
     from reef.recipe.errors import RecipeConfigError
 
     with pytest.raises(RecipeConfigError, match=r"training\.options"):
-        SAORecipe.from_environment(
-            {},
-            config={"optimization": {"eps_low": 0.8}},
-            **runtime_bindings(),
-        )
+        load_recipe(SAORecipe, {"optimization": {"eps_low": 0.8}}, {}, **runtime_bindings())
 
 
 # --- processor -------------------------------------------------------------
@@ -471,9 +469,10 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
 def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_serving(tmp_path) -> None:
     component = _SAOComponent(tmp_path / "checkpoints")
     inference = StubInferenceRuntime()
-    recipe = SAORecipe.from_environment(
+    recipe = load_recipe(
+        SAORecipe,
+        {"pipeline": {"sample2job": {"config": {"job_samples": 1}}}, "activation": {"module": "never"}},
         {},
-        config={"pipeline": {"sample2job": {"config": {"job_samples": 1}}}, "activation": {"module": "never"}},
         **runtime_bindings(component, inference),
     )
     dispatcher = _sao_dispatcher(tmp_path, recipe)

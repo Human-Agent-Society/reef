@@ -85,7 +85,7 @@ import a concrete integration.
 |                         | recovery, and lifecycle                                  | implementations                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/recipe/``        | the contract a method implements, dotted                 | external cookbook methods                  |
-|                         | resolution, runtime binding, the base harness evolution  |                                            |
+|                         | resolution, the recipe loader, the base harness evolution|                                            |
 |                         | recipe, and the built-in generated-task recipe           |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/train/``         | the trainer, the training job loop, the training         | HTTP endpoints, deployment                 |

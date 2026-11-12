@@ -39,7 +39,7 @@ class ServiceSettings:
     Recipe-specific config fields (batch sizes, group counts)
     are not fields here: they stay in ``recipe_settings`` — the raw ``reef``
     config section — and each recipe extracts its own via
-    ``WeightTrainingRecipe.service_config``, so their defaults live with the recipe.
+    ``reef.service.deploy.training.training_recipe_config``, so their defaults live with the recipe.
 
     ``routing_manifest`` is None, which turns routing off, or a non-empty manifest path; the public reader
     takes a blank value as not supplied, and nothing checks the file when the value is made.
