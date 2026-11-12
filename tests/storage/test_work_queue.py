@@ -7,8 +7,10 @@ from dataclasses import dataclass
 import pytest
 from tests.support.polling import wait_until
 
+from reef.core.errors import RuntimeConfigError
+from reef.core.plugins import PluginConfigError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
-from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
+from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.storage.control_lease import ControlLease
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
@@ -16,7 +18,7 @@ from reef.storage.served_models import (
     SERVING_KIND,
     SERVING_QUEUE,
     STOP_SERVING_KIND,
-    ControlLeaseConflict,
+    ControlLeaseConflictError,
     ServedModelsWriter,
 )
 from reef.storage.sql_coordination import (
@@ -26,7 +28,7 @@ from reef.storage.sql_coordination import (
     SQLServedModels,
     SQLWorkQueue,
 )
-from reef.storage.work_queue import NewWork, WorkConflict, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import NewWork, WorkConflictError, WorkItem, WorkLeaseLostError, WorkQueue
 
 
 @dataclass
@@ -77,7 +79,7 @@ def test_an_attempt_that_its_worker_gave_back_does_not_count(open_coordination):
         given_back = queue.give_back("jobs", "a", f"w{restart}", now=restart)
         assert (given_back.state, given_back.error, given_back.ended_at) == ("queued", "the worker stopped", None)
         assert (given_back.attempt_count, given_back.stopped_attempt_count) == (restart + 1, restart + 1)
-    with pytest.raises(WorkLeaseLost):
+    with pytest.raises(WorkLeaseLostError):
         queue.give_back("jobs", "a", "w2", now=3)
     # The item still has its two attempts.
     queue.take("jobs", "w", ["training_job:tinker"], now=4)
@@ -102,7 +104,7 @@ def test_a_worker_takes_the_oldest_item_it_accepts_and_finishes_it_under_its_lea
     queue.append_progress("jobs", "a", "w1", {"step": 1}, number=0, now=2)  # a continuing worker reports again safely
     with pytest.raises(ValueError, match="skips"):
         queue.append_progress("jobs", "a", "w1", {"step": 3}, number=2, now=2)
-    with pytest.raises(WorkLeaseLost):
+    with pytest.raises(WorkLeaseLostError):
         queue.finish("jobs", "a", "w2", {"ok": True})
     done = queue.finish("jobs", "a", "w1", {"ok": True}, now=3)
     assert done.state == "finished" and done.final and done.result == {"ok": True}
@@ -114,7 +116,7 @@ def test_adding_is_idempotent_by_id_and_rejects_a_different_payload(open_coordin
     queue = open_coordination().queue
     first = queue.append(job("a"))
     assert queue.append(job("a")) == first
-    with pytest.raises(WorkConflict):
+    with pytest.raises(WorkConflictError):
         queue.append(NewWork("jobs", "a", "s", "training_job:tinker", {"input": "other"}))
 
 
@@ -139,7 +141,7 @@ def test_an_expired_lease_returns_the_item_and_a_late_worker_loses_it(open_coord
     assert queue.extend_lease("jobs", "a", "w1", now=5).lease_expires_at == 15
 
     assert [item.state for item in queue.requeue_expired(now=16)] == ["queued"]
-    with pytest.raises(WorkLeaseLost):
+    with pytest.raises(WorkLeaseLostError):
         queue.extend_lease("jobs", "a", "w1", now=16)
     again = queue.take("jobs", "w2", ["training_job:tinker"], now=17)
     assert again.worker_id == "w2" and again.attempt_count == 2
@@ -210,11 +212,13 @@ def warnings_of(caplog) -> list[str]:
 @pytest.mark.parametrize(
     ("error", "attempts", "state"),
     [
-        (ItemFailed("bad input"), 2, "failed"),
+        (ItemFailedError("bad input"), 2, "failed"),
         (ValueError("bad input"), 2, "failed"),
+        (PluginConfigError("bad plugin config"), 2, "failed"),
+        (RuntimeConfigError("bad runtime config"), 2, "queued"),
         (RuntimeError("engine down"), 2, "queued"),
         (RuntimeError("engine down"), 1, "failed"),
-        (WorkerStopped(), 1, "queued"),
+        (WorkerStoppedError(), 1, "queued"),
     ],
 )
 def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, error, attempts, state):
@@ -239,7 +243,7 @@ def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, err
             "RuntimeError: modal run failed:\n  the export failed",
         ),
         (RuntimeError(), "RuntimeError:"),
-        (ItemFailed(" "), "the work item failed"),
+        (ItemFailedError(" "), "the work item failed"),
     ],
 )
 def test_a_worker_stores_an_error_message_with_surrounding_spaces(error, stored):
@@ -258,7 +262,7 @@ def test_a_worker_logs_an_expired_item_that_has_no_attempts_left(caplog):
         queue.append(job("a"), now=0)
         queue.take("jobs", "stopped-worker", ["training_job:tinker"], now=0)
         with caplog.at_level(logging.WARNING, logger="reef.execution.workers"):
-            assert not FailingWorker(queue, ItemFailed("unused")).run_once()
+            assert not FailingWorker(queue, ItemFailedError("unused")).run_once()
         assert queue.read("jobs", "a").state == "failed"
         assert warnings_of(caplog) == ["work item jobs/a of scenario s failed: the worker's lease expired"]
 
@@ -280,7 +284,7 @@ class WaitingWorker(QueueWorker):
         try:
             while not self.release.wait(0.01):
                 if self.stopped.is_set():
-                    raise WorkerStopped
+                    raise WorkerStoppedError
             return {}
         finally:
             with self.lock:
@@ -412,7 +416,7 @@ def test_served_models_writes_need_the_current_control_lease_number(open_coordin
     served = ServedArtifact("artifact-1", "http://engine:8000/", "artifact-1")
     assert served.url == "http://engine:8000"
     before = table.changed_sequence()
-    with pytest.raises(ControlLeaseConflict):
+    with pytest.raises(ControlLeaseConflictError):
         table.write(ScenarioModel("s"), served, control_lease_number=taken_over.number)
     table.write(ScenarioModel("s"), served, control_lease_number=3)
     assert table.read(ScenarioModel("s")) == served and table.read_scenario("s") == {"active": served}
@@ -459,7 +463,7 @@ def test_control_takeover_waits_for_the_serving_request_transaction(open_coordin
         assert writing.result(2).state == "queued"
         assert takeover.result(2).number == first.number + 1
         assert blocked
-    with pytest.raises(ControlLeaseConflict):
+    with pytest.raises(ControlLeaseConflictError):
         table.request("s", {"artifact_id": "b"}, control_lease_number=first.number, now=12)
 
 
@@ -595,7 +599,7 @@ def test_serving_completion_rejects_old_attempt_and_rolls_back_bad_routes(open_c
     old_attempt = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
     queue.requeue_expired(now=12)
     current = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=13)
-    with pytest.raises(WorkLeaseLost, match="later attempt"):
+    with pytest.raises(WorkLeaseLostError, match="later attempt"):
         table.complete_request(
             old_attempt, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=14
         )
@@ -629,7 +633,7 @@ def test_failed_serving_retries_only_on_explicit_request_and_old_control_cannot_
     other = table.request("s", {"artifact_id": "b"}, control_lease_number=lease.number, automatic_retries=3, now=5)
     assert other.metadata == {}
     stores.lease.acquire("new-control", now=11)
-    with pytest.raises(ControlLeaseConflict):
+    with pytest.raises(ControlLeaseConflictError):
         table.request("s", {}, control_lease_number=lease.number, now=12)
     assert table.current_request("s").id == other.id
 
@@ -687,7 +691,7 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     assert table.current_request("failed").state == "failed"
     table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=5)
     assert table.current_request("ready") == recovery
-    with pytest.raises(WorkLeaseLost):
+    with pytest.raises(WorkLeaseLostError):
         table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=14)
     assert table.current_request("ready") == recovery
 
@@ -723,14 +727,14 @@ def test_startup_and_cleanup_completion_require_the_current_runtime_owner(open_c
     table.request("s", {"artifact_id": "a"}, control_lease_number=lease.number, now=0)
     startup = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
     queue.extend_lease(SERVING_QUEUE, startup.id, "worker", now=9)
-    with pytest.raises(WorkLeaseLost):
+    with pytest.raises(WorkLeaseLostError):
         table.complete_request(
             startup, "worker", {"active": served}, owner=owner, serving_config={}, stop_delay_seconds=10, now=11
         )
     assert table.read_scenario("s") == {} and table.current_request("s").state == "assigned"
     queue.requeue_expired(now=11)
     current_owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=12)
-    with pytest.raises(WorkLeaseLost, match="later attempt"):
+    with pytest.raises(WorkLeaseLostError, match="later attempt"):
         table.complete_request(
             startup, "worker", {"active": served}, owner=owner, serving_config={}, stop_delay_seconds=10, now=13
         )
@@ -742,7 +746,7 @@ def test_startup_and_cleanup_completion_require_the_current_runtime_owner(open_c
     table.schedule_stop(stop, control_lease_number=lease.number)
     queue.append(NewWork(SERVING_QUEUE, "stop", "s", STOP_SERVING_KIND, serial_key=SERVING_QUEUE), now=14)
     cleanup = queue.take(SERVING_QUEUE, "worker", [STOP_SERVING_KIND], now=14)
-    with pytest.raises(WorkLeaseLost, match="later attempt"):
+    with pytest.raises(WorkLeaseLostError, match="later attempt"):
         table.complete_stop(cleanup, "worker", stop, owner=owner, now=15)
     assert table.due_stops(15) == (stop,)
     table.complete_stop(cleanup, "worker", stop, owner=current_owner, now=15)

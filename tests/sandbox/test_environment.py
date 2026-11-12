@@ -13,7 +13,7 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.environment import ExecutorEnvironment, run_sync
-from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramLaunchError, ProgramTimeout
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramLaunchError, ProgramTimeoutError
 
 
 def test_harbor_lifecycle_commands_and_file_transfers(tmp_path: Path) -> None:
@@ -67,7 +67,7 @@ def test_timeout_does_not_leave_a_process_running(tmp_path: Path) -> None:
 
     async def _run() -> None:
         await environment.start(force_build=False)
-        with pytest.raises(ProgramTimeout):
+        with pytest.raises(ProgramTimeoutError):
             await environment.exec(f"exec {shlex.quote(sys.executable)} -c 'import time; time.sleep(30)'")
         assert environment.process_owner.scope.pids() == ()
         await environment.stop(delete=True)

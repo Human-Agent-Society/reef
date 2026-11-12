@@ -41,7 +41,7 @@ from reef.service.data import (
     create_trajectory_items,
     jsonl_trajectories,
 )
-from reef.storage.data import MAX_QUERY_LIMIT, ItemNotFound, StoredItem, check_owner
+from reef.storage.data import MAX_QUERY_LIMIT, ItemNotFoundError, StoredItem, check_owner
 from reef.storage.data_queue import DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
@@ -87,10 +87,10 @@ def start_transfer(data: DataAccess, owner: str, segment: str, body: Mapping[str
 
 
 def transfer_status(data: DataAccess, owner: str, segment: str, transfer_id: str) -> dict[str, Any]:
-    """The status of the import or export ``transfer_id`` of ``owner``; ``ItemNotFound`` for another ID."""
+    """The status of the import or export ``transfer_id`` of ``owner``; ``ItemNotFoundError`` for another ID."""
     item = data.queue.read(DATA_QUEUE, transfer_id)
     if item is None or item.kind != TRANSFER_KINDS[segment] or item.payload.get("owner") != owner:
-        raise ItemNotFound(f"{owner!r} has no {segment[:-1]} {transfer_id!r}")
+        raise ItemNotFoundError(f"{owner!r} has no {segment[:-1]} {transfer_id!r}")
     return transfer_json(item)
 
 
@@ -157,7 +157,7 @@ def run_export(data: DataAccess, writers: ArchiveWriters, payload: Mapping[str, 
         for item_id in ids:
             item = store.read(owner, item_id)
             if item is None:
-                raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+                raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
             items.append(item)
     else:
         after = 0
@@ -194,12 +194,12 @@ def item_archive(data: DataAccess, owner: str, item_id: str, directory: Path) ->
     """Write the archive of the item ``item_id`` of ``owner`` into ``directory``; return its file and media type.
 
     A task's archive is the tar.gz of its files under its name; another item's is its content as JSON. Raise
-    ``ItemNotFound`` for an unknown ID.
+    ``ItemNotFoundError`` for an unknown ID.
     """
     store = data.require_store()
     item = store.read(owner, item_id)
     if item is None:
-        raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+        raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
     name = item_id.rsplit("/", 1)[-1]
     if item.kind == "task":
         archive = directory / f"{name}.tar.gz"

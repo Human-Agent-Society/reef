@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import ArtifactNotFound
+from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.files import DirectoryFiles
 from reef.dispatcher import Dispatcher
 from reef.service.auth import MAX_DOWNLOAD_URL_SECONDS
@@ -19,7 +19,7 @@ def artifact_directory(dispatcher: Dispatcher, scenario: str, artifact_id: str, 
     """The local directory of the files of ``artifact_id``, ``component``'s content in ``scenario``.
 
     Raise as ``Scenario.resolve_artifact`` does: ``ValueError`` for a missing or unknown component and
-    ``ArtifactNotFound`` for an artifact that the scenario does not list.
+    ``ArtifactNotFoundError`` for an artifact that the scenario does not list.
     """
     with dispatcher.locked_scenario(scenario) as current:
         selected, snapshot = current.resolve_artifact(artifact_id, component)
@@ -68,10 +68,10 @@ def artifact_files(
 
 
 def artifact_file(dispatcher: Dispatcher, scenario: str, artifact_id: str, component: str | None, path: str) -> Path:
-    """The file at ``path`` of the artifact; ``ArtifactNotFound`` unless ``path`` is one of its files."""
+    """The file at ``path`` of the artifact; ``ArtifactNotFoundError`` unless ``path`` is one of its files."""
     files = DirectoryFiles(artifact_directory(dispatcher, scenario, artifact_id, component))
     if path not in files.paths():
-        raise ArtifactNotFound(f"artifact {artifact_id!r} of {scenario!r} holds no file {path!r}")
+        raise ArtifactNotFoundError(f"artifact {artifact_id!r} of {scenario!r} holds no file {path!r}")
     return files.file(path)
 
 

@@ -63,7 +63,7 @@ from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSetti
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import GenerationJob
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
-from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenTask
+from reef.record2sample.generator import DuplicateTaskError, GeneratorError, WrittenTask
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -405,7 +405,10 @@ def test_the_check_tool_writes_checks_and_deletes_a_candidate_through_the_genera
         results.extend([await asyncio.to_thread(polled, tools), await asyncio.to_thread(polled, tools)])
         await asyncio.to_thread(checks.close)
         results.append(await asyncio.to_thread(polled, tools))
-        for error in (DuplicateTask("duplicate of a task already under the root"), GeneratorError("refused (500)")):
+        for error in (
+            DuplicateTaskError("duplicate of a task already under the root"),
+            GeneratorError("refused (500)"),
+        ):
             refusing = AgentTools(tmp_path / "run", checks_on(RefusingGenerator(tmp_path / "other", error)))
             results.append(await asyncio.to_thread(polled, refusing))
         return results
@@ -413,7 +416,7 @@ def test_the_check_tool_writes_checks_and_deletes_a_candidate_through_the_genera
     passed, unavailable, passed_again, spent, closed, duplicate, refused = asyncio.run(checked())
     assert [result["check_id"] for result in (passed, unavailable, passed_again, spent, closed)] == [1, 2, 3, 4, 5]
     assert passed["state"] == "done" and passed["passed"] is True and passed["check"] == 1
-    assert unavailable["ran"] is False and "OracleUnavailable" in unavailable["error"]
+    assert unavailable["ran"] is False and "OracleUnavailableError" in unavailable["error"]
     assert unavailable["checks_left"] == 1, "a check that could not run uses up none"
     assert passed_again["check"] == 2 and passed_again["checks_left"] == 0
     assert spent["error"] == "all 2 checks are used; finish with the task as it stands"

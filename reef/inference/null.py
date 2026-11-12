@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import InferenceUnavailable
+from reef.core.errors import InferenceUnavailableError
 from reef.inference.interfaces import InferenceAdmissionHandle, InferenceArtifact, InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory
 
@@ -28,10 +28,10 @@ NULL_INFERENCE_URL = "none://no-inference-engine"
 
 
 class NullInferenceHandler(InferenceHandler):
-    """A request handler that refuses every request with :class:`InferenceUnavailable`."""
+    """A request handler that refuses every request with :class:`InferenceUnavailableError`."""
 
     async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        raise InferenceUnavailable(UNAVAILABLE_MESSAGE)
+        raise InferenceUnavailableError(UNAVAILABLE_MESSAGE)
 
 
 class NullInferenceRuntime(InferenceRuntime):
@@ -60,7 +60,7 @@ class NullInferenceRuntime(InferenceRuntime):
         return True
 
     async def acquire_inference(self) -> InferenceAdmissionHandle:
-        raise InferenceUnavailable(UNAVAILABLE_MESSAGE)
+        raise InferenceUnavailableError(UNAVAILABLE_MESSAGE)
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.artifact_id

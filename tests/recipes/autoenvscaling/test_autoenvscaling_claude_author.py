@@ -51,7 +51,7 @@ from recipes.beta.autoenvscaling.author import (
     TaskVariant,
     VariantAuthor,
 )
-from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, CredentialHeld, rename_holding
+from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, CredentialHeldError, rename_holding
 from recipes.beta.autoenvscaling.check_gateway import CheckGateway
 from recipes.beta.autoenvscaling.claude_author import AUTHOR_TOOLS, CLAUDE_CHECK_TEXT, ClaudeCodeAuthor
 from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator
@@ -63,7 +63,7 @@ from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramExecutor,
     ProgramLaunchError,
-    ProgramTimeout,
+    ProgramTimeoutError,
     SandboxProgram,
 )
 from reef.recipe.generated_tasks.generator import RolledOutTask
@@ -195,7 +195,7 @@ class ScriptedClaudeSession(E2BSession):
         (root / "claude" / "statsig" / "cache").write_text("gates")
         (root / "home" / ".cache").mkdir(parents=True, exist_ok=True)
         if self.is_timeout:
-            raise ProgramTimeout("the agent ran out of time")
+            raise ProgramTimeoutError("the agent ran out of time")
         return ProcessOutcome(self.exit_code, self.stdout, self.stderr)
 
     def pull(self, root: Path, relative: str = "") -> None:
@@ -653,7 +653,7 @@ def test_a_name_that_cannot_take_the_redacted_name_is_deleted(tmp_path: Path) ->
 def test_check_and_admission_refuse_a_task_link_to_the_token(tmp_path: Path, reef_url: str) -> None:
     checks = CountingChecks()
     session = ScriptedClaudeSession(checks=([],), link_leak=TOKEN)
-    with pytest.raises(CredentialHeld):
+    with pytest.raises(CredentialHeldError):
         authored_in(tmp_path, reef_url, session, checks)
     [output] = session.check_outputs
     assert "holds this run's credential" in output and checks.count == 0

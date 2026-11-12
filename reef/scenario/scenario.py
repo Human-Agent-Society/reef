@@ -9,7 +9,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, SnapshotRef
 from reef.artifact.components import ScenarioComponents
 from reef.artifact.repository import Repository
-from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorable
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorableError
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
 from reef.core.artifact_selection import ArtifactSelection
@@ -661,6 +661,6 @@ def validate_component_trainers(
 __all__ = [
     "SCENARIO_METADATA_KEY",
     "Scenario",
-    "SnapshotNotRestorable",
+    "SnapshotNotRestorableError",
     "validate_component_trainers",
 ]

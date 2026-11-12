@@ -44,7 +44,7 @@ from aiohttp import web
 from reef_client.client import ReefClientError
 
 from reef.core.evaluation import RolloutRequest
-from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
+from reef.core.tasks import HarborTask, HarborTaskConflictError, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.execution.processes import CURRENT_PROCESS_SCOPE
@@ -671,7 +671,7 @@ class GeneratorService:
             return error_response(409, "duplicate of a task already under the root", duplicate=True)
         try:
             path = await asyncio.to_thread(write_harbor_task, task, self.tasks_root)
-        except HarborTaskConflict as exc:
+        except HarborTaskConflictError as exc:
             return error_response(409, f"a different task holds the name {task.name}: {exc}", duplicate=False)
         return web.json_response({"path": str(path), "name": task.name, "digest": task.digest}, status=201)
 

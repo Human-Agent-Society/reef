@@ -23,7 +23,7 @@ from reef.artifact import (
     read_reference,
 )
 from reef.artifact.artifact import training_starts_of
-from reef.core.errors import CommitPending, UnknownScenario
+from reef.core.errors import CommitPendingError, ScenarioNotFoundError
 from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
@@ -191,7 +191,7 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
                 directory=store(tmp_path),
             )
         monkeypatch.setattr(Trainer, "has_pending_commit", property(lambda self: True))
-        with pytest.raises(CommitPending, match="cannot import an artifact"):
+        with pytest.raises(CommitPendingError, match="cannot import an artifact"):
             value.import_artifact(
                 "math", opened(tmp_path / "good"), None, source=source(tmp_path / "good"), directory=store(tmp_path)
             )
@@ -226,7 +226,7 @@ def test_an_import_the_scenario_cannot_take_reads_nothing(tmp_path) -> None:
     try:
         with pytest.raises(ValueError, match="has no component 'wieghts'"):
             imports.import_source(value, "math", "wieghts", "mem://model")
-        with pytest.raises(UnknownScenario):
+        with pytest.raises(ScenarioNotFoundError):
             imports.import_source(value, "other", None, "mem://model")
         assert reader.read == []
         assert imports.import_source(value, "math", None, "mem://model")["scenario"] == "math"

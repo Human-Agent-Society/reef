@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.execution.sandbox.config import REMOTE_EXECUTORS, remote_executor
-from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.train.harness_backend.agent.run import AgentExecution
@@ -100,7 +100,7 @@ def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path)
         try:
             remote = remote_executor(sandbox, section, environ, timeout_s=timeout_s, owner_anchor=state_dir)
             remote.preflight()
-        except SandboxUnavailable as exc:
+        except SandboxUnavailableError as exc:
             raise ValueError(f"evolution.agent.sandbox is {sandbox}, but {exc}") from exc
         return AgentSettings(adapter, remote, timeout_s, binary)
     if sandbox not in ("", "bwrap"):
@@ -109,7 +109,7 @@ def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path)
     executor = SandboxExecutor(network="isolated")
     try:
         executor.preflight()
-    except SandboxUnavailable as exc:
+    except SandboxUnavailableError as exc:
         if sandbox == "bwrap":
             raise ValueError(f"evolution.agent.sandbox is bwrap, but {exc}") from exc
         logger.warning(

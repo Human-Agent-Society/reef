@@ -20,7 +20,7 @@ from tests.support.harness_service import backend_step
 from tests.support.harness_steps import PI_FAKE, build_harness_backend, changed_rules, harness_recipe, make_pi_binary
 
 from reef.execution.executor.config import ExecutorSettings
-from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import (
     DEFAULT_PREFIX_ROOT,
@@ -422,7 +422,7 @@ def test_vendor_binary_runs_in_a_real_sandbox_with_a_readonly_install(monkeypatc
     sandbox = SandboxExecutor()
     try:
         sandbox.preflight()
-    except SandboxUnavailable as error:
+    except SandboxUnavailableError as error:
         pytest.skip(str(error))
     monkeypatch.setenv(PREFIX_ENV, str(tmp_path / "install"))
     prefix = install_prefix(get_adapter("pi"))

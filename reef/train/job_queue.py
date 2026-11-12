@@ -39,7 +39,7 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.weight_layout import ArtifactFormat
-from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
+from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.observability.base import (
     ExperimentLogger,
     ExperimentRun,
@@ -50,7 +50,7 @@ from reef.observability.base import (
 )
 from reef.storage.data import DataStore
 from reef.storage.job_data import JobDataKind
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.train.training_requests import REQUEST_FAILURE_KEY, TRAINING_REQUESTS_QUEUE
 
@@ -514,14 +514,14 @@ class TrainingJobWorker(QueueWorker):
                         self.queue.write_metadata(
                             JOBS_QUEUE, item.id, FAILED_METRICS_KEY, cast(JsonValue, dict(status.metrics))
                         )
-                    raise ItemFailed(status.error or "the job failed")
+                    raise ItemFailedError(status.error or "the job failed")
                 if self.stopped.wait(self.poll_seconds):
-                    raise WorkerStopped
+                    raise WorkerStoppedError
                 # Control can cancel the job (a deleted scenario, a new training start): stop at the next poll.
                 held = self.queue.read(JOBS_QUEUE, item.id)
                 if lease_lost.is_set() or held is None or held.worker_id != self.worker_id or held.final:
-                    raise WorkLeaseLost(f"job {item.id} is no longer held by {self.worker_id}")
-        except WorkLeaseLost:
+                    raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
+        except WorkLeaseLostError:
             logger.warning("training worker %s lost job %s; cancelling its local run", self.worker_id, item.id)
             self.component.cancel(item.id)
             raise

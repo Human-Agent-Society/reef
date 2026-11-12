@@ -21,10 +21,10 @@ from dataclasses import dataclass, field
 from typing import Any, Self
 
 from reef.core.config import Settings
-from reef.core.errors import ReefError
+from reef.core.errors import ConfigError
 
 
-class PluginConfigError(ReefError, ValueError):
+class PluginConfigError(ConfigError):
     """A plugin setting does not name a usable plugin class, or its configuration is invalid."""
 
 
