@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -200,13 +201,25 @@ class TwoTrainerBuilder(TrainerBuilder):
     """Builds the trainers of a ``_TwoTrainerRecipe``: one for each of its backends, whose jobs run on the trainer's
     own thread, and the weights trainer when ``live`` has a training component.
 
-    ``recipe`` gives the backends and the pipelines. ``live`` gives the training component; ``_dispatcher`` sets it
-    to the dispatcher's live objects, whose training component is the jobs queue's view of it.
+    ``recipe`` gives the backends and the pipelines. ``live`` gives the training component. ``_dispatcher`` makes
+    the builder with ``waits_for_live=True`` and calls ``bind`` with the dispatcher's live objects, whose training
+    component is the jobs queue's view of it. A worker of the dispatcher can load a scenario before ``_dispatcher``
+    binds, so ``build_trainers`` waits for ``bind``; without the wait it would build no weights trainer.
     """
 
-    def __init__(self, recipe: _TwoTrainerRecipe, live: LiveObjects | None = None) -> None:
+    def __init__(
+        self, recipe: _TwoTrainerRecipe, live: LiveObjects | None = None, *, waits_for_live: bool = False
+    ) -> None:
         self.recipe = recipe
         self.live = LiveObjects() if live is None else live
+        self.live_bound = threading.Event()
+        if not waits_for_live:
+            self.live_bound.set()
+
+    def bind(self, live: LiveObjects) -> None:
+        """Give the builder the live objects that its trainers use, and let ``build_trainers`` go on."""
+        self.live = live
+        self.live_bound.set()
 
     def build_trainers(
         self,
@@ -222,6 +235,8 @@ class TwoTrainerBuilder(TrainerBuilder):
         samples=None,
         root=None,
     ):
+        if not self.live_bound.wait(timeout=30):
+            raise RuntimeError("the trainer builder got no live objects: _dispatcher did not call bind")
         recipe = self.recipe
 
         def factory_for(component: str):
@@ -406,7 +421,7 @@ def _dispatcher(
     records = tmp_path / "records" if records_dir is None else records_dir
     storage = data_storage(records)
     if trainer_builder is None and isinstance(recipe, _TwoTrainerRecipe):
-        trainer_builder = TwoTrainerBuilder(recipe)
+        trainer_builder = TwoTrainerBuilder(recipe, waits_for_live=True)
     dispatcher = Dispatcher(
         recipe,
         repository,
@@ -422,7 +437,7 @@ def _dispatcher(
         trainer_builder=trainer_builder,
     )
     if isinstance(trainer_builder, TwoTrainerBuilder):
-        trainer_builder.live = dispatcher.live
+        trainer_builder.bind(dispatcher.live)
     return dispatcher, backends
 
 
