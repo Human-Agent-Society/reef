@@ -19,7 +19,7 @@ from types import ModuleType
 
 import pytest
 from tests.harness.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
-from tests.support.harness_jobs import build_harness_backend, head_of
+from tests.support.harness_jobs import build_harness_backend, head_of, with_harness_component
 from tests.support.harness_render import (
     NATIVE_SEED_FILES,
     NATIVE_SEED_TOOLS,
@@ -28,7 +28,6 @@ from tests.support.harness_render import (
     native_tool,
     write_rendered,
 )
-from tests.support.strategies import resolve_method, resolve_task_scorer
 from tests.support.trajectories import recorded_trajectory
 
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
@@ -59,8 +58,9 @@ from reef.harness.tasks.trajectory import reader_for
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import validate_native_agent, validate_native_graph
 from reef.inference.http import InferenceProxyRuntime
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
 
@@ -247,13 +247,17 @@ PASS_THROUGH_BWRAP = "import os, sys\nargv = sys.argv[sys.argv.index('--') + 1:]
 
 def native_backend(tmp_path: Path, model, method, score, tasks: tuple[str, ...]) -> HarnessBackend:
     """A native backend over the launcher, bound to ``model``, whose head is the seed's native files."""
-    recipe = HarnessEvolutionRecipe(
-        method=resolve_method(method),
-        evolution=EvolutionSettings(adapter="native", binary=_launcher(tmp_path), state_dir=str(tmp_path / "harness")),
-        evaluation=EvaluationSettings(tasks=tasks),
-        scorer=resolve_task_scorer(score),
-        seed=HarnessTree(NATIVE_SEED_FILES),
-        runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy"),
+    recipe = with_harness_component(
+        HarnessEvolutionRecipe(
+            evolution=EvolutionSettings(
+                adapter="native", binary=_launcher(tmp_path), state_dir=str(tmp_path / "harness")
+            ),
+            evaluation=EvaluationSettings(tasks=tasks),
+            seed=HarnessTree(NATIVE_SEED_FILES),
+            runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy"),
+        ),
+        method,
+        score=score,
     )
     return build_harness_backend(recipe, "demo")
 

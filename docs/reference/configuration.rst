@@ -1679,7 +1679,7 @@ that plays task directories (an npm ``install``) and
        for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
 
    ``evolution.agent``
-       the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its jobs (``services.run_agent``); unset, no agent runs, and such a method is refused at startup
+       the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its jobs (``services.run_agent``, or ``services.agent`` for a method that starts the agent itself); unset, no agent runs, and such a method is refused at startup unless it also runs without an agent (``runs_without_agent``)
 
    ``evolution.agent.adapter`` : pi
        the agent's harness: any adapter whose prompt is text
@@ -1770,7 +1770,9 @@ reuses a scored run only in the context it ran in, and never reuses a
 failed run.
 
 The beta Reefine recipe runs its agent on pi with ``evolution.agent``, adds
-``evolution.agent.trial_timeout_s``, and reads ``evolution.multimodal``. Its
+``evolution.agent.trial_timeout_s``, and reads ``evolution.multimodal``. It
+gives the two to its method as ``evolution.method.config`` (``trial_timeout_s``
+and ``multimodal``). Its
 `README <../../recipes/beta/reefine/README.md>`__ documents them.
 
 The served model's binding is merged in when a run renders the tree; it

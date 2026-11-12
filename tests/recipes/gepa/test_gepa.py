@@ -10,7 +10,6 @@ read, so that run has no score. The scorer prefers rules with the marker.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import random
 import sys
@@ -18,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support.harness_jobs import TreeArtifacts, build_harness_backend, harness_recipe
+from tests.support.harness_jobs import TreeArtifacts, build_harness_backend, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import backend_step
 from tests.support.trajectories import recorded_trajectory
 
@@ -94,7 +93,7 @@ def gepa_backend(
     binary.write_text(PI_FAKE)
     binary.chmod(0o755)
     recipe = harness_recipe(tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary))
-    recipe = dataclasses.replace(recipe, models={"reflection": FakeChat() if reflector is None else reflector})
+    recipe = rebuilt_recipe(recipe, models={"reflection": FakeChat() if reflector is None else reflector})
     releases = TreeArtifacts(recipe.seed)
     return build_harness_backend(recipe, "demo", releases), releases
 

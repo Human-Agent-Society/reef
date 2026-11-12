@@ -25,6 +25,7 @@ from tests.support.harness_jobs import (
     harness_recipe,
     head_of,
     marker_score,
+    rebuilt_recipe,
 )
 from tests.support.harness_service import backend_step
 from tests.support.trajectories import recorded_trajectory
@@ -297,7 +298,7 @@ def test_a_refused_evaluate_call_adds_no_candidate(
         return
 
     recipe = harness_recipe(tmp_path, step, max_runs_per_step=1, evaluation={} if scored else {"policy": "none"})
-    recipe = recipe if scored else replace(recipe, scorer=None)
+    recipe = recipe if scored else rebuilt_recipe(recipe, scorer=None)
     backend = build_harness_backend(recipe, "demo")
     result = backend_step(backend, data(1), HarnessState().to_json())
     assert len(refusals) == 1 and refusals[0].startswith(refusal)

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support.harness_jobs import MODEL, PI_SEED, job_services
+from tests.support.harness_jobs import MODEL, PI_SEED, configured_component, job_services
 from tests.support.harness_methods import QueueChat
 from tests.support.trajectories import recorded_trajectory
 
@@ -182,9 +182,9 @@ def test_a_reply_that_is_not_the_asked_json_skips_its_run_and_an_item_with_a_cre
 def test_the_example_deploys_the_method_without_runs_and_a_bad_setting_is_refused() -> None:
     config = recipe_config_from_file_layout(yaml.safe_load(EXAMPLE.read_text(encoding="utf-8")))
     recipe = HarnessEvolutionRecipe.from_environment({}, config=config)
-    assert isinstance(recipe, HarnessEvolutionRecipe) and isinstance(recipe.method, ReasoningBank)
-    assert recipe.method.settings.max_items == 50
-    assert (recipe.evaluation.policy, recipe.scorer) == ("none", None)
+    component = configured_component(recipe)
+    assert isinstance(component.method, ReasoningBank) and component.method.settings.max_items == 50
+    assert (recipe.evaluation.policy, component.scorer) == ("none", None)
     assert recipe.pipeline_stages is not None and recipe.pipeline_stages.record2sample.plugin_class is InferenceSamples
     with pytest.raises(PluginConfigError, match="max_items_per_trace must be at least 1"):
         ReasoningBank.from_config({"max_items_per_trace": 0})

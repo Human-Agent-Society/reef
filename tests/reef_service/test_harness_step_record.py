@@ -9,7 +9,6 @@ from __future__ import annotations
 import io
 import json
 import tarfile
-from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 
@@ -26,6 +25,7 @@ from tests.support.harness_jobs import (
     harness_recipe,
     head_of,
     make_pi_binary,
+    rebuilt_recipe,
 )
 from tests.support.harness_service import backend_step
 from tests.support.strategies import resolve_task_scorer
@@ -117,7 +117,7 @@ def native_backend(
         binary=binary or str(make_native_binary(tmp_path)),
         **fields,
     )
-    recipe = replace(recipe, worker_executor=ExecutorSettings(workers=workers))
+    recipe = rebuilt_recipe(recipe, worker_executor=ExecutorSettings(workers=workers))
     releases = TreeArtifacts(recipe.seed)
     return build_harness_backend(recipe, "demo", releases), releases
 

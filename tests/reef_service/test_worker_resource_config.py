@@ -1,7 +1,7 @@
 """Worker sizing is generic; only component capability checks know the role."""
 
 import pytest
-from tests.support.harness_jobs import evolution_config
+from tests.support.harness_jobs import configured_component, evolution_config
 from tests.support.strategies import resolve_task_scorer
 
 from reef.evaluation.harness import evaluation_selection
@@ -29,7 +29,9 @@ def test_generic_sizing_drives_real_recipe(workers, backend):
     recipe = HarnessEvolutionRecipe.from_environment(
         {}, config=config, runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy")
     )
-    selected, needs = evaluation_selection(recipe.scorer, recipe.worker_executor)
+    scorer = configured_component(recipe).scorer
+    assert scorer is not None
+    selected, needs = evaluation_selection(scorer, recipe.worker_executor)
     assert selected.settings.backend == backend
     assert needs.workers == int(workers)
     assert needs.cpus_per_worker == 2

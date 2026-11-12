@@ -1,10 +1,10 @@
 """Published harnesses remain staged until their scenario journal commits."""
 
 import copy
-import dataclasses
 
 import pytest
 from tests.support.git_lfs import fake_git_lfs
+from tests.support.harness_jobs import rebuilt_recipe
 from tests.support.harness_methods import IMPROVED, SEED, QueueChat, meta_harness_recipe, proposal_reply
 from tests.support.harness_service import checkpoint_result, report_once
 
@@ -92,7 +92,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
         dispatcher.close()
     restarted = Dispatcher(
         # Each process makes its own harness component, as each service process builds its recipe.
-        dataclasses.replace(recipe, harness_component=None),
+        rebuilt_recipe(recipe),
         factory(),
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
@@ -145,7 +145,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         dispatcher.close()
     restarted = Dispatcher(
         # Each process makes its own harness component, as each service process builds its recipe.
-        dataclasses.replace(recipe, harness_component=None),
+        rebuilt_recipe(recipe),
         factory(),
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
@@ -278,7 +278,7 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
 
     restarted = Dispatcher(
         # Each process makes its own harness component, as each service process builds its recipe.
-        dataclasses.replace(recipe, harness_component=None),
+        rebuilt_recipe(recipe),
         factory(),
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,

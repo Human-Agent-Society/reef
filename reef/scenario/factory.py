@@ -244,7 +244,8 @@ def recovered_trainer_states(
 def read_trainer_spec(recipe: Recipe) -> TrainerSpec:
     """The spec of the one trainer of ``recipe``, which is not a composite.
 
-    - A ``HarnessEvolutionRecipe`` submits each step as a job of its ``harness_component``.
+    - A ``HarnessEvolutionRecipe`` submits each step as a job of the ``harness_component`` that the service gave it
+      (``reef.service.assembly.with_harness_components``).
     - A ``WeightTrainingRecipe`` submits jobs to its ``training_component``, with its ``parameters_by_kind``.
     - Any other recipe only reads records.
 
@@ -257,7 +258,10 @@ def read_trainer_spec(recipe: Recipe) -> TrainerSpec:
     job_parameters = None
     if isinstance(recipe, HarnessEvolutionRecipe):
         if recipe.harness_component is None:
-            raise RecipeConfigError("harness evolution has no training component to run its jobs")
+            raise RecipeConfigError(
+                "harness evolution has no training component to run its jobs: the service builds one with "
+                "reef.service.assembly.with_harness_components"
+            )
         job_component = recipe.harness_component
     elif isinstance(recipe, WeightTrainingRecipe):
         if type(recipe).pipeline_spec().sample2job is NoJobData:

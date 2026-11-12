@@ -15,9 +15,9 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.gateway import ModelCalls
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
-from reef.train.harness_backend.agent.run import AgentExecution, run_agent
+from reef.train.harness_backend.agent.run import run_agent
 from reef.train.harness_backend.calls import JobCalls, budgeted_bindings
-from reef.train.harness_backend.contract import AgentOutcome, Services
+from reef.train.harness_backend.contract import AgentExecution, AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace
 
 
@@ -26,9 +26,9 @@ class JobServices(Services):
 
     Values: ``workspace`` is the job's workspace. ``descriptor`` is the
     adapter the trees render for. ``evaluator`` scores trees, ``None`` when
-    the deployment configured no scorer. ``agent`` is the deployment's
-    coding agent, ``None`` when it configured none or the method does not
-    run it. ``history`` is the scenario's history; a tree the method
+    the deployment configured no scorer. ``agent_execution`` is the
+    deployment's coding agent, ``None`` when it configured none or the
+    method does not run it; ``agent`` returns it. ``history`` is the scenario's history; a tree the method
     evaluates joins it as a ``method`` candidate of the workspace's job
     whose parent is ``head``, the checksum of the head tree. ``job_calls``
     is the job's call meter. ``max_runs`` ≥ 0 bounds the runs
@@ -60,7 +60,7 @@ class JobServices(Services):
         self.budgeted = budgeted_bindings(models, job_calls)
         self.max_runs = max_runs
         self.runs_run = 0
-        self.agent = agent
+        self.agent_execution = agent
 
     @property
     def models(self) -> ModelBindings:
@@ -69,6 +69,10 @@ class JobServices(Services):
     @property
     def calls(self) -> ModelCalls:
         return self.job_calls
+
+    @property
+    def agent(self) -> AgentExecution | None:
+        return self.agent_execution
 
     def check(self, tree: HarnessTree) -> ValidationResult:
         return validate_tree(tree, self.descriptor)
@@ -96,9 +100,9 @@ class JobServices(Services):
             self.runs_run += self.history.next_run - started
 
     def run_agent(self, prompt: str, *, tree: HarnessTree, model: str) -> AgentOutcome:
-        if self.agent is None:
+        if self.agent_execution is None:
             raise RuntimeError("no coding agent runs for this method: it needs runs_agent and evolution.agent")
-        return run_agent(self.agent, self.workspace, self, prompt, tree=tree, model=model)
+        return run_agent(self.agent_execution, self.workspace, self, prompt, tree=tree, model=model)
 
 
 __all__ = ["JobServices"]

@@ -16,6 +16,7 @@ from types import ModuleType
 
 import pytest
 from tests.support.config_helpers import load_harness_deployment as load_config
+from tests.support.harness_jobs import configured_component
 
 from recipes.beta import reefine
 from recipes.beta.reefine import AnswerScorer, ReefineMethod, ReefineRecipe
@@ -108,10 +109,12 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
     # No agent: the method answers each request in text.
-    assert isinstance(built.method, ReefineMethod) and built.agent is None and built.training_mode == "manual"
+    component = configured_component(built)
+    assert isinstance(component.method, ReefineMethod) and component.agent is None
+    assert built.training_mode == "manual"
     assert (built.evaluation.policy, built.evaluation.floor_score) == ("floor", 1.0)
-    assert isinstance(built.scorer, AnswerScorer)
-    assert built.model_binding().model == "provider/model-a"
+    assert isinstance(component.scorer, AnswerScorer)
+    assert built.harness_models().served().model == "provider/model-a"
     # No seed in the deployment: the first tree is the recipe's own, the starter skill.
     assert built.seed == HarnessTree.read(SEED_DIRECTORY)
 

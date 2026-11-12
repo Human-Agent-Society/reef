@@ -132,7 +132,8 @@ def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path):
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     assert recipe.worker_executor.backend == "mp"
     # One --seed drives both draws, and the method plans over the training split.
-    assert (recipe.method.settings.seed, recipe.method.settings.trainset_size) == (0, 45)
+    settings = driver.harness_component(recipe).method.settings
+    assert (settings.seed, settings.trainset_size) == (0, 45)
 
 
 def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tmp_path):
@@ -195,7 +196,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     # Validation workers use the runtime's upstream, not the loopback service
     # used by the driver's minibatch and held-out passes.
-    assert recipe.model_binding().base_url == driver.aime.OPENAI_BASE_URL
+    assert recipe.harness_models().served().base_url == driver.aime.OPENAI_BASE_URL
     driver.aime.ANSWERS.clear()
     records = memory_records("test")
     with driver.worker_runtime(recipe):
@@ -217,14 +218,16 @@ def test_driver_binds_the_example_hooks_to_one_snapshot_and_keeps_other_hooks(lo
 
     driver = load("run")
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
-    assert isinstance(recipe.scorer, driver.aime.AIMEScorer) and recipe.method.feedback is recipe.scorer
+    component = driver.harness_component(recipe)
+    assert isinstance(component.scorer, driver.aime.AIMEScorer) and component.method.feedback is component.scorer
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
     evolution = config["recipe"]["config"]["evolution"]
     evolution["evaluation"]["scorer"] = "reef.evaluation.harness:VerifierRewardScorer"
     evolution["method"]["config"]["feedback"] = "recipes.gepa:ScoreFeedback"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
-    assert isinstance(recipe.scorer, VerifierRewardScorer) and isinstance(recipe.method.feedback, ScoreFeedback)
+    component = driver.harness_component(recipe)
+    assert isinstance(component.scorer, VerifierRewardScorer) and isinstance(component.method.feedback, ScoreFeedback)
 
 
 @pytest.mark.parametrize("already_initialized", [False, True])

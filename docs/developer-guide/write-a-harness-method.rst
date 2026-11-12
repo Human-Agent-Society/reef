@@ -198,6 +198,9 @@ The services
        environment could not run, and then ``failure`` says why
    * - ``run_agent(prompt, tree=, model=)``
      - one run of the deployment's coding agent (`Run a coding agent`_)
+   * - ``agent``
+     - the deployment's coding agent itself, an ``AgentExecution``, or
+       ``None`` (`Run a coding agent`_)
    * - ``calls``
      - the job's call meter: ``spend()``, ``record(entry)``, ``note(...)``
 
@@ -219,6 +222,21 @@ same address checks and scores trees: ``GET /tools``, ``POST /check`` with
 ``{"tree": "harness"}``, and ``POST /evaluate`` with ``{"tree": "harness",
 "tasks": [...]}``. ``run_agent`` returns an ``AgentOutcome`` (``exit_code``,
 ``timed_out``, ``error``, ``seconds``).
+
+A method that needs more than one run with Reef's gateway reads
+``services.agent``: the ``AgentExecution`` that Reef bound for the scenario,
+with the agent's adapter (``descriptor``), its isolation (``executor``), its
+``binary`` and the limit of one run (``timeout_s``). The method then starts
+the agent itself, for example behind its own gateway. A method that sets
+``runs_agent`` is refused at startup when the deployment has no
+``evolution.agent``. A method that also sets ``runs_without_agent = True``
+starts without one and reads ``services.agent`` as ``None``; Reefine does
+this to answer in text where no agent runs.
+
+A method receives every service through ``job.services``. Its constructor
+receives only its own settings (`Method settings`_): Reef builds the method
+from ``evolution.method.config`` before any scenario exists, so a model, an
+agent or a key cannot be a constructor argument.
 
 A method made of prompts
 ------------------------
@@ -408,7 +426,9 @@ Package a method
 A method in this repository is one package under ``recipes/<name>/``:
 ``method.py`` with the method and its settings, prompts as ``*.md`` files,
 ``README.md``, and runnable deployments in ``examples/``. It needs no recipe
-of its own.
+of its own: a recipe holds only configuration, and Reef's harness training
+component builds the method, the scorer and each scenario's backend from the
+``evolution`` section.
 
 Untrusted input
 ---------------

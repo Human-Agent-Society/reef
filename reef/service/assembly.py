@@ -14,7 +14,7 @@ import os
 import signal
 from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.base import ServedEndpoint, close_runtimes
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import create_app
@@ -66,6 +67,7 @@ from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 from reef.train.component import TrainingComponent, build_training_component
+from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.manager import TrainingManager
 
 
@@ -225,6 +227,32 @@ def composed_training_recipe(
     except BaseException:
         close_runtimes(() if training_component is None else (training_component,), runtime)
         raise
+
+
+def with_harness_components(recipe: Recipe, environ: Mapping[str, str]) -> Recipe:
+    """``recipe`` with the harness training component of each harness recipe in it.
+
+    A ``HarnessEvolutionRecipe`` gets a new ``HarnessTrainingComponent``, built from the recipe's settings and
+    models (``HarnessTrainingComponent.from_settings``); ``environ`` holds the variables that its sandbox and its
+    agent's isolation read. Each component recipe of a ``CompositeRecipe`` gets its own. Any other recipe is
+    returned as it is. The served endpoint must be on the recipe before the call (``with_served_endpoint``),
+    because the component reads the models once. The recipe only holds the component, so that the dispatcher and
+    the training service find it in ``job_components``, until RFC #1390 step 7 takes it off the recipe.
+
+    Raise ``ConfigError`` for an ``evolution`` section that names no usable method, scorer, collector, executor or
+    agent.
+    """
+    if isinstance(recipe, HarnessEvolutionRecipe):
+        component = HarnessTrainingComponent.from_settings(
+            recipe.harness_settings(), recipe.harness_models(), environ=environ
+        )
+        return replace(recipe, harness_component=component)
+    if isinstance(recipe, CompositeRecipe):
+        return replace(
+            recipe,
+            components={name: with_harness_components(child, environ) for name, child in recipe.components.items()},
+        )
+    return recipe
 
 
 def serving_recipe(settings: ServiceSettings, env: Mapping[str, str]) -> Recipe:
@@ -480,6 +508,8 @@ def build_dispatcher(
     data_store: DataStore | None = None
     dispatcher: Dispatcher | None = None
     try:
+        # The harness training component reads the served endpoint, so it is built after the recipe has it.
+        recipe = with_harness_components(recipe, env)
         scenario_storage, data_store = open_scenario_storage(settings)
         task_import = (
             TaskImport(Path(settings.task_import_manifest), Path(settings.task_import_tasks_root))

@@ -191,8 +191,46 @@ for every scenario in a deployment.
 
 A harness method is a ``Method`` that ``HarnessEvolutionRecipe`` runs, not a
 recipe: GEPA, Meta-Harness, ACE and ReasoningBank name the base recipe and set
-``evolution.method``. The beta Reefine subclasses it because it changes more
-than the tree.
+``evolution.method``. The beta Reefine subclasses it only to set its defaults.
+
+``HarnessEvolutionRecipe`` holds configuration and builds nothing that runs:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 36 64
+
+   * - Member
+     - Value
+   * - ``evolution``, ``evaluation``
+     - the parsed ``evolution`` section (``EvolutionSettings``, in
+       ``reef.train.harness_backend.settings``) and its ``evaluation``
+       section (``EvaluationSettings``); they name the method, the scorer
+       and the collector as plugin settings
+   * - ``seed``, ``models``, ``model_metadata``, ``worker_executor``,
+       ``model_name``
+     - the first tree, the method's named models, the model metadata, the
+       placement of the run workers and the served model's name
+   * - ``harness_settings()``
+     - the ``HarnessSettings`` that the harness training component builds
+       itself from
+   * - ``runs_offline()``, ``task_directories(descriptor)``,
+       ``configured_tasks()``, ``harness_state_dir(scenario, component)``
+     - functions of the configuration
+   * - ``harness_models()``, ``harness_served_model(scenario, component)``,
+       ``with_served_endpoint(endpoint)``, ``harness_component``
+     - the model under test and the training component, which the recipe
+       holds for the service until their owners hold them
+
+The service builds the ``HarnessTrainingComponent``
+(``reef.service.assembly.with_harness_components`` calls
+``HarnessTrainingComponent.from_settings``). The component builds the
+``Method``, the ``TaskScorer``, the ``TaskCollector``, the run executor and
+the agent settings from the sections, then one ``HarnessBackend`` with its
+evaluator for each scenario component, and the selection policy for each job.
+Code that holds these objects already, such as an example driver, calls
+``HarnessTrainingComponent(settings, models, method=..., executor=...,
+scorer=..., collector=..., agent=...)`` and puts the component on the recipe
+with ``dataclasses.replace(recipe, harness_component=component)``.
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; the trainer of such a
@@ -1746,7 +1784,8 @@ skipped or fails.
    from reef.harness.adapters.parts import Format, Part, TreeLayout
    from reef.harness.tree import HarnessTree, TreePatch
    from reef.train.harness_backend import (
-       AgentMethod, AgentOutcome, Method, MethodJob, ModelCalls, Services, Trace, Workspace,
+       AgentExecution, AgentMethod, AgentOutcome, Method, MethodJob, ModelCalls, Services, Trace,
+       Workspace,
    )
 
    class MyMethod(Method):
@@ -1767,8 +1806,18 @@ skipped or fails.
        ``job.workspace.write_output``
    * - ``Method.runs_agent``
      - a class attribute, ``False`` by default; ``True`` for a method that
-       calls ``Services.run_agent``, which then gets ``evolution.agent`` and is
-       refused at startup without it
+       calls ``Services.run_agent`` or reads ``Services.agent``, which then
+       gets ``evolution.agent`` and is refused at startup without it
+   * - ``Method.runs_without_agent``
+     - a class attribute, ``False`` by default; ``True`` for a method that
+       ``runs_agent`` and also runs when the deployment configures no agent:
+       it starts without ``evolution.agent`` and reads ``Services.agent`` as
+       ``None``
+   * - ``Method.from_config(config)``
+     - builds the method from ``evolution.method.config`` alone. A method
+       takes its own settings, such as a time limit, from ``config``, and
+       everything that runs (a model, the coding agent, the evaluation) from
+       ``job.services``; its constructor receives no service
    * - ``AgentMethod``
      - a method that is a folder of prompts (``config``: ``prompts``, the
        folder, and ``model``, ``served`` by default): ``START.md``, an
@@ -1830,6 +1879,13 @@ skipped or fails.
        when the call needs more runs than
        ``evolution.max_runs_per_step`` leaves, and then no task runs;
        ``ValueError`` for a tree that fails ``check``
+   * - ``Services.agent``
+     - the deployment's coding agent bound for the job's scenario, an
+       ``AgentExecution`` (``descriptor``, the agent's adapter; ``executor``,
+       its isolation bound to the adapter's program; ``binary``; and
+       ``timeout_s``, the limit of one run), or ``None`` when no agent runs
+       for the method. A method that needs its own gateway or tools starts
+       the agent with it; ``run_agent`` is the usual way
    * - ``Services.run_agent(prompt, *, tree, model)``
      - one run of the deployment's coding agent in the workspace, its own
        harness ``tree`` rendered after Reef's protocol rules and its model
@@ -1918,7 +1974,7 @@ Make evaluations idempotent by ``candidate.candidate_id`` because recovery may
 repeat work whose result was not durably committed. Whether a kept tree serves
 is the activation rule's decision, not the plugin's.
 
-A harness recipe builds its plugin for each scenario from
+The harness training component builds its plugin for each job from
 ``evolution.evaluation.policy`` and takes no other plugin (see `Harness
 method`_).
 

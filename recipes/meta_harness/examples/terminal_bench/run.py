@@ -9,6 +9,7 @@ import os
 import shutil
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,7 @@ from reef.scenario.snapshot_files import component_files
 from reef.service.deploy.config_utils import load_config
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.harness_backend.component import HISTORY_DIR
+from reef.train.harness_backend.component import HISTORY_DIR, HarnessTrainingComponent
 from reef.train.jobs import JobLoopState
 
 HERE = Path(__file__).resolve().parent
@@ -74,9 +75,15 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutio
         inference_timeout_s=config["evolution"]["evaluation"]["task_timeout_s"],
     )
     recipe = build_recipe(config["implementation"], config=config, runtime=runtime)
-    if not isinstance(recipe, HarnessEvolutionRecipe) or not isinstance(recipe.method, MetaHarness):
+    if not isinstance(recipe, HarnessEvolutionRecipe):
         raise TypeError("the example runs the Meta-Harness method")
-    return recipe
+    # The recipe is configuration; the harness training component builds the method and the scorer from it.
+    component = HarnessTrainingComponent.from_settings(
+        recipe.harness_settings(), recipe.harness_models(), environ=os.environ
+    )
+    if not isinstance(component.method, MetaHarness):
+        raise TypeError("the example runs the Meta-Harness method")
+    return replace(recipe, harness_component=component)
 
 
 def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher:

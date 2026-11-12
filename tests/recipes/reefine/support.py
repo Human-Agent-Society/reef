@@ -29,6 +29,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
 from reef.train.harness_backend import AgentOutcome, Method, Services, Trace, Workspace
+from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.calls import JobCalls
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData, TrainingCommit
@@ -98,6 +99,10 @@ class ModelServices(Services):
     @property
     def calls(self) -> JobCalls:
         return self.job_calls
+
+    @property
+    def agent(self) -> None:
+        return None
 
     def check(self, tree: HarnessTree) -> ValidationResult:
         return validate_tree(tree, self.descriptor)
@@ -209,13 +214,14 @@ def step_workspace(
 
 
 def reefine_step(
-    root: Path, method: Method, data: JobData, models: ModelBindings
+    root: Path, method: Method, data: JobData, models: ModelBindings, agent: AgentSettings | None = None
 ) -> tuple[TrainingCommit, tuple[Mapping[str, Any], ...]]:
     """One step of ``method`` through the backend's phases on the pi seed of ``tests.support.harness_jobs``, its
-    state under ``root``, ``models`` the deployment's, and the evaluation off: a changed tree publishes. Beside
+    state under ``root``, ``models`` the deployment's, ``agent`` its coding agent, and the evaluation off: a changed
+    tree publishes. Beside
     the result, the step's activity as the request page reads it while the candidate is evaluated; none for a
     skipped step."""
-    backend, _ = harness_backend(root, method, evaluation={"policy": "none"})
+    backend, _ = harness_backend(root, method, evaluation={"policy": "none"}, agent=agent)
     backend.models = models
     prepared = backend.prepare_job(data, HarnessState().to_json(), 0, head=head_of(backend))
     if prepared.candidate is None:

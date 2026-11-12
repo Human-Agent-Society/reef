@@ -627,3 +627,57 @@ def test_a_recipe_builds_no_trainer_and_no_pipeline() -> None:
                     and item.name in TRAINER_CONSTRUCTION_METHODS
                 )
     assert found == KEPT_TRAINER_CONSTRUCTION_METHODS
+
+
+#: The methods that built the objects of a harness job on a recipe before RFC #1390 moved that work into
+#: ``reef.train.harness_backend.component.HarnessTrainingComponent``.
+HARNESS_CONSTRUCTION_METHODS = frozenset({"build_backend", "build_evaluator", "build_policy"})
+
+#: ``(file, class, method)`` of each such method that a later step of RFC #1390 still has to remove; none is left.
+KEPT_HARNESS_CONSTRUCTION_METHODS: frozenset[tuple[str, str, str]] = frozenset()
+
+#: The classes of the objects that run a harness job: the component, the backend, the evaluator and the policies.
+HARNESS_JOB_CLASSES = frozenset(
+    {
+        "HarnessTrainingComponent",
+        "HarnessBackend",
+        "HarnessTaskEvaluator",
+        "ComparePolicy",
+        "FloorPolicy",
+        "NoEvaluationPolicy",
+    }
+)
+
+#: The names of ``HARNESS_JOB_CLASSES`` that ``reef/recipe/harness.py`` still calls; none is left.
+KEPT_HARNESS_JOB_CALLS: frozenset[str] = frozenset()
+
+
+def test_a_recipe_builds_no_harness_backend_evaluator_or_policy() -> None:
+    # A harness recipe is configuration (RFC #1390): the harness training component builds itself and the objects
+    # of its jobs from the recipe's settings, so no recipe class defines a method that builds them.
+    found: set[tuple[str, str, str]] = set()
+    paths = [*(REPO_ROOT / "reef" / "recipe").rglob("*.py"), *(REPO_ROOT / "recipes").rglob("*.py")]
+    for path in sorted(paths):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.ClassDef):
+                found.update(
+                    (str(path.relative_to(REPO_ROOT)), node.name, item.name)
+                    for item in node.body
+                    if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)
+                    and item.name in HARNESS_CONSTRUCTION_METHODS
+                )
+    assert found == KEPT_HARNESS_CONSTRUCTION_METHODS
+    # The harness recipe's module calls none of the classes, by a name or as an attribute.
+    called: set[str] = set()
+    module = ast.parse((REPO_ROOT / "reef" / "recipe" / "harness.py").read_text(encoding="utf-8"))
+    for node in ast.walk(module):
+        if isinstance(node, ast.Call):
+            function = node.func
+            name = (
+                function.id
+                if isinstance(function, ast.Name)
+                else function.attr if isinstance(function, ast.Attribute) else None
+            )
+            if name in HARNESS_JOB_CLASSES:
+                called.add(name)
+    assert called == KEPT_HARNESS_JOB_CALLS

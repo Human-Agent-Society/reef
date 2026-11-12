@@ -25,12 +25,14 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.service import deploy
 from reef.service.app import create_app
 from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import JobStatus, TrainingJob
+from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JobQueueComponent
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
@@ -317,7 +319,11 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repo
     )
 
     recipe = dispatcher.recipe
-    assert recipe.evolution.adapter == "pi" and isinstance(recipe.method, IdleMethod)
+    assert isinstance(recipe, HarnessEvolutionRecipe) and recipe.evolution.adapter == "pi"
+    # The dispatcher's recipe holds the jobs queue's view of the component that the service built.
+    queued = recipe.harness_component
+    assert isinstance(queued, JobQueueComponent) and isinstance(queued.component, HarnessTrainingComponent)
+    assert isinstance(queued.component.method, IdleMethod)
     assert recipe.configured_tasks() == ("t",)
 
 

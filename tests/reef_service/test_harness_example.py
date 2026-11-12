@@ -20,7 +20,14 @@ from types import ModuleType
 import pytest
 import yaml
 from tests.support.config_helpers import load_harness_deployment as load_config
-from tests.support.harness_jobs import COMPONENT, TreeArtifacts, harness_backend
+from tests.support.harness_jobs import (
+    COMPONENT,
+    TreeArtifacts,
+    configured_component,
+    configured_recipe,
+    harness_backend,
+    harness_component,
+)
 from tests.support.harness_service import backend_step, seed_root
 from tests.support.records import memory_records
 from tests.support.trainers import recipe_trainer
@@ -241,7 +248,8 @@ def write_recipe_file(path: Path, config: dict, evolution: dict) -> None:
 
 
 def boot_serve_file(tmp_path: Path, monkeypatch, filename: str, **evolution) -> HarnessEvolutionRecipe:
-    """The recipe a serve file boots, through reef's config loader and the service's upstream runtime.
+    """The recipe a serve file boots, through reef's config loader and the service's upstream runtime, with the
+    harness training component that the service builds for it.
 
     Its state goes under ``tmp_path``; ``evolution`` sets further ``evolution`` keys.
     """
@@ -252,9 +260,10 @@ def boot_serve_file(tmp_path: Path, monkeypatch, filename: str, **evolution) -> 
     write_recipe_file(materialized, config, {**config["evolution"], **state, **evolution})
     monkeypatch.chdir(serve_file_base(filename))
     service = service_config_from_mapping(config)
-    return HarnessEvolutionRecipe.from_environment(
+    recipe = HarnessEvolutionRecipe.from_environment(
         {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
     )
+    return configured_recipe(recipe)
 
 
 def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monkeypatch, evolution) -> None:
@@ -276,18 +285,19 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
     assert len(tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in tasks)
     assert (built.training_mode, built.evaluation.policy) == ("auto", "compare")
-    assert type(built.method).__name__ == "RulesMethod" and type(built.scorer).__name__ == "AnswerScorer"
+    component = harness_component(built)
+    assert type(component.method).__name__ == "RulesMethod" and type(component.scorer).__name__ == "AnswerScorer"
     # The seed is the starter rules and carries no provider; the binding comes from the runtime.
     assert built.seed == PI_SEED and set(PI_SEED.files) == {"rules.md"}
     assert not any("upstream" in text or "8000" in text for text in PI_SEED.files.values())
-    binding = built.model_binding()
+    binding = built.harness_models().served()
     assert (binding.base_url, binding.model, binding.api_key, binding.api) == (
         "http://127.0.0.1:8000",
         "qwen3-8b",
         "dummy",
         "openai",
     )
-    assert list(built.model_bindings()) == ["served"]
+    assert list(built.harness_models().bindings()) == ["served"]
     trainer = recipe_trainer(
         built, "demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built)
     )
@@ -302,7 +312,9 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
     the loop's own tools, hook and graph as the seed directory holds them."""
     built = boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml")
     assert built.evolution.adapter == "native" and built.evolution.binary is None
-    assert type(built.method).__name__ == "NativeMethod" and type(built.scorer).__name__ == "NativeAnswerScorer"
+    component = harness_component(built)
+    assert type(component.method).__name__ == "NativeMethod"
+    assert type(component.scorer).__name__ == "NativeAnswerScorer"
     # The same three tasks as the pi variant, so the two runs are comparable.
     pi_tasks = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["evaluation"]["tasks"]
     assert built.configured_tasks() == tuple(pi_tasks)
@@ -361,12 +373,17 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
     assert service.upstream_model == model_id
-    assert built.model_binding().model == model_id
-    assert built.training_mode == "auto" and type(built.method).__name__ == "RulesMethod"
+    assert built.harness_models().served().model == model_id
+    assert built.training_mode == "auto"
+    assert type(configured_component(built, os.environ).method).__name__ == "RulesMethod"
     records = memory_records("demo")
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
     trainer = recipe_trainer(
-        replace(built, evolution=local), "demo", records, artifacts=artifacts_for(built), root=seed_root(built)
+        configured_recipe(replace(built, evolution=local), os.environ),
+        "demo",
+        records,
+        artifacts=artifacts_for(built),
+        root=seed_root(built),
     )
     assert trainer.pipeline.training_mode == "auto"
     # Each report is one job's data: the deployment sets no job_samples, and the default is 1.

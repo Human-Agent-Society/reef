@@ -138,14 +138,37 @@ def load_recipe(
         inference_timeout_s=RUN_TIMEOUT_S,
     )
     recipe = build_recipe(str(sections["implementation"]), config=sections, runtime=runtime)
-    if not isinstance(recipe, HarnessEvolutionRecipe) or not isinstance(recipe.method, GEPA):
+    if not isinstance(recipe, HarnessEvolutionRecipe):
+        raise SystemExit("gepa.yaml must name the harness evolution recipe with recipes.gepa:GEPA as its method")
+    # The recipe is configuration; the harness training component builds the method and the scorer from it.
+    built = HarnessTrainingComponent.from_settings(
+        recipe.harness_settings(), recipe.harness_models(), environ=os.environ
+    )
+    if not isinstance(built.method, GEPA):
         raise SystemExit("gepa.yaml must name the harness evolution recipe with recipes.gepa:GEPA as its method")
     # Importable classes alone do not carry the driver's registered answers into spawn or Ray workers. The
     # example's own hooks become one snapshot of the answers and contexts; a hook the config names otherwise stays.
     snapshot = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
-    scorer = snapshot if isinstance(recipe.scorer, aime.AIMEAnswerScorer) else recipe.scorer
-    feedback = snapshot if isinstance(recipe.method.feedback, aime.AIMEFeedback) else recipe.method.feedback
-    return recipe.name, dataclasses.replace(recipe, scorer=scorer, method=GEPA(recipe.method.settings, feedback))
+    scorer = snapshot if isinstance(built.scorer, aime.AIMEAnswerScorer) else built.scorer
+    feedback = snapshot if isinstance(built.method.feedback, aime.AIMEFeedback) else built.method.feedback
+    component = HarnessTrainingComponent(
+        built.settings,
+        built.models,
+        method=GEPA(built.method.settings, feedback),
+        executor=built.executor,
+        scorer=scorer,
+        collector=built.collector,
+        agent=built.agent,
+    )
+    return recipe.name, dataclasses.replace(recipe, harness_component=component)
+
+
+def harness_component(recipe: HarnessEvolutionRecipe) -> HarnessTrainingComponent:
+    """The harness training component that ``load_recipe`` gave ``recipe``."""
+    component = recipe.harness_component
+    if not isinstance(component, HarnessTrainingComponent):
+        raise TypeError("the example's recipe runs its steps on its own harness training component")
+    return component
 
 
 @contextmanager
@@ -155,7 +178,10 @@ def worker_runtime(recipe: HarnessEvolutionRecipe):
     Ray reads RAY_ADDRESS when set; without it, start a local Ray runtime.
     Do not tear down an externally owned runtime when embedding this driver.
     """
-    selection, _ = evaluation_selection(recipe.scorer, recipe.worker_executor)
+    scorer = harness_component(recipe).scorer
+    if scorer is None:
+        raise TypeError("the example's evaluation needs a scorer")
+    selection, _ = evaluation_selection(scorer, recipe.worker_executor)
     if selection.settings.backend != "ray":
         yield
         return
@@ -270,9 +296,7 @@ class RunService:
         initial state before any."""
         scenario = self.dispatcher.get_or_create_scenario(self.scenario)
         assert scenario is not None
-        component = self.recipe.harness_component
-        if not isinstance(component, HarnessTrainingComponent):
-            raise TypeError("the example's recipe runs its steps on its own harness training component")
+        component = harness_component(self.recipe)
         last = JobLoopState.from_dict(scenario.trainer.state).last_job
         return component.state_after(None if last is None else last.job_id)[1]
 

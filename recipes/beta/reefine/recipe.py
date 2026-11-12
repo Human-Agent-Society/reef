@@ -1,41 +1,44 @@
-"""Reefine's recipe: the harness evolution recipe with Reefine's defaults, its agent and its multimodal gateway.
+"""Reefine's recipe: the harness evolution recipe with Reefine's defaults.
 
 ``ReefineRecipe`` answers a person's training requests, one job per
-request (``training_mode: manual``), with ``ReefineMethod``. It merges
-Reefine's defaults into the deployment's ``evolution`` section: the method,
-the seed beside this module, and an evaluation that runs the candidate alone
-on the deployment's tasks, scored by ``AnswerScorer``, and keeps it when every
-task meets the floor. On the health task the floor checks that the tree still
-works, not that the requested change does; the job's design and review and
-the person judge that. By default, a person activates a tree that changes an
-extension (the ``activation`` rule's ``review_kinds``).
+request (``training_mode: manual``), with ``ReefineMethod``. It only sets
+defaults: it merges them into the deployment's ``evolution`` section and
+builds nothing. The defaults are the method, the seed beside this module, and
+an evaluation that runs the candidate alone on the deployment's tasks, scored
+by ``AnswerScorer``, and keeps it when every task meets the floor. On the
+health task the floor checks that the tree still works, not that the
+requested change does; the job's design and review and the person judge that.
+By default, a person activates a tree that changes an extension (the
+``activation`` rule's ``review_kinds``).
 
 ``evolution.agent`` says where the coding agent that answers a request on
 pi runs (``reef.train.harness_backend.agent.settings``); Reefine adds
 ``trial_timeout_s`` to it, the limit of each trial, and runs its agent on the
 harness's own binary unless the section names another. ``multimodal`` is
 Reefine's own key: the gateway for images, embeddings, speech and decisions
-(``recipes.beta.reefine.multimodal``).
+(``recipes.beta.reefine.multimodal``). The recipe gives both to the method as
+its config (``evolution.method.config``); a deployment that names
+``HarnessEvolutionRecipe`` with ``ReefineMethod`` writes them there itself.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from recipes.beta.reefine.agent import ReefineAgent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER
-from recipes.beta.reefine.method import ReefineMethod
-from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettings
+from recipes.beta.reefine.method import DEFAULT_TRIAL_TIMEOUT_S, ReefineMethod
+from recipes.beta.reefine.multimodal import MultimodalSettings
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
+from reef.core.plugins import PluginConfigError
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend import Method
 
 #: The first tree of a new Reefine scenario: the starter skill.
 SEED_DIRECTORY = Path(__file__).with_name("seed")
@@ -53,41 +56,24 @@ EVALUATION_DEFAULTS: Mapping[str, Any] = {
 }
 
 
-#: How long one trial of the agent may take when ``evolution.agent.trial_timeout_s`` says nothing.
-DEFAULT_TRIAL_TIMEOUT_S = 300.0
-
-
 @dataclass(frozen=True, kw_only=True)
 class ReefineRecipe(HarnessEvolutionRecipe):
     """Refine a harness once per instruction; a person activates a tree that changes an extension.
 
     Values: the fields of ``HarnessEvolutionRecipe``, read with Reefine's
-    defaults merged in. ``multimodal`` is ``evolution.multimodal`` read,
-    ``None`` for no gateway: Reef relays the harness's image, embedding,
-    speech and decision calls to it with its key, unrecorded, and the
-    agent's trials reach the same one. ``agent`` is ``evolution.agent``
-    read, ``None`` when no agent answers requests (off pi, or where the host
-    cannot jail it), and ``trial_timeout_s`` > 0 bounds each of its trials.
-    Purpose: a deployment names it as its recipe; it builds each scenario's
-    backend with ``ReefineMethod``. Override ``evolution.evaluation.policy``
-    to compare scores against the head tree, and ``training-mode`` to
-    learn from reports too.
+    defaults merged in; the recipe adds no field that is not configuration.
+    ``evolution.method`` names ``ReefineMethod`` unless the deployment names
+    another method; its config holds ``trial_timeout_s`` (from
+    ``evolution.agent.trial_timeout_s``) and ``multimodal`` (from
+    ``evolution.multimodal``). ``evolution.agent`` is ``None`` off pi, where
+    no agent answers requests.
+    Purpose: a deployment names it as its recipe, for Reefine's defaults.
+    Override ``evolution.evaluation.policy`` to compare scores against the
+    head tree, and ``training-mode`` to learn from reports too.
     """
 
     name: str = field(default="reefine", kw_only=True)
     training_mode: str = config_field("manual")
-    multimodal: MultimodalSettings | None = None
-    trial_timeout_s: float = DEFAULT_TRIAL_TIMEOUT_S
-
-    @property
-    def multimodal_provider(self) -> MultimodalProvider | None:
-        """The configured provider, its key the chat upstream's when the upstream is the same gateway."""
-        if self.multimodal is None:
-            return None
-        binding = self.model_binding() if self.runtime is not None else None
-        return self.multimodal.provider(
-            None if binding is None else binding.base_url, None if binding is None else binding.api_key
-        )
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
@@ -129,8 +115,27 @@ class ReefineRecipe(HarnessEvolutionRecipe):
                 raise RecipeConfigError("evolution.agent.trial_timeout_s must be a positive number")
             binary = section.get("binary")
             agent = {**({"binary": binary} if binary else {}), **agent}
+        multimodal = section.get("multimodal")
+        try:
+            # Read now, so a deployment with a bad section refuses to start; the method reads it again.
+            MultimodalSettings.from_config(multimodal, values)
+        except ValueError as exc:
+            raise RecipeConfigError(f"evolution.{exc}") from exc
+        try:
+            method = Method.reference(own.get("method", EVOLUTION_DEFAULTS["method"]), setting="evolution.method")
+        except PluginConfigError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+        if issubclass(method.plugin_class, ReefineMethod):
+            # Reefine's own keys of the section are the method's config; keys that the deployment wrote there win.
+            method_config = {"trial_timeout_s": float(trial_timeout_s), **method.config}
+            if multimodal is not None:
+                method_config = {"multimodal": dict(multimodal), **method_config}
+            own["method"] = {
+                "module": f"{method.plugin_class.__module__}:{method.plugin_class.__qualname__}",
+                "config": method_config,
+            }
         reviewed = [part for part in REVIEWED_PARTS if part in descriptor.layout.parts]
-        kwargs = super()._recipe_kwargs(
+        return super()._recipe_kwargs(
             {
                 **settings,
                 "evolution": {**EVOLUTION_DEFAULTS, **own, "agent": agent, "evaluation": evaluation},
@@ -140,25 +145,6 @@ class ReefineRecipe(HarnessEvolutionRecipe):
             },
             values,
         )
-        try:
-            kwargs["multimodal"] = MultimodalSettings.from_config(section.get("multimodal"), values)
-        except ValueError as exc:
-            raise RecipeConfigError(f"evolution.{exc}") from exc
-        kwargs["trial_timeout_s"] = float(trial_timeout_s)
-        return kwargs
-
-    def build_backend(
-        self,
-        scenario: str,
-        component: str,
-    ) -> HarnessBackend:
-        """The scenario's backend. With an agent configured, its Reefine method runs the agent, bound here to pi
-        once per scenario as the evaluator is: the binary is resolved, and installed when missing, on the Reef
-        host, or named in a cloud sandbox's image."""
-        if self.agent is None or not isinstance(self.method, ReefineMethod):
-            return super().build_backend(scenario, component)
-        method = ReefineMethod(ReefineAgent(self.agent.bind(), self.trial_timeout_s, self.multimodal_provider))
-        return HarnessEvolutionRecipe.build_backend(replace(self, method=method), scenario, component)
 
 
-__all__ = ["DEFAULT_TRIAL_TIMEOUT_S", "SEED_DIRECTORY", "ReefineRecipe"]
+__all__ = ["SEED_DIRECTORY", "ReefineRecipe"]

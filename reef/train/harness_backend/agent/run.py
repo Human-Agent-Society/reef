@@ -1,7 +1,8 @@
 """Run the deployment's coding agent in one job's workspace.
 
-``AgentExecution`` is the agent bound for one scenario: its adapter, the
-executor that isolates it, its binary and its time limit. ``run_agent``
+``AgentExecution`` (``reef.train.harness_backend.contract``) is the agent bound
+for one scenario: its adapter, the executor that isolates it, its binary and
+its time limit. ``run_agent``
 implements ``Services.run_agent``: it starts the gateway with the workspace's
 tools (``check`` and ``evaluate``), renders the agent's tree after Reef's
 protocol rules (``protocol.md``), runs the agent in the workspace, and keeps
@@ -20,7 +21,6 @@ import os
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -33,7 +33,7 @@ from reef.harness.gateway import AgentGateway, AgentTool
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import headless_argv, headless_env, launch_agent, read_session
 from reef.harness.tree import HarnessTree, render_tree
-from reef.train.harness_backend.contract import AgentOutcome, Services
+from reef.train.harness_backend.contract import AgentExecution, AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace
 
 #: Reef's rules for every agent run, before the agent's own: the workspace, the outputs and the tools.
@@ -44,29 +44,6 @@ AGENT_HOME = "agent"
 SESSION_FILE = "agent-session.jsonl"
 #: The tree a tool reads when its arguments name none.
 DEFAULT_TREE = "harness"
-
-
-@dataclass(frozen=True)
-class AgentExecution:
-    """Where and how the deployment's coding agent runs, bound for one scenario.
-
-    Values: ``descriptor`` is the agent's adapter, which takes a text
-    prompt. ``executor`` is bound to the adapter's program, and ``binary`` is
-    the agent's binary there. ``timeout_s`` > 0 bounds one run.
-    Purpose: ``AgentSettings.bind`` makes one per scenario; ``run_agent``
-    runs the agent with it.
-    """
-
-    descriptor: AdapterDescriptor
-    executor: ProgramExecutor
-    binary: str
-    timeout_s: float
-
-    def __post_init__(self) -> None:
-        if self.descriptor.takes_task_directory:
-            raise ValueError(f"adapter {self.descriptor.name!r} plays task directories, so it cannot run a prompt")
-        if self.timeout_s <= 0:
-            raise ValueError("AgentExecution.timeout_s must be positive")
 
 
 def agent_env(descriptor: AdapterDescriptor, binary: str, home: Path) -> dict[str, str]:

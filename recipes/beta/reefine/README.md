@@ -11,8 +11,9 @@ classification.
 Reefine refines a coding harness from plain-language instructions. It is a
 [harness evolution](../../../docs/user-guide/evolve-your-harness.rst) recipe:
 its implementation is `recipes.beta.reefine:ReefineRecipe`, a
-`HarnessEvolutionRecipe` with its own method (`ReefineMethod`), scorer, seed
-and evaluation defaults. It needs no training GPUs. The example configuration
+`HarnessEvolutionRecipe` that only sets defaults: the method (`ReefineMethod`),
+the scorer, the seed and the evaluation. The recipe builds nothing; Reef's
+harness training component builds the method from the `evolution` section. It needs no training GPUs. The example configuration
 refines a pi harness; [Adapters other than pi](#adapters-other-than-pi) covers
 the others.
 
@@ -20,7 +21,7 @@ the others.
 
 ```text
 beta/reefine/
-  recipe.py            ReefineRecipe: the defaults, the agent's isolation and the multimodal gateway
+  recipe.py            ReefineRecipe: Reefine's defaults for the evolution section
   method.py            ReefineMethod: answers a request, or learns one skill from failing traces
   answer.py            the text answer: the served model writes the design, the files and the review
   prompts/             the text answer's prompts and the agent's request prompt (<name>.md), and the
@@ -419,6 +420,22 @@ Set
 an agent run makes a model call per turn and may probe several provider
 models before it settles on one.
 
+`ReefineRecipe` gives `evolution.agent.trial_timeout_s` and
+`evolution.multimodal` (below) to `ReefineMethod` as its config. The method
+takes the agent from its job's services (`job.services.agent`), so it needs
+no recipe of its own. A deployment that names
+`reef.recipe.harness:HarnessEvolutionRecipe` runs it without Reefine's
+defaults, and writes the two settings in the method's config:
+
+```yaml
+evolution:
+  method:
+    module: recipes.beta.reefine:ReefineMethod
+    config:
+      trial_timeout_s: 300
+      multimodal: {preset: openrouter, api_key_env: REEF_MULTIMODAL_API_KEY}
+```
+
 ## Images, speech, embeddings and decisions
 
 `evolution.multimodal` names one gateway that serves these modalities behind
@@ -438,7 +455,8 @@ evolution:
 `api_key` takes the key the way `inference.upstream_api_key` takes the chat
 key; the example configuration sets it to `${REEF_MULTIMODAL_API_KEY}`, and
 `--recipe.config.evolution.multimodal.api_key` sets it on the command line.
-Empty, the upstream key serves when the upstream is the same address, so a
+`api_key_env` names a variable of the service's environment instead.
+Empty, the served model's key serves when the served model is at the same address, so a
 deployment that chats through OpenRouter needs nothing more. Without a key,
 or for a route the preset does not serve (`openai-compatible` has no
 decisions), the agent's call answers 501. Recipes other than Reefine offer none.

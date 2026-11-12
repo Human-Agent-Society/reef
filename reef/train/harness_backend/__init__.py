@@ -8,8 +8,10 @@ One job goes from the head tree to a kept tree in ``backend``:
 ``HarnessBackend`` is the job as the harness training
 component (``component``) runs it (prepare, evaluate, settle). It holds the deployment's ``Method`` and calls ``Method.run`` once
 per job in ``propose``; the tree the method leaves in the job's workspace is
-the candidate. The recipe ``reef.recipe.harness.HarnessEvolutionRecipe``
-builds the backend; methods never subclass it.
+the candidate. The harness training component builds the backend from the
+deployment's ``evolution`` settings (``settings``) and models
+(``reef.harness.tasks.harness_models``);
+methods never subclass it.
 
 The evaluation and the activation are Reef's, shared with weight training:
 ``reef.evaluation`` decides whether a candidate is kept, and the scenario's
@@ -32,10 +34,11 @@ publication policies are ``reef.evaluation.harness``.
 
 from reef.harness.gateway import ModelCalls
 from reef.train.harness_backend.agent.method import AgentMethod
-from reef.train.harness_backend.contract import AgentOutcome, Method, MethodJob, Services
+from reef.train.harness_backend.contract import AgentExecution, AgentOutcome, Method, MethodJob, Services
 from reef.train.harness_backend.workspace import Trace, Workspace
 
 __all__ = [
+    "AgentExecution",
     "AgentMethod",
     "AgentOutcome",
     "Method",

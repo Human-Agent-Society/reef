@@ -1,4 +1,4 @@
-"""Reefine configuration: its defaults, and the agent each scenario's backend gets."""
+"""Reefine configuration: its defaults, and the agent that each scenario's backend binds for the method."""
 
 from __future__ import annotations
 
@@ -7,12 +7,14 @@ from pathlib import Path
 
 import pytest
 from reef_terminus.runner import trial_record
-from tests.support.harness_jobs import build_harness_backend
+from tests.support.harness_jobs import configured_component
 
 from recipes.beta.reefine import ReefineMethod, ReefineRecipe
+from recipes.beta.reefine.multimodal import MultimodalSettings
 from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.core.config import config_arguments
+from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.tasks.run import TaskResult
@@ -36,13 +38,15 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert recipe_class_for("recipes.beta.reefine:ReefineRecipe") is ReefineRecipe
     assert isinstance(built, ReefineRecipe)
     assert built.name == "reefine" and built.training_mode == "manual"
-    assert isinstance(built.method, ReefineMethod) and built.method.agent is None and built.agent is None
+    component = configured_component(built)
+    assert isinstance(component.method, ReefineMethod) and component.agent is None
+    assert component.method.trial_timeout_s == 300.0 and component.method.multimodal is None
     # By default a person activates a tree that changes an extension.
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
     # The floor: the candidate alone must pass every evaluation task; the current snapshot is not run.
     assert (built.evaluation.policy, built.evaluation.floor_score) == ("floor", 1.0)
-    assert isinstance(built.scorer, AnswerScorer)
+    assert isinstance(component.scorer, AnswerScorer)
     # Without evolution.seed the first tree is the packaged one: the starter skill.
     assert built.seed == HarnessTree.read(SEED_DIRECTORY)
     assert list(built.seed.files) == ["skills/answer-style/SKILL.md"]
@@ -71,7 +75,7 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
     assert built.training_mode == "manual" and built.stages().sample2job.config == {"batch_size": 3}
     assert built.seed == HarnessTree({"rules.md": "Answer in one line.\n"})
     assert isinstance(built.activation_rule(), NeverActivate)
-    assert built.evaluation.policy == "compare" and isinstance(built.scorer, AnswerScorer)
+    assert built.evaluation.policy == "compare" and isinstance(configured_component(built).scorer, AnswerScorer)
 
 
 @pytest.mark.parametrize(
@@ -136,15 +140,15 @@ def test_an_unknown_adapter_is_a_config_error() -> None:
 def test_off_pi_no_agent_is_built_or_warned_about(caplog) -> None:
     """The agent answers requests on pi alone: another adapter builds no agent, so an unjailed agent setting
     neither warns nor needs a sandbox there, while pi still warns."""
+    environ = {"REEF_AGENT_SANDBOX": "none"}
     with caplog.at_level("WARNING"):
-        built = ReefineRecipe.from_environment(
-            {"REEF_AGENT_SANDBOX": "none"}, config={"evolution": evolution(adapter="dsh")}
-        )
-    assert isinstance(built, ReefineRecipe) and built.agent is None
+        built = ReefineRecipe.from_environment(environ, config={"evolution": evolution(adapter="dsh")})
+        off_pi = configured_component(built, environ)
+    assert built.evolution.agent is None and off_pi.agent is None
     assert "sandbox is none" not in caplog.text
     with caplog.at_level("WARNING"):
-        pi = ReefineRecipe.from_environment({"REEF_AGENT_SANDBOX": "none"}, config={"evolution": evolution()})
-    assert isinstance(pi, ReefineRecipe) and pi.agent is not None and isinstance(pi.agent.executor, LocalExecutor)
+        pi = configured_component(ReefineRecipe.from_environment(environ, config={"evolution": evolution()}), environ)
+    assert pi.agent is not None and isinstance(pi.agent.executor, LocalExecutor)
     assert "sandbox is none" in caplog.text
 
 
@@ -156,9 +160,9 @@ def test_the_packaged_seed_is_the_first_tree_on_every_adapter(adapter: str) -> N
     assert built.seed == HarnessTree.read(SEED_DIRECTORY)
 
 
-def test_each_scenarios_backend_runs_the_agent_on_the_bound_binary_with_the_gateway(tmp_path: Path) -> None:
-    """The recipe binds the agent to pi once per scenario, with the deployment's binary and its multimodal gateway,
-    and leaves its own method without one."""
+def test_each_scenarios_backend_binds_the_agent_and_the_method_holds_its_own_config(tmp_path: Path) -> None:
+    """The recipe gives the method Reefine's keys as its config; the component binds the agent to pi once per
+    scenario, with the deployment's binary, for the method to read from its job's services."""
     binary = tmp_path / "pi"
     section = evolution(
         binary=str(binary),
@@ -167,19 +171,44 @@ def test_each_scenarios_backend_runs_the_agent_on_the_bound_binary_with_the_gate
         multimodal={"preset": "openrouter"},
     )
     upstream = InferenceProxyRuntime(base_url="https://openrouter.ai/api", api_key="sk-upstream", model_path="m")
-    built = ReefineRecipe.from_environment(
-        {"REEF_AGENT_SANDBOX": "none"}, config={"evolution": section}, runtime=upstream
-    )
-    assert isinstance(built, ReefineRecipe) and isinstance(built.method, ReefineMethod)
-    assert built.method.agent is None
-    backend = build_harness_backend(built, "demo")
-    method = backend.method
-    assert isinstance(method, ReefineMethod) and method.agent is not None
-    execution = method.agent.execution
+    environ = {"REEF_AGENT_SANDBOX": "none"}
+    built = ReefineRecipe.from_environment(environ, config={"evolution": section}, runtime=upstream)
+    assert built.evolution.method == {
+        "module": "recipes.beta.reefine.method:ReefineMethod",
+        "config": {"multimodal": {"preset": "openrouter"}, "trial_timeout_s": 30.0},
+    }
+    component = configured_component(built, environ)
+    method = component.method
+    assert isinstance(method, ReefineMethod) and method.trial_timeout_s == 30.0
+    assert isinstance(method.multimodal, MultimodalSettings)
+    backend = component.build_backend("demo", "harness")
+    execution = backend.agent
+    assert backend.method is method and execution is not None
     assert isinstance(execution.executor, LocalExecutor) and execution.binary == str(binary)
-    assert (execution.timeout_s, method.agent.trial_timeout_s) == (120.0, 30.0)
-    assert method.agent.provider == built.multimodal_provider and method.agent.provider.api_key == "sk-upstream"
+    assert execution.timeout_s == 120.0
+    # The gateway's key is the served model's, because the upstream is the same gateway.
+    served = backend.models.served
+    assert method.multimodal.provider(served.base_url, served.api_key).api_key == "sk-upstream"
     backend.close()
+
+
+def test_a_deployment_names_the_method_without_the_reefine_recipe() -> None:
+    """``ReefineMethod`` reads its own config, so the harness evolution recipe runs it with no recipe of its own."""
+    method = ReefineMethod.from_config({"trial_timeout_s": 45, "multimodal": {"api_key": "sk-or"}})
+    assert method.trial_timeout_s == 45.0 and method.multimodal is not None
+    assert method.multimodal.provider(None, None).api_key == "sk-or"
+    assert (ReefineMethod.runs_agent, ReefineMethod.runs_without_agent) == (True, True)
+    for config in ({"trial_timeout_s": 0}, {"multimodal": "openrouter"}, {"agent": {}}):
+        with pytest.raises(PluginConfigError):
+            ReefineMethod.from_config(config)
+    # A method that the deployment names itself keeps its own config; Reefine's keys fill what it leaves out.
+    named = {"module": "recipes.beta.reefine:ReefineMethod", "config": {"trial_timeout_s": 5}}
+    section = evolution(method=named, agent={"trial_timeout_s": 30})
+    built = ReefineRecipe.from_environment({"REEF_AGENT_SANDBOX": "none"}, config={"evolution": section})
+    assert built.evolution.method == {
+        "module": "recipes.beta.reefine.method:ReefineMethod",
+        "config": {"trial_timeout_s": 5},
+    }
 
 
 @pytest.mark.unit

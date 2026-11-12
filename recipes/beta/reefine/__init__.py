@@ -4,8 +4,8 @@ The parts:
 
 ``recipe``
     ``ReefineRecipe``, the harness evolution recipe with Reefine's defaults:
-    the method, the seed, the floor evaluation, the agent's isolation
-    (``evolution.agent``) and the multimodal gateway.
+    the method and its config, the seed, the floor evaluation and the
+    agent's isolation (``evolution.agent``). It holds configuration only.
 ``method``
     ``ReefineMethod``: a job with a request answers it, a job without one
     learns one skill from its failing traces.
