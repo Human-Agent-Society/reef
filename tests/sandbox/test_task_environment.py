@@ -26,16 +26,16 @@ from reef.execution.sandbox.task_environment import (
 @pytest.mark.unit
 def test_every_probed_environment_is_a_harbor_task_environment() -> None:
     assert ("docker", *REMOTE_TASK_ENVIRONMENTS) == HARBOR_TASK_ENVIRONMENTS
-    assert set(PROBED_TASK_ENVIRONMENTS) <= set(HARBOR_TASK_ENVIRONMENTS)
+    assert PROBED_TASK_ENVIRONMENTS == HARBOR_TASK_ENVIRONMENTS
     assert tuple(TASK_ENVIRONMENT_PROBES) == PROBED_TASK_ENVIRONMENTS
 
 
 @pytest.mark.unit
-def test_only_docker_and_e2b_have_probes() -> None:
-    assert checked_task_environment("docker") == "docker"
-    assert checked_task_environment("e2b") == "e2b"
-    for value in ("modal", "Docker", "", None, 3):
-        with pytest.raises(ValueError, match=r"^the Harbor environment must be docker or e2b, not "):
+def test_only_a_harbor_task_environment_has_probes() -> None:
+    for name in ("docker", "e2b", "modal"):
+        assert checked_task_environment(name) == name
+    for value in ("podman", "Docker", "", None, 3):
+        with pytest.raises(ValueError, match=r"^the Harbor environment must be docker or e2b or modal, not "):
             checked_task_environment(value)
 
     class EqualsDocker:
@@ -47,12 +47,12 @@ def test_only_docker_and_e2b_have_probes() -> None:
         def __hash__(self) -> int:
             return hash("docker")
 
-    with pytest.raises(ValueError, match="must be docker or e2b"):
+    with pytest.raises(ValueError, match="must be docker or e2b or modal"):
         checked_task_environment(EqualsDocker())
-    with pytest.raises(ValueError, match=r"^generator.environment must be docker or e2b, not 'modal'$"):
-        checked_task_environment("modal", "generator.environment")
-    with pytest.raises(ValueError, match="must be docker or e2b, not 'modal'"):
-        task_environment_probes("modal")
+    with pytest.raises(ValueError, match=r"^generator.environment must be docker or e2b or modal, not 'podman'$"):
+        checked_task_environment("podman", "generator.environment")
+    with pytest.raises(ValueError, match="must be docker or e2b or modal, not 'podman'"):
+        task_environment_probes("podman")
 
 
 @pytest.mark.unit
@@ -66,6 +66,11 @@ def test_each_environment_names_what_its_host_needs(monkeypatch: pytest.MonkeyPa
         task_environment_probes("e2b")[0].missing() == "E2B_API_KEY is not set; export it before this process starts"
     )
     assert EnvironmentVariableProbe("E2B_API_KEY").missing() == "E2B_API_KEY is not set"
+    # Modal: its two credential variables, and the package that Harbor's modal environment imports.
+    modal = task_environment_probes("modal", credential_hint="export it before reef serve starts")
+    assert [probe.name for probe in modal] == [*REMOTE_TASK_ENVIRONMENTS["modal"], "modal"]
+    monkeypatch.delenv("MODAL_TOKEN_SECRET", raising=False)
+    assert modal[1].missing() == "MODAL_TOKEN_SECRET is not set; export it before reef serve starts"
 
 
 @pytest.mark.unit
