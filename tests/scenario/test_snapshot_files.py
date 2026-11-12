@@ -10,8 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.support.harness_jobs import COMPONENT, PI_SEED, changed_rules, harness_recipe
 from tests.support.harness_service import harness_repository, run_step
-from tests.support.harness_steps import COMPONENT, PI_SEED, changed_rules, harness_recipe
 
 from reef.artifact import Artifact, ArtifactConflictError, ArtifactNotFoundError
 from reef.core.plugins import PluginReference

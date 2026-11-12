@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.harness_jobs import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe
 from tests.support.trajectories import recorded_trajectory
 
 gepa = pytest.importorskip("gepa")
@@ -32,7 +32,7 @@ from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
 from recipes.gepa import GEPA, Feedback, GEPASettings
 from recipes.gepa.archive import Archive
-from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
+from recipes.gepa.method import ARCHIVE_FILE, archive_for_job
 from reef.evaluation.harness import ComparePolicy
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
@@ -171,7 +171,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
 
     def committed_archive(state: dict[str, Any], text: str) -> Archive:
         archive = HarnessState.from_json(state).method_files.get(ARCHIVE_FILE)
-        return archive_for_step(
+        return archive_for_job(
             archive, backend.history, validation, {"rules.md": text}, repeats=recipe.evaluation.repeats
         )
 

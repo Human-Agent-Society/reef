@@ -121,7 +121,7 @@ class TaskEvaluationWorker:
         error scores 0; any other nonzero exit still scores and is observed
         beside the score. ``record_dir`` receives the trajectory files before
         the run root is removed, unless it is ``None``; a copy that fails is
-        not a run failure and propagates, so the step stops instead of
+        not a run failure and propagates, so the job stops instead of
         scoring a result that a disk error shaped.
         """
         token = RUN_OWNER_LEASE.set(self.owner_lease)

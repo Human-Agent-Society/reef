@@ -200,10 +200,10 @@ def test_online_grpo_objective_and_recipe_are_removed() -> None:
     data recipe, with nothing in it addressing drift on a continually updated
     policy."""
     from reef.recipe.registry import recipe_class_for
-    from reef.train.slime_backend.objectives import resolve_slime_objective
+    from reef.train.slime_backend.objectives import resolve_objective
 
     with pytest.raises(ValueError, match="unknown Slime objective"):
-        resolve_slime_objective("online_grpo")
+        resolve_objective("online_grpo")
     assert recipe_class_for("online_grpo") is None
     assert recipe_class_for("online_rft") is None
 

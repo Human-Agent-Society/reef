@@ -1,10 +1,10 @@
 """Reefine's method: answer a person's request with a change to the harness, or learn one skill from failures.
 
-``ReefineMethod.step`` reads its step's workspace. A step with a request
+``ReefineMethod.run`` reads its job's workspace. A job with a request
 answers it: the coding agent on pi when the recipe gave the method an agent
 (:mod:`recipes.beta.reefine.agent`), else the served model in text
-(:mod:`recipes.beta.reefine.answer`). A step without a request learns one
-skill from its traces, each a failure a client reported. The step leaves the
+(:mod:`recipes.beta.reefine.answer`). A job without a request learns one
+skill from its traces, each a failure a client reported. The job leaves the
 answer's tree in ``harness/`` and says what it did in plain text: why
 nothing changed, the design with its How to use paragraph, and the review.
 """
@@ -17,24 +17,24 @@ from typing import Any
 from recipes.beta.reefine.agent import ReefineAgent, answer_with_agent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER, answer_request, learn_from_failures
 from reef.harness.adapters import get_adapter
-from reef.train.harness_backend import Method, StepContext
+from reef.train.harness_backend import Method, MethodJob
 
 
 class ReefineMethod(Method):
-    """Reefine's step: a request answered with a change, or one skill learned from the step's failing traces.
+    """Reefine's job: a request answered with a change, or one skill learned from the job's failing traces.
 
-    Values: ``agent`` runs the coding agent on a request step on pi;
+    Values: ``agent`` runs the coding agent on a request job on pi;
     ``None`` answers every request with the served model's text.
     Purpose: ``ReefineRecipe`` names it as the default ``evolution.method``,
     built without an agent, and gives each scenario's backend one with the
-    agent it binds there; the backend calls ``step`` once per step.
+    agent it binds there; the backend calls ``run`` once per job.
     """
 
     def __init__(self, agent: ReefineAgent | None = None) -> None:
         self.agent = agent
 
-    def step(self, context: StepContext) -> None:
-        workspace, services = context.workspace, context.services
+    def run(self, job: MethodJob) -> None:
+        workspace, services = job.workspace, job.services
         head = workspace.tree()
         traces = workspace.traces()
         request = workspace.request()
@@ -56,11 +56,11 @@ class ReefineMethod(Method):
         else:
             answer = answer_request(head, request, traces, services, adapter)
         workspace.write_tree(head.apply(answer.patch))
-        workspace.write_output(summary=step_summary(answer.notes), notes=answer.notes, requires=answer.requires)
+        workspace.write_output(summary=job_summary(answer.notes), notes=answer.notes, requires=answer.requires)
 
 
-def step_summary(notes: Mapping[str, Any]) -> str:
-    """A request step's notes as plain text for the step pages: why nothing changed, the design with its How to
+def job_summary(notes: Mapping[str, Any]) -> str:
+    """A request job's notes as plain text for the job pages: why nothing changed, the design with its How to
     use paragraph, and the review; empty for notes that hold none of them."""
     parts: list[str] = []
     reason = notes.get("failure") or notes.get("declined")

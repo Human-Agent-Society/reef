@@ -32,8 +32,6 @@ from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import ExecutorFuture, base
 from reef.storage.durable_files import write_json
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import JobStatus, ScenarioRoot, TrainingJob
 from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
 from reef.train.slime_backend import component as slime_component
@@ -60,6 +58,8 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
     _allocated_bytes,
     retention_options,
 )
+from reef.train.slime_backend.schedule import next_steps
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, trajectories
 
 #: A policy objective over the suite's ``pg`` family, named by dotted reference like a cookbook method's.

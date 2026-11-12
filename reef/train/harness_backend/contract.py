@@ -1,13 +1,13 @@
-"""The method contract of harness evolution: what a method implements, and what each step gives it.
+"""The method contract of harness evolution: what a method implements, and what each job gives it.
 
-A method is a :class:`Method`. Each step gives it one :class:`StepContext`:
-the step's :class:`~reef.train.harness_backend.workspace.Workspace`, where the
-harness's components and the step's material are files, and the
+A method is a :class:`Method`. Each job gives it one :class:`MethodJob`:
+the job's :class:`~reef.train.harness_backend.workspace.Workspace`, where the
+harness's components and the job's material are files, and the
 :class:`Services`, the services that Reef runs for the method: model calls, the
 tree check, the evaluation, and a run of the deployment's coding agent. The
-method edits ``context.workspace.harness``; the tree it leaves there is the
-step's candidate, and an unchanged tree skips the step. What it says about the
-step it writes to ``output/`` (``Workspace.write_output``). A method never
+method edits ``job.workspace.harness``; the tree it leaves there is the
+job's candidate, and an unchanged tree skips the job. What it says about the
+job it writes to ``output/`` (``Workspace.write_output``). A method never
 subclasses the backend.
 """
 
@@ -70,9 +70,9 @@ class AgentOutcome:
 
 
 class Services(ABC):
-    """What a method may do in one step besides editing its workspace.
+    """What a method may do in one job besides editing its workspace.
 
-    Purpose: the backend makes one per step and passes it to ``Method.step``.
+    Purpose: the backend makes one per job and passes it to ``Method.run``.
     """
 
     @property
@@ -80,13 +80,13 @@ class Services(ABC):
     def models(self) -> ModelBindings:
         """The model bindings: ``served`` (the model under test) and every ``evolution.models`` entry.
 
-        Every call spends from the step's budget and lands in the step's call record.
+        Every call spends from the job's budget and lands in the job's call record.
         """
 
     @property
     @abstractmethod
     def calls(self) -> ModelCalls:
-        """The step's model-call budget, record and activity."""
+        """The job's model-call budget, record and activity."""
 
     @abstractmethod
     def check(self, tree: HarnessTree) -> ValidationResult:
@@ -96,13 +96,13 @@ class Services(ABC):
     def evaluate(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int = 1) -> tuple[RunRecord, ...]:
         """The records of ``repeats`` runs of ``tree`` on each task, task by task.
 
-        The tasks run like the step's evaluation: the same rendering, worker
+        The tasks run like the job's evaluation: the same rendering, worker
         pool and scorer. A record's score is a ``RolloutScore``: failed when the
         environment could not run the run, 0 when the tree gave no answer.
         A run in the history that did not fail is reused, so asking again
         costs nothing; ask for more repeats to get new samples. Raise
         ``RuntimeError`` when the deployment configured no scorer, or when the
-        call needs more runs than the step's budget has left; the whole
+        call needs more runs than the job's budget has left; the whole
         call is refused. Raise ``ValueError`` when ``tree`` fails ``check``, and
         ``TypeError`` when ``tasks`` is one string. A refused call adds nothing
         to the history.
@@ -110,7 +110,7 @@ class Services(ABC):
 
     @abstractmethod
     def run_agent(self, prompt: str, *, tree: HarnessTree, model: str) -> AgentOutcome:
-        """Run the deployment's coding agent (``evolution.agent``) once in the step's workspace, and wait for it.
+        """Run the deployment's coding agent (``evolution.agent``) once in the job's workspace, and wait for it.
 
         The agent works in the workspace's root: it may write ``harness/``,
         ``state/``, ``scratch/`` and ``output/``, and it reads ``material/``
@@ -118,7 +118,7 @@ class Services(ABC):
         rules and skills, rendered for the agent's adapter after Reef's
         protocol rules, which describe the workspace and the tools. The
         agent's model calls go to the binding ``model`` names, through a
-        loopback gateway that spends from the step's budget and records each
+        loopback gateway that spends from the job's budget and records each
         call; the gateway also serves ``check`` and ``evaluate`` on the
         workspace's trees. Raise ``RuntimeError`` when no agent runs for the
         method (it needs ``runs_agent`` and ``evolution.agent``), ``KeyError``
@@ -128,15 +128,15 @@ class Services(ABC):
 
 
 @dataclass(frozen=True)
-class StepContext:
-    """What one step gives a method.
+class MethodJob:
+    """What one job gives a method.
 
-    Values: ``workspace`` is the step's directories: the head tree in
+    Values: ``workspace`` is the job's directories: the head tree in
     ``harness/``, the material, the method's state, scratch and output. Data
     and the harness's components are files there. ``services`` are the services
-    that Reef runs for the method in this step: model calls, the call record,
+    that Reef runs for the method in this job: model calls, the call record,
     the tree check and the evaluation.
-    Purpose: the backend makes one per step and passes it to ``Method.step``.
+    Purpose: the backend makes one per job and passes it to ``Method.run``.
     """
 
     workspace: Workspace
@@ -144,7 +144,7 @@ class StepContext:
 
     def __post_init__(self) -> None:
         if not isinstance(self.workspace, Workspace) or not isinstance(self.services, Services):
-            raise TypeError("StepContext needs a Workspace and Services")
+            raise TypeError("MethodJob needs a Workspace and Services")
 
 
 class Method(ConfiguredPlugin, ABC):
@@ -154,20 +154,20 @@ class Method(ConfiguredPlugin, ABC):
     coding agent (``Services.run_agent``); only such a method gets the agent,
     and the recipe refuses a deployment that configures none for it.
     Purpose: a deployment names the class in ``evolution.method``, the recipe
-    builds it with ``from_config``, and the backend calls ``step`` once per
-    step. A method keeps what it learns across steps in the workspace's
-    ``state/``; the backend commits that directory with the step.
+    builds it with ``from_config``, and the backend calls ``run`` once per
+    job. A method keeps what it learns across jobs in the workspace's
+    ``state/``; the backend commits that directory with the job.
     """
 
     runs_agent: ClassVar[bool] = False
 
     @abstractmethod
-    def step(self, context: StepContext) -> None:
-        """Edit ``context.workspace.harness`` into this step's candidate, or leave it unchanged to skip the step.
+    def run(self, job: MethodJob) -> None:
+        """Edit ``job.workspace.harness`` into this job's candidate, or leave it unchanged to skip the job.
 
-        Say what the step did in ``output/``: ``context.workspace.write_output``
+        Say what the job did in ``output/``: ``job.workspace.write_output``
         writes the summary, the notes and the requires.
         """
 
 
-__all__ = ["AgentOutcome", "Method", "Services", "StepContext"]
+__all__ = ["AgentOutcome", "Method", "MethodJob", "Services"]

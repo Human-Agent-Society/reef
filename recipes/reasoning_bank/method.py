@@ -1,7 +1,7 @@
 """ReasoningBank: a memory of strategies and lessons that an agent distills from its own runs.
 
 Based on Ouyang et al., "ReasoningBank: Scaling Agent Self-Evolving with Reasoning Memory" (arXiv 2509.25140).
-Each step reads the runs among the step's traces. A run's outcome is its score against ``success_score``, or the
+Each job reads the runs among the job's traces. A run's outcome is its score against ``success_score``, or the
 label of a judge model when the run has no score. An extractor model then writes memory items from the run:
 strategies from a success, lessons from a failure. The bank of items is the method's state, ``state/memory.json``.
 Each item is served as the Agent Skill ``skills/rb-<slug>/SKILL.md``, so the harness's own skill list does the
@@ -29,7 +29,7 @@ from reef.core.prompts import untrusted_text
 from reef.core.trajectories import atif_messages
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.train.harness_backend import Method, StepContext, Trace
+from reef.train.harness_backend import Method, MethodJob, Trace
 
 PROMPTS = Path(__file__).parent / "prompts"
 #: The judge's prompt; ``$trace`` is the run.
@@ -62,8 +62,8 @@ class MemoryItem:
     ``description`` are non-empty single lines without leading, trailing or repeated whitespace; the description
     has at most ``MAX_DESCRIPTION_CHARS`` characters. ``content`` is non-empty text without leading or trailing
     whitespace. Every text encodes as UTF-8. ``outcome`` is one of ``OUTCOMES``, the outcome of the run the item
-    came from, and ``step`` ≥ 1 is the step that wrote it.
-    Purpose: ``state/memory.json`` holds the bank's items, oldest first. Each step adds the items the extractor
+    came from, and ``step`` ≥ 1 is the number of the job that wrote it.
+    Purpose: ``state/memory.json`` holds the bank's items, oldest first. Each job adds the items the extractor
     writes and writes each item into the tree as the skill at ``path``, with the text ``skill()``.
     """
 
@@ -116,7 +116,7 @@ class ReasoningBankSettings(PluginSettings):
     Values: ``judge_model`` and ``extract_model`` are non-empty names of model bindings: ``served`` or an
     ``evolution.models`` entry. ``success_score`` is a finite number. ``max_items_per_trace`` ≥ 1.
     ``max_items`` ≥ 0 and ``max_traces_per_step`` ≥ 0, where 0 sets no limit.
-    Purpose: ``ReasoningBank.from_config`` parses it from ``evolution.method.config``; each step reads it.
+    Purpose: ``ReasoningBank.from_config`` parses it from ``evolution.method.config``; each job reads it.
     """
 
     judge_model: str = config_option("served", help="The model that labels a run without a score.")
@@ -127,7 +127,7 @@ class ReasoningBankSettings(PluginSettings):
     max_items_per_trace: int = config_option(3, help="The most memory items that one run adds.")
     max_items: int = config_option(50, help="The most items the bank keeps; the oldest go first. 0 sets no limit.")
     max_traces_per_step: int = config_option(
-        0, help="The most runs that one step learns from, in trace order. 0 sets no limit."
+        0, help="The most runs that one job learns from, in trace order. 0 sets no limit."
     )
 
     def __post_init__(self) -> None:
@@ -142,11 +142,11 @@ class ReasoningBankSettings(PluginSettings):
 
 
 class ReasoningBank(Method):
-    """ReasoningBank as a harness evolution method: each step adds the memory items of its runs to the bank.
+    """ReasoningBank as a harness evolution method: each job adds the memory items of its runs to the bank.
 
     Values: ``settings`` is the method's config.
     Purpose: a deployment names ``recipes.reasoning_bank:ReasoningBank`` in ``evolution.method``; the backend
-    calls ``step`` once per step.
+    calls ``run`` once per job.
     """
 
     def __init__(self, settings: ReasoningBankSettings) -> None:
@@ -156,16 +156,16 @@ class ReasoningBank(Method):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(ReasoningBankSettings.parse(config, plugin_class=cls))
 
-    def step(self, context: StepContext) -> None:
+    def run(self, job: MethodJob) -> None:
         """Label each run among the traces, add its memory items to the bank, and write the bank as the tree's
         ``rb-*`` skills.
 
         A reply that is not the asked JSON skips its run, and an item that carries a credential or an
         instruction override stays out of the bank; the notes say why. The bank and the tree change together:
-        when the new tree fails ``services.check``, neither changes, so no later step starts from a bank that
+        when the new tree fails ``services.check``, neither changes, so no later job starts from a bank that
         cannot render.
         """
-        workspace, services = context.workspace, context.services
+        workspace, services = job.workspace, job.services
         settings = self.settings
         judge, extractor = services.models[settings.judge_model], services.models[settings.extract_model]
         bank_path = workspace.state / MEMORY_FILE

@@ -1,11 +1,12 @@
-"""How a training component cuts one job's data into optimizer steps.
+"""How the Slime component cuts one job's data into optimizer steps.
 
 ``StepScheduling`` is the passes over the job data, the packing of its rollouts
-into steps by token count, and what happens to a partial last step. A training
-component parses it from its own job parameters. The objective's
-``rollout_unit`` says which rows one step keeps together. A component expands
-both into a row order and a step layout (``schedule_job_data``) and turns that
-order into its own wire rows. Reef's control plane reads none of it.
+into steps by token count, and what happens to a partial last step. The
+component parses it from its job parameters. The objective's ``rollout_unit``
+says which rows one step keeps together. ``schedule_job_data`` expands both
+into a row order and a step layout, which ``reef_adapters.preparation`` turns
+into Slime's wire rows. ``next_steps`` is the step counter that an objective
+keeps in its state. Reef's control plane reads none of it.
 """
 
 from __future__ import annotations
@@ -13,10 +14,10 @@ from __future__ import annotations
 import bisect
 import random
 import zlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import Literal
+from typing import Any, Literal
 
 from reef.core.job_data import JobData, trajectories
 from reef.core.trajectories import source_record_id
@@ -40,9 +41,9 @@ class StepScheduling:
     tokens, and one optimizer step trains step-size packs instead of
     step-size rollouts; ``shuffle`` and ``remainder`` then apply to packs (see
     ``pack_rollouts``). The packs decide only which rollouts share a step: the
-    loss and the micro-batches stay the component's. A training component
-    makes the value from its own job parameters, and ``schedule_job_data``
-    reads it.
+    loss and the micro-batches stay the component's. ``SlimeJobParameters``
+    makes the value from a job's parameters, and ``schedule_job_data`` reads
+    it.
     """
 
     epochs: int = 1
@@ -101,7 +102,7 @@ class MaterializedSchedule:
     ``tail_rollouts`` the rollouts of each epoch's partial last step under
     ``remainder="partial"``: the last step's size, or 0 when every step is
     full. The constructor checks these conditions. ``materialize_schedule``
-    makes the value; a component turns it into its wire rows.
+    makes the value; ``build_slime_payload`` turns it into Slime's wire rows.
     """
 
     row_indices: tuple[int, ...]
@@ -186,7 +187,7 @@ def materialize_schedule(
 ) -> MaterializedSchedule:
     """Expand ``scheduling`` over one job's data whose rows carry ``rollout_ids``.
 
-    ``step_size`` is the backend's units per optimizer step: rollouts, or
+    ``step_size`` is Slime's units per optimizer step: rollouts, or
     packs when ``scheduling.packing_length`` is set. ``token_counts`` has one
     token count per row; packing requires it. Job data with fewer units
     trains them as one partial step under ``remainder="partial"``. Rows
@@ -278,14 +279,9 @@ def schedule_job_data(
     )
 
 
-__all__ = [
-    "MaterializedSchedule",
-    "RolloutUnit",
-    "StepScheduling",
-    "job_data_schedule_seed",
-    "materialize_schedule",
-    "pack_rollouts",
-    "rollout_ids",
-    "schedule_job_data",
-    "schedule_seed",
-]
+def next_steps(state: Mapping[str, Any]) -> int:
+    """The step counter of an objective's ``state`` plus one. ``ValueError``: it is not a non-negative int."""
+    steps = state.get("steps", 0)
+    if not isinstance(steps, int) or isinstance(steps, bool) or steps < 0:
+        raise ValueError("algorithm state 'steps' must be a non-negative integer")
+    return steps + 1

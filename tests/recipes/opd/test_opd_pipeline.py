@@ -14,12 +14,12 @@ from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.recipe.registry import build_recipe
 from reef.sample2job import DistillJobData
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill import settings_from_args
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData
 
 QUESTION = [{"role": "user", "content": "Compute 1 + 1."}]

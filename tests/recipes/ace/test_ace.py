@@ -11,9 +11,9 @@ import json
 from pathlib import Path
 
 import pytest
+from tests.support.harness_jobs import PI_SEED, TreeArtifacts, build_harness_backend, job_services, runtime
 from tests.support.harness_methods import QueueChat
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import PI_SEED, TreeArtifacts, build_harness_backend, runtime, step_services
 from tests.support.trajectories import recorded_trajectory
 
 from recipes.ace import ACE, ACESettings
@@ -24,9 +24,9 @@ from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe import load_recipe_config
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
-from reef.train.harness_backend import StepContext, Workspace
+from reef.train.harness_backend import MethodJob, Workspace
 from reef.train.harness_backend.state import HarnessState
-from reef.train.harness_backend.workspace import StepOutput
+from reef.train.harness_backend.workspace import JobOutput
 from reef.train.types import JobData
 
 PI = get_adapter("pi")
@@ -74,7 +74,7 @@ def playbook_state(*bullets: tuple[str, str, int, int]) -> dict[str, str]:
 
 def ace_step(
     tmp_path: Path, chat: QueueChat, settings: ACESettings, *samples: TrajectorySample, state: dict[str, str]
-) -> tuple[Workspace, StepOutput]:
+) -> tuple[Workspace, JobOutput]:
     """One ACE step on a workspace over the pi seed, with ``chat`` as the served model, and what it wrote to ``output/``."""
     workspace = Workspace.create(
         tmp_path / "step",
@@ -88,8 +88,8 @@ def ace_step(
         samples=samples,
         state_files=state,
     )
-    services = step_services(workspace, ModelBindings(served=chat))
-    ACE(settings).step(StepContext(workspace, services))
+    services = job_services(workspace, ModelBindings(served=chat))
+    ACE(settings).run(MethodJob(workspace, services))
     return workspace, workspace.read_output()
 
 

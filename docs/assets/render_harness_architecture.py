@@ -81,7 +81,7 @@ BOXES = [
     (2, "B2", WIDE, "store", None, "Records", "raw traces: model calls and reports"),
     (4, "B2", COL_W, "store", None, "Tasks", "Harbor tasks: train · eval"),
     (3, "B3", WORKSPACE_W, "reef", None, "Workspace", "`harness/ · material/traces/ · state/"),
-    (2, "B3", COL_W, "reef", 5, "Method", "`step(context)"),
+    (2, "B3", COL_W, "reef", 5, "Method", "`run(job)"),
     (1, "B3", COL_W, "reef", 6, "Check", "`validate_tree"),
     (2, "B4", WIDE, "reef", 7, "Evaluation", "runs each task as a run, scores it"),
     (4, "B4", COL_W, "reef", None, "Runs", "`run.task"),

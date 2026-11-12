@@ -10,8 +10,8 @@ from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact.files import DirectoryFiles
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
-from reef.train.algos.signals import PreparedJob
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob, job_id_for
+from reef.train.slime_backend.signals import PreparedJob
 from reef.train.types import JobData
 
 

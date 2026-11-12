@@ -17,7 +17,6 @@ from reef.core.job_data import JobData, TaskSample, TrajectorySample, trajectori
 from reef.core.trajectories import trajectory_reward
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob
 from reef.train.task_rollouts import ChatEndpoint, RolloutTokens, TaskJobRollouts, run_train_tasks
 from reef.train.tinker_backend import component as component_module
@@ -28,6 +27,7 @@ from reef.train.tinker_backend.config import TinkerSettings
 from reef.train.tinker_backend.objectives import TinkerObjective
 from reef.train.tinker_backend.parameters import rollout_settings
 from reef.train.tinker_backend.rollout import SamplerChat
+from reef.train.tinker_backend.signals import TrainingSignal
 
 MODEL = "Qwen/Qwen3-8B"
 ROLLOUT = {"rollouts_per_task": 2, "concurrency": 2}

@@ -29,7 +29,7 @@ class TaskScorer(ConfiguredPlugin, ABC):
         ``score`` — given a task name and its run result, return a
         float score. Higher is better; non-finite values raise.
     A model-based judge also overrides ``score_with_models``, which receives
-    the step's model bindings. ``score`` stays abstract, so a judge
+    the job's model bindings. ``score`` stays abstract, so a judge
     implements it too, for example to raise because it needs the bindings.
     """
 
@@ -47,7 +47,7 @@ class TaskScorer(ConfiguredPlugin, ABC):
 
     def score_with_models(self, task: str, result: TaskResult, models: ModelBindings) -> float:
         """The score that the evaluation records for one run: ``score(task, result)`` unless a judge overrides
-        it to call ``models``, the step's bindings."""
+        it to call ``models``, the job's bindings."""
         return self.score(task, result)
 
 

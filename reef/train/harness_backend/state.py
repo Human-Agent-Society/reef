@@ -1,8 +1,8 @@
 """The harness backend's algorithm state, the part of a commit record the backend owns.
 
 The tree itself is not here: it is the git release the commit recorded, and
-the trees a step tried are in the scenario's history. The state keeps what
-crosses steps and must commit with them: the failure streak the budget reads, the
+the trees a job tried are in the scenario's history. The state keeps what
+crosses jobs and must commit with them: the failure streak the budget reads, the
 collected evaluation tasks, and the method's own files.
 """
 
@@ -16,7 +16,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class HarnessState:
-    """The harness backend's state after one step.
+    """The harness backend's state after one job.
 
     Values: ``failure_streak`` ≥ 0 counts the candidates rejected since the latest
     selected one. ``collected_tasks`` are the prompts collected into the evaluation tasks, in collection order,
