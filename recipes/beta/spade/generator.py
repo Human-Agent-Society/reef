@@ -37,7 +37,6 @@ from typing import Any, Self
 from pydantic import TypeAdapter
 
 from recipes.beta.spade.generation import (
-    DEFAULT_MAX_DESIGNER_SCALE,
     RECORDED_EXCERPT_CHARS,
     GenerationError,
     GenerationRecord,
@@ -89,6 +88,7 @@ HINT_ARM = "hint"
 OPEN_PREFIX = "open/"
 REPORT_PREFIX = "report/"
 DEFAULT_SCORE_SETTINGS = ScoreSettings()
+DEFAULT_MAX_DESIGNER_SCALE = 50.0
 #: The config keys of the Designer's score, the fields of ``ScoreSettings``.
 SCORE_KEYS = tuple(entry.name for entry in fields(ScoreSettings))
 CONFIG_KEYS = frozenset(
@@ -151,7 +151,7 @@ def saved_designer_advantages(state: GeneratorState, recipe_generation: int) -> 
 
     The reports are the state documents ``report/<number>`` of ``state``. The result is empty when no report names
     that generation, such as a report written before reports named it. Raises ``GenerationError`` for a report that
-    cannot be read.
+    is missing or is not a generation report.
     """
     # The report of a generation usually has the recipe's number; another report is a fallback.
     keys = state.keys(REPORT_PREFIX)
@@ -159,7 +159,7 @@ def saved_designer_advantages(state: GeneratorState, recipe_generation: int) -> 
     for key in ordered:
         report = state.read(key)
         if report is None:
-            continue
+            raise GenerationError(f"the state document {key} is missing")
         try:
             document = json.loads(report)
         except ValueError as exc:

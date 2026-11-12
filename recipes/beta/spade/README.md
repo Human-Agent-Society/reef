@@ -38,9 +38,9 @@ The generator keeps its own state in the same task store, as state documents, an
 | Document | Content |
 | --- | --- |
 | `open/<generation>` | the proposals of a generation that `record_results` has not closed, named by the recipe's generation number |
-| `report/<number>` | each proposal, refusal, and measurement of a closed generation, named by SPADE's own number of the generation |
+| `report/<number>` | each proposal, refusal, and measurement of a closed generation, the recipe's generation number, the score of each task, and the Designer advantages, named by SPADE's own number of the generation |
 
-After a restart, the generator reads the last report to recover the experience, closes open generations when their results arrive, and numbers new generations after the reports and open generations.
+After a restart, the generator reads the last report to recover the experience, closes open generations when their results arrive, and numbers new generations after the reports, the open generations, and the recipe's generation. With `train_designer`, `designer_advantages` reads the report whose `recipe_generation` is the generation asked for, whatever its key.
 
 The documents are rows of the table `task_state_document` in the scenario's database, under the store name `generated-tasks`. With SQLite storage, the database of a scenario is `<storage.agent-record-dir>/<SHA-256 of the scenario name>.sqlite3`. To read the report of SPADE's generation 0:
 

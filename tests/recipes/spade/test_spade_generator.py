@@ -419,10 +419,12 @@ def test_without_train_designer_the_calls_keep_no_sample_and_no_reply_trains(tmp
 def test_the_advantages_belong_to_the_recipes_generation_number(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
     generator = spade(tmp_path, service, count=1, is_training_designer=True)
-    (task,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=7)))
+    request = TaskGenerationRequest((), DESCRIPTION, generation=7)
+    asyncio.run(generator.generate(request))
+    (task,) = asyncio.run(generator.generate(request))
     asyncio.run(generator.record_results((RolledOutTask(task, (0.25,)),), generation=7))
-    assert report(tmp_path, 0)["recipe_generation"] == 7, "SPADE numbers it 0; the recipe numbers it 7"
-    assert generator.designer_advantages(7) == {"designer-1": 0.0} and generator.designer_advantages(0) == {}
+    assert report(tmp_path, 8)["recipe_generation"] == 7, "SPADE numbers the second attempt 8; the recipe numbers it 7"
+    assert generator.designer_advantages(7) == {"designer-2": 0.0} and generator.designer_advantages(8) == {}
 
 
 def test_from_config_reads_the_score_settings_the_scale_cap_and_train_designer(tmp_path: Path) -> None:
