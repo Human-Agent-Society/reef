@@ -591,7 +591,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     train_pair(first, 1)
     assert first_component.trained_data == [["i1"]]
     # Nothing was compacted: the consumed pair is still visible to training reads.
-    assert first.get_or_create_scenario("math").records.get("math", "i1") is not None
+    assert first.get_or_create_scenario("math").records.read("math", "i1") is not None
     first.close()
 
     second_component = SourceRecordingComponent(tmp_path / "second")
@@ -631,7 +631,7 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     # The second inference sits below the committed watermark yet survives
     # compaction: it is protected, and only processor memory knew about it.
     assert committed_records(agent_record_dir)[-1].high_water_sequence == 3
-    assert first.get_or_create_scenario("math").records.get("math", "i2") is not None
+    assert first.get_or_create_scenario("math").records.read("math", "i2") is not None
     first.close()
 
     second_component = SourceRecordingComponent()
@@ -675,7 +675,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("math")
     # Recovery uses committed consumption while leaving bodies readable.
-    assert recovered.records.get("math", "i1") is not None
+    assert recovered.records.read("math", "i1") is not None
     assert recovered.scenario_step == 3
 
     train_pair(second, 2)
@@ -1184,8 +1184,8 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     wait_for_step(dispatcher, 2, scenario="skills")
     recovered = dispatcher.get_or_create_scenario("skills")
     assert recovered is not original
-    assert recovered.records.get("skills", "i1") is not None
-    assert recovered.records.get("skills", "r1") is not None
+    assert recovered.records.read("skills", "i1") is not None
+    assert recovered.records.read("skills", "r1") is not None
     status = dispatcher.build_training_status()["scenarios"]["skills"]
     assert status["scenario_step"] == 2
     assert status["last_committed_step"]["step"] == 2

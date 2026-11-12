@@ -364,12 +364,12 @@ class TrainingPipeline:
             lineage["read_by_task"] = max(reads)[1]
         return lineage
 
-    def add_record_samples(
+    def write_record_samples(
         self, group: str | None, record_ids: tuple[str, ...], samples: tuple[tuple[str, Sample], ...]
     ) -> bool:
-        """Save samples (``TrainerSamples.add_record_samples``) with their tasks (``lineage``), count the new ones,
+        """Save samples (``TrainerSamples.write_record_samples``) with their tasks (``lineage``), count the new ones,
         and return whether one is new."""
-        added = self.store.add_record_samples(group, record_ids, samples, lineage=self.lineage(record_ids))
+        added = self.store.write_record_samples(group, record_ids, samples, lineage=self.lineage(record_ids))
         self.stored_sample_count += added
         return added > 0
 
@@ -377,7 +377,7 @@ class TrainingPipeline:
         """Store the samples of each unit that the stage made ready, and the samples that it made from no set.
 
         When the stage makes a unit ready (``take_ready_units``), the pipeline saves its samples as items
-        (``TrainerSamples.add_record_samples``), which then consumes its records, and the stage ends
+        (``TrainerSamples.write_record_samples``), which then consumes its records, and the stage ends
         the unit. Return whether one or more stored sample is new.
         """
         ready_units = self.record2sample.take_ready_units()
@@ -387,7 +387,7 @@ class TrainingPipeline:
         made = self.record2sample.made_samples()
         if made:
             stored = (
-                self.add_record_samples(
+                self.write_record_samples(
                     None, (), tuple((f"{self.sample_id_prefix}{name}", sample) for name, sample in made)
                 )
                 or stored
@@ -419,7 +419,7 @@ class TrainingPipeline:
             for index, sample in enumerate(set_samples)
         )
         group = f"{prefix}{unit.set_ids()[0]}" if len(samples) > 1 else None
-        stored = self.add_record_samples(group, tuple(unit.consumed_ids()), samples)
+        stored = self.write_record_samples(group, tuple(unit.consumed_ids()), samples)
         self.record2sample.consume(unit)
         return stored
 
@@ -531,7 +531,7 @@ class TrainingPipeline:
         imported task that it does not take, an upload that its stage cannot render), for samples of more than one
         kind, and for more than the stage's ``max_job_samples``.
         """
-        return self.sample_entries(self.store.get(request.samples))
+        return self.sample_entries(self.store.read(request.samples))
 
     def sample_entries(self, samples: Sequence[StoredSample]) -> tuple[tuple[StoredSample, Sample], ...]:
         """``samples`` of a request, each with the sample that it trains; raise ``ValueError`` as
@@ -569,7 +569,7 @@ class TrainingPipeline:
         untrainable: list[str] = []
         kinds: set[SampleKind] = set()
         for sample_ids in batched(dict.fromkeys(request.samples), MAX_QUERY_LIMIT):
-            for stored in self.store.get(sample_ids):
+            for stored in self.store.read(sample_ids):
                 stored_ids.add(stored.sample_id)
                 if self.trainable(stored) is None:
                     untrainable.append(stored.sample_id)
@@ -651,7 +651,7 @@ class TrainingPipeline:
         self.advance()
         while self.pending is None and self.next_request() is None and self.holds_job_data(sample_count):
             ids = [stored.sample_id for stored, _ in self.auto_entries()]
-            used = {stored.sample_id for stored in self.store.get(ids) if stored.split == "train"}
+            used = {stored.sample_id for stored in self.store.read(ids) if stored.split == "train"}
             left = [sample_id for sample_id in ids if sample_id not in used]
             if not left:
                 return True

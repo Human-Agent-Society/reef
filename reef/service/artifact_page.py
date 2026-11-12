@@ -171,7 +171,7 @@ def recorded_patch(metrics: Mapping[str, Any] | None) -> dict[str, str | None]:
     """The patch a step recorded as ``patch``: tree path to new text, or to ``None`` for a removal.
 
     Empty for a step that recorded none, such as a skip before a candidate or the creation row. The record clips
-    and redacts long texts, so a text here can differ from the released file.
+    and redacts long texts, so a text here can differ from the published file.
     """
     patch = metrics.get("patch") if metrics else None
     if not isinstance(patch, Mapping):

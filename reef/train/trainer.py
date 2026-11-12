@@ -502,7 +502,7 @@ class Trainer:
             missing = [
                 ref
                 for ref in item.references
-                if self._records.get(self.scenario, ref) is None and self.used_record(ref) is None
+                if self._records.read(self.scenario, ref) is None and self.used_record(ref) is None
             ]
             if missing:
                 logger.warning(

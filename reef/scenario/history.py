@@ -40,7 +40,7 @@ def read_records(
 
 
 def read_record(scenario: Scenario, record_id: str) -> dict[str, Any] | None:
-    stored = scenario.records.get_for_audit(scenario.name, record_id)
+    stored = scenario.records.read_for_audit(scenario.name, record_id)
     return None if stored is None else {**record_metadata(stored), "payload": stored.item.payload}
 
 

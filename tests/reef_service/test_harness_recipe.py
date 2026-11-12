@@ -423,7 +423,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         def import_task(name: str, split: str) -> StoredSample:
             metadata = {"kind": "task", "scenarios": {"s": split}}
             samples.data.create(samples.owner, [NewItem(name, write_task(root, name), metadata)])
-            (task,) = samples.get([name])
+            (task,) = samples.read([name])
             return task
 
         backend = build_harness_backend(built, "s")

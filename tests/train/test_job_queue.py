@@ -141,8 +141,8 @@ def test_a_queued_job_keeps_its_component_and_previous_job():
         component="harness",
         previous_job_id="j0",
     )
-    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job), serial_key="s"))
-    taken = job_from_item(queue.get(JOBS_QUEUE, "j1"), MemoryDataStore(LocalTaskFileStore()))
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job), serial_key="s"))
+    taken = job_from_item(queue.read(JOBS_QUEUE, "j1"), MemoryDataStore(LocalTaskFileStore()))
     assert (taken.component, taken.previous_job_id) == ("harness", "j0")
 
 
@@ -158,7 +158,7 @@ def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the
 
     view.submit(job("j1"))
     view.submit(job("j1"))  # a second submit of one ID does nothing
-    item = queue.get(JOBS_QUEUE, "j1")
+    item = queue.read(JOBS_QUEUE, "j1")
     # The item has no serial key: a free worker takes it beside another job of its scenario.
     assert (item.scenario, item.kind, item.serial_key) == ("s", job_kind("steps"), None)
 
@@ -175,7 +175,7 @@ def test_a_refused_job_never_enters_the_queue_and_a_failed_job_reports_its_error
     view = JobQueueComponent(component, queue)
     with pytest.raises(ValueError, match="cannot train"):
         view.submit(job("bad", invalid=True))
-    assert queue.get(JOBS_QUEUE, "bad") is None
+    assert queue.read(JOBS_QUEUE, "bad") is None
 
     view.submit(job("boom", fail=True))
     failed = wait_for(lambda: view.status("boom"), "failed")
@@ -217,12 +217,12 @@ def test_a_control_only_component_closes_what_it_owns(tmp_path):
 @pytest.mark.unit
 def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
-    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
     # The first worker reported step 1, then stopped without a word; its lease expires.
     queue.take(JOBS_QUEUE, "training-0", [job_kind("steps")])
     queue.start(JOBS_QUEUE, "j1", "training-0")
     first = SavedCheckpoint(1, "/old/step-1", "/old/step-1", {"loss": 1.0})
-    queue.add_progress(JOBS_QUEUE, "j1", "training-0", checkpoint_json(first), number=0)
+    queue.append_progress(JOBS_QUEUE, "j1", "training-0", checkpoint_json(first), number=0)
     queue.requeue_expired(now=time.time() + 60)
 
     worker = TrainingJobWorker(
@@ -233,7 +233,7 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
         poll_seconds=0.02,
     )
     assert worker.run_once()
-    item = queue.get(JOBS_QUEUE, "j1")
+    item = queue.read(JOBS_QUEUE, "j1")
     assert item.state == "finished"
     assert [entry["step"] for entry in item.progress] == [1, 2]
     worker.stop()
@@ -259,11 +259,11 @@ def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
     parameters = {"objective": "sft", "learning_rate": 1e-5}
     instructed = TrainingJob("j1", "steps", "steps:base", job_data_ref(data), parameters, scenario="s")
     summary = {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
-    queue.add(
+    queue.append(
         NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(instructed, summary), serial_key="s"), now=0
     )
 
-    queued = job_json(queue.get(JOBS_QUEUE, "j1"))
+    queued = job_json(queue.read(JOBS_QUEUE, "j1"))
     assert queued["parameters"] == parameters
     assert (queued["sample_count"], queued["sample_kind"]) == (2, "trajectory")
     assert queued["request"] == {"id": "r1", "text": "prefer tests", "parameters": {"learning_rate": 1e-5}}
@@ -287,7 +287,7 @@ def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
     )
     empty = TrainingJob("j3", "steps", "steps:base", job_data_ref(JobData("s:data:2")), {}, scenario="s")
     for value in (automatic, empty):
-        queue.add(NewWork(JOBS_QUEUE, value.job_id, "s", job_kind("steps"), job_payload(value), serial_key="s"))
+        queue.append(NewWork(JOBS_QUEUE, value.job_id, "s", job_kind("steps"), job_payload(value), serial_key="s"))
     listed = {listed_job["id"]: listed_job for listed_job in scenario_jobs(queue, "s")}
     assert (listed["j2"]["request"], listed["j2"]["sample_kind"], listed["j2"]["parameters"]) == (None, "task", {})
     assert (listed["j3"]["sample_count"], listed["j3"]["sample_kind"]) == (0, None)
@@ -321,7 +321,7 @@ def job_event(job_id: str | None) -> TrainingExperimentEvent:
 @pytest.mark.unit
 def test_control_writes_the_run_that_records_a_job_into_the_jobs_item():
     queue = memory_coordination().work_queue
-    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
     tracker = RunTracker()
     recorder = JobExperimentRecorder(tracker, queue)
     recorder.record(job_event("j1"))
@@ -338,9 +338,9 @@ def test_control_writes_the_run_that_records_a_job_into_the_jobs_item():
         "url": "https://wandb.ai/team/reef/runs/run-s",
     }
     # The run of every later commit of the job is the same, so the item does not change again.
-    sequence = queue.get(JOBS_QUEUE, "j1").changed_sequence
+    sequence = queue.read(JOBS_QUEUE, "j1").changed_sequence
     recorder.record(job_event("j1"))
-    assert queue.get(JOBS_QUEUE, "j1").changed_sequence == sequence
+    assert queue.read(JOBS_QUEUE, "j1").changed_sequence == sequence
 
     with pytest.raises(TypeError):
         JobExperimentRecorder(recorder, queue)
@@ -349,7 +349,7 @@ def test_control_writes_the_run_that_records_a_job_into_the_jobs_item():
 @pytest.mark.unit
 def test_a_job_has_no_experiment_when_the_tracker_has_no_run():
     queue = memory_coordination().work_queue
-    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
     JobExperimentRecorder(RunTracker(open_run=False), queue).record(job_event("j1"))
     JobExperimentRecorder(ExperimentTracker(), queue).record(job_event("j1"))
     assert scenario_jobs(queue, "s")[0]["experiment"] is None

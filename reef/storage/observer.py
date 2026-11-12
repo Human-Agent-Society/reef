@@ -77,8 +77,8 @@ class ObservedRecordStore(RecordStore):
     def existing_receipt(self, item: AgentRecord) -> AgentRecord | None:
         return self._inner.existing_receipt(item)
 
-    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
-        return self._inner.get(scenario, agent_record_id)
+    def read(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+        return self._inner.read(scenario, agent_record_id)
 
     def replay(self, scenario: str, *, offset: int = 0, limit: int | None = None) -> tuple[AgentRecord, ...]:
         return self._inner.replay(scenario, offset=offset, limit=limit)
@@ -94,8 +94,8 @@ class ObservedRecordStore(RecordStore):
     def last_sequence(self, scenario: str) -> int:
         return self._inner.last_sequence(scenario)
 
-    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
-        return self._inner.get_for_audit(scenario, agent_record_id)
+    def read_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+        return self._inner.read_for_audit(scenario, agent_record_id)
 
     def audit_page(
         self, scenario: str, *, after_sequence: int = 0, limit: int = 256, request_type: RequestType | None = None

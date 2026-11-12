@@ -350,7 +350,7 @@ def test_request_records_the_artifact_id_captured_before_inference(tmp_path) -> 
             response = await request
             assert response.status == 200
             record_id = response.headers["x-reef-agent-record-id"]
-        item = value.get_or_create_scenario("math").records.get("math", record_id)
+        item = value.get_or_create_scenario("math").records.read("math", record_id)
         assert backend.artifact_id == selected_version
         assert item.artifact_id is not None
         assert item.artifact_id == selected_version

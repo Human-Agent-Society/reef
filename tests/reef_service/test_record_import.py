@@ -260,7 +260,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
             ]
             assert all(sample.metadata["response"]["choices"] for sample in samples)
             for index in range(6):
-                stored = scenario.records.get_for_audit("s", f"offline-{index}")
+                stored = scenario.records.read_for_audit("s", f"offline-{index}")
                 assert stored.item.payload == inference_payload(f"offline-{index}")
 
     try:
@@ -304,13 +304,13 @@ def test_import_admission_authentication_and_scenario_isolation(tmp_path):
                 }
             scenario = dispatcher.get_or_create_scenario("s")
             assert scenario.records.count("s") == 1
-            assert scenario.records.get("s", "first").payload == body["payload"]
+            assert scenario.records.read("s", "first").payload == body["payload"]
             other_headers = {**HEADERS, "x-reef-scenario": "other"}
             response = await client.post("/reef/records", headers=other_headers, json=imported("second"))
             assert response.status == 200
             other = dispatcher.get_or_create_scenario("other")
-            assert other.records.get("other", "first") is None
-            assert scenario.records.get("s", "second") is None
+            assert other.records.read("other", "first") is None
+            assert scenario.records.read("s", "second") is None
             response = await client.post(
                 "/reef/records",
                 headers=other_headers,
@@ -344,7 +344,7 @@ def test_imported_reports_follow_the_recipes_report_schema(tmp_path):
                 json=imported("missing-score", {"references": ["source"]}, "report"),
             )
             assert response.status == 400
-            assert dispatcher.get_or_create_scenario("s").records.get("s", "missing-score") is None
+            assert dispatcher.get_or_create_scenario("s").records.read("s", "missing-score") is None
 
     try:
         asyncio.run(run())
@@ -397,7 +397,7 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
                 },
             )
             assert response.status == 409
-            assert scenario.records.get("s", "new") is None
+            assert scenario.records.read("s", "new") is None
             response = await client.post(
                 endpoint,
                 headers={**HEADERS, "x-reef-scenario": "other"},
@@ -412,7 +412,7 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
                 json={"records": [imported("large", {"text": "x" * MAX_RECORD_IMPORT_BYTES})]},
             )
             assert response.status == 413
-            assert scenario.records.get("s", "large") is None
+            assert scenario.records.read("s", "large") is None
             assert not dispatcher.recipe.batches
 
     try:

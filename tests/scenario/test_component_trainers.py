@@ -229,7 +229,7 @@ def wait_for_jobs(dispatcher: Dispatcher, training: WeightsJobComponent, count: 
     their items, as the weights trainer then reads them."""
 
     def ended() -> bool:
-        items = [dispatcher.queue.get(JOBS_QUEUE, job.job_id) for job in training.submitted]
+        items = [dispatcher.queue.read(JOBS_QUEUE, job.job_id) for job in training.submitted]
         return len(items) == count and all(item is not None and item.final for item in items)
 
     assert became_true(ended)
@@ -795,7 +795,7 @@ def test_a_report_on_an_inference_the_weights_job_trained_is_skipped_not_raised(
     settle_weights_job(scenario)
     wait_for_serving(dispatcher, "agent")
     make_samples(scenario)
-    assert scenario.records.get("agent", "i1") is not None
+    assert scenario.records.read("agent", "i1") is not None
     assert scenario.next_commit(WEIGHTS) is None
     weights = scenario.trainer_for(WEIGHTS)
     # The samples worker can skip the report before the job's final commit consumes the skipped ID.
@@ -854,7 +854,7 @@ def test_a_retry_settled_for_a_taken_slot_stays_settled_after_a_restart(
     scenario.records.append(slotted_report("r2", "i2", "G", 1))
     assert commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     assert commit_step(scenario, HARNESS) == [("i1", "r1"), ("i2", "r2")]
-    assert scenario.records.get("agent", "r1dup") is not None
+    assert scenario.records.read("agent", "r1dup") is not None
     rebuilt = reload_agent(dispatcher)
     rebuilt.records.append(_records(4, rebuilt.serving_artifact_id())[0])
     rebuilt.records.append(slotted_report("r4", "i4", "G", 2))
@@ -897,7 +897,7 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     rebuilt = dispatcher.registry.get_optional("agent")
     assert rebuilt is not None and rebuilt is not scenario
     assert commit_step(rebuilt, WEIGHTS) == [("i1", "r1")]
-    assert rebuilt.records.get("agent", "i1") is not None and rebuilt.records.get("agent", "r1") is not None
+    assert rebuilt.records.read("agent", "i1") is not None and rebuilt.records.read("agent", "r1") is not None
     for _ in range(3):
         dispatcher.local_workers.process_step("agent", HARNESS)
     current = dispatcher.registry.get_optional("agent")
@@ -929,7 +929,7 @@ def test_a_weights_commit_that_fails_leaves_its_batch_to_the_weights_trainer_aft
     with pytest.raises(OSError, match="transient store write error"):
         commit_step(scenario, WEIGHTS)
     assert commit_step(scenario, HARNESS) == [("i2", "r2")]
-    assert scenario.records.get("agent", "i1") is not None and scenario.records.get("agent", "r1") is not None
+    assert scenario.records.read("agent", "i1") is not None and scenario.records.read("agent", "r1") is not None
     rebuilt = reload_agent(dispatcher)
     assert commit_step(rebuilt, WEIGHTS) == [("i1", "r1")]
 
