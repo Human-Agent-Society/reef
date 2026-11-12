@@ -67,7 +67,7 @@ from reef.storage.served_models import (
     SERVING_KIND,
     SERVING_QUEUE,
     STOP_SERVING_KIND,
-    ControlLeaseConflict,
+    ControlLeaseConflictError,
     ServedModelsWriter,
     serving_serial_key,
     without_redeploy,
@@ -79,9 +79,9 @@ from reef.storage.work_queue import (
     WORK_STATES,
     JsonValue,
     NewWork,
-    WorkConflict,
+    WorkConflictError,
     WorkItem,
-    WorkLeaseLost,
+    WorkLeaseLostError,
     WorkLogLine,
     WorkQueue,
     check_log_page,
@@ -585,7 +585,7 @@ class SQLServedModels(ServedModelsWriter):
                 self.checked_owner(connection, owner, worker_id, moment)
             held = self.work.held(connection, item.queue, item.id, worker_id, moment)
             if held.attempt_count != item.attempt_count:
-                raise WorkLeaseLost("a later attempt holds this serving request")
+                raise WorkLeaseLostError("a later attempt holds this serving request")
             current = self.request_in(connection, item.scenario)
             result: dict[str, JsonValue] = {}
             with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
@@ -626,7 +626,7 @@ class SQLServedModels(ServedModelsWriter):
                 self.checked_owner(connection, owner, worker_id, moment)
             held = self.work.held(connection, item.queue, item.id, worker_id, moment)
             if held.attempt_count != item.attempt_count:
-                raise WorkLeaseLost("a later attempt holds this serving cleanup")
+                raise WorkLeaseLostError("a later attempt holds this serving cleanup")
             with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
                 deleted = connection.execute(
                     delete(self.tables.scheduled_stop).where(
@@ -653,7 +653,7 @@ class SQLServedModels(ServedModelsWriter):
             raise ValueError("the inference owner must hold an inference-owner item")
         held = self.work.held(connection, owner.queue, owner.id, worker_id, now)
         if held.attempt_count != owner.attempt_count:
-            raise WorkLeaseLost("a later attempt holds the inference runtime")
+            raise WorkLeaseLostError("a later attempt holds the inference runtime")
 
     def recover_completed(
         self,
@@ -715,7 +715,7 @@ class SQLServedModels(ServedModelsWriter):
     def checked(self, connection: Connection, control_lease_number: int) -> None:
         current = self.lease.number_in(connection)
         if current != control_lease_number:
-            raise ControlLeaseConflict(
+            raise ControlLeaseConflictError(
                 f"control lease number {control_lease_number} is not the current number {current}"
             )
 
@@ -982,7 +982,7 @@ class SQLWorkQueue(WorkQueue):
             or item.worker_id != worker_id
             or (item.lease_expires_at is not None and item.lease_expires_at < now)
         ):
-            raise WorkLeaseLost(f"worker {worker_id!r} does not hold {queue}/{item_id}")
+            raise WorkLeaseLostError(f"worker {worker_id!r} does not hold {queue}/{item_id}")
         return item
 
     def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
@@ -992,7 +992,7 @@ class SQLWorkQueue(WorkQueue):
             existing = self.row(connection, work.queue, work.id)
             if existing is not None:
                 if canonical_json(dict(existing.payload)) != payload:
-                    raise WorkConflict(f"{work.queue}/{work.id} exists with a different payload")
+                    raise WorkConflictError(f"{work.queue}/{work.id} exists with a different payload")
                 return existing
             return self.insert(connection, work, counter.next(), moment)
 

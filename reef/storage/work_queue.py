@@ -39,11 +39,11 @@ FINAL_STATES: frozenset[str] = frozenset({"finished", "failed"})
 HELD_STATES: frozenset[str] = frozenset({"assigned", "running"})
 
 
-class WorkConflict(ReefError):
+class WorkConflictError(ReefError):
     """An item with the same ID exists with a different payload."""
 
 
-class WorkLeaseLost(ReefError):
+class WorkLeaseLostError(ReefError):
     """The worker no longer holds the lease of the item, so it must stop work on it."""
 
 
@@ -257,7 +257,7 @@ class WorkQueue(ABC):
     @abstractmethod
     def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
         """Add ``work`` as a queued item and return it. When an item with the same queue and ID exists, return it
-        unchanged if its payload equals ``work.payload``, else raise ``WorkConflict``."""
+        unchanged if its payload equals ``work.payload``, else raise ``WorkConflictError``."""
 
     @abstractmethod
     def request(
@@ -303,12 +303,12 @@ class WorkQueue(ABC):
     @abstractmethod
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         """Set ``lease_expires_at = now + lease_seconds`` when ``worker_id`` holds the item; else raise
-        ``WorkLeaseLost``."""
+        ``WorkLeaseLostError``."""
 
     @abstractmethod
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
-        """Change the held item from ``assigned`` to ``running``; ``WorkLeaseLost`` when ``worker_id`` does not hold
-        it. A running item stays running."""
+        """Change the held item from ``assigned`` to ``running``; ``WorkLeaseLostError`` when ``worker_id`` does not
+        hold it. A running item stays running."""
 
     @abstractmethod
     def add_progress(
@@ -323,13 +323,13 @@ class WorkQueue(ABC):
     ) -> WorkItem:
         """Append ``progress`` as progress number ``number`` (0-based) of the held item. Adding a number that the
         item already has changes nothing, so a worker that continues the item can report again safely; a number
-        beyond the next one raises ``ValueError``. ``WorkLeaseLost`` when ``worker_id`` does not hold the item."""
+        beyond the next one raises ``ValueError``. ``WorkLeaseLostError`` when ``worker_id`` does not hold the item."""
 
     @abstractmethod
     def finish(
         self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
     ) -> WorkItem:
-        """Make the held item ``finished`` with ``result``, ended at ``now``; ``WorkLeaseLost`` when ``worker_id``
+        """Make the held item ``finished`` with ``result``, ended at ``now``; ``WorkLeaseLostError`` when ``worker_id``
         does not hold it."""
 
     @abstractmethod
@@ -344,20 +344,20 @@ class WorkQueue(ABC):
         now: float | None = None,
     ) -> WorkItem:
         """End the held attempt with ``error``: the item becomes ``queued`` when ``retryable`` and it has attempts
-        left, else ``failed``, ended at ``now``. ``WorkLeaseLost`` when ``worker_id`` does not hold it."""
+        left, else ``failed``, ended at ``now``. ``WorkLeaseLostError`` when ``worker_id`` does not hold it."""
 
     @abstractmethod
     def give_back(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         """End the held attempt because the worker stops: the item becomes ``queued`` with the error
         ``"the worker stopped"`` and one more ``stopped_attempt_count``, so another worker continues it at once.
-        The attempt does not count toward the attempts that the queue allows. ``WorkLeaseLost`` when ``worker_id``
+        The attempt does not count toward the attempts that the queue allows. ``WorkLeaseLostError`` when ``worker_id``
         does not hold it."""
 
     @abstractmethod
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
         """Make an item that is not final ``failed`` with ``error``, ended now, for the producer that added it. A
-        worker that held it gets ``WorkLeaseLost`` at its next call and stops. Return the item, or None when it does
-        not exist; a final item does not change."""
+        worker that held it gets ``WorkLeaseLostError`` at its next call and stops. Return the item, or None when it
+        does not exist; a final item does not change."""
 
     @abstractmethod
     def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:
@@ -496,7 +496,7 @@ class LeaseExtender:
         while not self.done.wait(self.queue.lease_seconds / 3):
             try:
                 self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id)
-            except WorkLeaseLost:
+            except WorkLeaseLostError:
                 self.lease_lost.set()
                 return
             except Exception:
@@ -512,9 +512,9 @@ __all__ = [
     "JsonValue",
     "LeaseExtender",
     "NewWork",
-    "WorkConflict",
+    "WorkConflictError",
     "WorkItem",
-    "WorkLeaseLost",
+    "WorkLeaseLostError",
     "WorkLogLine",
     "WorkQueue",
     "WorkState",

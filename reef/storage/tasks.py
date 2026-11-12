@@ -55,7 +55,7 @@ class TaskStoreError(ReefError):
     """A write conflicts with the stored state, or it names state that the store does not hold."""
 
 
-class TaskConflict(TaskStoreError):
+class TaskConflictError(TaskStoreError):
     """A task name is already published with different files or in the other split."""
 
 
@@ -202,7 +202,7 @@ class TaskStore(ABC):
         files must give the same split. The method then returns the published
         task.
 
-        Raises ``TaskConflict`` if the name is published with other files or
+        Raises ``TaskConflictError`` if the name is published with other files or
         in the other split. Raises ``TaskStoreError`` if the candidate does not
         exist or is rejected.
         """
@@ -452,7 +452,7 @@ __all__ = [
     "SplitName",
     "StoredTask",
     "TaskCandidate",
-    "TaskConflict",
+    "TaskConflictError",
     "TaskFileStore",
     "TaskStorage",
     "TaskStore",

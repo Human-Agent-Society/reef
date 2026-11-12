@@ -29,7 +29,7 @@ so storage locators can be shared without pulling in backend implementations, an
 ``tests/contributing/test_dependency_boundaries.py``.
 """
 
-from reef.core.errors import ReefError, UnknownScenario
+from reef.core.errors import ReefError, ScenarioNotFoundError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.core.snapshot import SnapshotRef
@@ -40,6 +40,6 @@ __all__ = [
     "ReportBase",
     "ReportValidationError",
     "RequestType",
+    "ScenarioNotFoundError",
     "SnapshotRef",
-    "UnknownScenario",
 ]

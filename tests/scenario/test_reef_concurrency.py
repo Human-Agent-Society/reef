@@ -15,7 +15,7 @@ import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
-from reef.artifact import Artifact, ArtifactConflict, InMemoryRepositoryBackend, Repository, SnapshotRef
+from reef.artifact import Artifact, ArtifactConflictError, InMemoryRepositoryBackend, Repository, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.storage.sql_coordination import memory_coordination
@@ -123,7 +123,7 @@ def test_activate_requires_the_observed_head(tmp_path) -> None:
 
     stale = SnapshotRef(revision="stale", parent_revision=None)
     advanced = SnapshotRef(revision="live:proc:w1:1", parent_revision=head.revision)
-    with pytest.raises(ArtifactConflict, match="active artifact moved"):
+    with pytest.raises(ArtifactConflictError, match="active artifact moved"):
         repository.activate(advanced, expected=stale)
 
     assert repository.current_artifact == head

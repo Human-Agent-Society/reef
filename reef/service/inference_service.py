@@ -85,18 +85,18 @@ INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1
 
 
 def startup_error(error: str | None) -> str:
-    """What a failed startup status says: the message of a runtime's ``StartupFailed`` (RFC #1299), else a fixed text,
-    since other errors can hold paths or secrets."""
+    """What a failed startup status says: the message of a runtime's ``StartupFailedError`` (RFC #1299), else a fixed
+    text, since other errors can hold paths or secrets."""
     if error is not None and error.startswith(STARTUP_FAILED_PREFIX):
         return error.removeprefix(STARTUP_FAILED_PREFIX)
     return "The inference engine did not start. Check the service logs."
 
 
-class NotServed(ReefError):
+class NotServedError(ReefError):
     """The scenario serves no model under the request's name."""
 
 
-class StaleServedModels(ReefError):
+class StaleServedModelsError(ReefError):
     """The replica could not read ``served_models`` for longer than it may serve from its cache."""
 
 
@@ -221,12 +221,12 @@ class ScenarioServing:
 
 
 def row_for_model(scenario: str, rows: Mapping[str, ServedArtifact], model: object) -> ServedArtifact:
-    """The row that answers a request for ``model``: the row of that name, else the active row. Raise ``NotServed``
-    when that row does not exist."""
+    """The row that answers a request for ``model``: the row of that name, else the active row. Raise
+    ``NotServedError`` when that row does not exist."""
     name = model if isinstance(model, str) and model in rows else ACTIVE
     served = rows.get(name)
     if served is None:
-        raise NotServed(f"scenario {scenario!r} serves no model {name!r}")
+        raise NotServedError(f"scenario {scenario!r} serves no model {name!r}")
     return served
 
 
@@ -268,7 +268,7 @@ class ServedModelsCache:
             if held is not None and now - held.read_at < self.max_cache_age_seconds:
                 logger.warning("serving %s from a cached read of served_models: %s", scenario, exc)
                 return held
-            raise StaleServedModels(f"served_models cannot be read: {exc}") from exc
+            raise StaleServedModelsError(f"served_models cannot be read: {exc}") from exc
         self.reads[scenario] = ScenarioServing(now, sequence, rows, serving_config, weights)
         return self.reads[scenario]
 
@@ -284,10 +284,10 @@ class ServedModelsCache:
         return row_for_model(scenario, self.scenario_rows(scenario, refresh=refresh), model)
 
     def read_named(self, scenario: str, name: str, *, refresh: bool = False) -> ServedArtifact:
-        """The ``ServedArtifact`` of the row ``name`` of ``scenario``; ``NotServed`` when there is none."""
+        """The ``ServedArtifact`` of the row ``name`` of ``scenario``; ``NotServedError`` when there is none."""
         served = self.scenario_rows(scenario, refresh=refresh).get(name)
         if served is None:
-            raise NotServed(f"scenario {scenario!r} serves no artifact {name!r}")
+            raise NotServedError(f"scenario {scenario!r} serves no artifact {name!r}")
         return served
 
 
@@ -460,7 +460,7 @@ class InferenceReplica:
             artifact_id = model
         try:
             route = self.cache.read(scenario, model)
-        except (NotServed, StaleServedModels, LookupError):
+        except (NotServedError, StaleServedModelsError, LookupError):
             route = None
         if item.state == "finished" or (route is not None and route.artifact_id == artifact_id):
             # A published route serves the artifact already: the request that starts another artifact beside it, or
@@ -490,7 +490,7 @@ class InferenceReplica:
         try:
             served = self.cache.read(scenario, model)
             handler = self.engines.handler(served)
-        except (NotServed, StaleServedModels, LookupError):
+        except (NotServedError, StaleServedModelsError, LookupError):
             return None, None, None
         engine = handler.engine_state(served)
         if engine != "starting":
@@ -516,7 +516,7 @@ class InferenceReplica:
             if use_split:
                 return await asyncio.to_thread(self.route, scenario, payload, session_key, refresh=refresh)
             return await asyncio.to_thread(self.cache.read, scenario, payload.get("model"), refresh=refresh), None
-        except NotServed as exc:
+        except NotServedError as exc:
             status = await asyncio.to_thread(self.startup_status, scenario, ACTIVE if name is None else name)
             if status["state"] in ("pending", "starting"):
                 raise web.HTTPServiceUnavailable(
@@ -532,7 +532,7 @@ class InferenceReplica:
                     content_type="application/json",
                 ) from exc
             raise web.HTTPServiceUnavailable(text="The inference route is unavailable.") from exc
-        except StaleServedModels as exc:
+        except StaleServedModelsError as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
     def handler(self, served: ServedArtifact) -> InferenceHandler:
@@ -546,7 +546,7 @@ class InferenceReplica:
         scenario's serving config; 400 when its handler refuses it."""
         try:
             serving_config = self.cache.serving_config(scenario)
-        except StaleServedModels as exc:
+        except StaleServedModelsError as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
         try:
             return self.handler(served).request_payload(payload, serving_config=serving_config)
@@ -821,9 +821,9 @@ __all__ = [
     "RECORD_HEADER",
     "SESSION_KEY_HEADER",
     "InferenceReplica",
-    "NotServed",
+    "NotServedError",
     "ServedModelsCache",
-    "StaleServedModels",
+    "StaleServedModelsError",
     "TrafficChoice",
     "TrafficWeights",
     "add_inference_routes",

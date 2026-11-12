@@ -16,7 +16,7 @@ from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import ScenarioCapacityFull, ScenarioLimitReached
+from reef.core.errors import ScenarioCapacityFullError, ScenarioLimitReachedError
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.scenario import Scenario
@@ -242,7 +242,7 @@ def test_full_service_refuses_a_load_when_no_scenario_is_idle(tmp_path) -> None:
         assert busy is not None
         measurement = busy.operations.start("ingest/write")
 
-        with pytest.raises(ScenarioCapacityFull) as refused:
+        with pytest.raises(ScenarioCapacityFullError) as refused:
             dispatcher.get_or_create_scenario("b")
 
         assert refused.value.retry_after_seconds > 0
@@ -268,7 +268,7 @@ def test_concurrent_loads_share_the_load_limit(tmp_path) -> None:
 
     def load(name: str) -> None:
         # Timing decides which load is refused. The test checks only the limit.
-        with suppress(ScenarioCapacityFull):
+        with suppress(ScenarioCapacityFullError):
             dispatcher.get_or_create_scenario(name)
 
     try:
@@ -293,9 +293,9 @@ def test_registration_limit_refuses_a_new_scenario_and_stores_nothing(tmp_path) 
 
         # A registered scenario loads again. The limit counts registrations, not loads.
         assert dispatcher.get_or_create_scenario("a") is not None
-        with pytest.raises(ScenarioLimitReached, match=r"reef\.max_scenarios"):
+        with pytest.raises(ScenarioLimitReachedError, match=r"reef\.max_scenarios"):
             dispatcher.get_or_create_scenario("b")
-        with pytest.raises(ScenarioLimitReached):
+        with pytest.raises(ScenarioLimitReachedError):
             dispatcher.create_scenario("b")
 
         assert not dispatcher.has_scenario("b")

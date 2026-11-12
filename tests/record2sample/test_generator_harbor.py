@@ -15,7 +15,13 @@ import pytest
 
 from reef.core.tasks import read_harbor_task, write_harbor_task
 from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessScope
-from reef.record2sample.generator import GeneratedHarborTask, HarborReply, OracleUnavailable, harbor_task, oracle_check
+from reef.record2sample.generator import (
+    GeneratedHarborTask,
+    HarborReply,
+    OracleUnavailableError,
+    harbor_task,
+    oracle_check,
+)
 from reef.record2sample.generator.harbor import (
     content_hash,
     dockerfile_logical_lines,
@@ -460,7 +466,7 @@ def test_a_harbor_run_that_hangs_is_stopped_at_the_timeout(tmp_path: Path) -> No
     root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
     started = time.monotonic()
     harbor = fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}, sleep_s=30)
-    with pytest.raises(OracleUnavailable, match="harbor run -a oracle did not finish within 1 s"):
+    with pytest.raises(OracleUnavailableError, match="harbor run -a oracle did not finish within 1 s"):
         oracle_check(root, harbor=harbor, timeout_s=1.0)
     assert time.monotonic() - started < 10.0
 
@@ -503,7 +509,7 @@ def test_stopping_the_scope_ends_the_harbor_run_in_flight_and_refuses_a_new_one(
     # A check the stopping generator refuses to start could not run: an error, never a refused task.
     token = CURRENT_PROCESS_SCOPE.set(scope)
     try:
-        with pytest.raises(OracleUnavailable, match="the generator is stopping; no new harbor run"):
+        with pytest.raises(OracleUnavailableError, match="the generator is stopping; no new harbor run"):
             oracle_check(tmp_path / "tasks" / "harbor-00003-001-inspection", harbor=str(tmp_path / "harbor"))
     finally:
         CURRENT_PROCESS_SCOPE.reset(token)
@@ -522,7 +528,7 @@ def test_a_harbor_run_that_ignores_the_term_is_killed_after_the_grace(tmp_path: 
 def test_a_missing_harbor_command_line_raises_rather_than_refusing_the_task(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(shutil, "which", lambda name: None)
     root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
-    with pytest.raises(OracleUnavailable, match="the harbor command line is not installed") as raised:
+    with pytest.raises(OracleUnavailableError, match="the harbor command line is not installed") as raised:
         oracle_check(root)
     assert isinstance(raised.value, RuntimeError), "a caller that catches RuntimeError still sees it"
 
@@ -532,7 +538,7 @@ def test_a_harbor_run_that_exits_nonzero_raises_with_its_output(tmp_path: Path) 
     path.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write('docker is not running')\nsys.exit(2)\n")
     path.chmod(0o755)
     root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
-    with pytest.raises(OracleUnavailable, match="harbor run -a oracle exited 2: docker is not running") as raised:
+    with pytest.raises(OracleUnavailableError, match="harbor run -a oracle exited 2: docker is not running") as raised:
         oracle_check(root, harbor=str(path))
     assert isinstance(raised.value.__cause__, RuntimeError), "the harbor run's own error is the cause"
 
@@ -540,7 +546,7 @@ def test_a_harbor_run_that_exits_nonzero_raises_with_its_output(tmp_path: Path) 
 def test_a_nop_run_that_exits_nonzero_raises_after_a_good_oracle_run(tmp_path: Path) -> None:
     root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
     harbor = fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}, exits={"nop": 3})
-    with pytest.raises(OracleUnavailable, match="harbor run -a nop exited 3: docker daemon is not running"):
+    with pytest.raises(OracleUnavailableError, match="harbor run -a nop exited 3: docker daemon is not running"):
         oracle_check(root, harbor=harbor)
     assert (root.parent / ".harbor-jobs" / root.name / "oracle").is_dir(), "the oracle run happened first"
     stderr_path = root.parent / ".harbor-jobs" / root.name / "nop" / "harbor-stderr.txt"

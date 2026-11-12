@@ -19,6 +19,7 @@ from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.config import config_arguments
+from reef.core.errors import RuntimeConfigError
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
 from reef.evaluation.activation import activation_reference, build_activation_rule
@@ -237,6 +238,8 @@ class Recipe:
                 training_component=training_component,
                 **field_values,
             )
+        except (RecipeConfigError, RuntimeConfigError):
+            raise
         except ValueError as exc:
             raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
 

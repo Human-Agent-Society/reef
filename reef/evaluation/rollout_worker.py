@@ -50,14 +50,14 @@ from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import QueueWorker, WorkerStopped
+from reef.execution.workers import QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import tree_agent, trial_directory
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRollout, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
 
 logger = logging.getLogger(__name__)
 
@@ -549,10 +549,10 @@ async def run_while_held(
     runner: TaskRolloutRunner, request: RolloutRequest, lease_lost: threading.Event, stopped: threading.Event
 ) -> TaskRollout:
     """Run the rollout of ``request`` with ``runner`` and return it. When ``lease_lost`` or ``stopped`` is set first,
-    cancel the run, so that Harbor stops the trial and its sandbox. Then raise ``WorkLeaseLost`` for ``lease_lost``:
-    a client cancelled the rollout, or another worker took it. Raise ``WorkerStopped`` for ``stopped`` alone: the
-    worker stops, and the rollout goes back to the queue. A process that ends with a trial still running leaves the
-    trial's sandbox running, so a stopping worker does not wait for the trial."""
+    cancel the run, so that Harbor stops the trial and its sandbox. Then raise ``WorkLeaseLostError`` for
+    ``lease_lost``: a client cancelled the rollout, or another worker took it. Raise ``WorkerStoppedError`` for
+    ``stopped`` alone: the worker stops, and the rollout goes back to the queue. A process that ends with a trial
+    still running leaves the trial's sandbox running, so a stopping worker does not wait for the trial."""
     run = asyncio.ensure_future(runner.run_rollouts_async([request], asyncio.Semaphore(1)))
     while not lease_lost.is_set() and not stopped.is_set():
         done, _ = await asyncio.wait({run}, timeout=LEASE_CHECK_S)
@@ -563,8 +563,8 @@ async def run_while_held(
     with contextlib.suppress(asyncio.CancelledError):
         await run
     if lease_lost.is_set():
-        raise WorkLeaseLost("the evaluation worker lost its lease")
-    raise WorkerStopped
+        raise WorkLeaseLostError("the evaluation worker lost its lease")
+    raise WorkerStoppedError
 
 
 class EvaluationRolloutWorker(QueueWorker):
@@ -620,9 +620,9 @@ class EvaluationRolloutWorker(QueueWorker):
         deadline = time.monotonic() + SERVE_WAIT_S
         while time.monotonic() < deadline:
             if self.stopped.is_set():
-                raise WorkerStopped
+                raise WorkerStoppedError
             if lease_lost.is_set():
-                raise WorkLeaseLost("the evaluation worker lost its lease")
+                raise WorkLeaseLostError("the evaluation worker lost its lease")
             item = self.queue.get(SERVING_QUEUE, item_id)
             if item is not None and item.final:
                 if item.state != "finished":

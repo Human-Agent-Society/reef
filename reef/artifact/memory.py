@@ -10,9 +10,9 @@ from threading import RLock
 from reef.artifact.artifact import (
     ARTIFACT_ID_METADATA_KEY,
     Artifact,
-    ArtifactConflict,
+    ArtifactConflictError,
     ArtifactMaterializationError,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactPublicationError,
     SnapshotRef,
     artifact_components,
@@ -66,13 +66,13 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
         ref = self._storage.refs.get(revision)
         if ref is not None:
             return ref
-        raise ArtifactNotFound(f"release does not exist: {revision}")
+        raise ArtifactNotFoundError(f"release does not exist: {revision}")
 
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._storage.lock:
             ref = self._storage.artifacts.get(artifact_id)
         if ref is None:
-            raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
+            raise ArtifactNotFoundError(f"repository has no artifact {artifact_id!r}")
         return ref
 
     def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
@@ -111,7 +111,7 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
 
     def current(self) -> SnapshotRef:
         if self._current is None:
-            raise ArtifactNotFound("repository has no current artifact")
+            raise ArtifactNotFoundError("repository has no current artifact")
         return self._current
 
     def materialize(self, ref: SnapshotRef) -> Artifact:
@@ -132,7 +132,7 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
         with self._storage.lock:
             current = self.current()
             if current.revision != expected_parent.revision:
-                raise ArtifactConflict(
+                raise ArtifactConflictError(
                     f"repository is at {current.revision}, not expected parent {expected_parent.revision}"
                 )
             ref = self._storage.copy_artifact(
@@ -155,7 +155,7 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
             if current == ref:
                 return
             if current != expected_parent:
-                raise ArtifactConflict("repository head changed before the staged snapshot was committed")
+                raise ArtifactConflictError("repository head changed before the staged snapshot was committed")
             self._current = ref
             self._metadata = dict(self._storage.metadata[ref.revision])
 

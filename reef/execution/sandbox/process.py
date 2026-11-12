@@ -33,12 +33,12 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from reef.core.errors import ReefError
+from reef.core.errors import InternalError, ReefError
 from reef.execution.processes import (
     CURRENT_PROCESS_SCOPE,
     ProcessRequest,
     ProcessScope,
-    ProcessScopeClosed,
+    ProcessScopeClosedError,
     ProcessSetup,
 )
 
@@ -64,7 +64,7 @@ class ProcessOwner:
 PROCESS_OWNER: ContextVar[ProcessOwner | None] = ContextVar("sandbox_process_owner", default=None)
 
 
-class SandboxUnavailable(ReefError):
+class SandboxUnavailableError(ReefError):
     """A deployment requires the sandbox executor but it cannot isolate."""
 
 
@@ -77,11 +77,11 @@ class ProcessOutcome:
     stderr: str
 
 
-class ProgramTimeout(Exception):
+class ProgramTimeoutError(InternalError):
     """The process exceeded its wall-clock budget; raised for run_task to map."""
 
 
-class ProgramLaunchError(Exception):
+class ProgramLaunchError(InternalError):
     """The process could not be launched; raised for run_task to map."""
 
 
@@ -119,7 +119,7 @@ class ProgramExecutor(ABC):
 
     ``run_task`` prepares ``root`` (with ``workspace`` inside it) and the
     ``env`` overlay; an executor decides how the process sees them. It must
-    kill the whole process tree on timeout and raise :class:`ProgramTimeout`
+    kill the whole process tree on timeout and raise :class:`ProgramTimeoutError`
     or :class:`ProgramLaunchError` so ``run_task`` maps them to the public
     ``TaskRunError`` uniformly.
 
@@ -230,7 +230,7 @@ def run_process(
         )
     except FileNotFoundError as exc:
         raise ProgramLaunchError(f"harness binary {popen_argv[0]!r} not found") from exc
-    except ProcessScopeClosed as exc:
+    except ProcessScopeClosedError as exc:
         raise ProgramLaunchError("the execution environment was stopped") from exc
     finally:
         if read_fd is not None:
@@ -238,7 +238,7 @@ def run_process(
         if write_fd is not None:
             os.close(write_fd)
     if result.reason == "timed_out":
-        raise ProgramTimeout(f"run timed out after {timeout}s: {list(popen_argv)}")
+        raise ProgramTimeoutError(f"run timed out after {timeout}s: {list(popen_argv)}")
     if result.reason == "stopped":
         raise ProgramLaunchError("the execution environment was stopped")
     return ProcessOutcome(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
@@ -375,12 +375,12 @@ class SandboxExecutor(ProgramExecutor):
 
     def preflight(self) -> None:
         if shutil.which("bwrap") is None:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "the sandbox executor requires bubblewrap (bwrap) on PATH; install it or set "
                 "evolution.executor: local for development"
             )
         if self.network not in ("default", "isolated"):
-            raise SandboxUnavailable(f"unknown sandbox network {self.network!r}; use 'default' or 'isolated'")
+            raise SandboxUnavailableError(f"unknown sandbox network {self.network!r}; use 'default' or 'isolated'")
         if self.network == "isolated":
             self.preflight_pasta()
         # The native loop nests one jail per tool call inside the run's, so a host that refuses a user namespace
@@ -395,11 +395,11 @@ class SandboxExecutor(ProgramExecutor):
                 timeout=30,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 f"the sandbox executor cannot nest a bubblewrap jail on this host: {exc}"
             ) from exc
         if done.returncode != 0:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "the sandbox executor cannot nest a bubblewrap jail on this host, which every sandboxed native "
                 f"tool call needs: {done.stderr.strip()[-600:]}"
             )
@@ -429,12 +429,12 @@ class SandboxExecutor(ProgramExecutor):
         needs; either way the jail would never start, so the host is refused here with pasta's own reason.
         """
         if shutil.which("pasta") is None:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "an isolated sandbox network requires pasta (the passt package) on PATH; install it, or run "
                 "without isolation where that is allowed"
             )
         if os.geteuid() == 0:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "pasta cannot map users when started as root; run the Reef service as a non-root user with user "
                 "namespaces allowed to isolate the network"
             )
@@ -450,9 +450,9 @@ class SandboxExecutor(ProgramExecutor):
                 timeout=30,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SandboxUnavailable(f"pasta cannot set up an isolated network on this host: {exc}") from exc
+            raise SandboxUnavailableError(f"pasta cannot set up an isolated network on this host: {exc}") from exc
         if done.returncode != 0:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "pasta cannot set up an isolated network on this host (run the Reef service as a non-root user "
                 f"with user namespaces allowed): {(done.stderr or done.stdout).strip()[-600:]}"
             )

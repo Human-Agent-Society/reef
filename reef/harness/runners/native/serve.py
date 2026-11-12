@@ -37,6 +37,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from reef.core.errors import InternalError
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureError, CaptureProxy
 from reef.harness.runners.native import SESSION_VERSION, TOOL_OUTPUT_DIR, LoadError, Session, _Loop, binding_from
@@ -71,7 +72,7 @@ MAX_SOCKET_PATH_BYTES = 100
 _SESSION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
-class ServeError(Exception):
+class ServeError(InternalError):
     """The serve process cannot start, or a request cannot be served; the message says why."""
 
 

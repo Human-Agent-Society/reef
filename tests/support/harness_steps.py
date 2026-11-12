@@ -21,7 +21,7 @@ from weakref import WeakKeyDictionary
 from tests.support._strategies import resolve_method, resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
 
-from reef.artifact.artifact import ArtifactNotFound
+from reef.artifact.artifact import ArtifactNotFoundError
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginReference
 from reef.evaluation.harness import EvaluationSettings, History, TaskCollector, TaskScorer
@@ -109,7 +109,7 @@ class TreeArtifacts(CommittedArtifacts):
 
     def artifact(self, release_id: str, component: str) -> ArtifactTextFiles:
         if release_id not in self.trees:
-            raise ArtifactNotFound(f"no snapshot {release_id!r}")
+            raise ArtifactNotFoundError(f"no snapshot {release_id!r}")
         return ArtifactTextFiles(release_id, dict(self.trees[release_id].files))
 
 

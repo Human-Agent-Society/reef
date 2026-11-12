@@ -21,10 +21,10 @@ __all__ = [
     "SNAPSHOT_METADATA_KEYS",
     "TRAINING_STARTS_METADATA_KEY",
     "Artifact",
-    "ArtifactConflict",
+    "ArtifactConflictError",
     "ArtifactError",
     "ArtifactMaterializationError",
-    "ArtifactNotFound",
+    "ArtifactNotFoundError",
     "ArtifactPublicationError",
     "ArtifactRepository",
     "ArtifactSourceError",
@@ -56,11 +56,11 @@ class ArtifactSourceError(ArtifactError):
     pass
 
 
-class ArtifactNotFound(ArtifactError):
+class ArtifactNotFoundError(ArtifactError):
     pass
 
 
-class ArtifactConflict(ArtifactError):
+class ArtifactConflictError(ArtifactError):
     pass
 
 
@@ -156,9 +156,9 @@ class Artifact:
             return materialized._artifact_id
         manifest = materialized.components
         if manifest is None:
-            raise ArtifactNotFound(f"snapshot {self.ref.revision!r} names no artifact ID")
+            raise ArtifactNotFoundError(f"snapshot {self.ref.revision!r} names no artifact ID")
         if not manifest.single:
-            raise ArtifactNotFound(
+            raise ArtifactNotFoundError(
                 f"snapshot {self.ref.revision!r} holds components {list(manifest.names)}; name one of them"
             )
         return next(iter(manifest.artifact_ids(self.ref.revision).values()))
@@ -180,7 +180,7 @@ class Artifact:
         if manifest is None:
             return materialized
         if name not in manifest.entries:
-            raise ArtifactNotFound(f"snapshot {self.ref.revision!r} binds no component {name!r}")
+            raise ArtifactNotFoundError(f"snapshot {self.ref.revision!r} binds no component {name!r}")
         if manifest.single:
             return materialized
         if materialized.local_path is None:

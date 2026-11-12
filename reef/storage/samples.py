@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflict, MemoryDataStore, NewItem, StoredItem
+from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, MemoryDataStore, NewItem, StoredItem
 from reef.storage.tasks import LocalTaskFileStore, SplitName
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
@@ -383,7 +383,7 @@ class TrainerSamples:
                         task = shutil.copytree(sample.task_path, Path(directory) / item_id)
                         task_metadata = {"kind": "task", **metadata, "task_metadata": dict(sample.metadata)}
                         store.data.create(store.owner, [NewItem(item_id, task, task_metadata)])
-            except ItemConflict:
+            except ItemConflictError:
                 # Another process made the same sample first: its item wins.
                 continue
             new += 1

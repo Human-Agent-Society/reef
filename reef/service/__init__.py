@@ -22,7 +22,9 @@ training backend; backend definitions load their optional execution adapters.
 Adding a route: write a ``register_*`` function in a ``routes/`` module and
 wire it into ``register_routes``. The handler raises domain errors and lets
 ``errors.ERROR_STATUS_TABLE`` translate them; a new error type that needs a
-status other than 400 gets a row there, not a local try/except. The docs
+status other than 400 gets a row there, not a local try/except. A failure
+that the request did not cause derives from ``reef.core.errors.InternalError``
+and answers 500. The docs
 contract check derives the route list from ``routes/`` sources, so the HTTP
 API reference must name every route.
 """

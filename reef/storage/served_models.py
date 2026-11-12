@@ -39,7 +39,7 @@ def without_redeploy(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
     return {key: value for key, value in payload.items() if key != REDEPLOY}
 
 
-class ControlLeaseConflict(ReefError):
+class ControlLeaseConflictError(ReefError):
     """A control write carried a ``control_lease_number`` that is not the current one."""
 
 
@@ -91,7 +91,7 @@ class ServedModelsWriter(ServedModels):
 
     Control selects work with ``request``. Inference completes startup and cleanup with ``complete_request`` and ``complete_stop``.
     Direct operations ``write``, ``remove``, ``schedule_stop`` and ``delete_stop`` check ``control_lease_number``.
-    A stale control number raises ``ControlLeaseConflict`` without a change. Reads require no lease.
+    A stale control number raises ``ControlLeaseConflictError`` without a change. Reads require no lease.
     """
 
     @abstractmethod
@@ -171,7 +171,7 @@ class ServedModelsWriter(ServedModels):
         """Publish ``models`` and ``serving_config`` for ``item.scenario`` and finish its serving work in one
         transaction.
 
-        The item must be held by ``worker_id`` in the same attempt; otherwise raise ``WorkLeaseLost``.
+        The item must be held by ``worker_id`` in the same attempt; otherwise raise ``WorkLeaseLostError``.
         When supplied, ``owner`` must also be held in the same attempt.
         Superseded work finishes with an empty result and changes no route. Schedule its unreferenced endpoints for cleanup.
         Each model name is non-empty. Schedule unreferenced replaced routes after ``stop_delay_seconds``.
@@ -192,7 +192,7 @@ class ServedModelsWriter(ServedModels):
         """Remove ``stop`` and finish its held cleanup work in one transaction.
 
         A later stop of the same endpoint stays when its ``stop_after`` differs.
-        An expired lease or another attempt raises ``WorkLeaseLost`` without changing anything.
+        An expired lease or another attempt raises ``WorkLeaseLostError`` without changing anything.
         When supplied, ``owner`` must also be held in the same attempt.
         """
 
@@ -224,7 +224,7 @@ __all__ = [
     "SERVING_KIND",
     "SERVING_QUEUE",
     "STOP_SERVING_KIND",
-    "ControlLeaseConflict",
+    "ControlLeaseConflictError",
     "ServedModels",
     "ServedModelsWriter",
     "serving_serial_key",

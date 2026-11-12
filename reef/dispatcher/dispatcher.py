@@ -18,7 +18,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
+from reef.core.errors import ReefError, ScenarioCapacityFullError, ScenarioNotFoundError
 from reef.core.evaluation import EvaluationCall, EvaluationTrajectory
 from reef.core.job_data import TaskSample
 from reef.core.records_types import AgentRecord, RequestType
@@ -384,10 +384,10 @@ class Dispatcher(
         Artifacts that other scenarios share stay.
         """
         if "/" in scenario or scenario in ("", ".", ".."):
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         with self.record_retention_lock, self.registry.lock_for(scenario):
             if not self.registry.has(scenario):
-                raise UnknownScenario(f"unknown scenario {scenario!r}")
+                raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
             # The inference service stops answering the scenario first, so no record reaches the archived store.
             if self.publisher is not None:
                 self.publisher.withdraw(scenario)
@@ -641,7 +641,7 @@ class Dispatcher(
         artifact with weight 0 answers only the requests that name it. ``component`` may be left out when the
         scenario has one component.
 
-        Raise ``UnknownScenario`` for an unknown scenario, the errors of ``Scenario.resolve_artifact`` for an
+        Raise ``ScenarioNotFoundError`` for an unknown scenario, the errors of ``Scenario.resolve_artifact`` for an
         artifact that is not one of the component, ``ReefError`` when the runtime serves one artifact and
         ``served`` names more, and ``ValueError`` when this service does not run control or when an empty
         ``served`` comes with a ``component``.
@@ -806,11 +806,12 @@ class Dispatcher(
     def import_target(self, scenario: str, component: str | None) -> str:
         """The component of ``scenario`` an import into ``component`` lands in; raise as ``import_artifact`` does.
 
-        Raise ``UnknownScenario`` for an unknown scenario, and ``ValueError`` for an unknown component or one that
-        takes no import. An unknown scenario is refused before its lock is made, so a request for any name adds none.
+        Raise ``ScenarioNotFoundError`` for an unknown scenario, and ``ValueError`` for an unknown component or one
+        that takes no import. An unknown scenario is refused before its lock is made, so a request for any name adds
+        none.
         """
         if not self.registry.has(scenario):
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).import_target(component)
 
@@ -857,7 +858,7 @@ class Dispatcher(
     def current_artifact(self, scenario: str) -> Artifact:
         current = self.get_or_create_scenario(scenario)
         if current is None:
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         return Artifact(current.repository.require_current_artifact(), current.repository)
 
     # -- Record acceptance -----------------------------------------------
@@ -866,7 +867,7 @@ class Dispatcher(
         with self.registry.lock_for(item.scenario):
             current = self.get_or_create_scenario(item.scenario)
             if current is None:
-                raise UnknownScenario(f"unknown scenario {item.scenario!r}")
+                raise ScenarioNotFoundError(f"unknown scenario {item.scenario!r}")
             stored, inserted = ingest.append_record(current, item)
             if inserted:
                 self.process_accepted_records(current)
@@ -887,7 +888,7 @@ class Dispatcher(
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
             if current is None:
-                raise UnknownScenario(f"unknown scenario {scenario!r}")
+                raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
             item = ingest.file_request(current, request_id or uuid.uuid4().hex, payload)
             self.local_workers.wake(current)
             return item
@@ -917,7 +918,7 @@ class Dispatcher(
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario)
             if current is None:
-                raise UnknownScenario(f"unknown scenario {scenario!r}")
+                raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
             stored, inserted = ingest.append_records(current, items)
             if inserted:
                 self.process_accepted_records(current)
@@ -938,7 +939,7 @@ class Dispatcher(
         A scenario gets its owner when it is created, so only a scenario that still has the default owner (its
         own name) and uses none of its trajectory or task items can take another. The data service then copies the
         scenario's artifacts and records to items of ``owner``. Raise ``ValueError`` otherwise, and
-        ``UnknownScenario`` for a scenario that does not exist.
+        ``ScenarioNotFoundError`` for a scenario that does not exist.
         """
         check_owner(owner)
         with self.locked_scenario(scenario) as current:
@@ -1006,13 +1007,13 @@ class Dispatcher(
     def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
         """The loaded scenario ``scenario`` at its newest commit, loaded again when it was unloaded, held under its lock.
 
-        Raise ``UnknownScenario`` when the scenario does not exist. The caller must not keep the scenario, or its
+        Raise ``ScenarioNotFoundError`` when the scenario does not exist. The caller must not keep the scenario, or its
         storage session, after the block: an unload closes the session.
         """
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
             if current is None:
-                raise UnknownScenario(f"unknown scenario {scenario!r}")
+                raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
             yield self.at_newest_commit(current)
 
     def set_evaluation_and_activation(
@@ -1063,8 +1064,8 @@ class Dispatcher(
         a load does. ``served`` is what the scenario serves, by component (``served_mapping``).
         ``record2sample_config`` is the stored ``ScenarioSettings.record2sample_config``. ``job_parameters`` are the
         recipe's parameters of a training job by the kind of its samples (``PipelineContext.job_parameters``), which a
-        request's ``parameters`` merge into; a kind that the recipe gives none is left out. Raise ``UnknownScenario``
-        for an unknown scenario.
+        request's ``parameters`` merge into; a kind that the recipe gives none is left out. Raise
+        ``ScenarioNotFoundError`` for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
@@ -1132,8 +1133,8 @@ class Dispatcher(
 
     def add_evaluation_call(self, scenario: str, evaluation_id: str, artifact_id: str, call: EvaluationCall) -> None:
         """Keep ``call`` of evaluation ``evaluation_id`` as a record item of the owner of ``scenario``, for the current
-        generation of the scenario (``CandidateArtifacts``). ``ReefError`` without a data store; ``ScenarioArchived``
-        when the scenario was archived meanwhile."""
+        generation of the scenario (``CandidateArtifacts``). ``ReefError`` without a data store;
+        ``ScenarioArchivedError`` when the scenario was archived meanwhile."""
         data, owner, generation = self.evaluation_data(scenario)
         data.create(owner, [evaluation_call_item(scenario, artifact_id, evaluation_id, call)], generation=generation)
 
@@ -1197,7 +1198,7 @@ class Dispatcher(
                 if current is not None:
                     # Rows that the last run did not read train now, before the next record arrives.
                     self.local_workers.wake(current)
-            except ScenarioCapacityFull:
+            except ScenarioCapacityFullError:
                 # This is not a preload failure. The scenario loads on its first request, when a load slot is free.
                 logger.info("scenario %r is not preloaded: the service holds its limit of loaded scenarios", scenario)
             except Exception as exc:

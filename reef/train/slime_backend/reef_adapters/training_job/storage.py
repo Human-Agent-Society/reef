@@ -17,13 +17,14 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any
 
+from reef.core.errors import InternalError
 from reef.storage.durable_files import fsync_dir, mkdir_durable, read_json, write_json
 
 POLICIES = {"latest", "best_reward"}
 Inventory = tuple[list[dict[str, Any]], list[str]]
 
 
-class CheckpointStorageError(RuntimeError):
+class CheckpointStorageError(InternalError, RuntimeError):
     pass
 
 

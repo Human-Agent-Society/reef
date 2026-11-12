@@ -30,7 +30,7 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
 )
 from reef.core.activation import ActivationRule
-from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
+from reef.core.errors import ReefError, ScenarioCapacityFullError, ScenarioNotFoundError
 from reef.evaluation.activation import EvaluatedActivation, activation_setting, scenario_activation_reference
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
@@ -257,9 +257,9 @@ class ScenarioRegistry:
         return current
 
     def require(self, scenario: str) -> Scenario:
-        """Resolve an existing scenario; raise UnknownScenario if not found."""
+        """Resolve an existing scenario; raise ScenarioNotFoundError if not found."""
         if not self.has(scenario):
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         return self._resolve(scenario, None, True)
 
     def list(self) -> tuple[dict[str, Any], ...]:
@@ -594,7 +594,7 @@ class ScenarioRegistry:
 
         Admission tells how many loaded scenarios must unload first. This
         method unloads idle candidates until there are enough. If there are
-        too few, it raises ``ScenarioCapacityFull``.
+        too few, it raises ``ScenarioCapacityFullError``.
 
         Lock order: the lock of ``scenario``, then the admission lock. The
         lifecycle's ``unload_if_idle`` only tries the locks of other scenarios
@@ -620,7 +620,7 @@ class ScenarioRegistry:
                     unloaded_count += 1
             if unloaded_count < load_admission.unload_count:
                 logger.warning("refused to load scenario %r: too few loaded scenarios are idle", scenario)
-                raise ScenarioCapacityFull(
+                raise ScenarioCapacityFullError(
                     f"cannot load scenario {scenario!r}: {len(loaded)} scenarios are loaded, and too few of them "
                     "are idle to free a load slot; retry later"
                 )

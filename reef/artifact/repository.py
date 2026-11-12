@@ -18,8 +18,8 @@ from typing import Any, Self
 from reef.artifact.artifact import (
     LOCAL_SNAPSHOT_PREFIX,
     Artifact,
-    ArtifactConflict,
-    ArtifactNotFound,
+    ArtifactConflictError,
+    ArtifactNotFoundError,
     ArtifactPublicationError,
     ArtifactRepository,
     SnapshotRef,
@@ -69,7 +69,7 @@ class RepositoryBackend(ArtifactRepository):
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         """The stored snapshot that ``artifact_id`` is bound to in this repository.
 
-        Raise ``ArtifactNotFound`` when this repository has no binding for the ID.
+        Raise ``ArtifactNotFoundError`` when this repository has no binding for the ID.
         """
 
     def artifact_snapshots(self, artifact_ids: Collection[str]) -> dict[str, SnapshotRef]:
@@ -81,14 +81,14 @@ class RepositoryBackend(ArtifactRepository):
         for artifact_id in artifact_ids:
             try:
                 snapshots[artifact_id] = self.artifact_snapshot(artifact_id)
-            except ArtifactNotFound:
+            except ArtifactNotFoundError:
                 continue
         return snapshots
 
     def resolve_artifact(self, artifact_id: str) -> Artifact:
         """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path.
 
-        Raise ``ArtifactNotFound`` when this repository has no binding for the ID.
+        Raise ``ArtifactNotFoundError`` when this repository has no binding for the ID.
         """
         snapshot = self.materialize(self.artifact_snapshot(artifact_id))
         components = artifact_components(snapshot)
@@ -116,7 +116,7 @@ class RepositoryBackend(ArtifactRepository):
         """Bind each artifact ID in the stored ``snapshot`` to it, before a head moves to it.
 
         ``snapshot`` needs its metadata, not its files. An ID bound to a snapshot with the same content keeps that
-        binding. Raise ``ArtifactConflict`` for an ID bound to other content. IDs bound before a failure stay
+        binding. Raise ``ArtifactConflictError`` for an ID bound to other content. IDs bound before a failure stay
         bound, so a repeated call completes the rest.
         """
         for artifact_id in artifact_components(snapshot):
@@ -126,15 +126,15 @@ class RepositoryBackend(ArtifactRepository):
                 and bound != snapshot.ref
                 and self.artifact_content(bound, artifact_id) != self.artifact_content(snapshot.ref, artifact_id)
             ):
-                raise ArtifactConflict(f"artifact {artifact_id!r} already names different files or metadata")
+                raise ArtifactConflictError(f"artifact {artifact_id!r} already names different files or metadata")
 
     def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
         """Every file of the snapshot ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
         seconds; the backend lists and signs them without materializing the snapshot.
 
         None, the default, when this backend keeps no copy of its snapshots that a client can open; Reef then lists
-        the files of the materialized snapshot, and serves them itself. Raise ``ArtifactNotFound`` when the backend
-        holds no snapshot ``ref``.
+        the files of the materialized snapshot, and serves them itself. Raise ``ArtifactNotFoundError`` when the
+        backend holds no snapshot ``ref``.
         """
         return None
 
@@ -142,7 +142,7 @@ class RepositoryBackend(ArtifactRepository):
         """The URI of the directory of the snapshot ``ref``, as ``ArtifactSources`` reads it, ending with ``/``.
 
         Another scenario imports the snapshot from this URI, also in another deployment that can read the backend's
-        storage. None, the default, when the backend keeps no copy that a URI names. Raise ``ArtifactNotFound``
+        storage. None, the default, when the backend keeps no copy that a URI names. Raise ``ArtifactNotFoundError``
         when the backend holds no snapshot ``ref``.
         """
         return None
@@ -151,7 +151,7 @@ class RepositoryBackend(ArtifactRepository):
     def resolve_snapshot(self, revision: str) -> SnapshotRef:
         """The stored snapshot that the backend revision ``revision`` names in this repository.
 
-        Raise ``ArtifactNotFound`` for a snapshot the repository does not hold.
+        Raise ``ArtifactNotFoundError`` for a snapshot the repository does not hold.
         """
 
     @abstractmethod
@@ -507,11 +507,11 @@ class Repository(ArtifactRepository):
         No storage I/O runs: the commit history records the activation, and
         recovery reads the active artifact back from it. The move is a
         compare-and-swap: ``expected`` is the active artifact the caller
-        observed. A mismatch raises ``ArtifactConflict`` and changes nothing.
+        observed. A mismatch raises ``ArtifactConflictError`` and changes nothing.
         """
         with self._head_lock:
             if self._current_artifact != expected:
-                raise ArtifactConflict(
+                raise ArtifactConflictError(
                     f"active artifact moved from {expected.revision} to "
                     f"{None if self._current_artifact is None else self._current_artifact.revision}; "
                     f"refusing to activate {ref.revision}"
@@ -525,7 +525,7 @@ class Repository(ArtifactRepository):
         ``activate`` is true, also make it the active artifact (``current``)."""
         with self._head_lock:
             if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
-                raise ArtifactConflict("repository heads changed before the committed snapshot was installed")
+                raise ArtifactConflictError("repository heads changed before the committed snapshot was installed")
             if activate:
                 self._current_artifact = ref
             self._checkpoint_artifact = ref
@@ -536,7 +536,7 @@ class Repository(ArtifactRepository):
         if self.backend.current() == checkpoint:
             return
         if checkpoint.parent_revision is None:
-            raise ArtifactConflict("a committed checkpoint without a parent cannot repair a different head")
+            raise ArtifactConflictError("a committed checkpoint without a parent cannot repair a different head")
         parent = self.backend.resolve_snapshot(checkpoint.parent_revision)
         self.require_staged_commit_support().commit_snapshot(checkpoint, expected_parent=parent)
 

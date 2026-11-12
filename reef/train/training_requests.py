@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from reef.core.training_request import TrainingRequest
-from reef.storage.records import RecordConflict
-from reef.storage.work_queue import JsonValue, NewWork, WorkConflict, WorkItem, WorkQueue
+from reef.storage.records import RecordConflictError
+from reef.storage.work_queue import JsonValue, NewWork, WorkConflictError, WorkItem, WorkQueue
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class ScenarioTrainingRequests:
         """Queue the request ``request_id`` with the normalized ``payload``; return its item.
 
         The same ID with the same payload returns the item that exists; with another payload it raises
-        ``RecordConflict``, as a record with the same ID and other content does.
+        ``RecordConflictError``, as a record with the same ID and other content does.
         """
         work = NewWork(
             TRAINING_REQUESTS_QUEUE,
@@ -101,8 +101,8 @@ class ScenarioTrainingRequests:
         )
         try:
             return self.queue.add(work)
-        except WorkConflict as exc:
-            raise RecordConflict(f"request {request_id!r} already has different content") from exc
+        except WorkConflictError as exc:
+            raise RecordConflictError(f"request {request_id!r} already has different content") from exc
 
     def get(self, request_id: str) -> WorkItem | None:
         """The item of the request ``request_id`` of this scenario, in any state, or None."""

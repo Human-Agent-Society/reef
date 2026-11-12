@@ -38,18 +38,18 @@ from reef.record2sample.generator import (
     DesignerAnswer,
     DesignerError,
     DesignerRequest,
-    DuplicateTask,
+    DuplicateTaskError,
     GeneratorError,
     GeneratorRollouts,
     GeneratorService,
     HarborChecks,
     HttpGenerator,
     OracleResult,
-    OracleUnavailable,
+    OracleUnavailableError,
     ReadinessProbe,
     ReefGeneratorRollouts,
     TaskChecks,
-    TaskNameConflict,
+    TaskNameConflictError,
     WrittenTask,
     readiness_probes,
 )
@@ -120,7 +120,7 @@ class StandInChecks(TaskChecks):
         if self.gate is not None:
             self.gate.wait()
         if self.raises:
-            raise OracleUnavailable("harbor run -a oracle exited 2: docker is not running")
+            raise OracleUnavailableError("harbor run -a oracle exited 2: docker is not running")
         if not self.is_solvable:
             return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)
         return OracleResult(is_solvable=True, reason="", oracle_reward=1.0, nop_reward=0.0)
@@ -310,10 +310,10 @@ def test_a_task_is_written_once_and_a_duplicate_or_a_name_conflict_is_refused(tm
         assert read_harbor_task(written.path) == task
         again = await generator.write_task(task)
         assert again.path == written.path and written.created and not again.created, "staging again returns it"
-        with pytest.raises(DuplicateTask, match="duplicate"):
+        with pytest.raises(DuplicateTaskError, match="duplicate"):
             await generator.write_task(replace(task, name="other-name"))
         # A taken name is a name conflict, told apart from a duplicate.
-        with pytest.raises(TaskNameConflict, match="a different task holds the name harbor-00001-000-inspection"):
+        with pytest.raises(TaskNameConflictError, match="a different task holds the name harbor-00001-000-inspection"):
             await generator.write_task(
                 HarborTask(
                     name=task.name,
@@ -331,7 +331,9 @@ def test_a_task_is_written_once_and_a_duplicate_or_a_name_conflict_is_refused(tm
         return None
 
     run_with(built, body)
-    assert issubclass(TaskNameConflict, GeneratorError) and not issubclass(TaskNameConflict, DuplicateTask)
+    assert issubclass(TaskNameConflictError, GeneratorError) and not issubclass(
+        TaskNameConflictError, DuplicateTaskError
+    )
 
 
 def test_a_check_runs_the_oracle_on_a_task_under_the_root_only(tmp_path: Path) -> None:
@@ -352,7 +354,7 @@ def test_a_check_runs_the_oracle_on_a_task_under_the_root_only(tmp_path: Path) -
 
 def test_a_check_that_could_not_run_is_a_failed_job_the_client_raises(tmp_path: Path) -> None:
     built, _, checks, _ = service(tmp_path, checks=StandInChecks(raises=True))
-    error = "OracleUnavailable: harbor run -a oracle exited 2: docker is not running"
+    error = "OracleUnavailableError: harbor run -a oracle exited 2: docker is not running"
 
     async def body(generator: HttpGenerator) -> object:
         _, written = await propose_and_write(generator)
@@ -467,7 +469,7 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
         f"open({str(arguments_path)!r}, 'w').write(json.dumps(sys.argv[1:]))\nsys.exit(2)\n"
     )
     harbor.chmod(0o755)
-    with pytest.raises(OracleUnavailable, match="harbor run -a oracle exited 2"):
+    with pytest.raises(OracleUnavailableError, match="harbor run -a oracle exited 2"):
         HarborChecks(harbor=str(harbor), environment="e2b").oracle(tmp_path / "tasks" / "t")
     harbor_arguments = json.loads(arguments_path.read_text())
     assert harbor_arguments[harbor_arguments.index("-e") + 1] == "e2b"
@@ -904,7 +906,7 @@ def test_history_write_refuses_a_name_conflict_without_replacing_the_task(tmp_pa
         written = await task_generator.write(item)
         conflicting = replace(item, instruction=item.instruction + "Use the supplied state file.\n")
 
-        with pytest.raises(TaskNameConflict):
+        with pytest.raises(TaskNameConflictError):
             await task_generator.write(conflicting)
 
         assert read_harbor_task(written.path).digest == item.digest

@@ -16,7 +16,7 @@ from reef.core.errors import ReefError
 from reef.core.evaluation import COLLECTION_AVERAGES, CollectionAverage
 
 
-class CollectionNotFound(ReefError):
+class CollectionNotFoundError(ReefError):
     """A collection name that the owner does not store."""
 
 
@@ -106,4 +106,4 @@ def collection_benchmarks(stored: Mapping[str, TaskCollection], name: str) -> tu
     return tuple(found)
 
 
-__all__ = ["CollectionNotFound", "TaskCollection", "check_names", "collection_benchmarks"]
+__all__ = ["CollectionNotFoundError", "TaskCollection", "check_names", "collection_benchmarks"]

@@ -18,9 +18,9 @@ from urllib.parse import urlsplit
 from reef.artifact.artifact import (
     ARTIFACT_ID_METADATA_KEY,
     Artifact,
-    ArtifactConflict,
+    ArtifactConflictError,
     ArtifactMaterializationError,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactPublicationError,
     ArtifactSourceError,
     SnapshotRef,
@@ -551,7 +551,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             try:
                 resolved_snapshot = self._workspace.fetch_version(selector)
             except ArtifactPublicationError as exc:
-                raise ArtifactNotFound(f"release does not exist: {revision}") from exc
+                raise ArtifactNotFoundError(f"release does not exist: {revision}") from exc
         return self._manifest.snapshot(resolved_snapshot)
 
     def artifact_ref_name(self, artifact_id: str) -> str:
@@ -572,7 +572,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         snapshot = self.stored_snapshot(commit)
         components = artifact_components(snapshot)
         if artifact_id not in components:
-            raise ArtifactNotFound(f"storage snapshot does not contain artifact {artifact_id!r}")
+            raise ArtifactNotFoundError(f"storage snapshot does not contain artifact {artifact_id!r}")
         component = components[artifact_id]
         manifest = snapshot.components
         prefix = "" if component is None or manifest is None or manifest.single else f"{component}/"
@@ -606,7 +606,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         with self._workspace.lock:
             commit = self._workspace.ls_remote(self.artifact_ref_name(artifact_id))
             if commit is None:
-                raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
+                raise ArtifactNotFoundError(f"repository has no artifact {artifact_id!r}")
             self._workspace.fetch_version(commit)
             return self._manifest.snapshot(commit, local=True)
 
@@ -682,7 +682,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
     def current(self) -> SnapshotRef:
         version = self._workspace.ls_remote(self.ref_name)
         if version is None:
-            raise ArtifactNotFound("repository has no current artifact")
+            raise ArtifactNotFoundError("repository has no current artifact")
         return self._manifest.snapshot(version)
 
     def materialize(self, ref: SnapshotRef) -> Artifact:
@@ -723,7 +723,9 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         with self._workspace.lock:
             current = self._workspace.ls_remote(self.ref_name)
             if current != expected_parent.revision:
-                raise ArtifactConflict(f"repository is at {current}, not expected parent {expected_parent.revision}")
+                raise ArtifactConflictError(
+                    f"repository is at {current}, not expected parent {expected_parent.revision}"
+                )
             files = {
                 ".gitattributes": _LFS_ATTRIBUTES,
                 _MANIFEST: _ArtifactManifest.text(
@@ -765,7 +767,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
                 if current != expected_parent.revision:
-                    raise ArtifactConflict(f"repository advanced from {expected_parent.revision}") from exc
+                    raise ArtifactConflictError(f"repository advanced from {expected_parent.revision}") from exc
                 raise
             if not linked:
                 self._cache_snapshot(commit, artifact.local_path, paths, files)
@@ -805,7 +807,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             if current == ref.revision:
                 return
             if current != expected_parent.revision:
-                raise ArtifactConflict("repository head changed before the staged snapshot was committed")
+                raise ArtifactConflictError("repository head changed before the staged snapshot was committed")
             try:
                 self._workspace.force_push_with_lease(
                     f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
@@ -816,7 +818,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                 if current == ref.revision:
                     return
                 if current != expected_parent.revision:
-                    raise ArtifactConflict("repository head changed while committing a staged snapshot") from exc
+                    raise ArtifactConflictError("repository head changed while committing a staged snapshot") from exc
                 raise
 
     def _open_repository(self) -> None:

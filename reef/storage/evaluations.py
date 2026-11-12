@@ -26,7 +26,7 @@ EvaluationState = Literal["queued", "running", "finished", "failed"]
 EVALUATION_STATES: tuple[EvaluationState, ...] = ("queued", "running", "finished", "failed")
 
 
-class EvaluationStateConflict(ReefError):
+class EvaluationStateConflictError(ReefError):
     """An evaluation is not in the state that a change of state needs, or does not exist."""
 
 
@@ -143,21 +143,21 @@ class EvaluationStore(ABC):
 
     @abstractmethod
     def begin(self, evaluation_id: str) -> StoredEvaluation:
-        """Start a queued evaluation and return it, ``running``; ``EvaluationStateConflict`` for any other."""
+        """Start a queued evaluation and return it, ``running``; ``EvaluationStateConflictError`` for any other."""
 
     @abstractmethod
     def finish(self, evaluation_id: str, *, result: PolicyEvaluation, finished_at: float) -> StoredEvaluation:
-        """End a running evaluation with ``result`` and return it; ``EvaluationStateConflict`` for any other."""
+        """End a running evaluation with ``result`` and return it; ``EvaluationStateConflictError`` for any other."""
 
     @abstractmethod
     def fail(self, evaluation_id: str, *, error: str, finished_at: float) -> StoredEvaluation:
-        """End a queued or running evaluation with ``error`` and return it; ``EvaluationStateConflict`` for any
+        """End a queued or running evaluation with ``error`` and return it; ``EvaluationStateConflictError`` for any
         other."""
 
     @abstractmethod
     def reopen(self, evaluation_id: str) -> StoredEvaluation:
         """Make a finished or failed evaluation ``running`` again and return it, without its result, its error and
-        its ``finished_at``; ``EvaluationStateConflict`` for any other."""
+        its ``finished_at``; ``EvaluationStateConflictError`` for any other."""
 
     @abstractmethod
     def get(self, evaluation_id: str) -> StoredEvaluation | None:
@@ -168,4 +168,10 @@ class EvaluationStore(ABC):
         """At most ``limit`` evaluations, newest ``created_at`` first; ``ValueError`` unless ``limit`` is positive."""
 
 
-__all__ = ["EVALUATION_STATES", "EvaluationState", "EvaluationStateConflict", "EvaluationStore", "StoredEvaluation"]
+__all__ = [
+    "EVALUATION_STATES",
+    "EvaluationState",
+    "EvaluationStateConflictError",
+    "EvaluationStore",
+    "StoredEvaluation",
+]

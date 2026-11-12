@@ -35,6 +35,7 @@ from typing import Any
 
 from reef_client.client import ReefClient, ReefClientError
 
+from reef.core.errors import InternalError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
@@ -61,7 +62,7 @@ MODAL_SANDBOX_MARGIN_S = 3600
 MODAL_SANDBOX_MAX_S = 24 * 60 * 60
 
 
-class TaskRolloutError(RuntimeError):
+class TaskRolloutError(InternalError, RuntimeError):
     """A task's rollout could not run, or could not be reported."""
 
 

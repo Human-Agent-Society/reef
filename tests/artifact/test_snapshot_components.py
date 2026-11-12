@@ -16,7 +16,7 @@ from tests.support.serving import wait_for_serving
 
 from reef.artifact import (
     Artifact,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactPublicationError,
     DefaultStart,
     InMemoryRepositoryBackend,
@@ -110,7 +110,7 @@ def test_component_views_of_a_composed_release(tmp_path: Path) -> None:
 
     assert composed.components is not None
     assert composed.components.names == (WEIGHTS, HARNESS)
-    with pytest.raises(ArtifactNotFound, match="holds components"):
+    with pytest.raises(ArtifactNotFoundError, match="holds components"):
         _ = composed.artifact_id
     view = composed.component(WEIGHTS)
     assert view.local_path == tmp_path / "release" / WEIGHTS
@@ -118,7 +118,7 @@ def test_component_views_of_a_composed_release(tmp_path: Path) -> None:
     assert view.ref.revision == composed.ref.revision
     assert dict(view.metadata) == {"runtime_load_id": "inc:3"}
     assert TextFileTree().read_files(composed.component(HARNESS)) == {"AGENTS.md": "rules"}
-    with pytest.raises(ArtifactNotFound):
+    with pytest.raises(ArtifactNotFoundError):
         composed.component("config")
 
     # A snapshot without a manifest is its own only component, whatever the caller names.

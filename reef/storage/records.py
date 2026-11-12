@@ -15,7 +15,7 @@ from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 
 
-class RecordConflict(ReefError):
+class RecordConflictError(ReefError):
     """A record id already identifies different content."""
 
 
@@ -55,7 +55,7 @@ class RecordStore(ABC):
 
     Reads are scoped to the supplied scenario. Record ids are
     unique across the store: retries with identical content are idempotent,
-    while different content raises ``RecordConflict``. Retry comparison ignores
+    while different content raises ``RecordConflictError``. Retry comparison ignores
     ``created_at``.
 
     Append sequences increase and must never be reused, including after
@@ -149,7 +149,7 @@ class RecordStore(ABC):
 __all__ = [
     "AgentRecord",
     "AppendResult",
-    "RecordConflict",
+    "RecordConflictError",
     "RecordLoss",
     "RecordRetention",
     "RecordStore",

@@ -11,9 +11,9 @@ level up. Boundaries this package holds:
 - Releases are immutable and heads move only by compare-and-swap
   (``activate`` takes ``expected``; ``publish`` takes
   ``expected_parent``), so concurrent publication conflicts loudly
-  (``ArtifactConflict``) instead of losing a snapshot.
+  (``ArtifactConflictError``) instead of losing a snapshot.
 - A ``local:`` release has identity but no durable bytes; activation and
-  a new training start refuse it as a source (``SnapshotNotRestorable``).
+  a new training start refuse it as a source (``SnapshotNotRestorableError``).
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it
 through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes
@@ -43,10 +43,10 @@ They remain usable without a commit history.
 
 from reef.artifact.artifact import (
     Artifact,
-    ArtifactConflict,
+    ArtifactConflictError,
     ArtifactError,
     ArtifactMaterializationError,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactPublicationError,
     ArtifactSourceError,
     ArtifactValidator,
@@ -71,7 +71,7 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedSnapshotRepositoryBackend,
 )
-from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorable
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorableError
 from reef.artifact.sources import (
     REFERENCE_FILE,
     ArtifactSourceReader,
@@ -95,11 +95,11 @@ __all__ = [
     "REFERENCE_FILE",
     "AdapterArtifactError",
     "Artifact",
-    "ArtifactConflict",
+    "ArtifactConflictError",
     "ArtifactError",
     "ArtifactFiles",
     "ArtifactMaterializationError",
-    "ArtifactNotFound",
+    "ArtifactNotFoundError",
     "ArtifactPublicationError",
     "ArtifactSnapshotChain",
     "ArtifactSourceError",
@@ -131,7 +131,7 @@ __all__ = [
     "RepositoryBackendFactory",
     "S3PrefixFiles",
     "S3Reader",
-    "SnapshotNotRestorable",
+    "SnapshotNotRestorableError",
     "SnapshotRef",
     "SourceFiles",
     "StagedSnapshotRepositoryBackend",

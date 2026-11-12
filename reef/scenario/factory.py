@@ -16,7 +16,7 @@ from typing import Any
 
 from reef.artifact.artifact import (
     Artifact,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactPublicationError,
     SnapshotRef,
     artifact_components,
@@ -128,7 +128,7 @@ class RepositoryCommitSnapshots(CommitSnapshots):
             if record.snapshot == UNLOCATED_SNAPSHOT:
                 try:
                     record = replace(record, snapshot=self.snapshot(record, seen, active))
-                except ArtifactNotFound as exc:
+                except ArtifactNotFoundError as exc:
                     raise CommitHistoryError(f"commit step {record.step} names a missing artifact: {exc}") from exc
             seen.update((record.artifact_ids or {}).values())
             if record.activates:

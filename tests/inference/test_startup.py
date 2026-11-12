@@ -18,13 +18,13 @@ from reef.dispatcher import Dispatcher, serving
 from reef.dispatcher.serving import ServingWorker
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.inference.null import NullInferenceRuntime
-from reef.inference.startup import StartupFailed, StartupStopped, redeploying, report_startup, stopping
+from reef.inference.startup import StartupFailedError, StartupStoppedError, redeploying, report_startup, stopping
 from reef.service.app import create_app
 from reef.service.inference_service import build_inference_app
 from reef.storage.served_models import REDEPLOY, SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import WorkLeaseLost
+from reef.storage.work_queue import WorkLeaseLostError
 
 STATUS = "/reef/scenarios/math/inference/status"
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}
@@ -221,7 +221,7 @@ def test_an_inference_worker_resumes_expired_startup_and_keeps_completed_work_re
             completed = control.coordination.served_models.current_request("math")
             assert completed.id == abandoned.id and completed.attempt_count == 2
             assert completed.result and control.coordination.served_models.read_scenario("math")
-            with pytest.raises(WorkLeaseLost):
+            with pytest.raises(WorkLeaseLostError):
                 control.coordination.served_models.complete_request(
                     abandoned, "previous-process", {}, serving_config={}, stop_delay_seconds=0
                 )
@@ -392,12 +392,12 @@ class StoppableRuntime(PausedRuntime):
         try:
             while not self.release.wait(0.02):
                 if stopping():
-                    raise StartupStopped
+                    raise StartupStoppedError
         finally:
             with self.lock:
                 self.running -= 1
         if self.fail_start:
-            raise StartupFailed("--language-model-only does not support this model")
+            raise StartupFailedError("--language-model-only does not support this model")
         return StubInferenceRuntime.activate_checkpoint(self, artifact, scenario=scenario)
 
 

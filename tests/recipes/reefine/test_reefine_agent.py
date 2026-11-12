@@ -24,7 +24,7 @@ from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider
 from recipes.beta.reefine.trial import trial_script
 from reef.core.training_request import TrainingRequest
 from reef.execution.sandbox.e2b import E2BSession
-from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramTimeout, SandboxExecutor
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramTimeoutError, SandboxExecutor
 from reef.execution.sandbox.remote import pack
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import reply_tool_calls, tool_summary
@@ -289,7 +289,7 @@ def test_a_run_past_its_limit_keeps_its_tree_and_progress_without_publishing(tmp
         assert "pi.getActiveTools()" in reference and "**replaces**" in reference
         (workspace / "rules.md").write_text("Unfinished candidate")
         (root / "output" / "progress.md").write_text("API confirmed; tool isolation remains unchecked.")
-        raise ProgramTimeout("deadline")
+        raise ProgramTimeoutError("deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     workspace, services = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
@@ -424,7 +424,7 @@ def test_a_trial_reserves_finish_time_and_records_the_exact_candidate(tmp_path, 
 
     def launch(*args, timeout, **kwargs):
         timeouts.append(timeout)
-        raise ProgramTimeout("trial deadline")
+        raise ProgramTimeoutError("trial deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     run, gateway = gateway_run(tmp_path, timeout_s=100)

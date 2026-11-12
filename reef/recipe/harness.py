@@ -35,7 +35,7 @@ from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
 from reef.core.config import Settings, config_option
-from reef.core.errors import ReefError
+from reef.core.errors import InternalError, ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.model_metadata import ModelMetadata
 from reef.core.plugins import PluginReference
@@ -403,6 +403,8 @@ class HarnessEvolutionRecipe(Recipe):
             executor = build_executor(section, environ=values)
             worker_executor = role_executor_settings(settings, "evolution")
             agent = agent_settings(evolution.agent, values, state_dir=Path(evolution.state_dir).expanduser())
+        except InternalError:
+            raise
         except (TypeError, ValueError, ReefError) as exc:
             raise RecipeConfigError(str(exc)) from exc
         try:

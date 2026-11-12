@@ -12,7 +12,7 @@ from tests.support.artifact_versions import ImportingComponent, ImportingInferen
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
-from reef.artifact.artifact import ArtifactNotFound
+from reef.artifact.artifact import ArtifactNotFoundError
 from reef.core.errors import ReefError
 from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
@@ -168,7 +168,7 @@ def test_a_mapping_serves_exactly_its_artifacts_and_the_commit_history_records_e
     assert value.set_served("math", {old_id: 100}) == {"served": {old_id: 100}}
     assert [record.operation for record in scenario.store.history()[-3:]] == ["serve", "activate", "stop_serving"]
     assert new_id not in scenario.served_beside()
-    with pytest.raises(ArtifactNotFound):
+    with pytest.raises(ArtifactNotFoundError):
         scenario.stop_serving(new_id)
     # The active artifact still answers at its artifact's URL; the stopped artifact has no row.
     wait_for_serving(value)
@@ -217,7 +217,7 @@ def test_a_mapping_that_names_an_unknown_artifact_changes_nothing(tmp_path) -> N
     new_id, old_id = newest["artifact_id"], older["artifact_id"]
     steps = len(scenario.store.history())
     for mapping in ({"missing": 100}, {new_id: 60, "missing": 40}, {old_id: 100, "missing": 0}):
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             value.set_served("math", mapping)
     with pytest.raises(ValueError, match="no component 'other'"):
         value.set_served("math", {old_id: 100}, "other")

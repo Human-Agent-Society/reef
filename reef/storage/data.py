@@ -49,15 +49,15 @@ RECORD_SOURCES = ("inference", "evaluation")
 MAX_QUERY_LIMIT = 1000
 
 
-class ItemConflict(ReefError):
+class ItemConflictError(ReefError):
     """An item ID that the owner already stores with other content."""
 
 
-class ItemNotFound(ReefError):
+class ItemNotFoundError(ReefError):
     """An item ID that the owner does not store."""
 
 
-class ScenarioArchived(ReefError):
+class ScenarioArchivedError(ReefError):
     """A write of record items for a generation of their scenario that is no longer current."""
 
 
@@ -435,7 +435,7 @@ class DataStore(Plugin, ABC):
     Operations:
 
     * ``create(owner, items)`` stores each item, all or none. An item whose ID the owner stores with the same
-      digest is unchanged; with another digest it is an ``ItemConflict``, and nothing is stored. Bad metadata or
+      digest is unchanged; with another digest it is an ``ItemConflictError``, and nothing is stored. Bad metadata or
       content is a ``ValueError``, and nothing is stored.
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
@@ -463,12 +463,12 @@ class DataStore(Plugin, ABC):
     * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``. A durable reader of record items keeps one cursor for each: a
       ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
-      (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items, without content.
+      (``patched_metadata``). An unknown ID is an ``ItemNotFoundError``. It returns the updated items, without content.
     * ``replace_task(owner, item_id, directory)`` copies the task directory ``directory``, named ``item_id``, into
       the owner's task file partition and gives the task item ``item_id`` its digest. The item keeps its ID,
       sequence and metadata. When the digest changes, each use of the item gets a new use sequence, so a trainer
       reads the task again; the same files change nothing. It returns the item without content. An unknown ID is an
-      ``ItemNotFound``; an item of another kind, or a directory of another name, is a ``ValueError``, and nothing
+      ``ItemNotFoundError``; an item of another kind, or a directory of another name, is a ``ValueError``, and nothing
       changes. The files of the old digest stay, so a reader that opened them can go on.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
     * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
@@ -477,7 +477,7 @@ class DataStore(Plugin, ABC):
     * ``scenario_generation(owner, scenario)`` returns the current generation of ``scenario``: an opaque string,
       new when the scenario has none. A writer of the scenario's records reads it when it opens the scenario, and
       gives it to ``create``. ``create(owner, items, generation=...)`` stores record items of one origin scenario
-      only while that generation is current; else it raises ``ScenarioArchived`` and stores nothing.
+      only while that generation is current; else it raises ``ScenarioArchivedError`` and stores nothing.
     * ``prune_records(max_bytes)`` deletes the oldest record items of the source ``inference``, across owners, until
       those items hold at most ``max_bytes``, and returns their number. Each deleted item adds to the ``RecordLoss``
       of its origin scenario. It deletes no evaluation call and does not count its bytes. A store counts the bytes that it keeps for a record item: its row and the trajectory nodes that
@@ -919,12 +919,12 @@ class MemoryDataStore(DataStore):
         prepared = prepared_items(owner, items, self.task_files)
         origin = generation_origin(prepared, generation)
         if origin is not None and self.generations.get((owner, origin)) != generation:
-            raise ScenarioArchived(f"generation {generation!r} of {origin!r} is no longer current")
+            raise ScenarioArchivedError(f"generation {generation!r} of {origin!r} is no longer current")
         stored = self.items.setdefault(owner, {})
         for entry in prepared:
             existing = stored.get(entry[0].item_id)
             if existing is not None and existing.digest != entry[2]:
-                raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
+                raise ItemConflictError(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
         result: list[StoredItem] = []
         for item, metadata, digest in prepared:
             existing = stored.get(item.item_id)
@@ -1100,7 +1100,7 @@ class MemoryDataStore(DataStore):
         stored = self.items.get(owner, {})
         missing = [item_id for item_id in item_ids if item_id not in stored]
         if missing:
-            raise ItemNotFound(f"{owner!r} stores no item {missing[0]!r}")
+            raise ItemNotFoundError(f"{owner!r} stores no item {missing[0]!r}")
         updated = [
             StoredItem(
                 stored[item_id].sequence,
@@ -1122,7 +1122,7 @@ class MemoryDataStore(DataStore):
         stored = self.items.get(owner, {})
         item = stored.get(item_id)
         if item is None:
-            raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+            raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
         digest = replaced_task_digest(owner, item, directory, self.task_files)
         if digest != item.digest:
             item = replace(item, digest=digest)

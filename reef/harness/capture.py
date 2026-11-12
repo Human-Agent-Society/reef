@@ -22,10 +22,11 @@ from typing import Any
 
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
+from reef.core.errors import InternalError
 from reef.core.records_types import ROLLOUT_HEADER
 
 
-class CaptureError(Exception):
+class CaptureError(InternalError):
     """The capture proxy could not start or is not running."""
 
 

@@ -24,7 +24,7 @@ from reef.storage.tasks import (
     SplitName,
     StoredTask,
     TaskCandidate,
-    TaskConflict,
+    TaskConflictError,
     TaskFileStore,
     TaskStorage,
     TaskStore,
@@ -194,9 +194,9 @@ class SQLTaskStore(TaskStore):
             name = candidate["task_name"]
             for task in self.published_tasks(connection, task_name=name):
                 if task.files_digest != candidate["files_digest"]:
-                    raise TaskConflict(f"task {name!r} is published with other files")
+                    raise TaskConflictError(f"task {name!r} is published with other files")
                 if task.split != split:
-                    raise TaskConflict(f"task {name!r} is published to {task.split}, not {split}")
+                    raise TaskConflictError(f"task {name!r} is published to {task.split}, not {split}")
             if candidate["split"] is None:
                 self.set_outcome(connection, generation, index, split=split)
             (published,) = self.published_tasks(connection, task_name=name)

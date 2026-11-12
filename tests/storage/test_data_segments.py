@@ -14,7 +14,7 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.storage import sql_data
 from reef.storage.data import NewItem
 from reef.storage.record_items import record_item
-from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentNotFound, SegmentPartition, segment_lines
+from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentNotFoundError, SegmentPartition, segment_lines
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore
 
@@ -73,13 +73,13 @@ def test_a_segment_is_json_lines_and_a_reader_reads_only_its_lines(tmp_path):
     store.put("acme", "s1", data)
     assert [json.loads(line) for line in data.decode().splitlines()] == [{"a": 1}, {"b": "二"}]
     assert store.read("acme", list(reversed(places))) == ('{"b":"二"}'.encode(), b'{"a":1}')
-    with pytest.raises(SegmentNotFound):
+    with pytest.raises(SegmentNotFoundError):
         store.read("other", places)
-    with pytest.raises(SegmentNotFound):
+    with pytest.raises(SegmentNotFoundError):
         store.read("acme", [SegmentLine("s1", places[1].offset, 100)])
     store.delete("acme", "s1")
     store.delete("acme", "s1")
-    with pytest.raises(SegmentNotFound):
+    with pytest.raises(SegmentNotFoundError):
         store.read("acme", places)
     with pytest.raises(ValueError, match="newline"):
         segment_lines("s2", ["{}\n{}"])
