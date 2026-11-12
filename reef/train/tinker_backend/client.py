@@ -15,7 +15,7 @@ from typing import Any
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate
 from reef.tinker.service import close_service, served_context_windows, tinker_sdk
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
-from reef.train.tinker_backend.config import TinkerServiceConfig
+from reef.train.tinker_backend.config import TinkerServiceSettings
 from reef.train.tinker_backend.losses import MatrixInput, TinkerCustomLoss, TinkerLoss, TokenRow
 
 logger = logging.getLogger(__name__)
@@ -160,7 +160,7 @@ class TinkerSDKClient(TinkerClient):
 
     _sdk: Any
     _model: str
-    _config: TinkerServiceConfig
+    _config: TinkerServiceSettings
     _api_key: str
     _service: Any
     #: The frozen base model's sampling client, made at the first KL term.
@@ -171,7 +171,7 @@ class TinkerSDKClient(TinkerClient):
     def __init__(
         self,
         base_model: str,
-        config: TinkerServiceConfig,
+        config: TinkerServiceSettings,
         api_key: str,
         *,
         lora_rank: int | None,

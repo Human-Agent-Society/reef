@@ -14,7 +14,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.service.assembly import build_dispatcher
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import (
@@ -352,7 +352,7 @@ class SubdirectoryTaskFileStore(LocalTaskFileStore):
     ],
 )
 def test_the_deployment_selects_the_task_file_store(tmp_path, backend, files_root):
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_repository=str(tmp_path / "artifacts.git"),
@@ -378,4 +378,4 @@ def test_the_deployment_selects_the_task_file_store(tmp_path, backend, files_roo
 )
 def test_the_deployment_rejects_an_invalid_task_file_backend(backend):
     with pytest.raises(ValueError, match="task_file_backend"):
-        ServiceConfig(recipe="recipe", task_file_backend=backend)
+        ServiceSettings(recipe="recipe", task_file_backend=backend)

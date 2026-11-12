@@ -238,7 +238,7 @@ def chat_stream(response: dict[str, Any], payload: dict[str, Any]) -> InferenceS
 
 
 @dataclass(frozen=True)
-class TinkerInferenceConfig:
+class TinkerInferenceSettings:
     """What the sampler needs; the trainer passes these from its own ``training.options``."""
 
     api_key: str | None = config_option(None, help="Tinker API key; prefer api_key_env.")
@@ -267,7 +267,7 @@ class TinkerInferenceRuntimeFactory(RuntimeFactory):
     kind = "tinker"
 
     def config_type(self) -> type:
-        return TinkerInferenceConfig
+        return TinkerInferenceSettings
 
     def __call__(
         self,

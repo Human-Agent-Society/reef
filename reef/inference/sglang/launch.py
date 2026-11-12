@@ -19,7 +19,7 @@ from reef.inference.process import (
     check_server_owner,
     ports_in_use,
 )
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.engine import ReefSGLangEngine
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
 from reef.inference.sglang.process import launch_router, node_address_and_port, wait_ready
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 SGLANG_PLUGIN_NAME = "reef"
 
 
-def engine_environment(config: SGLangConfig) -> dict[str, str]:
+def engine_environment(config: SGLangSettings) -> dict[str, str]:
     configured = config.env_vars.get("SGLANG_PLUGINS", os.environ.get("SGLANG_PLUGINS", ""))
     plugins = [name.strip() for name in configured.split(",") if name.strip()]
     return {
@@ -58,7 +58,7 @@ class SGLangEngineGroup(EngineGroup):
     ``router`` is the host and port of the router that every engine registers with.
     """
 
-    def __init__(self, config: SGLangConfig, placement: Any, router: tuple[str, int]) -> None:
+    def __init__(self, config: SGLangSettings, placement: Any, router: tuple[str, int]) -> None:
         self.config, self.placement = config, placement
         self.router = router
         self.all_engines: list[Any] = [None] * config.engine_count
@@ -141,7 +141,7 @@ class SGLangCluster:
     router; ``endpoint`` is then the router's URL, which serves every engine.
     """
 
-    def __init__(self, config: SGLangConfig, placement: Any) -> None:
+    def __init__(self, config: SGLangSettings, placement: Any) -> None:
         self.config, self.placement = config, placement
         self.group: SGLangEngineGroup | None = None
         self.routers: list[Any] = []

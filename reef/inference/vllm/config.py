@@ -6,14 +6,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.execution.executor import Executor
-from reef.inference.engine_control import EngineConfig
+from reef.inference.engine_control import EngineSettings
 
 #: Engine arguments Reef derives from its own settings; ``options`` may not repeat them.
 RESERVED_OPTIONS = frozenset({"model", "host", "port", "tensor_parallel_size", "enable_sleep_mode"})
 
 
 @dataclass(frozen=True)
-class VLLMConfig(EngineConfig):
+class VLLMSettings(EngineSettings):
     """One model served by identical single-node vLLM engines on the reserved inference GPUs."""
 
     model_path: str

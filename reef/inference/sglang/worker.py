@@ -9,14 +9,14 @@ import ray
 
 from reef.inference.process import retire_engines
 from reef.inference.recovery import InferenceControl, InferenceEngineGroup
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.launch import SGLangCluster
 
 
 class SGLangWorker:
     """Own the serving engines and the locally launched router."""
 
-    def __init__(self, config: SGLangConfig, pg: Any) -> None:
+    def __init__(self, config: SGLangSettings, pg: Any) -> None:
         self.config = config
         self.cluster = SGLangCluster(config, pg)
         self._closed = False

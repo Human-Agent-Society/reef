@@ -1,6 +1,6 @@
 """Assemble the Reef HTTP service from settings: dispatcher, registry, app.
 
-This is the service's composition logic — a :class:`ServiceConfig` in, a
+This is the service's composition logic — a :class:`ServiceSettings` in, a
 running aiohttp application out. It knows nothing about the deployment config
 format; ``reef.service.deploy`` translates YAML into these settings and
 orchestrates processes around the result.
@@ -43,7 +43,7 @@ from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import evaluation_token_for
 from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
-from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
+from reef.service.deploy.service_config import ServiceSettings, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
 from reef.service.harness_imports import HarnessSyncWorker
@@ -77,10 +77,10 @@ def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
     return None
 
 
-def _recipe_owned_settings(settings: ServiceConfig) -> dict[str, Any]:
+def _recipe_owned_settings(settings: ServiceSettings) -> dict[str, Any]:
     """The flat ``reef.*`` keys that belong to the recipe, not the service.
 
-    The service's own vocabulary is :class:`ServiceConfig`' fields plus the
+    The service's own vocabulary is :class:`ServiceSettings`' fields plus the
     config spellings that map onto them (``reef.token`` feeds ``tokens``), so
     it never drifts from what the settings layer consumes. Everything else
     the operator wrote under ``reef:`` is recipe configuration and must be
@@ -103,7 +103,7 @@ def _require_non_empty(value: str | None, setting: str) -> str:
 
 
 def connect_training_component(
-    settings: ServiceConfig, *, model_path: str, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
+    settings: ServiceSettings, *, model_path: str, default_parameters: Mapping[JobDataKind, Mapping[str, Any]]
 ) -> tuple[TrainingComponent, InferenceRuntime]:
     """Build the selected training component for the recipe's ``default_parameters``, then its snapshots' serving.
 
@@ -127,7 +127,7 @@ def connect_training_component(
     return component, serving
 
 
-def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:
+def _upstream_runtime(settings: ServiceSettings) -> InferenceRuntime | None:
     """The proxy runtime ``reef.upstream_url`` names, or None to leave recipes
     to their own resolution (a recipe-config ``runtime`` section, else the
     ``REEF_UPSTREAM_URL`` environment)."""
@@ -144,7 +144,7 @@ def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:
 
 def _training_recipe(
     recipe_type: type[WeightTrainingRecipe],
-    settings: ServiceConfig,
+    settings: ServiceSettings,
     env: Mapping[str, str],
 ) -> Recipe:
     """Build a weight-training recipe on the selected backend runtime."""
@@ -181,7 +181,7 @@ def composed_training_recipe(
     config: dict[str, Any],
     weight_type: type[WeightTrainingRecipe],
     weight_config: Mapping[str, Any],
-    settings: ServiceConfig,
+    settings: ServiceSettings,
     env: Mapping[str, str],
 ) -> Recipe:
     """Build a recipe that trains weights through one of its components, on the selected backend runtime.
@@ -227,13 +227,13 @@ def composed_training_recipe(
         raise
 
 
-def serving_recipe(settings: ServiceConfig, env: Mapping[str, str]) -> Recipe:
+def serving_recipe(settings: ServiceSettings, env: Mapping[str, str]) -> Recipe:
     """The deployment's recipe, as every process of the deployment builds it: its runtime is the same in each, and
     only control opens it (``InferenceRuntime.open``)."""
     return _serving_recipe(_require_non_empty(settings.recipe, "reef.recipe"), settings, env)
 
 
-def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str]) -> Recipe:
+def _serving_recipe(selected: str, settings: ServiceSettings, env: Mapping[str, str]) -> Recipe:
     """Build the one recipe ``reef.recipe`` names.
 
     The spellings differ only in where config and runtime come from: a dotted
@@ -305,7 +305,7 @@ def default_served_url(host: str, port: int) -> str:
     return f"http://[{bound}]:{port}" if literal.version == 6 else f"http://{bound}:{port}"
 
 
-def build_segment_store(settings: ServiceConfig) -> SegmentStore | None:
+def build_segment_store(settings: ServiceSettings) -> SegmentStore | None:
     """The segment store that ``storage.segment_backend`` names, in ``<agent_record_dir>/segments``, or None."""
     directory = Path(settings.agent_record_dir) / "segments"
     if settings.segment_backend is None:
@@ -316,7 +316,7 @@ def build_segment_store(settings: ServiceConfig) -> SegmentStore | None:
     return SegmentStore.referenced_class(reference).from_config(reference.config, directory=directory)
 
 
-def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> DataStore:
+def build_data_store(settings: ServiceSettings, task_files: TaskFileStore) -> DataStore:
     """The data store that ``storage.data_store`` names, sharing ``task_files`` without owning it, and owning the
     segment store of ``storage.segment_backend``.
 
@@ -357,7 +357,7 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
         raise
 
 
-def open_service_coordination(settings: ServiceConfig) -> Coordination:
+def open_service_coordination(settings: ServiceSettings) -> Coordination:
     """The deployment's coordination store: on ``storage.coordination_backend``, which defaults to the built-in
     record backend, with the record database and schema of ``settings``."""
     backend = settings.coordination_backend
@@ -374,7 +374,7 @@ def open_service_coordination(settings: ServiceConfig) -> Coordination:
     )
 
 
-def build_task_files(settings: ServiceConfig) -> TaskFileStore:
+def build_task_files(settings: ServiceSettings) -> TaskFileStore:
     """The task file store that ``storage.task_file_backend`` names, in ``storage.task_file_dir``."""
     task_file_directory = Path(settings.task_file_dir)
     if settings.task_file_backend == "local":
@@ -383,7 +383,7 @@ def build_task_files(settings: ServiceConfig) -> TaskFileStore:
     return TaskFileStore.referenced_class(reference).from_config(reference.config, directory=task_file_directory)
 
 
-def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, DataStore]:
+def open_scenario_storage(settings: ServiceSettings) -> tuple[ScenarioStorage, DataStore]:
     """The deployment's scenario storage (``storage.record_backend``), which owns the task file store, and the data
     store (``build_data_store``), which keeps the scenarios' records. The caller closes the data store before the
     storage, because the data store shares the task file store."""
@@ -417,7 +417,7 @@ def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, Dat
     return storage, data
 
 
-def build_artifact_backend(settings: ServiceConfig) -> ConfigurableRepositoryBackendFactory:
+def build_artifact_backend(settings: ServiceSettings) -> ConfigurableRepositoryBackendFactory:
     """Build the artifact backend shared by control and inference."""
     artifact_backend = (
         {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
@@ -438,7 +438,7 @@ def build_artifact_backend(settings: ServiceConfig) -> ConfigurableRepositoryBac
 
 
 def build_dispatcher(
-    settings: ServiceConfig,
+    settings: ServiceSettings,
     *,
     environ: Mapping[str, str] | None = None,
     hold_local_cycles: bool = False,
@@ -592,7 +592,7 @@ def build_dispatcher(
 
 
 def build_app(
-    settings: ServiceConfig,
+    settings: ServiceSettings,
     *,
     environ: Mapping[str, str] | None = None,
     inference_handler: InferenceHandler | None = None,

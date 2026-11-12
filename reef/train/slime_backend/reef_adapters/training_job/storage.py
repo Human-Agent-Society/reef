@@ -32,7 +32,7 @@ MEGATRON_TRACKER = "latest_checkpointed_iteration.txt"
 
 
 @dataclass(frozen=True)
-class RetentionConfig:
+class RetentionSettings:
     policy: str = "latest"
     max_storage_fraction: float | None = 0.8
     min_free_space_fraction: float = 0.1
@@ -69,12 +69,12 @@ class RetentionConfig:
         )
 
 
-def retention_options(arguments: Sequence[str]) -> tuple[RetentionConfig, list[str]]:
+def retention_options(arguments: Sequence[str]) -> tuple[RetentionSettings, list[str]]:
     """Split Reef's ``--reef-checkpoint-*`` options from ``arguments``; return their config and the other arguments.
 
     The sizes take a unit (``size_bytes``). An option that is not given keeps
-    its ``RetentionConfig`` default. Raise ``ValueError`` for a config that
-    ``RetentionConfig`` refuses.
+    its ``RetentionSettings`` default. Raise ``ValueError`` for a config that
+    ``RetentionSettings`` refuses.
     """
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, argument_default=argparse.SUPPRESS)
     parser.add_argument("--reef-checkpoint-policy", dest="policy")
@@ -83,7 +83,7 @@ def retention_options(arguments: Sequence[str]) -> tuple[RetentionConfig, list[s
     parser.add_argument("--reef-checkpoint-max-storage", dest="max_storage_bytes", type=size_bytes)
     parser.add_argument("--reef-checkpoint-min-free-space", dest="min_free_space_bytes", type=size_bytes)
     options, remaining = parser.parse_known_args(list(arguments))
-    return RetentionConfig(**vars(options)), remaining
+    return RetentionSettings(**vars(options)), remaining
 
 
 def size_bytes(value: str) -> int:
@@ -113,7 +113,7 @@ class CheckpointStorage:
 
     def __init__(
         self,
-        config: RetentionConfig,
+        config: RetentionSettings,
         *,
         hf_template: str,
         megatron_root: str | Path,

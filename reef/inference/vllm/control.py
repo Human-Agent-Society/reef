@@ -7,7 +7,7 @@ to travel directly between training workers and inference engines.
 from __future__ import annotations
 
 from reef.inference.engine_control import EngineControl, EngineExecutor
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 
 
 class VLLMExecutor(EngineExecutor):
@@ -19,5 +19,5 @@ class VLLMExecutor(EngineExecutor):
         return VLLMWorker(**dict(self.config.options))
 
 
-class VLLMControl(EngineControl[VLLMConfig]):
+class VLLMControl(EngineControl[VLLMSettings]):
     """Own the vLLM serving executor inside Reef's inference control actor."""

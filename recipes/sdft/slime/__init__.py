@@ -15,13 +15,13 @@ from typing import Any
 from reef.train.algos.helpers import next_steps
 from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.algorithm import register_loss_family
-from reef.train.slime_backend.distill import DistillAlgorithm, DistillSettings
+from reef.train.slime_backend.distill import DistillAlgorithm, DistillAlgorithmSettings
 from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective
 from reef.train.types import JobData, trajectories
 
 
 @dataclass(frozen=True)
-class SdftSettings(DistillSettings):
+class SdftSettings(DistillAlgorithmSettings):
     """SDFT's defaults, parsed from the ``--sdft-*`` flags.
 
     The reference trainer's (idanshen/Self-Distillation, ``distil_config.py``

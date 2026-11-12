@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.engine import ReefSGLangEngine
 from reef.inference.sglang.launch import SGLangEngineGroup
 
@@ -78,7 +78,7 @@ def native_engine(monkeypatch):
 
 def test_native_launch_uses_supplied_placement_and_versions_before_registration(native_engine):
     _, launched, events = native_engine
-    config = SGLangConfig("model", 8, 8, 8, options={"pp_size": 2, "enable_memory_saver": True})
+    config = SGLangSettings("model", 8, 8, 8, options={"pp_size": 2, "enable_memory_saver": True})
     worker = ReefSGLangEngine(config, 0, base_gpu_id=4)
     worker.init("10.0.0.1:18000", 16000, 17000, "10.0.0.1", router_ip="10.0.0.2", router_port=3000)
     assert launched[0]["tp_size"] == 4
@@ -116,7 +116,7 @@ def test_group_places_each_engine_on_its_reserved_gpus_and_its_own_ports(monkeyp
 
     monkeypatch.setattr(launch.ray, "remote", lambda cls: ActorClass())
     monkeypatch.setattr(launch.ray, "get", lambda value: value)
-    config = SGLangConfig("model", 8, 4, 8)
+    config = SGLangSettings("model", 8, 4, 8)
     group = SGLangEngineGroup(config, (object(), list(range(8)), [0, 1, 2, 3, 4, 5, 6, 7]), ("router", 3000))
     group.start_engines({})
     assert [c["scheduling_strategy"].placement_group_bundle_index for c in calls] == [0, 4]
@@ -131,7 +131,7 @@ def test_group_places_each_engine_on_its_reserved_gpus_and_its_own_ports(monkeyp
 
 
 def test_group_rejects_noncontiguous_gpu_reservations_before_launch(monkeypatch):
-    config = SGLangConfig("model", 2, 2, 4)
+    config = SGLangSettings("model", 2, 2, 4)
     group = SGLangEngineGroup(config, (object(), [0, 1], [0, 2]), ("router", 3000))
     with pytest.raises(ValueError, match="contiguous"):
         group.start_engines({})
@@ -186,7 +186,7 @@ def test_sglang_enables_reef_plugin_without_training_preflight(monkeypatch):
     from reef.inference.sglang.launch import engine_environment
 
     monkeypatch.setenv("SGLANG_PLUGINS", "telemetry")
-    config = SGLangConfig("model", 1, 1, 1)
+    config = SGLangSettings("model", 1, 1, 1)
     env = engine_environment(config)
     assert env["SGLANG_PLUGINS"] == "telemetry,reef"
     assert env["SGLANG_REEF_PLUGIN"] == "1"

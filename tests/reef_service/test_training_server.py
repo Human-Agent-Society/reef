@@ -26,7 +26,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.service import deploy
 from reef.service.app import create_app
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import JobStatus, TrainingJob
@@ -84,7 +84,7 @@ def _example_owned(relative_path: str):
 LOCAL_TRAINING_BACKEND = "tests.support._training_deployment:LocalDeployment"
 
 
-def _settings(**overrides) -> ServiceConfig:
+def _settings(**overrides) -> ServiceSettings:
     recipe_settings = dict(overrides.pop("recipe_settings", {}))
     values = {
         "host": "0.0.0.0",
@@ -107,7 +107,7 @@ def _settings(**overrides) -> ServiceConfig:
         "recipe_settings": recipe_settings,
     }
     values.update(overrides)
-    return ServiceConfig(**values)
+    return ServiceSettings(**values)
 
 
 @pytest.fixture
@@ -593,7 +593,7 @@ def test_service_tokens_merge_token_and_tokens_and_drop_empties() -> None:
 
 
 def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
-    """``reef.token`` feeds ``ServiceConfig.tokens`` under another name; the
+    """``reef.token`` feeds ``ServiceSettings.tokens`` under another name; the
     recipe-owned remainder of the section must still exclude it, or every
     training recipe would reject the cookbook configs as unconsumed settings."""
     from reef.service.assembly import _recipe_owned_settings

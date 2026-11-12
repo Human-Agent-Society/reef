@@ -15,7 +15,7 @@ from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_named_recipe
 from reef.service import assembly
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -157,7 +157,7 @@ def test_service_app_cleanup_closes_its_owned_runtime_once(monkeypatch, tmp_path
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
 
     async def run():
-        app = assembly.build_app(ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path)))
+        app = assembly.build_app(ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path)))
         runner = web.AppRunner(app)
         await runner.setup()
         await runner.cleanup()
@@ -176,6 +176,6 @@ def test_failed_service_assembly_releases_its_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
     with pytest.raises(ValueError, match="training must be an object"):
         assembly.build_dispatcher(
-            ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), training_settings="invalid")
+            ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path), training_settings="invalid")
         )
     assert events == ["close component", "shutdown runtime"]

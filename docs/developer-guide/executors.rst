@@ -354,7 +354,7 @@ Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
 
 .. code:: python
 
-   from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec, resolve
+   from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec, resolve
 
    class Counter:
        def __init__(self, rank):
@@ -366,7 +366,7 @@ Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
            return self.rank, self.value
 
    if __name__ == "__main__":  # required for spawn
-       executor = Executor.create(ExecutorConfig(
+       executor = Executor.create(ExecutorLaunch(
            workers=tuple(WorkerSpec(Counter, args=(rank,)) for rank in range(2)),
        ))  # auto -> mp
        try:
@@ -418,7 +418,7 @@ Implement ``_init_executor``, ``rpc``, ``collective_rpc``, ``check_health`` and
 gets a future back can subclass ``SubmittingExecutor`` instead. It then
 implements only ``_submit`` and ``_submit_all``. The bundled ``uni``, ``mp``
 and ``ray`` executors and ``DelegatingExecutor`` are built that way.
-Backend-specific launch configuration belongs in ``ExecutorConfig.options``.
+Backend-specific launch configuration belongs in ``ExecutorLaunch.options``.
 GPU tensors, optimizer state, NCCL collectives and KV transfers remain the
 model backend's responsibility. Changing executors does not resize a live
 topology or reshard checkpoints.
@@ -454,7 +454,7 @@ placement, rank-zero rendezvous and the memory-saver environment. RPC goes
 through the shared ``RayExecutor``.
 
 ``--reef-executor-backend`` in ``training.options`` selects another worker
-executor. The executor receives these values in ``ExecutorConfig.options``:
+executor. The executor receives these values in ``ExecutorLaunch.options``:
 
 - ``args``, the parsed Slime arguments.
 - The node and GPU counts, and the placement group ``pg``.
@@ -609,7 +609,7 @@ does not import or initialize Ray to probe it. It does not count GPUs, change
 TP/PP, or retry a failed backend with another backend. Resource requests must
 describe the intended scheduling. Standalone SGLang commands still control
 their own model parallelism. ``auto`` is also the default
-``ExecutorConfig.backend`` for the low-level worker factory. A service
+``ExecutorLaunch.backend`` for the low-level worker factory. A service
 controller is not a model rank. Slime's specialized Ray requirement and
 service resource reservations stay specific to each component; they do not
 implement vLLM's TP/PP launcher.

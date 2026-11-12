@@ -59,7 +59,7 @@ def serving_engine_config(
     ``adapter`` release format enables the engine's adapter table, of
     ``adapter_capacity`` adapters. ``prefix_sharing`` retracts the requests
     in flight at each load, which lets the engines keep their prefix cache
-    where that is safe (SGLang decides; see ``SGLangConfig``). ``vllm`` serves full
+    where that is safe (SGLang decides; see ``SGLangSettings``). ``vllm`` serves full
     weights only, with one engine. Any other engine, such as a
     ``module:factory``, gets SGLang's input. Raise ``ValueError`` for an
     input the engine cannot serve.
@@ -107,7 +107,7 @@ def serving_engine_config(
 
 
 @dataclass(frozen=True)
-class RemoteServingRuntimeConfig:
+class RemoteServingRuntimeSettings:
     """Options of the inference service's runtime for published weights that engines on an inference component serve.
 
     Values: ``remote`` is an ``inference.remote`` section that
@@ -216,7 +216,7 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
     kind = "remote_serving"
 
     def config_type(self) -> type:
-        return RemoteServingRuntimeConfig
+        return RemoteServingRuntimeSettings
 
     def parse_config(self, config: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
         injected = {key: config[key] for key in ("inference_handler_factory",) if key in config}

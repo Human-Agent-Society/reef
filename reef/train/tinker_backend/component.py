@@ -44,7 +44,7 @@ from reef.train.local_jobs import LocalJobComponent
 from reef.train.task_rollouts import RolloutSettings, RolloutTokens, TaskJobRollouts, run_train_tasks, task_name
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
-from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
+from reef.train.tinker_backend.config import ScoreCentering, TinkerServiceSettings, TinkerSettings
 from reef.train.tinker_backend.parameters import TinkerJobParameters, rollout_settings, tinker_parameters_schema
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
@@ -61,7 +61,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     A job's parameters are ``TinkerJobParameters``: ``objective``, optionally
     ``learning_rate_schedule`` and ``scheduling``, and ``batch_size``, ``kl_coef``,
     ``learning_rate``, ``save_interval`` and ``rollout``, where ``batch_size``,
-    ``kl_coef`` and ``learning_rate`` default to the component's ``TinkerServiceConfig``.
+    ``kl_coef`` and ``learning_rate`` default to the component's ``TinkerServiceSettings``.
     ``submit`` refuses any other parameter or a malformed value. Jobs of
     several scenarios can share the component, since each job trains from its
     own start.
@@ -108,7 +108,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def __init__(
         self,
         base_model: str,
-        config: TinkerServiceConfig,
+        config: TinkerServiceSettings,
         client: TinkerClient,
         *,
         sampler: TinkerSampler | None = None,
@@ -465,7 +465,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
     """
 
     def __init__(
-        self, base_model: str, config: TinkerConfig, client: TinkerClient, *, sampler: TinkerSampler | None = None
+        self, base_model: str, config: TinkerSettings, client: TinkerClient, *, sampler: TinkerSampler | None = None
     ) -> None:
         self._lora_rank = config.lora_rank
         super().__init__(base_model, config, client, sampler=sampler)
