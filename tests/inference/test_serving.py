@@ -287,6 +287,37 @@ def test_a_failed_load_that_took_the_scenarios_own_slot_serves_nothing_until_rec
     assert engines.events[-1] == "resume"
 
 
+def test_a_base_root_stays_bound_until_the_scenarios_adapter_serves(engines, tmp_path, monkeypatch):
+    serving = opened(
+        AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=2, model_path="Qwen/Qwen3-8B")
+    )
+    serving.activate_checkpoint(published_snapshot(saved_base_root(tmp_path / "base"), "base"), scenario="math")
+    base_route = serving.served_artifact("base", "math")
+    assert base_route is not None
+    trained = published_snapshot(saved_adapter(tmp_path / "job-1"), "j1")
+
+    def refuse_resume():
+        raise RuntimeError("the engines did not resume")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(engines, "resume", refuse_resume)
+        with pytest.raises(RuntimeError, match="did not resume"):
+            serving.activate_checkpoint(trained, scenario="math")
+    # The adapter loaded, but generation stays paused, so no artifact has a route until recovery.
+    assert serving.recovery_pending
+    assert serving.served_artifact("base", "math") is None and serving.served_artifact("j1", "math") is None
+    # Recovery restores what served before the activation: the base root, and not the adapter that never served.
+    serving.recover_engines()
+    assert serving.served_artifact("base", "math") == base_route
+    assert serving.served_artifact("j1", "math") is None and serving.serving_adapter_runtime_load_id("math") is None
+    # A second activation of the adapter serves it, which ends the binding of the base root.
+    version = serving.activate_checkpoint(trained, scenario="math")
+    assert serving.served_artifact("j1", "math") == ServedArtifact(
+        "j1", "http://component.example", adapter_name("math", version)
+    )
+    assert serving.served_artifact("base", "math") is None and serving.base_artifact_ids == {}
+
+
 def test_shutdown_closes_admission_and_the_service_that_owns_the_engines(engines):
     service = Service()
     serving = opened(AdapterServingRuntime(ServiceEngines(engines, service), Handler(), adapter_capacity=1))

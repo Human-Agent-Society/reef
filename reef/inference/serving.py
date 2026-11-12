@@ -517,8 +517,10 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
                 # Generation is paused, so the scenario's own adapter may make room for its new one.
                 self.residency.activate(scenario, version, self.adapter_engine, files=files, supersede=True)
                 self.loaded_artifact_ids[version] = artifact_id
-                self.base_artifact_ids.pop(scenario, None)
                 self.resume_restored()
+                # The base root stays bound until the adapter serves. After a failed resume, recovery restores no
+                # adapter for the scenario, which then serves its base root again.
+                self.base_artifact_ids.pop(scenario, None)
             except AdapterEvictionFailedError:
                 # The engine kept an adapter that the runtime tried to unload, so recovery must restore the bindings.
                 raise
