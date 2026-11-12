@@ -137,6 +137,7 @@ class TaskJobRollouts:
     Values: ``samples`` holds the samples of the groups that train, each group contiguous, every sample with the
     ``group_id`` of its task. ``scores`` holds the score of each rollout, by task name, in run order; each group names
     a task of ``scores``. ``tokens`` holds the ``RolloutTokens`` of each rollout that ran, in the order of ``scores``.
+    ``left_out`` is a non-negative int, the samples left out because they are longer than the job's ``max_tokens``.
     Purpose: ``run_train_tasks`` makes it; the component trains ``samples`` and reports ``metrics`` in the job's
     metrics.
     """
@@ -144,8 +145,11 @@ class TaskJobRollouts:
     samples: tuple[TrajectorySample, ...]
     scores: RolloutScores
     tokens: tuple[RolloutTokens, ...]
+    left_out: int = 0
 
     def __post_init__(self) -> None:
+        if isinstance(self.left_out, bool) or not isinstance(self.left_out, int) or self.left_out < 0:
+            raise ValueError("TaskJobRollouts.left_out must be a non-negative int")
         if any(not isinstance(sample, TrajectorySample) for sample in self.samples):
             raise TypeError("task rollouts train trajectories")
         if not isinstance(self.scores, RolloutScores):
@@ -181,6 +185,7 @@ class TaskJobRollouts:
         those whose calls do not assemble into a sample, as on Slime. ``rollout_tokens`` maps each task to the
         ``response_tokens`` and ``trained_tokens`` of each of its rollouts that ran, in run order, and
         ``rollout_response_tokens`` and ``rollout_trained_tokens`` are their sums over the job.
+        ``unrenderable_samples`` counts the samples left out for their length (``left_out``), when there are any.
         """
         rollouts = sum(len(scores) for _, scores in self.scores.tasks)
         return {
@@ -197,6 +202,7 @@ class TaskJobRollouts:
             },
             "rollout_response_tokens": sum(item.response_tokens for item in self.tokens),
             "rollout_trained_tokens": sum(item.trained_tokens for item in self.tokens),
+            **({"unrenderable_samples": self.left_out} if self.left_out else {}),
         }
 
 
@@ -315,13 +321,15 @@ def run_train_tasks(
     start: str,
     model_adapter: str | None = None,
     lab: TaskLab | None = None,
+    max_tokens: int | None = None,
 ) -> TaskJobRollouts:
     """Run ``settings.rollouts_per_task`` rollouts of each task, answering their model calls with ``chat``.
 
     ``model`` is the model name the agent sends, and ``model_adapter`` the adapter it names, or None. ``start`` is
     the job's ``start``, the weights that ``chat`` samples; each sample names it as its ``artifact_id``.
-    ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``. The result counts the tokens of each
-    rollout that ran (``RolloutTokens``).
+    ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``. ``max_tokens`` is the most tokens a
+    sample's targets, every token but the first, may have, or None for no bound: a longer sample is left out before
+    its task's group forms. The result counts the tokens of each rollout that ran (``RolloutTokens``).
     """
     assembly = rollout_assembly(settings)
     with ChatEndpoint(chat) as endpoint:
@@ -349,6 +357,7 @@ def run_train_tasks(
         )
     samples: list[TrajectorySample] = []
     tokens: list[RolloutTokens] = []
+    left_out = 0
     for index, task in enumerate(tasks):
         name = task_name(task)
         ran = [
@@ -357,18 +366,29 @@ def run_train_tasks(
             if not rollout.is_infrastructure_failure
         ]
         assembled = [(rollout, rollout_sample(rollout, name, assembly, start)) for rollout in ran]
-        group = [sample for _, sample in assembled if sample is not None]
+        # A sample whose targets are longer than max_tokens is left out before the group forms: Tinker refuses a whole
+        # optimizer step for one such row.
+        rows = [
+            (
+                rollout,
+                sample,
+                sample is not None and (max_tokens is None or len(sample.training["tokens"]) - 1 <= max_tokens),
+            )
+            for rollout, sample in assembled
+        ]
+        group = [sample for _, sample, is_fitting in rows if sample is not None and is_fitting]
+        left_out += sum(sample is not None and not is_fitting for _, sample, is_fitting in rows)
         # A group of fewer than two samples has no relative reward, so it does not train.
         trains = len(group) >= 2
         if trains:
             samples.extend(group)
-        for rollout, sample in assembled:
+        for rollout, sample, is_fitting in rows:
             sampled = sum(
                 len(recorded_training({"response": turn.response}).get("loss_mask", ())) for turn in rollout.turns
             )
-            trained = sum(sample.training.get("loss_mask", [])) if sample is not None and trains else 0
+            trained = sum(sample.training.get("loss_mask", [])) if sample is not None and is_fitting and trains else 0
             tokens.append(RolloutTokens(name, sampled, trained, assembled=sample is not None))
     scores = RolloutScores.by_task(
         [task_name(task) for task in tasks], [runner.rollout_score(rollout) for rollout in rollouts]
     )
-    return TaskJobRollouts(tuple(samples), scores, tuple(tokens))
+    return TaskJobRollouts(tuple(samples), scores, tuple(tokens), left_out)

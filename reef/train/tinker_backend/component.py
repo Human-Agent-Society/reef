@@ -281,6 +281,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
                 trajectories(JobData(job.data_id, samples)),
                 RolloutScores.from_json(kept["scores"]),
                 tuple(RolloutTokens(**item) for item in kept["tokens"]),
+                kept["left_out"],
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
@@ -304,6 +305,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             work_dir=directory / "rollouts",
             start=job.start,
             model_adapter=start.sampler_path,
+            max_tokens=self._client.context_window(),
         )
         write_json(
             record,
@@ -311,6 +313,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
                 "samples": JobData(job.data_id, rollouts.samples).to_dict(),
                 "scores": rollouts.scores.to_json(),
                 "tokens": [asdict(item) for item in rollouts.tokens],
+                "left_out": rollouts.left_out,
             },
         )
         return rollouts

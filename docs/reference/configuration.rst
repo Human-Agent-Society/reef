@@ -2156,7 +2156,9 @@ its group trains with advantage 0 on Slime and counts in ``rollout_samples``;
 on Tinker it does not train, and it is in neither count. A Tinker task job
 also reports each rollout's response tokens and the tokens of them that train
 (``rollout_tokens``), and their sums (``rollout_response_tokens`` and
-``rollout_trained_tokens``).
+``rollout_trained_tokens``). On Tinker, a sample longer than the model's context
+window is left out before its group forms: ``unrenderable_samples`` counts it,
+and it is in neither ``rollout_samples`` nor the trained tokens.
 
 Task jobs on Slime
 ~~~~~~~~~~~~~~~~~~
@@ -2243,11 +2245,8 @@ its reward out of its group's mean and deviation, so the group's other rollouts
 train against each other. A group with one sample left has advantage 0. When
 no group of a Slime rollout can train, the job fails before the workers train it,
 with the first rollout's error. Slime's metrics such as ``rollout/raw_reward``
-count a removed sample with reward 0. The job's metrics report each task's
-rewards of the rollouts that ran (``rollout_rewards``), the samples that train
-(``rollout_samples``), and the rollouts that give no sample because they fail
-in the infrastructure or their model calls do not assemble into one
-(``removed_rollouts``).
+count a removed sample with reward 0. The job's metrics are the task job
+metrics above: ``rollout_rewards``, ``rollout_samples`` and ``removed_rollouts``.
 
 The driver refuses a task job, when it is submitted, in these cases:
 

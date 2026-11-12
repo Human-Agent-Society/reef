@@ -302,12 +302,16 @@ def chat_request(payload: dict[str, Any]) -> tuple[list[dict[str, str]], dict[st
         raise UpstreamStatusError("Tinker requires non-empty text messages", status=400)
     messages = []
     for message in raw:
+        # An assistant message may keep the reasoning_content that a Tinker answer carries, so a client can send its
+        # history back as it got it; the chat template renders it as that reply's thinking.
+        is_assistant = isinstance(message, dict) and message.get("role") == "assistant"
+        keys = {"role", "content", "reasoning_content"} if is_assistant else {"role", "content"}
         if (
             not isinstance(message, dict)
-            or set(message) != {"role", "content"}
-            or not isinstance(message["role"], str)
+            or not {"role", "content"} <= set(message) <= keys
             or message["role"] not in {"system", "user", "assistant"}
             or not isinstance(message["content"], str)
+            or not isinstance(message.get("reasoning_content", ""), str)
         ):
             raise UpstreamStatusError("Tinker currently supports text system/user/assistant messages", status=400)
         messages.append(dict(message))

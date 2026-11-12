@@ -201,6 +201,30 @@ def test_a_rollout_counts_its_response_tokens_and_the_tokens_that_train(tmp_path
 
 
 @pytest.mark.unit
+def test_a_sample_longer_than_max_tokens_is_left_out_before_its_group_forms(tmp_path):
+    rollouts = run_train_tasks(
+        (harbor_task(tmp_path, "add"),),
+        rollout_settings({"rollout": {"rollouts_per_task": 2, "concurrency": 1}}),
+        SamplerChat(ScaffoldSampler(), None, model=MODEL, runtime_load_id="tinker:base", topk_logprobs=0),
+        model=MODEL,
+        work_dir=tmp_path / "work",
+        start="tinker://start",
+        lab=TwoCallLab({"add": 1.0}),
+        max_tokens=1,
+    )
+
+    # Both samples are longer than the bound, so the group has none to compare and no token counts as trained.
+    assert rollouts.samples == ()
+    assert rollouts.tokens == (RolloutTokens("add", 4, 0, assembled=True),) * 2
+    metrics = rollouts.metrics()
+    assert (metrics["rollout_samples"], metrics["rollout_trained_tokens"], metrics["unrenderable_samples"]) == (
+        0,
+        0,
+        2,
+    )
+
+
+@pytest.mark.unit
 def test_the_sampler_chat_refuses_a_request_that_tinker_cannot_serve():
     with ChatEndpoint(
         SamplerChat(Sampler(), None, model=MODEL, runtime_load_id="tinker:base", topk_logprobs=0)

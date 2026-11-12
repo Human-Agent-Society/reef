@@ -602,3 +602,15 @@ def test_thinking_rides_reasoning_content_and_the_answer_is_the_content():
     assert thinking["training"]["response_message"] == message
     direct = chat(TextSampler([1, 3], [12], window=4096))["choices"][0]["message"]
     assert direct == {"role": "assistant", "content": '\n\n{"commands": []}'}, "thinking off: no reasoning field"
+
+
+@pytest.mark.unit
+def test_a_client_can_send_back_an_answer_with_its_reasoning_content():
+    # terminus-2 with interleaved thinking, and an OpenAI client that appends the returned message, both do this.
+    sampler = TextSampler([1, 2], [10, 11, 12], window=4096)
+    answer = chat(sampler)["choices"][0]["message"]
+    history = [{"role": "user", "content": "go"}, answer, {"role": "user", "content": "next"}]
+    again = sample_chat(sampler, None, {"model": "m", "messages": history}, model="m", runtime_load_id="start")
+    assert again["training"]["request_messages"][1] == answer
+    with pytest.raises(UpstreamStatusError, match="system/user/assistant messages"):
+        chat(sampler, messages=[{"role": "user", "content": "go", "reasoning_content": "plan"}])
