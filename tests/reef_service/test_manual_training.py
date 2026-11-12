@@ -13,7 +13,14 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support import trainers
-from tests.support.harness_jobs import COMPONENT, UNCHANGED, TreeArtifacts, changed_rules, harness_recipe
+from tests.support.harness_jobs import (
+    COMPONENT,
+    UNCHANGED,
+    TreeArtifacts,
+    changed_rules,
+    harness_recipe,
+    rebuilt_recipe,
+)
 from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
 from tests.support.polling import became_true
 from tests.support.records import item_records, memory_records
@@ -312,7 +319,9 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
         seen.append((workspace.request(), workspace.traces()))
         called.set()
 
-    dispatcher = open_dispatcher(replace(recipe_in("manual", tmp_path, method), pipeline_stages=harness_stages()))
+    dispatcher = open_dispatcher(
+        rebuilt_recipe(recipe_in("manual", tmp_path, method), pipeline_stages=harness_stages())
+    )
     dispatcher.get_or_create_scenario("s")
 
     async def run():

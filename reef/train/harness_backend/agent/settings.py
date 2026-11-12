@@ -17,7 +17,7 @@ from reef.execution.sandbox.config import REMOTE_EXECUTORS, remote_executor
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import AdapterProgram
-from reef.train.harness_backend.agent.run import AgentExecution
+from reef.train.harness_backend.contract import AgentExecution
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,8 @@ class AgentSettings:
     the agent's isolation, not yet bound to the adapter's program.
     ``timeout_s`` > 0 bounds one run. ``binary`` is the agent's binary,
     ``None`` for the adapter's pinned install.
-    Purpose: ``agent_settings`` reads it from the deployment, and the recipe
-    binds it for each scenario.
+    Purpose: ``agent_settings`` reads it from the deployment, and the harness
+    training component binds it for each scenario.
     """
 
     adapter: str

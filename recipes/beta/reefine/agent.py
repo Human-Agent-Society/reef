@@ -20,7 +20,7 @@ left, that tree in ``output/``.
 The agent holds no credential. Online model and provider calls go through a
 loopback gateway (:mod:`recipes.beta.reefine.agent_gateway`) that spends from
 the job's model-call budget and records into the job's ``calls.json``. Its
-isolation is the executor the recipe built for it
+isolation is the executor that the deployment's agent settings name
 (``evolution.agent.sandbox``). Scripted trials use a fixed local
 model in that same executor.
 """
@@ -66,8 +66,8 @@ from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import headless_argv, launch_agent, read_session
 from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
-from reef.train.harness_backend import Services, Workspace
-from reef.train.harness_backend.agent.run import AgentExecution, agent_env
+from reef.train.harness_backend import AgentExecution, Services, Workspace
+from reef.train.harness_backend.agent.run import agent_env
 
 AGENT_RULES = Path(__file__).with_name("agent_rules.md")
 AGENT_TOOLS = Path(__file__).with_name("agent_tools.ts")
@@ -101,8 +101,8 @@ class ReefineAgent:
     the agent and its trials run under, pi's binary there, and the time limit
     of the whole agent run. ``trial_timeout_s`` > 0 bounds each trial.
     ``provider`` is the deployment's multimodal gateway, ``None`` for none.
-    Purpose: ``ReefineRecipe.build_backend`` makes one per scenario;
-    ``ReefineMethod`` runs the agent on a request job with it.
+    Purpose: ``ReefineMethod`` makes one for a request job, from the agent that the job's services hold
+    (``Services.agent``) and its own config, and runs the agent with it.
     """
 
     execution: AgentExecution

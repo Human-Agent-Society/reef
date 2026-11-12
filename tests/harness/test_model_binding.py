@@ -463,7 +463,7 @@ def test_recipe_binds_the_model_metadata_of_the_served_model() -> None:
         **evolution_config(adapter="codex", model_metadata={"small": {"context_window": 640_000, "reasoning": True}}),
     }
     codex = load_recipe(HarnessEvolutionRecipe, config, {}, runtime=runtime)
-    assert codex.model_binding().metadata.context_window == 640_000
+    assert codex.harness_models().served().metadata.context_window == 640_000
 
 
 def test_unknown_api_is_refused() -> None:
@@ -554,7 +554,7 @@ def test_recipe_declares_named_models_under_evolution_models() -> None:
         return load_recipe(HarnessEvolutionRecipe, config, environ, runtime=runtime)
 
     teacher = {"url": "http://big", "model": "large", "api_key_env": "TEACHER_KEY"}
-    models = recipe({"teacher": teacher}, {"TEACHER_KEY": "sk-t"}).model_bindings()
+    models = recipe({"teacher": teacher}, {"TEACHER_KEY": "sk-t"}).harness_models().bindings()
     assert models.served.model == "small" and models["teacher"].api_key == "sk-t"
     with pytest.raises(RecipeConfigError, match="may not name a model 'served'"):
         recipe({"served": {"url": "http://x", "model": "m"}}, {})

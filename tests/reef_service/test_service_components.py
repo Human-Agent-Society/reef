@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent
-from tests.support.harness_jobs import IdleMethod, harness_recipe
+from tests.support.harness_jobs import evolution_config, runtime
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.trajectories import policy_trajectory
@@ -29,6 +29,8 @@ from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.recipe import CompositeRecipe, Recipe
+from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.record2sample.service import (
     RECORD_SELECTION_KIND,
     SAMPLES_QUEUE,
@@ -182,7 +184,12 @@ def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_e
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = replace(settings(tmp_path), served_url="http://reef-control:8000")
-    recipe = CompositeRecipe(components={"harness": harness_recipe(tmp_path, IdleMethod()), "records": Recipe()})
+    # The training service builds the harness training component from the recipe's settings, after the recipe
+    # has the served endpoint.
+    harness = load_recipe(
+        HarnessEvolutionRecipe, evolution_config(state_dir=str(tmp_path / "harness")), {}, runtime=runtime()
+    )
+    recipe = CompositeRecipe(components={"harness": harness, "records": Recipe()})
     monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
     bindings = []
     start = TrainingJobWorker.start
@@ -190,7 +197,7 @@ def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_e
     def observe_start(worker: TrainingJobWorker) -> None:
         component = worker.component
         assert isinstance(component, HarnessTrainingComponent)
-        bindings.append(component.jobs.recipe.model_binding("math"))
+        bindings.append(component.models.served("math"))
         start(worker)
 
     monkeypatch.setattr(TrainingJobWorker, "start", observe_start)

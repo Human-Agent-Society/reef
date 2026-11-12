@@ -88,8 +88,10 @@ Implementation
   history instead of keeping copies of them.
 - Put a prompt longer than a sentence or two in a ``.md`` file beside the
   method.
-- Subclass ``HarnessEvolutionRecipe`` only when the method changes more than
-  the tree, such as the files a client pulls.
+- Subclass ``HarnessEvolutionRecipe`` only to change configuration, such as
+  the defaults of a deployment or the files a client pulls. A recipe builds
+  no backend, evaluator or method; a method takes what it needs from
+  ``job.services``.
 
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~

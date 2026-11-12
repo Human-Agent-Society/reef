@@ -3,8 +3,11 @@
 ``config_field`` declares one value of the recipe's ``data`` section. Config
 wins over a declared environment fallback and the dataclass default.
 ``section_field`` declares a field that holds one config section, parsed into
-the field's ``Settings`` dataclass. The loader (``reef.recipe.loading``) reads
-both declarations. Range and cross-field validation stay in the recipe's
+the field's ``Settings`` dataclass. ``reader_field`` declares a field whose
+value a ``ConfigReader`` reads from the config, for a value that is neither:
+one that several sections give, a file that a section names, or a value that
+needs the environment. The loader (``reef.recipe.loading``) reads the three
+declarations. Range and cross-field validation stay in the recipe's
 ``__post_init__``.
 """
 
@@ -12,11 +15,13 @@ from __future__ import annotations
 
 import sys
 import types
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import MISSING, field, fields
 from typing import Any, get_type_hints
 
 from reef.core.config import Settings, config_arguments, config_option, parse_config_values
+from reef.core.errors import InternalError, ReefError
 from reef.recipe.errors import RecipeConfigError
 
 
@@ -86,6 +91,59 @@ def resolve_section_field_values(recipe_class: type, config: Mapping[str, Any]) 
         try:
             values[item.name] = settings_type.from_config(section, setting=path)
         except (TypeError, ValueError) as exc:
+            raise RecipeConfigError(str(exc)) from exc
+    return values
+
+
+#: The metadata key of a ``reader_field``: its ``ConfigReader``.
+FIELD_READER = "recipe_config_reader"
+
+
+class ConfigReader(ABC):
+    """Reads the value of one recipe field from the flat recipe config.
+
+    Values: a reader holds no state. ``read(config, environ, sections)`` returns the value of the field: ``config``
+    is the flat recipe config after the class's ``section_defaults``, ``environ`` the environment, and ``sections``
+    the parsed ``section_field`` values of the class by field name. The result is configuration: a value that the
+    config, the environment and the files that the config names decide, and never an object that runs. ``read``
+    raises ``ValueError`` or a ``ReefError`` for a config that gives no such value.
+    Purpose: ``reader_field`` declares one on a recipe field, and the loader calls ``read`` once for each load
+    (``resolve_reader_field_values``).
+    """
+
+    @abstractmethod
+    def read(self, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]) -> object:
+        """The value of the field for ``config``."""
+
+
+def reader_field(reader: ConfigReader, *, default: Any = MISSING, default_factory: Any = MISSING) -> Any:
+    """Declare a recipe field whose value ``reader`` reads from the flat recipe config.
+
+    ``default`` or ``default_factory`` is the value of a recipe that code builds without the loader.
+    """
+    if not isinstance(reader, ConfigReader):
+        raise TypeError("reader_field takes a ConfigReader")
+    return field(default=default, default_factory=default_factory, metadata={FIELD_READER: reader})
+
+
+def resolve_reader_field_values(
+    recipe_class: type, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]
+) -> dict[str, object]:
+    """Read each ``reader_field`` of ``recipe_class`` from ``config``; the result maps field names to values.
+
+    Raise ``RecipeConfigError`` with the reader's message for a ``TypeError``, a ``ValueError`` or a ``ReefError``
+    that is not an ``InternalError``.
+    """
+    values: dict[str, object] = {}
+    for item in fields(recipe_class):
+        reader = item.metadata.get(FIELD_READER)
+        if reader is None:
+            continue
+        try:
+            values[item.name] = reader.read(config, environ, sections)
+        except (InternalError, RecipeConfigError):
+            raise
+        except (TypeError, ValueError, ReefError) as exc:
             raise RecipeConfigError(str(exc)) from exc
     return values
 

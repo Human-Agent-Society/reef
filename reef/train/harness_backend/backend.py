@@ -64,9 +64,8 @@ from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
 from reef.train.backend import ArtifactTextFiles, PreparedHarnessJob
-from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import JobCalls, call_tokens
-from reef.train.harness_backend.contract import Method, MethodJob
+from reef.train.harness_backend.contract import AgentExecution, Method, MethodJob
 from reef.train.harness_backend.records import CALLS_FILE, JobRecord
 from reef.train.harness_backend.services import JobServices
 from reef.train.harness_backend.state import HarnessState
@@ -149,7 +148,7 @@ class JobLimits:
     ``max_model_calls_per_step`` caps one job's model calls;
     ``max_runs_per_step`` caps the runs the method's
     ``services.evaluate`` runs in one job.
-    Purpose: ``HarnessEvolutionRecipe`` builds it from ``evolution``; the
+    Purpose: ``HarnessTrainingComponent`` builds it from ``evolution``; the
     backend reads it in every job.
     """
 
@@ -178,7 +177,7 @@ class HarnessBackend(HarnessCandidateEvaluator):
     does not run it. ``evaluator`` is ``None`` when the deployment configured
     no scorer; then no task runs. ``task_directories`` says
     that the tasks are Harbor task directories.
-    Purpose: ``HarnessEvolutionRecipe.build_backend`` makes one per scenario
+    Purpose: ``HarnessTrainingComponent.build_backend`` makes one per scenario
     component; the harness training component (``reef.train.harness_backend.component``) runs each job.
     """
 

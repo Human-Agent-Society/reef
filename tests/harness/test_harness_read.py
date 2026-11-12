@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-from tests.support.harness_jobs import IdleMethod, evolution_config
+from tests.support.harness_jobs import evolution_config
 
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.components import ScenarioComponents
@@ -13,18 +13,17 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import CompositeRecipe, Recipe
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.service.app import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.harness_backend.settings import EvolutionSettings
 
 #: The files pi reads for a tree that holds only ``rules.md`` with the text ``rule``: its package and empty configs.
 PI_RULES_RENDER = render_tree(HarnessTree({"rules.md": "rule"}), get_adapter("pi"))
 #: A pi harness evolution recipe: what its components serves is the subject here, so it never builds a backend.
-PI_RECIPE = HarnessEvolutionRecipe(
-    method=IdleMethod(), evolution=EvolutionSettings(), evaluation=EvaluationSettings(policy="none")
-)
+PI_RECIPE = HarnessEvolutionRecipe(evolution=EvolutionSettings(), evaluation=EvaluationSettings(policy="none"))
 
 
 @dataclass(frozen=True, kw_only=True)

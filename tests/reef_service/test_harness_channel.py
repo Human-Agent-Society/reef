@@ -9,13 +9,12 @@ import asyncio
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_jobs import changed_rules, harness_recipe
+from tests.support.harness_jobs import changed_rules, harness_recipe, rebuilt_recipe
 from tests.support.harness_render import descriptor_data, write_descriptor
 from tests.support.harness_service import EchoInference, harness_dispatcher, job_backend
 
@@ -70,7 +69,7 @@ def channel_dispatcher(
         else {}
     )
     stages["sample2job"] = {"config": {"job_samples": job_samples}}
-    recipe = replace(
+    recipe = rebuilt_recipe(
         harness_recipe(
             tmp_path,
             lambda workspace, services: next(candidates, None),

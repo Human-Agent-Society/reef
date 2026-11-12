@@ -6,7 +6,8 @@ A recipe class declares its configuration and does not load itself.
 - ``config_field`` fields from the ``data`` section, with their environment
   fallbacks (``reef.recipe.config_fields.resolve_config_field_values``);
 - ``section_field`` fields from their sections
-  (``resolve_section_field_values``);
+  (``resolve_section_field_values``), over the class's ``section_defaults``;
+- ``reader_field`` fields from their readers (``resolve_reader_field_values``);
 - the ``pipeline`` section over the class's ``pipeline_spec`` and the
   ``activation`` section, which every recipe has;
 - ``refused_sections``, which fail the load when the config sets them;
@@ -28,6 +29,7 @@ from typing import Any
 
 from reef.core.errors import RuntimeConfigError
 from reef.core.plugins import PluginConfigError
+from reef.core.values import deep_merge
 from reef.evaluation.activation import activation_reference
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.interfaces import InferenceRuntime
@@ -40,7 +42,11 @@ from reef.recipe.composite import (
     configured_training_mode,
 )
 from reef.recipe.config import load_recipe_config, recipe_config_from_mapping
-from reef.recipe.config_fields import resolve_config_field_values, resolve_section_field_values
+from reef.recipe.config_fields import (
+    resolve_config_field_values,
+    resolve_reader_field_values,
+    resolve_section_field_values,
+)
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.train.component import TrainingComponent
@@ -77,12 +83,16 @@ def load_recipe(
             recipe_class, config, environ, field_values, runtime=runtime, training_component=training_component
         )
     try:
-        config = recipe_class.config_with_defaults(config)
+        if recipe_class.section_defaults:
+            config = deep_merge(recipe_class.section_defaults, config)
         for section, message in recipe_class.refused_sections.items():
             if config.get(section):
                 raise RecipeConfigError(message)
         sections = resolve_section_field_values(recipe_class, config)
-        arguments: dict[str, Any] = {**sections, **recipe_class.built_fields(config, environ, sections)}
+        arguments: dict[str, Any] = {
+            **sections,
+            **resolve_reader_field_values(recipe_class, config, environ, sections),
+        }
         try:
             if config.get("pipeline") is not None:
                 arguments["pipeline_stages"] = PipelineSettings.from_setting(

@@ -10,13 +10,21 @@ marker score 0.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support.harness_jobs import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe, head_of
+from tests.support.harness_jobs import (
+    COMPONENT,
+    TreeArtifacts,
+    build_harness_backend,
+    configured_recipe,
+    harness_component,
+    harness_recipe,
+    head_of,
+    rebuilt_recipe,
+)
 from tests.support.harness_methods import (
     ALTERNATE,
     IMPROVED,
@@ -40,7 +48,6 @@ from reef.core.plugins import PluginConfigError
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import ComparePolicy
 from reef.harness.tree import HarnessTree
-from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import AgentMethod
@@ -59,7 +66,7 @@ def meta_harness_backend(
     """The backend of one scenario whose method is ``MetaHarness(settings)`` and whose proposer model is ``chat``."""
     method = MetaHarness(MetaHarnessSettings(**settings))
     recipe = harness_recipe(tmp_path, method, seed=seed, score=MarkerScorer(), tasks=(TASK,))
-    recipe = dataclasses.replace(recipe, models={"proposer": chat})
+    recipe = rebuilt_recipe(recipe, models={"proposer": chat})
     artifacts = TreeArtifacts(recipe.seed)
     return build_harness_backend(recipe, "demo", artifacts), artifacts
 
@@ -261,8 +268,10 @@ def test_a_deployment_names_the_method_for_any_adapter(tmp_path: Path, adapter: 
     api = "openai"
     recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime(api))
 
-    assert isinstance(recipe, HarnessEvolutionRecipe) and isinstance(recipe.method, MetaHarness)
-    assert recipe.method.settings == MetaHarnessSettings(mode="incumbent_only", components=("rules",))
+    recipe = configured_recipe(recipe)
+    method = harness_component(recipe).method
+    assert isinstance(method, MetaHarness)
+    assert method.settings == MetaHarnessSettings(mode="incumbent_only", components=("rules",))
     assert recipe.evolution.adapter == adapter and recipe.seed == SEED
     artifacts = ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
     assert isinstance(
@@ -334,14 +343,10 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
         sandbox={"egress_hosts": ["api.e2b.dev"], "env_from": ["REEF_TERMINUS_ENVIRONMENT", "E2B_API_KEY"]},
     )
     evolution["evaluation"].update(task_timeout_s=17, forbid_residue=True, tasks=["test/hello-world"])
-    recipe = build_recipe(
-        config["implementation"],
-        {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"},
-        config=config,
-        runtime=served_runtime(),
-    )
-    recipe = dataclasses.replace(
-        recipe,
+    environ = {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"}
+    recipe = build_recipe(config["implementation"], environ, config=config, runtime=served_runtime())
+    recipe = rebuilt_recipe(
+        configured_recipe(recipe, environ),
         scorer=resolve_task_scorer(lambda task, result: result.trajectory[0]["reward"]),
         models={"proposer": QueueChat(proposal_reply(SEED, proposed))},
     )

@@ -20,13 +20,13 @@ import pytest
 from tests.support.harness_jobs import TreeArtifacts, build_harness_backend, harness_recipe
 from tests.support.harness_service import backend_step
 
+from reef.core.errors import ConfigError
 from reef.core.plugins import PluginConfigError
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.modal import ModalExecutor
 from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailableError
 from reef.execution.sandbox.remote import deployment_owner
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.recipe.errors import RecipeConfigError
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.state import HarnessState
@@ -184,7 +184,7 @@ def test_a_method_folder_needs_a_start_prompt(tmp_path: Path) -> None:
 
 def test_a_method_that_runs_an_agent_needs_evolution_agent(tmp_path: Path) -> None:
     method = AgentMethod.from_config({"prompts": str(method_folder(tmp_path))})
-    with pytest.raises(RecipeConfigError, match=r"AgentMethod runs a coding agent: set evolution\.agent"):
+    with pytest.raises(ConfigError, match=r"AgentMethod runs a coding agent: set evolution\.agent"):
         harness_recipe(tmp_path, method)
 
 

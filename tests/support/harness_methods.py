@@ -16,7 +16,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from tests.support.harness_jobs import make_pi_binary
+from tests.support.harness_jobs import configured_recipe, make_pi_binary
 
 from reef.evaluation.harness import TaskScorer
 from reef.harness.tasks.model_binding import ModelBinding
@@ -100,13 +100,14 @@ def meta_harness_sections(tmp_path: Path, *, adapter: str = "pi", **method: Any)
 
 
 def meta_harness_recipe(tmp_path: Path, chat: QueueChat, **method: Any) -> HarnessEvolutionRecipe:
-    """The recipe ``meta_harness_sections`` names, built over the fake pi binary, with ``chat`` as its proposer."""
+    """The recipe ``meta_harness_sections`` names, built over the fake pi binary, with ``chat`` as its proposer and
+    with the harness training component that the service builds for it."""
     make_pi_binary(tmp_path)
     config = meta_harness_sections(tmp_path, **method)
     recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime())
     if not isinstance(recipe, HarnessEvolutionRecipe):
         raise TypeError(f"the section built a {type(recipe).__name__}")
-    return dataclasses.replace(recipe, models={"proposer": chat})
+    return configured_recipe(dataclasses.replace(recipe, models={"proposer": chat}))
 
 
 __all__ = [

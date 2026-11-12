@@ -165,8 +165,8 @@ Candidate selection
 A harness trainer's decision about which candidate tree its step keeps. A
 ``CandidateEvaluator`` measures the candidate, a ``CandidateSelector`` makes
 the select-or-reject decision, and a ``CandidateEvaluationPlugin`` implements
-both. A harness recipe builds it for each scenario from its publication
-policy. Selection does not decide what serves; the activation rule does.
+both. The harness training component builds it for each job from the
+deployment's publication policy. Selection does not decide what serves; the activation rule does.
 
 Activation rule
 ---------------

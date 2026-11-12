@@ -16,8 +16,9 @@ weights or the harness*. This package holds everything a method binds to:
   its configuration and does not load itself.
 - ``registry`` — dotted class resolution (``recipe_class_for``).
 - ``config_fields`` — one dataclass field as the whole configuration surface
-  for one setting (YAML key, env fallback, shared typed parser), and
-  ``section_field`` for a field that holds a parsed config section.
+  for one setting (YAML key, env fallback, shared typed parser),
+  ``section_field`` for a field that holds a parsed config section, and
+  ``reader_field`` for a field that a ``ConfigReader`` reads from the config.
 - ``config`` — recipe-config YAML loading; ``errors`` — the error family.
 
 The activation rule is part of this contract, not a separate subsystem:

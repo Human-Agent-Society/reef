@@ -173,6 +173,14 @@ declarations of the class:
   fallbacks.
 - ``section_field`` fields. Each holds one config section, parsed into the
   ``Settings`` dataclass of the field's annotation.
+- ``reader_field`` fields. Each names a ``ConfigReader``, whose ``read``
+  returns the field's value from the config, the environment and the parsed
+  sections. Use one for a value that no single section holds, such as a file
+  that a section names. The value is configuration, never an object that
+  runs.
+- ``section_defaults``, a class attribute with the class's own defaults for
+  its sections. The loader merges the deployment's config over them, key by
+  key. Reefine sets its method, seed and evaluation defaults this way.
 - ``refused_sections``, a class attribute that maps a config section to an
   error message. The loader raises ``RecipeConfigError`` with that message
   when the deployment sets the section. SAO refuses ``optimization`` this way.

@@ -1,5 +1,5 @@
 """Server-side vendor resolution of the harness binary: the pin gate, the
-vendor command, the install prefix, and the backend a recipe builds on it.
+vendor command, the install prefix, and the backend that the harness training component builds on it.
 
 Hermetic: the npm-kind tests shim ``npm`` on PATH and run the real
 subprocess path; the git-kind test records the install steps instead of
@@ -12,11 +12,17 @@ import os
 import stat
 import sys
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support.harness_jobs import PI_FAKE, build_harness_backend, changed_rules, harness_recipe, make_pi_binary
+from tests.support.harness_jobs import (
+    PI_FAKE,
+    build_harness_backend,
+    changed_rules,
+    harness_recipe,
+    make_pi_binary,
+    rebuilt_recipe,
+)
 from tests.support.harness_service import backend_step
 
 from reef.execution.executor.config import ExecutorSettings
@@ -257,7 +263,7 @@ def _backend(
     executor: ProgramExecutor | None = None,
     worker_executor: ExecutorSettings | None = None,
 ) -> HarnessBackend:
-    """The pi backend a recipe builds with ``binary``; ``None`` resolves the vendor's binary as the build runs."""
+    """The pi backend that the harness training component builds with ``binary``; ``None`` resolves the vendor's binary as the build runs."""
     fields: dict = {}
     if executor is not None:
         fields["executor"] = executor
@@ -267,7 +273,7 @@ def _backend(
     def method(workspace, services):
         return TreePatch(changed_rules("marker rules\n"))
 
-    recipe = replace(harness_recipe(tmp_path, method, binary=binary), **fields)
+    recipe = rebuilt_recipe(harness_recipe(tmp_path, method, binary=binary), **fields)
     return build_harness_backend(recipe, "demo")
 
 

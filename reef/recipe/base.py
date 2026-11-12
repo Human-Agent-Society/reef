@@ -17,7 +17,6 @@ from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioC
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
-from reef.core.config import Settings
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
 from reef.evaluation.activation import build_activation_rule
@@ -95,6 +94,11 @@ class Recipe:
     """Config sections that this recipe refuses, each with the message of the ``RecipeConfigError`` that the loader
     raises when the section is not empty: for example a weight recipe whose objective options belong to the backend
     refuses ``optimization``."""
+
+    section_defaults: ClassVar[Mapping[str, Any]] = {}
+    """The class's own defaults for its config sections, by section name. The loader merges the deployment's config
+    over them (``reef.core.values.deep_merge``): nested objects merge key by key, and every other value of the
+    deployment wins. A class that only sets other defaults for a base class's sections declares them here."""
 
     name: str = "recipe"
     runtime: InferenceRuntime | None = None
@@ -186,30 +190,6 @@ class Recipe:
         if self.training_component is None:
             return replace(self, data_store=data_store)
         return replace(self, training_component=components[self.training_component.name], data_store=data_store)
-
-    @classmethod
-    def config_with_defaults(cls, config: Mapping[str, Any]) -> Mapping[str, Any]:
-        """The flat recipe config that the loader reads for this class: ``config`` itself by default.
-
-        A class with defaults of its own for a section returns ``config`` with those defaults under the
-        deployment's keys. The result is a function of ``config`` alone. The loader (``reef.recipe.loading``) calls
-        it before it reads any section. Step 4 of RFC #1390 removes this hook with its one override, Reefine's.
-        """
-        return config
-
-    @classmethod
-    def built_fields(
-        cls, config: Mapping[str, Any], environ: Mapping[str, str], sections: Mapping[str, Settings]
-    ) -> dict[str, Any]:
-        """The constructor arguments that this class builds from ``config`` and cannot declare: none by default.
-
-        ``config`` is ``config_with_defaults`` of the deployment's config and ``sections`` holds the parsed
-        ``section_field`` values by field name. The loader (``reef.recipe.loading``) passes the result to the
-        constructor beside the declared fields. A harness recipe returns its method, scorer, collector and
-        executor here; step 4 of RFC #1390 moves that construction to the harness training component and removes
-        this hook.
-        """
-        return {}
 
     def with_served_endpoint(self, endpoint: ServedEndpoint) -> Recipe:
         """This recipe told where the service answers inference; the default has no calls of its own to point there."""

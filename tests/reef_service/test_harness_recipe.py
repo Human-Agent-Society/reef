@@ -29,10 +29,12 @@ from tests.support.harness_jobs import (
     changed_rules,
     evolution_config,
     harness_backend,
+    harness_component,
     harness_recipe,
     head_of,
     make_pi_binary,
     marker_score,
+    rebuilt_recipe,
     runtime,
     traced,
 )
@@ -54,6 +56,7 @@ from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact import Artifact
 from reef.core.activation import MadeArtifact
+from reef.core.errors import ConfigError
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.prompts import untrusted_text
@@ -81,11 +84,12 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import ServedEndpoint
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.service.app import create_app
+from reef.service.assembly import with_harness_components
 from reef.storage.data import NewItem
 from reef.storage.samples import StoredSample
 from reef.storage.sql_coordination import memory_coordination
@@ -93,6 +97,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
+from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainingCommit
@@ -107,7 +112,10 @@ SUPPORT = "tests.support.harness_jobs"
 
 
 def from_config(settings: dict[str, Any], **options: Any) -> HarnessEvolutionRecipe:
-    return load_recipe(HarnessEvolutionRecipe, settings, {}, **options)
+    """The recipe of ``settings`` with its harness training component, as the service builds the two."""
+    recipe = with_harness_components(load_recipe(HarnessEvolutionRecipe, settings, {}, **options), {})
+    assert isinstance(recipe, HarnessEvolutionRecipe)
+    return recipe
 
 
 def flat(scores: list[dict[str, object]]) -> list[object]:
@@ -150,18 +158,21 @@ def test_recipe_resolves_by_dotted_reference() -> None:
 
 def test_a_deployment_names_its_plugins_by_reference_or_by_module_and_config() -> None:
     built = from_config(evolution_config())
-    assert isinstance(built.method, IdleMethod) and isinstance(built.scorer, FixedScorer)
-    assert built.collector is None and built.seed == HarnessTree({}) and built.default_start().files == {}
+    component = harness_component(built)
+    assert isinstance(component.method, IdleMethod) and isinstance(component.scorer, FixedScorer)
+    assert component.collector is None and built.seed == HarnessTree({}) and built.default_start().files == {}
     collecting = from_config(
         evolution_config(
             method={"module": f"{SUPPORT}:IdleMethod", "config": {}},
             evaluation={"collect_failures": True, "collector": f"{SUPPORT}:NoCollection"},
         )
     )
-    assert isinstance(collecting.method, IdleMethod) and isinstance(collecting.collector, NoCollection)
-    with pytest.raises(RecipeConfigError, match="IdleMethod takes no config"):
+    component = harness_component(collecting)
+    assert isinstance(component.method, IdleMethod) and isinstance(component.collector, NoCollection)
+    # The harness training component builds the plugins, so it refuses a setting that names none.
+    with pytest.raises(PluginConfigError, match="IdleMethod takes no config"):
         from_config(evolution_config(method={"module": f"{SUPPORT}:IdleMethod", "config": {"depth": 2}}))
-    with pytest.raises(RecipeConfigError, match=r"evolution\.method"):
+    with pytest.raises(PluginConfigError, match=r"evolution\.method"):
         from_config(evolution_config(method=f"{SUPPORT}:Missing"))
     with pytest.raises(RecipeConfigError, match="'evolution' config section"):
         from_config({})
@@ -230,7 +241,8 @@ INVALID_SETTINGS = {
 def test_an_invalid_setting_refuses_boot_naming_it(section: dict, message: str) -> None:
     evaluation = section.get("evaluation")
     evolution = {key: value for key, value in section.items() if key != "evaluation"}
-    with pytest.raises(RecipeConfigError, match=message):
+    # The recipe refuses a bad setting, and the harness training component a setting that names nothing it can build.
+    with pytest.raises(ConfigError, match=message):
         from_config(evolution_config(evaluation=evaluation, **evolution))
 
 
@@ -280,7 +292,7 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
     )
     try:
         backend = job_backend(trainer)
-        selection = built.build_policy(backend)
+        selection = harness_component(built).build_policy(backend)
         assert type(selection) is policy
         assert {name: vars(selection)[name] for name in fields} == fields
         # With no run to run, the backend holds no evaluator.
@@ -293,7 +305,9 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     """One win and no losses clears the plain comparison but not a margin of 1."""
     recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, evaluation={"min_margin": 1})
     backend = backend_of(recipe)
-    result = backend_step(backend, JobData("demo:1"), HarnessState().to_json(), recipe.build_policy(backend))
+    result = backend_step(
+        backend, JobData("demo:1"), HarnessState().to_json(), harness_component(recipe).build_policy(backend)
+    )
     assert (result.metrics["wins"], result.metrics["losses"], result.metrics["selected"]) == (1, 0, False)
     assert result.metrics["min_margin"] == 1.0
 
@@ -471,7 +485,7 @@ def test_offline_runs_need_task_directories_to_evaluate_on_and_a_scorer() -> Non
     with pytest.raises(RecipeConfigError, match="the evaluation tasks must be task directories too"):
         from_config({**evolution_config(), **offline}, runtime=runtime())
     unscored = evolution_config(evaluation={"scorer": None, "policy": "none", "tasks": []})
-    with pytest.raises(RecipeConfigError, match=r"they need evaluation\.scorer"):
+    with pytest.raises(ConfigError, match=r"they need evaluation\.scorer"):
         from_config({**unscored, **offline}, runtime=runtime())
 
 
@@ -546,11 +560,12 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
 
 def test_recipe_selects_the_run_executor(monkeypatch: pytest.MonkeyPatch) -> None:
     """evolution.executor selects the executor; local is the default, and a sandbox that cannot isolate refuses
-    at recipe build."""
-    assert type(from_config(evolution_config()).executor).__name__ == "LocalExecutor"
-    assert type(from_config(evolution_config(executor="local")).executor).__name__ == "LocalExecutor"
+    when the harness training component is built."""
+    assert type(harness_component(from_config(evolution_config())).executor).__name__ == "LocalExecutor"
+    local = harness_component(from_config(evolution_config(executor="local")))
+    assert type(local.executor).__name__ == "LocalExecutor"
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
-    with pytest.raises(RecipeConfigError, match="bubblewrap"):
+    with pytest.raises(ConfigError, match="bubblewrap"):
         from_config(evolution_config(executor="sandbox"))
 
 
@@ -558,9 +573,9 @@ def test_evolution_worker_selector_is_independent_of_sandbox_selector() -> None:
     settings = {"execution": {"evolution": {"backend": "mp", "workers": 2}}, **evolution_config()}
     recipe = from_config(settings)
     assert recipe.worker_executor == ExecutorSettings("mp", workers=2)
-    assert type(recipe.executor).__name__ == "LocalExecutor"
+    assert type(harness_component(recipe).executor).__name__ == "LocalExecutor"
     settings["execution"]["evolution"]["backend"] = "uni"
-    with pytest.raises(RecipeConfigError, match="exactly one"):
+    with pytest.raises(ConfigError, match="exactly one"):
         from_config(settings)
 
 
@@ -571,25 +586,27 @@ def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch) -> None
         **evolution_config(),
     }
     recipe = from_config(settings)
-    selected, requirements = evaluation_selection(recipe.scorer, recipe.worker_executor)
+    scorer = harness_component(recipe).scorer
+    assert scorer is not None
+    selected, requirements = evaluation_selection(scorer, recipe.worker_executor)
     assert selected.settings.backend == "ray" and requirements.gpus_per_worker == 1
     settings["execution"]["evolution"]["backend"] = "mp"
-    with pytest.raises(RecipeConfigError, match="visible on this host"):
+    with pytest.raises(ConfigError, match="visible on this host"):
         from_config(settings)
 
 
 def test_recipe_without_a_runtime_refuses_to_build(tmp_path: Path) -> None:
-    built = dataclasses.replace(harness_recipe(tmp_path, lambda workspace, services: None), runtime=None)
-    with pytest.raises(RecipeConfigError, match=r"reef\.upstream_url"):
+    built = rebuilt_recipe(harness_recipe(tmp_path, lambda workspace, services: None), runtime=None)
+    with pytest.raises(ConfigError, match=r"reef\.upstream_url"):
         backend_of(built)
 
 
 def test_adapter_without_model_binding_refuses_boot(tmp_path: Path, monkeypatch) -> None:
     built = harness_recipe(tmp_path, lambda workspace, services: None)
     unbound = dataclasses.replace(get_adapter("pi"), model_binding={})
-    monkeypatch.setattr("reef.recipe.harness.get_adapter", lambda name: unbound)
+    monkeypatch.setattr("reef.train.harness_backend.component.get_adapter", lambda name: unbound)
     with pytest.raises(ModelBindingError, match="declares no model_binding"):
-        backend_of(built)
+        backend_of(rebuilt_recipe(built))
 
 
 def test_a_winning_step_binds_only_its_runs_records_its_context_and_names_its_kinds(
@@ -655,24 +672,24 @@ def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
     """Told where Reef answers inference, runs sample the snapshot the scenario serves through it."""
     config = {"model": {"path": "qwen3-8b"}, **evolution_config()}
     recipe = load_recipe(HarnessEvolutionRecipe, config, {"REEF_UPSTREAM_URL": "http://upstream.test"})
-    assert recipe.model_binding().base_url == "http://upstream.test"
-    served = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900/", token="reef-local"))
-    binding = served.model_binding("agent")
+    assert recipe.harness_models().served().base_url == "http://upstream.test"
+    served = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900/", token="reef-local")).harness_models()
+    binding = served.served("agent")
     assert binding.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
     assert binding.api_key == "reef-local" and binding.model == "qwen3-8b"
     # A free form name is quoted: one path segment, whatever it holds.
-    assert (
-        served.model_binding("org/project").base_url == "http://127.0.0.1:8900/reef/scenarios/org%2Fproject/evaluation"
-    )
-    assert served.model_binding().base_url == "http://upstream.test"
+    assert served.served("org/project").base_url == "http://127.0.0.1:8900/reef/scenarios/org%2Fproject/evaluation"
+    assert served.served().base_url == "http://upstream.test"
+    # The harness service reads the same model for the layer that a client installs.
+    assert recipe.harness_served_model("agent", "harness") == recipe.harness_models().served("agent")
     # A component of a composite names itself, so its candidate's calls leave its own served hooks out.
     component = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900", component="harness"))
     assert (
-        component.model_binding("agent").base_url
+        component.harness_models().served("agent").base_url
         == "http://127.0.0.1:8900/reef/scenarios/agent/components/harness/evaluation"
     )
     # Every run of the scenario binds the served model through the same route.
-    assert served.model_bindings("agent").served == binding
+    assert served.bindings("agent").served == binding
 
 
 @pytest.mark.parametrize("change", ["none", "binary", "run-executor", "scorer-config", "named-model"])
@@ -735,7 +752,7 @@ def test_the_executor_and_run_settings_reach_the_runs_and_interleave_the_sides(t
     recipe = harness_recipe(
         tmp_path, lambda workspace, services: MARKER, evaluation={"task_timeout_s": 5.0, "repeats": 2}
     )
-    backend = backend_of(dataclasses.replace(recipe, executor=executor))
+    backend = backend_of(rebuilt_recipe(recipe, executor=executor))
     result = step(backend)
     assert timeouts == [5.0] * 4
     assert all(received is executor for received in executors)
@@ -838,7 +855,7 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
         score=task_order_score,
         tasks=("task one", "task two"),
     )
-    backend = backend_of(dataclasses.replace(recipe, worker_executor=ExecutorSettings(workers=4)))
+    backend = backend_of(rebuilt_recipe(recipe, worker_executor=ExecutorSettings(workers=4)))
     prepared = backend.prepare_job(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
     try:
         evaluation = backend.evaluate(prepared.candidate)
@@ -852,7 +869,7 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
 @pytest.mark.parametrize("workers, expected", [(1, "uni"), (2, "mp")])
 def test_real_runs_run_on_the_selected_worker_backend(tmp_path, workers, expected, caplog):
     recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, tasks=("task one", "task two"))
-    backend = backend_of(dataclasses.replace(recipe, worker_executor=ExecutorSettings(workers=workers)))
+    backend = backend_of(rebuilt_recipe(recipe, worker_executor=ExecutorSettings(workers=workers)))
     assert backend.evaluator.worker_pool.selection.settings.backend == expected
     assert backend.evaluator.worker_pool.requirements.gpus_per_worker == 0
     prepared = backend.prepare_job(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
@@ -1343,7 +1360,7 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
     def dispatcher() -> Dispatcher:
         # Each process makes its own harness component, as each service process builds its recipe.
         return Dispatcher(
-            dataclasses.replace(built, harness_component=None),
+            rebuilt_recipe(built),
             repository,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),

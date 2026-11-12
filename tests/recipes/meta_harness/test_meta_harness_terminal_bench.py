@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import dataclasses
 import importlib
 import json
 import subprocess
@@ -12,6 +11,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.git_lfs import fake_git_lfs
+from tests.support.harness_jobs import rebuilt_recipe
 
 from reef.execution.sandbox.process import SandboxExecutor
 from reef.harness import TaskResult
@@ -150,7 +150,7 @@ def campaign(driver, monkeypatch, tmp_path, fake_git_lfs):
     config = driver.configuration(("task",), 1)
     recipe = driver.load_recipe(config, tmp_path)
     chat = Proposals(HarnessTree.read(driver.SEED))
-    recipe = dataclasses.replace(recipe, models={"proposer": chat})
+    recipe = rebuilt_recipe(recipe, models={"proposer": chat})
     return recipe, chat, launches, tmp_path
 
 
@@ -186,7 +186,7 @@ def test_search_commits_and_restart_resumes_from_the_commit_without_more_runs(dr
     # The summary is disposable: a restart rebuilds it from the latest durable commit.
     (directory / "summary.json").write_text("stale")
     # A restarted process builds its recipe again, and with it its own harness component.
-    restarted = driver.open_campaign(dataclasses.replace(recipe), directory)
+    restarted = driver.open_campaign(rebuilt_recipe(recipe), directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
         assert driver.search(restarted, scenario, recipe, directory, 1) == summary
@@ -215,7 +215,7 @@ def test_commit_failure_writes_no_summary_and_restart_commits_the_queued_job(dri
     finally:
         dispatcher.close()
     # A restarted process builds its recipe again, and with it its own harness component.
-    restarted = driver.open_campaign(dataclasses.replace(recipe), directory)
+    restarted = driver.open_campaign(rebuilt_recipe(recipe), directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
         summary = driver.search(restarted, scenario, recipe, directory, 1)

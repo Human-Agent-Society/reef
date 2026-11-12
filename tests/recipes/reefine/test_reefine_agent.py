@@ -20,7 +20,7 @@ from recipes.beta.reefine import ReefineMethod
 from recipes.beta.reefine import agent as reefine_agent
 from recipes.beta.reefine.agent import AgentRun, CheckTool, ReefineAgent, TrialTool, agent_rules, answer_with_agent
 from recipes.beta.reefine.agent_gateway import ReefineGateway
-from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider
+from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider, MultimodalSettings
 from recipes.beta.reefine.trial import trial_script
 from reef.core.training_request import TrainingRequest
 from reef.execution.sandbox.e2b import E2BSession
@@ -30,8 +30,8 @@ from reef.harness.adapters import get_adapter
 from reef.harness.gateway import reply_tool_calls, tool_summary
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import TreePatch
-from reef.train.harness_backend import MethodJob, Services, Workspace
-from reef.train.harness_backend.agent.run import AgentExecution
+from reef.train.harness_backend import AgentExecution, MethodJob, Services, Workspace
+from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.calls import JobCalls
 from reef.train.types import JobData
 
@@ -214,8 +214,10 @@ def agent_step(tmp_path: Path, models: ModelBindings) -> tuple[Workspace, Servic
 
 @pytest.mark.unit
 def test_the_agent_changes_the_steps_tree_tries_it_and_the_step_publishes_it_reviewed(tmp_path, upstream) -> None:
-    method = ReefineMethod(agent_of(fake_pi(tmp_path), provider_of(upstream)))
-    result, activity = reefine_step(tmp_path, method, JobData("demo:1", (), request=ASK), served_of(upstream))
+    # The method takes the agent from its job's services, and its gateway from its own config.
+    method = ReefineMethod(30.0, MultimodalSettings(PRESETS["openrouter"], f"{upstream.url}/api", "sk-or-test"))
+    agent = AgentSettings("pi", LocalExecutor(), 60.0, str(fake_pi(tmp_path)))
+    result, activity = reefine_step(tmp_path, method, JobData("demo:1", (), request=ASK), served_of(upstream), agent)
     metrics = result.metrics
     assert metrics["selected"] is True and metrics["patch"] == {"extensions/speak.ts": SPEAK}
     notes = metrics["method_notes"]
@@ -273,11 +275,13 @@ def test_an_agent_that_changes_nothing_or_fails_its_model_call_hands_back_no_cha
 
 @pytest.mark.unit
 def test_off_pi_the_agent_stays_idle_and_the_served_model_answers(tmp_path) -> None:
-    """The agent's rules and trials are pi's: on another adapter a method that holds an agent answers in text."""
+    """The agent's rules and trials are pi's: on another adapter a job whose services hold an agent answers in
+    text."""
     workspace = step_workspace(tmp_path, adapter="dsh")
     served = Served(designed({"rules.md": "Run the tests first.\n"}), json.dumps(REVIEW))
-    method = ReefineMethod(agent_of(tmp_path / "no-such-pi"))
-    method.run(MethodJob(workspace, job_services(workspace, ModelBindings(served=served))))
+    execution = agent_of(tmp_path / "no-such-pi").execution
+    services = job_services(workspace, ModelBindings(served=served), agent=execution)
+    ReefineMethod().run(MethodJob(workspace, services))
     assert workspace.tree() == TREE.apply(TreePatch({"rules.md": "Run the tests first.\n"}))
     assert workspace.read_output().notes["review"] == REVIEW and "This harness is" in served.prompts[1]
 

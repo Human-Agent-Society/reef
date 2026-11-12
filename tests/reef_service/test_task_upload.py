@@ -12,7 +12,7 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_jobs import evolution_config, runtime
+from tests.support.harness_jobs import configured_recipe, evolution_config, runtime
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import dispatcher_for
 
@@ -203,7 +203,7 @@ def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_
     evaluation = {"tasks": [], "imported_tasks": True}
     config = {**evolution_config(evaluation=evaluation, state_dir=str(tmp_path / "state")), **pipeline}
     # In manual mode no train task starts a step while the test runs.
-    recipe = load_recipe(HarnessEvolutionRecipe, config, {}, runtime=runtime())
+    recipe = configured_recipe(load_recipe(HarnessEvolutionRecipe, config, {}, runtime=runtime()))
     dispatcher = dispatcher_for(tmp_path, replace(recipe, training_mode="manual"))
 
     async def run() -> None:

@@ -47,6 +47,7 @@ from reef.service.assembly import (
     open_scenario_storage,
     open_service_coordination,
     serving_recipe,
+    with_harness_components,
 )
 from reef.service.auth import evaluation_token_for
 from reef.service.deploy.service_config import ServiceSettings
@@ -194,8 +195,14 @@ class TrainingApp(ComponentApp):
             recipe = recipe.with_served_endpoint(
                 ServedEndpoint(url=settings.served_url or default_served_url(settings.host, settings.port), token=None)
             )
-        components = recipe.job_components()
         runtime = recipe.runtime
+        try:
+            # The harness training component reads the served endpoint, so it is built after the recipe has it.
+            recipe = with_harness_components(recipe, environ)
+        except BaseException:
+            close_runtimes(recipe.job_components(), runtime)
+            raise
+        components = recipe.job_components()
         coordination: Coordination | None = None
         task_files: TaskFileStore | None = None
         data_store: DataStore | None = None

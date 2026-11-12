@@ -14,7 +14,6 @@ development check, not a runtime dependency.
 
 from __future__ import annotations
 
-import dataclasses
 import hashlib
 import json
 import sys
@@ -22,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support.harness_jobs import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe
+from tests.support.harness_jobs import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import backend_step
 from tests.support.trajectories import recorded_trajectory
 
@@ -164,7 +163,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
         tasks=validation,
         binary=str(binary),
     )
-    recipe = dataclasses.replace(recipe, models={"reflection": Reflector("http://model.test", "reflection")})
+    recipe = rebuilt_recipe(recipe, models={"reflection": Reflector("http://model.test", "reflection")})
     releases = TreeArtifacts(recipe.seed)
     backend = build_harness_backend(recipe, "fidelity", releases)
     policy = ComparePolicy(backend, statistic="mean")

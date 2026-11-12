@@ -31,15 +31,15 @@ class EvaluationSettings(Settings):
     (the eval split of the scenario's imported tasks, as each job reads it);
     one is required unless ``policy`` is ``none``. ``scorer`` and ``collector``
     are plugin settings (a ``package.module:Class`` reference, or a mapping
-    with ``module`` and ``config``); the recipe requires a scorer unless
+    with ``module`` and ``config``); the harness training component requires a scorer unless
     ``policy`` is ``none``. ``policy`` is one of ``POLICIES`` and ``statistic`` one of
     ``STATISTICS``. ``min_margin`` ≥ 0, ``floor_score`` > 0 and
     ``task_timeout_s`` > 0 are finite numbers, ``repeats`` ≥ 1, and every
     count ≥ 0. ``collector`` needs ``collect_failures``. ``agent_host`` is a
     non-empty host name or address: an agent that plays a Harbor task in the
     task's container reaches Reef's model route there.
-    Purpose: the harness recipe parses it and builds the evaluator, the task
-    source and the publication policy from it.
+    Purpose: the harness recipe parses it, and the harness training component
+    builds the evaluator, the task source and the publication policy from it.
     """
 
     tasks: tuple[str, ...] = config_option((), help="The evaluation tasks: instructions, or task directories.")
