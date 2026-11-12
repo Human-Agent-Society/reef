@@ -7,6 +7,7 @@ from typing import Any
 
 import ray
 
+from reef.execution.executor.placement import GpuBundles
 from reef.inference.process import EngineStartup, retire_engines
 from reef.inference.recovery import InferenceControl, InferenceEngineGroup
 from reef.inference.vllm.config import VLLMConfig
@@ -16,7 +17,7 @@ from reef.inference.vllm.launch import VLLMEngineGroup
 class VLLMWorker:
     """Own the serving engines."""
 
-    def __init__(self, config: VLLMConfig, pg: Any) -> None:
+    def __init__(self, config: VLLMConfig, pg: GpuBundles) -> None:
         self.config = config
         self.group = VLLMEngineGroup(config, pg)
         self._closed = False

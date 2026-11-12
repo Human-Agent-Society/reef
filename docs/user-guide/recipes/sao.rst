@@ -206,4 +206,4 @@ Related guides
 - `Train model weights from agent feedback <../evolve-your-model.rst>`__:
   set up the GPU stack and inspect published updates.
 - `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
-  and query feedback, scenarios, and releases.
+  and query feedback, scenarios, and artifacts.

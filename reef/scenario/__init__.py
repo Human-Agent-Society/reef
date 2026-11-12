@@ -15,7 +15,7 @@ The modules follow these responsibilities:
   It returns a complete ``Scenario`` and closes owned resources on failure.
 - ``committer`` orders commits, activations, new training starts, retries, and artifact publication
   around store settlement. Trainer state is exposed only after settlement.
-- ``releases`` queries releases, artifact content, and committed training metadata.
+- ``snapshots`` queries snapshots, artifact content, and committed training metadata.
   It shares the committer's publication lock. Writers take the operation lock
   before the publication lock; readers never take the operation lock, so long
   training preparation does not block serving. ``history`` pages retained

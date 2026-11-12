@@ -73,7 +73,7 @@ def task_partition(owner: str) -> str:
 def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenario: str) -> AgentRecord:
     """The copy in ``scenario`` of the record item ``item_id`` with ``content``, made in the scenario ``origin``.
 
-    The copy has the record ID ``item_id``, and the request type, payload, time and release of ``content``. Each
+    The copy has the record ID ``item_id``, and the request type, payload, time and artifact ID of ``content``. Each
     reference ``x`` becomes ``<origin>/x``, and so does each entry of a ``references`` list in the payload. Raise
     ``ValueError`` unless ``content`` has the keys ``RECORD_CONTENT_KEYS`` with the types that ``record_item``
     gives them, for an inference or a report, and ``item_id`` is ``<origin>/<agent_record_id>``.
