@@ -113,7 +113,7 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
     # The name is free: a new scenario under it starts from the base, not the dropped chain.
     again = value.get_or_create_scenario("delivery")
     assert again is not None and again is not created
-    assert again.repository.require_current_artifact().revision == first_snapshot or again.scenario_step == 0
+    assert again.repository.require_current_artifact().revision == first_snapshot or again.commit_number == 0
 
 
 def test_delete_scenario_refuses_names_that_are_paths() -> None:

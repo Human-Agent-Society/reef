@@ -472,11 +472,11 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
     session = storage.open("s")
     samples = sample_store(storage, "s", session)
     upload(samples, "t1", "t2")
-    session.commit_step(
-        expected_step=0,
+    session.append_commit(
+        expected_commit_number=0,
         commit=CommitRecord(
             scenario="s",
-            step=1,
+            commit_number=1,
             snapshot=SnapshotRef("release:1", "base"),
             checkpoint=True,
             algorithm_state={},

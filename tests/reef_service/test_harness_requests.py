@@ -77,7 +77,7 @@ def answered(workspace: Workspace, patch: TreePatch, **output) -> None:
 def request_rows(scenario) -> list[dict]:
     """The committed rows that answered a request, oldest first."""
     rows = [row for row in catalog(scenario) if row.get("metrics", {}).get("training_request")]
-    return sorted(rows, key=lambda row: row["step"])
+    return sorted(rows, key=lambda row: row["commit_number"])
 
 
 async def committed(scenario: Scenario, count: int, seconds: float = 30.0) -> list[dict]:

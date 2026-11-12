@@ -156,7 +156,7 @@ class _WandbScenarioLogger(ExperimentLogger):
         return TrainingExperimentContext(
             scenario=self._scenario,
             recipe=self._recipe,
-            step=self._run_segment,
+            commit_number=self._run_segment,
             source_artifacts=self._source_artifacts,
             run_segment=self._run_segment,
         )
@@ -323,7 +323,7 @@ class WandbExperimentTracker(ExperimentTracker):
                     run.summary.update(
                         {
                             "reef/ended_by": "train_from",
-                            "reef/train_from_step": event.step,
+                            "reef/train_from_commit_number": event.commit_number,
                             "reef/train_from_artifact_ids": event.start_artifacts.artifact_ids,
                         }
                     )
@@ -334,7 +334,7 @@ class WandbExperimentTracker(ExperimentTracker):
             if scenario_logger is not None:
                 scenario_logger._rotate(
                     source_artifacts=event.start_artifacts,
-                    run_segment=event.step,
+                    run_segment=event.commit_number,
                 )
                 context = scenario_logger._context()
                 next_run_id = self._run_id(context)
@@ -378,9 +378,11 @@ class WandbExperimentTracker(ExperimentTracker):
             metadata = {**metadata, "component": component}
         values: dict[str, Any] = {
             **numeric,
-            **{f"reef/{key}": value for key, value in metadata.items() if value is not None and key != "step"},
+            **{
+                f"reef/{key}": value for key, value in metadata.items() if value is not None and key != "commit_number"
+            },
             "train/step": event.context.run_step,
-            "reef/step": event.context.step,
+            "reef/commit_number": event.context.commit_number,
         }
         try:
             run.log(values)
@@ -450,7 +452,7 @@ class WandbExperimentTracker(ExperimentTracker):
                                 type(exc).__name__,
                             )
                 values[f"{prefix}/step"] = start + logged
-                values["reef/step"] = event.context.step
+                values["reef/commit_number"] = event.context.commit_number
                 run.log(values)
                 logged += 1
             run.summary[counter] = start + logged
@@ -577,7 +579,7 @@ class WandbExperimentTracker(ExperimentTracker):
         source = event.context.source_artifacts
         produced = event.produced_artifacts
         return {
-            "step": event.context.step,
+            "commit_number": event.context.commit_number,
             "run_segment": event.context.run_segment,
             "run_step": event.context.run_step,
             "run_id": run_id,
@@ -595,7 +597,7 @@ class WandbExperimentTracker(ExperimentTracker):
         client = self._client
         if client is None or event.checkpoint_path is None:
             return
-        identity = event.training_job_id or f"{event.context.scenario}-step-{event.context.step}"
+        identity = event.training_job_id or f"{event.context.scenario}-commit-{event.context.commit_number}"
         artifact = client.Artifact(name=f"reef-checkpoint-{_artifact_name(identity)}", type="model")
         artifact.add_dir(event.checkpoint_path)
         run.log_artifact(artifact)

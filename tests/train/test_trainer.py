@@ -87,11 +87,11 @@ def finish(trainer: Trainer) -> None:
 def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> None:
     """Append ``prepared`` to the commit history as training step ``step``, as the scenario committer does, so the
     sample store counts the samples that the step trained."""
-    session.commit_step(
-        expected_step=step - 1,
+    session.append_commit(
+        expected_commit_number=step - 1,
         commit=CommitRecord(
             scenario="math",
-            step=step,
+            commit_number=step,
             snapshot=SnapshotRef(f"release:{step}", "base"),
             checkpoint=True,
             algorithm_state=prepared.algorithm_state,

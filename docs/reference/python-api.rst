@@ -550,15 +550,16 @@ The session contract is:
        the records that each trainer's stages consumed. It closes with the
        session and survives restarts when ``durable``.
    * - ``history()``
-     - Committed ``CommitRecord`` values in step order: training steps
+     - ``CommitRecord`` values in commit number order: training steps
        (including inactive artifacts), activations, and new training starts.
        This is authoritative after an ambiguous commit error.
    * - ``training_run_position()``
-     - The step of the last ``train_from`` commit and the count of training
+     - The commit number of the last ``train_from`` commit and the count of training
        commits after it, for experiment run numbering.
-   * - ``commit_step(expected_step=..., commit=...)``
+   * - ``append_commit(expected_commit_number=..., commit=...)``
      - Persist the ``CommitRecord`` and its consumption progress, returning the
-       canonical accepted record. Its step must equal ``expected_step + 1``.
+       canonical accepted record. Its ``commit_number`` must equal
+       ``expected_commit_number + 1``.
    * - ``recover(checkpoint=...)``
      - Accept a checkpoint ``CommitRecord`` (``None`` at initial registration),
        reconcile it with history, and return the head ``CommitRecord`` or ``None`` for a fresh
@@ -575,11 +576,11 @@ selection and leaves training starts unchanged. A sync selects its new
 artifact for serving and training in one commit. Activation and serving record a complete selection without
 publishing another artifact snapshot. A selection maps component names directly to artifact IDs.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
-the current step before accepting a new successor: two different commits
-prepared from the same step cannot both succeed. An identical recorded retry
-returns the original record, even after later steps have committed; only
+the current commit number before accepting a new successor: two different commits
+prepared from the same commit number cannot both succeed. An identical recorded retry
+returns the original record, even after later commits; only
 ``recorded_at`` is excluded from retry comparison. A new commit with a stale
-expected step, or a retry with conflicting content, raises
+expected commit number, or a retry with conflicting content, raises
 ``ScenarioStoreConflictError`` without advancing the store.
 
 ``CommitHistoryScenarioStore`` serializes writers through ``CommitHistory.locked()``.
@@ -591,7 +592,7 @@ commit's trainer for each sample whose ``sample:<sample_id>`` the commit lists. 
 durable when the transaction ends; an exception before then stores no commit
 and counts no sample. Direct writes through a ``CommitHistory``
 bypass this store contract.
-A failure after append can leave the step committed. Retry the exact commit or
+A failure after append can leave the commit stored. Retry the exact commit or
 recover the session; do not infer rollback from an exception. Recovery uses
 committed ``consumed_ids`` and separate skipped-batch receipts to rebuild
 processor memory without repeating work. It does not modify stored bodies.

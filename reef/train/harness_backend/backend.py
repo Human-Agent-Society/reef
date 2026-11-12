@@ -224,17 +224,17 @@ class HarnessBackend(HarnessCandidateEvaluator):
         self,
         data: JobData,
         state: Mapping[str, Any],
-        scenario_step: int,
+        commit_number: int,
         *,
         head: ArtifactTextFiles,
         seed_tasks: tuple[str, ...] | None = None,
     ) -> PreparedHarnessJob:
-        """The candidate of job ``scenario_step + 1``, or its skip, on ``head``. ``seed_tasks`` replaces the
+        """The candidate of job ``commit_number + 1``, or its skip, on ``head``. ``seed_tasks`` replaces the
         evaluation's seed tasks for this job when it is set."""
         self.progress = None
         self.failed_job = {}
         try:
-            prepared = self.prepare(data, HarnessState.from_json(state), scenario_step + 1, head, seed_tasks)
+            prepared = self.prepare(data, HarnessState.from_json(state), commit_number + 1, head, seed_tasks)
         except BaseException:
             if self.progress is not None:
                 # The failed row keeps the phase it reached and the record directory the attempt wrote.

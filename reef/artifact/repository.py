@@ -617,7 +617,7 @@ class Repository(ArtifactRepository):
 
     def stage(
         self,
-        step: int,
+        commit_number: int,
         artifact: Artifact,
         *,
         parent: SnapshotRef,
@@ -630,11 +630,11 @@ class Repository(ArtifactRepository):
         except OSError as exc:
             shutil.rmtree(destination, ignore_errors=True)
             raise ArtifactPublicationError(f"failed to stage artifact from {artifact.local_path}: {exc}") from exc
-        return self.register_staged(step, artifact, destination, parent=parent)
+        return self.register_staged(commit_number, artifact, destination, parent=parent)
 
     def stage_composed(
         self,
-        step: int,
+        commit_number: int,
         components: Mapping[str, Artifact],
         *,
         parent: SnapshotRef,
@@ -642,13 +642,15 @@ class Repository(ArtifactRepository):
         """Compose several components straight into a staged local snapshot; one copy, not two."""
         destination = self.local_root / self._process_id / uuid.uuid4().hex
         composed = compose_snapshot(components, directory=destination)
-        return self.register_staged(step, composed, destination, parent=parent)
+        return self.register_staged(commit_number, composed, destination, parent=parent)
 
-    def register_staged(self, step: int, source: Artifact, destination: Path, *, parent: SnapshotRef) -> Artifact:
+    def register_staged(
+        self, commit_number: int, source: Artifact, destination: Path, *, parent: SnapshotRef
+    ) -> Artifact:
         """Record the tree staged at ``destination`` as a local snapshot with ``source``'s artifact IDs and metadata."""
         staged = Artifact(
             SnapshotRef(
-                revision=f"{LOCAL_SNAPSHOT_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{step}",
+                revision=f"{LOCAL_SNAPSHOT_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{commit_number}",
                 parent_revision=parent.revision,
             ),
             self,

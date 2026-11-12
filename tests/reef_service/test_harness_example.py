@@ -580,7 +580,7 @@ def session_events(session: str, release: str, stages, tool: str | None = None) 
 
 
 def write_commits(directory: Path, *commits: dict) -> None:
-    """Replace the commits of one scenario database with stored records at steps 1, 2, ...
+    """Replace the commits of one scenario database with stored records at commit numbers 1, 2, ...
 
     Each of ``commits`` gives the fields that differ from a complete record.
     """
@@ -589,7 +589,7 @@ def write_commits(directory: Path, *commits: dict) -> None:
         training = commit.get("operation", "training") == "training"
         base = CommitRecord(
             scenario="x",
-            step=commit["step"],
+            commit_number=commit["commit_number"],
             snapshot=SnapshotRef("storage:base", None),
             checkpoint=training,
             algorithm_state={} if training else None,
@@ -604,8 +604,8 @@ def write_commits(directory: Path, *commits: dict) -> None:
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("DELETE FROM scenario_commit")
         connection.executemany(
-            "INSERT INTO scenario_commit (step, commit_json) VALUES (?, ?)",
-            [(step, json.dumps(commit)) for step, commit in enumerate(stored, start=1)],
+            "INSERT INTO scenario_commit (commit_number, commit_json) VALUES (?, ?)",
+            [(commit_number, json.dumps(commit)) for commit_number, commit in enumerate(stored, start=1)],
         )
 
 
@@ -617,7 +617,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     (native / "sessions" / "s2").mkdir(parents=True)
     (work / "agent-record").mkdir()
     commit = {
-        "step": 1,
+        "commit_number": 1,
         "recorded_at": 1050.0,
         "operation": "training",
         "snapshot": {"revision": "r2", "parent_revision": "r1"},
@@ -645,7 +645,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     (native / "sessions" / "serve.jsonl").write_text("".join(json.dumps(event) + "\n" for event in mounts))
 
     data = replay.collect(work)
-    assert [(release["step"], release["kind"], release["artifact_id"]) for release in data["releases"]] == [
+    assert [(release["commit_number"], release["kind"], release["artifact_id"]) for release in data["releases"]] == [
         (0, "seed", "seed"),
         (1, "published", "r2"),
     ]
@@ -693,14 +693,16 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     activation = {
         "recorded_at": 1060.0,
         "operation": "activate",
-        "step": 2,
+        "commit_number": 2,
         "snapshot": {"revision": "r1", "parent_revision": None},
         "metrics": None,
         "algorithm_state": None,
     }
     write_commits(work / "agent-record", commit, activation)
     with_activation = replay.collect(work)
-    assert [(release["kind"], release["step"], release["artifact_id"]) for release in with_activation["releases"]] == [
+    assert [
+        (release["kind"], release["commit_number"], release["artifact_id"]) for release in with_activation["releases"]
+    ] == [
         ("seed", 0, "seed"),
         ("published", 1, "r2"),
         ("activate", 2, "r1"),
@@ -728,7 +730,7 @@ def test_replay_uses_component_ids_from_current_commits_and_native_events(
     session = sessions / "current"
     session.mkdir(parents=True)
     commit = {
-        "step": 1,
+        "commit_number": 1,
         "recorded_at": 1050.0,
         "operation": "training",
         "snapshot": {"revision": "storage:new", "parent_revision": "storage:seed"},
@@ -736,7 +738,7 @@ def test_replay_uses_component_ids_from_current_commits_and_native_events(
         "metrics": {"selected": True, "patch": {"rules.md": "updated\n"}},
     }
     activation = {
-        "step": 2,
+        "commit_number": 2,
         "recorded_at": 1060.0,
         "operation": "activate",
         # An activation that carries the manifest names the component it changed.

@@ -418,12 +418,12 @@ def _job_commits(*, end_event: str = "finished", rollout_id: int = 0, error: str
     job = {"job_id": "job-1", "backend": "slime"}
     end = {**job, "event": end_event, **({} if error is None else {"error": error})}
     return [
-        {"step": 1, "metrics": {"training_job": {**job, "event": "submitted"}}},
+        {"commit_number": 1, "metrics": {"training_job": {**job, "event": "submitted"}}},
         {
-            "step": 2,
+            "commit_number": 2,
             "metrics": {**TRAIN_METRICS, "selected": True, "training_job": {**job, "event": "checkpoint", "step": 1}},
         },
-        {"step": 3, "metrics": {"rollout_id": rollout_id, "training_job": end}},
+        {"commit_number": 3, "metrics": {"rollout_id": rollout_id, "training_job": end}},
     ]
 
 
@@ -431,7 +431,7 @@ def _wait(statuses, commits=_job_commits, *, timeout_s: float = 1, expected_roll
     statuses = iter(statuses)
     return wait_for_training_step(
         status=lambda: scenario_status(next(statuses), "guidance-run"),
-        commits=lambda after_step: commits(),
+        commits=lambda after_commit_number: commits(),
         after=TrainingPosition(0, 0, None),
         expected_rollout_id=expected_rollout_id,
         timeout_s=timeout_s,
@@ -440,8 +440,8 @@ def _wait(statuses, commits=_job_commits, *, timeout_s: float = 1, expected_roll
 
 
 def test_training_wait_returns_the_checkpoint_once_the_job_ended() -> None:
-    running = _reef_status(scenario_step=1, training_job={"job_id": "job-1"})
-    ended = _reef_status(scenario_step=3, finished_jobs=1, served_artifact_id="artifact-1")
+    running = _reef_status(commit_number=1, training_job={"job_id": "job-1"})
+    ended = _reef_status(commit_number=3, finished_jobs=1, served_artifact_id="artifact-1")
 
     outcome = _wait([_reef_status(), running, ended])
 
@@ -455,7 +455,7 @@ def test_training_wait_returns_the_checkpoint_once_the_job_ended() -> None:
 
 
 def test_training_wait_fails_on_a_failed_job_or_the_wrong_rollout() -> None:
-    ended = _reef_status(scenario_step=3, finished_jobs=1)
+    ended = _reef_status(commit_number=3, finished_jobs=1)
 
     with pytest.raises(RuntimeError, match="job-1 failed: RuntimeError: out of memory"):
         _wait([ended], lambda: _job_commits(end_event="failed", error="RuntimeError: out of memory"))
@@ -497,7 +497,7 @@ def test_training_wait_deadline_is_not_a_builtin_timeout(monkeypatch) -> None:
     )
 
     with pytest.raises(GuidanceTrainingTimeoutError, match="rollout 11 did not complete after 1s") as raised:
-        _wait([_reef_status(scenario_step=1, training_job={"job_id": "job-1"})], expected_rollout_id=11)
+        _wait([_reef_status(commit_number=1, training_job={"job_id": "job-1"})], expected_rollout_id=11)
 
     assert not isinstance(raised.value, TimeoutError)
 
@@ -506,7 +506,7 @@ def _reef_status(
     *,
     error: str | None = None,
     failed_steps: list[dict] | None = None,
-    scenario_step: int = 0,
+    commit_number: int = 0,
     finished_jobs: int = 0,
     training_job: dict | None = None,
     served_artifact_id: str | None = None,
@@ -516,7 +516,7 @@ def _reef_status(
         "preload_errors": {},
         "scenarios": {
             "guidance-run": {
-                "scenario_step": scenario_step,
+                "commit_number": commit_number,
                 "training_job": training_job,
                 "finished_jobs": finished_jobs,
                 "served_artifact_id": served_artifact_id,
@@ -532,10 +532,13 @@ def test_status_progress_reads_reef_over_http(monkeypatch) -> None:
     commits = _job_commits()
     pages = {
         "/reef/status": {"error": None, "scenarios": {}},
-        "/reef/scenarios/guidance-run/commits?after_step=0&limit=100": {"commits": commits[:2], "next_after_step": 2},
-        "/reef/scenarios/guidance-run/commits?after_step=2&limit=100": {
+        "/reef/scenarios/guidance-run/commits?after_commit_number=0&limit=100": {
+            "commits": commits[:2],
+            "next_after_commit_number": 2,
+        },
+        "/reef/scenarios/guidance-run/commits?after_commit_number=2&limit=100": {
             "commits": commits[2:],
-            "next_after_step": None,
+            "next_after_commit_number": None,
         },
     }
     seen = []

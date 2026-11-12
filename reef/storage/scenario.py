@@ -26,7 +26,7 @@ from reef.storage.tasks import TaskFileStore, TaskStorage
 
 
 class ScenarioStoreConflictError(ReefError):
-    """A commit's expected step or content conflicts with the stored history."""
+    """A commit's expected commit number or content conflicts with the stored history."""
 
 
 @dataclass(frozen=True)
@@ -138,20 +138,20 @@ class ScenarioStore(ABC):
 
     @abstractmethod
     def history(self) -> tuple[CommitRecord, ...]:
-        """Read committed steps in increasing order: training steps, activations and new training starts."""
+        """Read commits in increasing commit number order: training steps, activations and new training starts."""
 
     @abstractmethod
     def training_run_position(self) -> tuple[int, int]:
-        """Return the step of the last new training start and the training count after it."""
+        """Return the commit number of the last new training start and the training count after it."""
 
     @abstractmethod
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
-        """Persist exactly ``expected_step + 1`` with its consumption progress.
+    def append_commit(self, *, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
+        """Persist the commit numbered ``expected_commit_number + 1`` with its consumption progress.
 
         Conflicting writers are serialized across sessions. An identical retry
         (ignoring only ``recorded_at``) returns the original record, even after
-        later steps. Different content or
-        a stale expected step raises ``ScenarioStoreConflictError``.
+        later commits. Different content or
+        a stale expected commit number raises ``ScenarioStoreConflictError``.
 
         An exception can occur after the commit becomes durable. Callers
         inspect history or retry the same commit before repeating training.
@@ -161,7 +161,7 @@ class ScenarioStore(ABC):
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
         """Reconcile a checkpoint commit with history.
 
-        ``None`` denotes initial registration before any committed step.
+        ``None`` denotes initial registration before any commit.
         A checkpoint ahead of history is adopted durably.
         Validate scenario identity and continuity after the checkpoint. Return
         the committed head, or ``None`` at creation, without publishing artifacts.

@@ -1421,7 +1421,7 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_th
                 )
             commit = CommitRecord(
                 scenario="s",
-                step=1,
+                commit_number=1,
                 snapshot=snapshot,
                 selection=ArtifactSelection({"weights": artifact_id}),
                 checkpoint=True,
@@ -1577,28 +1577,28 @@ async def until(client: TestClient, done) -> list[dict[str, Any]]:
 
 
 @pytest.mark.unit
-def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp_path: Path) -> None:
+def test_a_commit_that_publishes_a_checkpoint_reports_a_new_artifact(tmp_path: Path) -> None:
     new_artifacts = NewArtifacts()
     storage = ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), new_artifacts)
     try:
         session = storage.open("s")
         step = {"algorithm_state": {}, "high_water_sequence": 0, "high_water_offset": 0, "scenario": "s"}
         published = CommitRecord(
-            step=1,
+            commit_number=1,
             snapshot=SnapshotRef("a1", None),
             checkpoint=True,
             selection=ArtifactSelection({"model": "a1"}),
             **step,
         )
-        kept = CommitRecord(step=2, snapshot=SnapshotRef("a1", None), checkpoint=False, **step)
-        session.commit_step(expected_step=0, commit=published)
-        session.commit_step(expected_step=1, commit=kept)
+        kept = CommitRecord(commit_number=2, snapshot=SnapshotRef("a1", None), checkpoint=False, **step)
+        session.append_commit(expected_commit_number=0, commit=published)
+        session.append_commit(expected_commit_number=1, commit=kept)
         assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None, "a1")
         assert new_artifacts.queue.empty(), "a step that publishes nothing reports no artifact"
         # An activation, even one that publishes a composed snapshot, and a new training start make no artifact.
         operation = {"high_water_sequence": 0, "high_water_offset": 0, "scenario": "s", "algorithm_state": None}
         activation = CommitRecord(
-            step=3,
+            commit_number=3,
             snapshot=SnapshotRef("a2", "a1"),
             checkpoint=False,
             operation="activate",
@@ -1607,10 +1607,10 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
             **operation,
         )
         start = CommitRecord(
-            step=4, snapshot=SnapshotRef("a1", None), checkpoint=False, operation="train_from", **operation
+            commit_number=4, snapshot=SnapshotRef("a1", None), checkpoint=False, operation="train_from", **operation
         )
-        session.commit_step(expected_step=2, commit=activation)
-        session.commit_step(expected_step=3, commit=start)
+        session.append_commit(expected_commit_number=2, commit=activation)
+        session.append_commit(expected_commit_number=3, commit=start)
         assert new_artifacts.queue.empty(), "an activation or a new training start reports no artifact"
         session.close()
     finally:
@@ -1641,7 +1641,7 @@ def test_automatic_evaluation_uses_published_artifact_ids(component, selected, e
     observer = NewArtifacts()
     commit = CommitRecord(
         scenario="s",
-        step=1,
+        commit_number=1,
         snapshot=SnapshotRef("storage:snapshot", None),
         checkpoint=True,
         algorithm_state={},

@@ -66,9 +66,9 @@ class OpaqueStore(ScenarioStore):
     def training_run_position(self) -> tuple[int, int]:
         return self._inner.training_run_position()
 
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
+    def append_commit(self, *, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
         self._events.append(("commit", self.scenario))
-        return self._inner.commit_step(expected_step=expected_step, commit=commit)
+        return self._inner.append_commit(expected_commit_number=expected_commit_number, commit=commit)
 
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
         self._events.append(("recover", self.scenario))
@@ -194,9 +194,9 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
         assert scenario.store.durable
         scenario.records.append(trace("first"))
         scenario.commit(TrainingCommit(state={}))
-        assert scenario.scenario_step == 1
+        assert scenario.commit_number == 1
         assert ("commit", "math") in factory.events
-        assert [row["step"] for row in dispatcher.read_commits("math")["commits"]] == [1]
+        assert [row["commit_number"] for row in dispatcher.read_commits("math")["commits"]] == [1]
         stored = dispatcher.read_record("math", "first")
         assert stored is not None
         assert stored["payload"] == {"text": "first"}
@@ -215,9 +215,9 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
     try:
         recovered = reopened.get_or_create_scenario("math")
         assert recovered is not None
-        assert recovered.scenario_step == 1
+        assert recovered.commit_number == 1
         assert recovered.records.read("math", "first") is not None
-        assert [row["step"] for row in reopened.read_commits("math")["commits"]] == [1]
+        assert [row["commit_number"] for row in reopened.read_commits("math")["commits"]] == [1]
         assert ("recover", "math") in reopened_factory.events
     finally:
         reopened.close()

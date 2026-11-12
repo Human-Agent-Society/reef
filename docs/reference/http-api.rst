@@ -135,7 +135,7 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/artifacts``                                                                         | import a directory as a new artifact              |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/restore``                                                                           | restore the complete selection at an earlier step |
+| ``POST /reef/scenarios/{scenario}/restore``                                                                           | restore the selection of an earlier commit        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/train-from``                                                                        | set the artifact a trainer starts its next job or |
 |                                                                                                                       | step from                                         |
@@ -2953,9 +2953,9 @@ Restore a scenario selection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To restore every component's active artifact together, send
-``POST /reef/scenarios/{scenario}/restore`` with ``{"step": 12}``.
-The step names an existing operation. Reef restores the active selection
-as it stood after that step. Use ``{"step": 0}`` for the starting artifacts.
+``POST /reef/scenarios/{scenario}/restore`` with ``{"commit_number": 12}``.
+The commit number names an existing operation. Reef restores the active selection
+as it stood after that commit. Use ``{"commit_number": 0}`` for the starting artifacts.
 
 The answer is ``{scenario, components}``, where ``components`` maps every
 component name to its restored ``artifact_id``. A changed selection appends
@@ -2965,8 +2965,8 @@ split unchanged.
 Restoring the current selection is a no-op. Poll `Startup status`_ before
 using the restored inference artifact.
 
-The body must contain only a non-negative integer ``step``. An invalid or
-unknown step, or a step whose selection cannot be reconstructed from the
+The body must contain only a non-negative integer ``commit_number``. An invalid or
+unknown commit number, or one whose selection cannot be reconstructed from the
 retained history, returns HTTP 400; an unknown scenario returns 404. A pending
 training commit returns 409. Artifact validation and runtime capabilities
 still apply.
@@ -3172,10 +3172,10 @@ a training job runs or an update is being published.
      "preload_errors": {},
      "scenarios": {
        "hello-reef": {
-         "scenario_step": 3,
+         "commit_number": 3,
          "artifact_head_sync": {"state": "synchronized", "error": null},
-         "last_committed_step": {
-           "step": 3,
+         "last_training_commit": {
+           "commit_number": 3,
            "recorded_at": 1756400000.0,
            "metrics": {"selected": false, "selection": {"reason": "candidate lost"}}
          },
@@ -3227,20 +3227,20 @@ model.
 A scenario whose recipe runs one trainer per recipe component adds a
 ``components`` object. For each recipe component, it holds the component's
 own ``job_data_ready``, ``training_mode``, ``processor`` status and
-``last_committed_step``. The scenario-wide ``job_data_ready``, ``training_mode``
+``last_training_commit``. The scenario-wide ``job_data_ready``, ``training_mode``
 and ``processor`` describe the first trainer that trains, else the first
-trainer. The scenario-wide ``last_committed_step`` is the latest commit of
+trainer. The scenario-wide ``last_training_commit`` is the latest training commit of
 any recipe component.
 
 Every row of ``GET /reef/scenarios/{scenario}/artifacts`` names the
 ``component`` whose artifact it is.
 
-``last_committed_step`` reports the latest durable training step number,
-commit time, and its recipe-owned metrics; it is ``null`` before the first
+``last_training_commit`` reports the commit number of the latest durable training commit,
+its commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
 step that skipped or rejected its candidate. An activation, a train-from, an
-import or a sync advances ``scenario_step`` without replacing the latest
-training outcome.
+import or a sync advances ``commit_number`` without replacing the latest
+training outcome. ``commit_number`` is the number of the scenario's newest commit.
 
 ``serving`` is runtime-wide but recipe-shaped, keyed by recipe name. A runtime
 that serves per-scenario adapters reports the engines' shared adapter
@@ -3348,15 +3348,15 @@ and the stored ``payload``. A missing body returns 404: it may have expired or
 never been retained. Reading never reactivates records or changes retention.
 
 ``GET /reef/scenarios/{scenario}/operations`` returns ``{scenario,
-operations, next_after_step}``, oldest first. ``after_step`` defaults to 0;
-``limit`` defaults to 50 and accepts 1–100. ``next_after_step`` is null at
+operations, next_after_commit_number}``, oldest first. ``after_commit_number`` defaults to 0;
+``limit`` defaults to 50 and accepts 1–100. ``next_after_commit_number`` is null at
 the end. ``/commits`` remains an alias with the array named ``commits``.
 
 Repeat ``record_id`` to filter operations whose ``consumed_ids`` contain any
 requested ID (at most 100 IDs of 1–256 characters). This tests exact set
 membership, not whether a record was eligible for training.
 
-Each row exposes ``step``, ``operation``, ``operation_verified``,
+Each row exposes ``commit_number``, ``operation``, ``operation_verified``,
 ``recorded_at``, ``components``, ``component``, ``activated``,
 ``consumed_ids`` and ``metrics``. ``components`` maps component names to
 artifact IDs associated with the operation. ``component`` identifies the
