@@ -9,6 +9,10 @@ The modules follow these responsibilities:
   archival coordination. It keeps each scenario's settings through the
   injected storage. It asks its ``admission.ScenarioAdmission`` before it
   creates or loads a scenario; the dispatcher unloads an idle scenario to free a load slot.
+- ``live_objects`` holds the runtime, the training components, the data store
+  and the served endpoint that one process builds for the recipe
+  (``LiveObjects``), and the functions that need both a recipe and one of
+  those objects. A recipe is configuration and holds none of them.
 - ``factory`` writes a new scenario's root snapshot (the recipe's default
   start, or an artifact item), opens storage, reconciles committed state, synchronizes and
   activates the checkpoint, builds the trainer, and replays retained records.

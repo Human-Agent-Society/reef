@@ -7,7 +7,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.support.records import memory_records
-from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.trajectories import policy_trajectory
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
@@ -98,7 +98,7 @@ def _processor(experiment_logger=None, job_samples=None) -> TrainingPipeline:
 
 
 def _recipe(config: dict) -> TTTDRecipe:
-    recipe = load_recipe(TTTDRecipe, {"model": {"path": "Qwen/Qwen3-8B"}, **config}, {}, **runtime_bindings())
+    recipe = load_recipe(TTTDRecipe, {"model": {"path": "Qwen/Qwen3-8B"}, **config}, {})
     assert isinstance(recipe, TTTDRecipe)
     return recipe
 

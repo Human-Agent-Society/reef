@@ -216,21 +216,24 @@ recipe: GEPA, Meta-Harness, ACE and ReasoningBank name the base recipe and set
    * - ``runs_offline()``, ``task_directories(descriptor)``,
        ``configured_tasks()``, ``harness_state_dir(scenario, component)``
      - functions of the configuration
-   * - ``harness_models()``, ``harness_served_model(scenario, component)``,
-       ``with_served_endpoint(endpoint)``, ``harness_component``
-     - the model under test and the training component, which the recipe
-       holds for the service until their owners hold them
+
+The recipe holds no runtime, no served endpoint and no training component.
+The process holds them in ``LiveObjects`` (see `Live objects`_), and
+``reef.scenario.live_objects.harness_models(recipe, live)`` gives the models
+of the runs: the runtime as the model under test, and the recipe's named
+models.
 
 The service builds the ``HarnessTrainingComponent``
 (``reef.service.assembly.with_harness_components`` calls
-``HarnessTrainingComponent.from_settings``). The component builds the
+``HarnessTrainingComponent.from_settings`` and returns the ``LiveObjects``
+that hold the component). The component builds the
 ``Method``, the ``TaskScorer``, the ``TaskCollector``, the run executor and
 the agent settings from the sections, then one ``HarnessBackend`` with its
 evaluator for each scenario component, and the selection policy for each job.
 Code that holds these objects already, such as an example driver, calls
 ``HarnessTrainingComponent(settings, models, method=..., executor=...,
-scorer=..., collector=..., agent=...)`` and puts the component on the recipe
-with ``dataclasses.replace(recipe, harness_component=component)``.
+scorer=..., collector=..., agent=...)`` and gives the dispatcher
+``LiveObjects(runtime=runtime, harness_component=component)``.
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; the trainer of such a
@@ -248,7 +251,7 @@ recipe only reads records.
 |                                 | when the method changes more than the tree, such as  |
 |                                 | the files a client pulls                             |
 +---------------------------------+------------------------------------------------------+
-| evolve a different artifact     | subclass ``WeightTrainingRecipe`` over a             |
+| evolve a different artifact     | subclass ``WeightTrainingRecipe``, deploy it with a  |
 |                                 | ``TrainingComponent`` that makes the artifact, and   |
 |                                 | override ``build_components()``                      |
 +---------------------------------+------------------------------------------------------+
@@ -268,41 +271,95 @@ Common members
 | ``name``                                          | ``str``                     | instance field; the default    |
 |                                                   |                             | registry key                   |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``runtime``                                       | ``InferenceRuntime`` or     | required inference component   |
-|                                                   | ``None``                    | for ``WeightTrainingRecipe``   |
-+---------------------------------------------------+-----------------------------+--------------------------------+
-| ``training_component``                            | ``TrainingComponent`` or    | required training component    |
-|                                                   | ``None``                    | for ``WeightTrainingRecipe``;  |
-|                                                   |                             | its first positional argument  |
-+---------------------------------------------------+-----------------------------+--------------------------------+
 | ``stages()``                                      | ``PipelineSettings``        | the two stage classes and      |
 |                                                   |                             | their configs: the deployment's|
 |                                                   |                             | ``pipeline`` section over      |
 |                                                   |                             | ``pipeline_spec()``            |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_components(scenario)``                    | ``ScenarioComponents``      | the components of one named    |
-|                                                   |                             | scenario's snapshots, each with|
-|                                                   |                             | its kind and admission check   |
-|                                                   |                             | (default                       |
+| ``build_components(scenario)``                    | ``ScenarioComponents``      | the components that the        |
+|                                                   |                             | configuration declares for one |
+|                                                   |                             | named scenario's snapshots,    |
+|                                                   |                             | each with its kind and         |
+|                                                   |                             | admission check (default       |
 |                                                   |                             | ``AcceptAnyArtifact()``)       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
+| ``default_start()``                               | ``DefaultStart``            | the content of a new scenario's|
+|                                                   |                             | root snapshot that the         |
+|                                                   |                             | configuration gives; empty by  |
+|                                                   |                             | default                        |
++---------------------------------------------------+-----------------------------+--------------------------------+
+
+A recipe has no runtime, no training component and no store, and it builds
+none. Every member is a function of the recipe's configuration.
+
+Live objects
+~~~~~~~~~~~~
+
+.. code:: python
+
+   from reef.scenario.live_objects import LiveObjects, ServedEndpoint
+
+The process that runs a service builds the objects that run the recipe, and
+holds them in one frozen ``LiveObjects`` value. The service assembly builds it
+(``reef.service.assembly.load_deployment`` returns the recipe and the value),
+and ``Dispatcher(recipe, backend_factory, live=live, ...)`` receives it.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 70
+
+   * - Field
+     - Value
+   * - ``runtime``
+     - the serving ``InferenceRuntime``, or ``None``
+   * - ``training_component``
+     - the ``TrainingComponent`` that runs the jobs of the recipe that trains
+       weights, or ``None``; a ``WeightTrainingRecipe`` needs it and the
+       runtime (``check_recipe_objects`` raises ``RecipeConfigError``)
+   * - ``harness_component``
+     - the training component that runs the jobs of the harness recipe, or
+       ``None``
+   * - ``data_store``
+     - the deployment's ``DataStore``, or ``None``
+   * - ``served_endpoint``
+     - a ``ServedEndpoint(url, token)`` where this Reef answers inference
+       itself, or ``None``
+
+``dispatcher.live`` holds the value as the trainers see it: each job
+component is the jobs queue's view of it. Read the serving runtime of a
+dispatcher as ``dispatcher.live.runtime``.
+
+The same module holds the functions that need a recipe and a live object:
+
+- ``scenario_components(recipe, live, scenario)`` gives the components of a
+  deployment's scenario: ``recipe.build_components(scenario)``, with the kind
+  of the weight component from the runtime (``served_weight_kind``) and its
+  layout from the training component (``TrainingArtifactLayout``).
+- ``default_start(recipe, live)`` gives the root content of a new scenario:
+  the training component's untrained checkpoint for a weight recipe, each
+  component's start under its directory for a composite, and
+  ``recipe.default_start()`` for any other recipe.
+- ``check_root_start(recipe, live, root)`` checks an item start; see below.
+- ``harness_models(recipe, live)`` and
+  ``harness_served_model(recipe, live, scenario, component)`` give the models
+  of a harness recipe's runs.
 
 A recipe builds no trainer. The scenario factory reads a ``TrainerSpec`` from
-the recipe (``reef.scenario.factory.read_trainer_specs``): its ``stages()``,
+the recipe and the live objects
+(``reef.scenario.factory.read_trainer_specs``): the recipe's ``stages()``,
 ``report_type``, ``training_mode`` and, for a ``WeightTrainingRecipe``, its
-``parameters_by_kind()`` and training component. A ``CompositeRecipe`` gives
+``parameters_by_kind()``, with the training component of ``LiveObjects``. A ``CompositeRecipe`` gives
 one spec for each component. The factory's ``TrainerBuilder``
 (``reef.train.trainer_builder``) then builds one trainer for each spec with
 ``Trainer.build``, and binds it to its snapshot component. A recipe that is
 not a composite has one trainer, so its scenario serves at most one component.
 
-``check_root_start(root)`` checks an item start before scenario registration.
-``root`` is the recipe's ``ScenarioRoot``, with its artifact and source.
-The default calls ``training_component.root_start`` when that component is
-bound. A recipe with several trainers must check each
-trainer's root view and raise ``ValueError`` if any component refuses it.
-``CompositeRecipe`` does this for each child recipe, using the same root view
-as trainer construction. A refusal leaves the scenario unregistered.
+``check_root_start(recipe, live, root)`` checks an item start before scenario
+registration. ``root`` is the scenario's ``ScenarioRoot``, with its artifact
+and source. The function calls ``root_start`` of the training component in
+``live``; without one, it checks nothing. For a ``CompositeRecipe`` it checks
+each component's view of the root, the same view as trainer construction
+uses. A refusal raises ``ValueError`` and leaves the scenario unregistered.
 
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
@@ -1037,7 +1094,8 @@ gives ``paths()``, and ``sha256(path)`` and ``read_bytes(path)`` for each path.
 Read only the files that the check needs: on an S3 prefix or a Hugging Face
 revision, each read downloads that file. The built-in recipes bind one:
 
-- A weight recipe binds ``TrainingArtifactLayout(training_component)``, which calls
+- A weight recipe's component gets ``TrainingArtifactLayout(training_component)``
+  (``scenario_components``), which calls
   the component's ``check_artifact`` (see `Training jobs and components`_).
   For full weights and adapters it reads only file names and
   ``adapter/adapter_config.json``.
@@ -2033,8 +2091,10 @@ Scenario components
    from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 
 ``Recipe.build_components(scenario)`` returns the components that every
-snapshot of the scenario binds. ``WeightTrainingRecipe`` declares a
-``weights`` component of its runtime's ``served_weight_kind``, and
+snapshot of the scenario binds, as the recipe's configuration declares them.
+``WeightTrainingRecipe`` declares a ``weights`` component, whose kind is the
+deployment runtime's ``served_weight_kind``
+(``reef.scenario.live_objects.scenario_components`` adds it), and
 ``HarnessEvolutionRecipe`` declares a ``harness`` component that clients
 pull, so most methods never touch this. See `Scenario components
 <../developer-guide/components.rst>`__ for where Reef reads each field.
@@ -2163,12 +2223,13 @@ lost or dead engines (``InferenceBackend.recover``, which for an inference
 component also covers a restarted component), loads what it serves into them
 again (``reload_served``), and resumes.
 
-Weight recipes hold ``training_component: TrainingComponent`` and
-``runtime: InferenceRuntime`` separately. Construction is explicit:
+A weight recipe holds neither the ``TrainingComponent`` nor the
+``InferenceRuntime``. The process holds both beside the recipe:
 
 .. code:: python
 
-   recipe = SAORecipe(training, runtime=inference)
+   recipe = SAORecipe()
+   live = LiveObjects(runtime=inference, training_component=training)
 
 A training deployment's component factory returns the ``TrainingComponent``
 alone; a serving factory returns an ``InferenceRuntime``.

@@ -14,7 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent
 from tests.support.harness_jobs import evolution_config, runtime
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -38,6 +38,7 @@ from reef.record2sample.service import (
     Selection,
     request_selection,
 )
+from reef.scenario.live_objects import LiveObjects
 from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app
@@ -108,8 +109,8 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
 ) -> None:
     config = replace(settings(tmp_path), task_file_dir=str(tmp_path / "task-files"))
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    recipe = Recipe(training_component=component)
-    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    deployment = (Recipe(), LiveObjects(training_component=component))
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
     trajectory = policy_trajectory("sample", (1, 2), (1,), (-0.1,), 1.0, artifact_id="v1")
     coordination = assembly.open_service_coordination(config)
     view = JobQueueComponent(component, coordination.work_queue, owns_component=False)
@@ -150,9 +151,9 @@ def test_a_training_worker_start_failure_closes_its_component_and_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
 ) -> None:
     component = StubTrainingComponent()
-    recipe = Recipe(training_component=component)
+    deployment = (Recipe(), LiveObjects(training_component=component))
     coordination = memory_coordination()
-    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
     monkeypatch.setattr(component_apps, "open_service_coordination", lambda settings: coordination)
     threads: list[Thread | None] = []
     start = TrainingJobWorker.start
@@ -184,13 +185,14 @@ def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_e
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = replace(settings(tmp_path), served_url="http://reef-control:8000")
-    # The training service builds the harness training component from the recipe's settings, after the recipe
-    # has the served endpoint.
-    harness = load_recipe(
-        HarnessEvolutionRecipe, evolution_config(state_dir=str(tmp_path / "harness")), {}, runtime=runtime()
+    # The training service builds the harness training component from the recipe's settings, after the live
+    # objects have the served endpoint.
+    harness = load_recipe(HarnessEvolutionRecipe, evolution_config(state_dir=str(tmp_path / "harness")), {})
+    deployment = (
+        CompositeRecipe(components={"harness": harness, "records": Recipe()}),
+        LiveObjects(runtime=runtime()),
     )
-    recipe = CompositeRecipe(components={"harness": harness, "records": Recipe()})
-    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
     bindings = []
     start = TrainingJobWorker.start
 
@@ -426,8 +428,9 @@ def test_control_and_data_load_a_scenario_without_activating_its_engine(tmp_path
 
     def dispatcher(components: frozenset[str]) -> Dispatcher:
         return Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            TestPolicyRecipe(),
             repository,
+            live=live_objects(component, component.inference),
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
             components=components,
@@ -457,8 +460,9 @@ def test_the_data_service_reads_the_artifact_that_control_commits_after_the_data
 
     def dispatcher(components: frozenset[str]) -> Dispatcher:
         return Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            TestPolicyRecipe(),
             repository,
+            live=live_objects(component, component.inference),
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
             components=components,

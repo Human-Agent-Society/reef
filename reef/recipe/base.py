@@ -7,7 +7,7 @@ backend updates model weights.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar, Self
@@ -20,13 +20,9 @@ from reef.core.components import RECORDS_COMPONENT
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
 from reef.evaluation.activation import build_activation_rule
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.inference.interfaces import InferenceRuntime
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.data import DataStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind
-from reef.train.component import ScenarioRoot, TrainingArtifactLayout, TrainingComponent
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
@@ -49,41 +45,16 @@ def every_check(*checks: ArtifactValidator) -> ArtifactValidator:
     return kept[0] if len(kept) == 1 else EveryCheck(kept)
 
 
-@dataclass(frozen=True)
-class ServedEndpoint:
-    """Where this Reef answers inference itself: what a recipe's own evaluation calls target.
-
-    ``url`` is the service's base URL and ``token`` a bearer token it accepts.
-    ``component`` names the snapshot component the recipe evolves when it is
-    one of several: its evaluation calls then leave that component's served
-    hooks out, since the rollout runs a candidate of it.
-    """
-
-    url: str
-    token: str | None = None
-    component: str | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.url, str) or not self.url.strip():
-            raise ValueError("served endpoint requires a url")
-        object.__setattr__(self, "url", self.url.strip().rstrip("/"))
-
-
-def check_job_components(recipe: Recipe, components: Mapping[str, TrainingComponent]) -> None:
-    """Raise ``ValueError`` unless ``components`` names exactly the job components of ``recipe``."""
-    names = sorted(component.name for component in recipe.job_components())
-    if sorted(components) != names:
-        raise ValueError(f"the job components of {type(recipe).__name__} are {names}, not {sorted(components)}")
-
-
 @dataclass(frozen=True, kw_only=True)
 class Recipe:
     """Default inference recipe and base contract for update recipes.
 
     Instantiating ``Recipe`` directly records traffic without producing job
     data. Specialized recipes are frozen dataclasses over this base: they
-    add their own fields and, when needed, narrow the ``runtime`` field.
-    The scenario factory builds the trainers from a recipe's values
+    add their own configuration fields. A recipe holds no runtime, no
+    training component and no store (RFC #1390): the process holds them in
+    ``reef.scenario.live_objects.LiveObjects``. The scenario factory builds
+    the trainers from a recipe's values and those objects
     (``reef.scenario.factory.read_trainer_specs``).
     """
 
@@ -101,12 +72,6 @@ class Recipe:
     deployment wins. A class that only sets other defaults for a base class's sections declares them here."""
 
     name: str = "recipe"
-    runtime: InferenceRuntime | None = None
-    training_component: TrainingComponent | None = None
-    #: The store of the job data directories that the trainers write for their jobs; the dispatcher binds it
-    #: (``with_job_components``).
-    data_store: DataStore | None = field(default=None, repr=False, compare=False)
-
     training_mode: str = config_field("auto")
     #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
     pipeline_stages: PipelineSettings | None = field(default=None, repr=False, compare=False)
@@ -177,24 +142,6 @@ class Recipe:
         """
         return self.stages().scenario_state_dirs(scenario)
 
-    def job_components(self) -> tuple[TrainingComponent, ...]:
-        """The training components whose jobs this recipe's trainers submit, each under its own ``name``: the
-        weight trainer's ``training_component``, and the ones that a recipe adds, such as a harness's."""
-        return () if self.training_component is None else (self.training_component,)
-
-    def with_job_components(self, components: Mapping[str, TrainingComponent], data_store: DataStore) -> Recipe:
-        """This recipe whose trainers submit the jobs of each job component to ``components[name]``, such as the
-        jobs queue's view of it, and write the data of each job to ``data_store``. Raise ``ValueError`` unless
-        ``components`` names exactly the job components."""
-        check_job_components(self, components)
-        if self.training_component is None:
-            return replace(self, data_store=data_store)
-        return replace(self, training_component=components[self.training_component.name], data_store=data_store)
-
-    def with_served_endpoint(self, endpoint: ServedEndpoint) -> Recipe:
-        """This recipe told where the service answers inference; the default has no calls of its own to point there."""
-        return self
-
     @property
     def report_type(self) -> type[ReportBase] | None:
         """The typed external-report contract this recipe accepts.
@@ -207,27 +154,22 @@ class Recipe:
         return None
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        """The components that every snapshot of the named scenario binds.
+        """The components that every snapshot of the named scenario binds, as the recipe's configuration declares
+        them.
 
         Each ``ComponentSpec`` gives the component's kind, the admission check
         run before it is published or restored, its import layout and the
         files a client pulls. The default declares none: the scenario records
-        traffic only. Most recipes ignore ``scenario``.
+        traffic only. Most recipes ignore ``scenario``. The value is a function
+        of the recipe's configuration fields alone; the deployment's components are
+        ``reef.scenario.live_objects.scenario_components``, which adds the facts that live objects know.
         """
         return ScenarioComponents()
 
-    def check_root_start(self, root: ScenarioRoot) -> None:
-        """Check that training can start from ``root`` before an item start is registered.
-
-        The default calls ``training_component.root_start`` when a training component is bound. A recipe with
-        several trainers checks each trainer's component and root view. Raise ``ValueError`` on refusal.
-        """
-        if self.training_component is not None:
-            self.training_component.root_start(root)
-
     def default_start(self) -> DefaultStart:
-        """The content of a new scenario's root snapshot when no artifact item starts the scenario; empty by
-        default."""
+        """The content of a new scenario's root snapshot when no artifact item starts the scenario, as the recipe's
+        configuration gives it; empty by default. The deployment's default start is
+        ``reef.scenario.live_objects.default_start``."""
         return DefaultStart()
 
     def harness_state_dir(self, scenario: str, component: str) -> Path | None:
@@ -238,11 +180,6 @@ class Recipe:
         The value is a function of the recipe's configuration fields alone (``EvolutionSettings.component_state_dir``
         for a harness recipe). The harness routes hold a recipe of any class, so each recipe class answers for its
         own configuration."""
-        return None
-
-    def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
-        """The model that ``component``'s harness in ``scenario`` calls: a client's layer asks Reef for this model
-        by name and dialect. ``None`` for a recipe that evolves no harness."""
         return None
 
     @property
@@ -268,9 +205,10 @@ WEIGHTS_COMPONENT = "weights"
 class WeightTrainingRecipe(Recipe):
     """Shared recipe contract for backend algorithms that update weights.
 
-    Requires a :class:`~reef.train.component.TrainingComponent` in
-    ``training_component`` (the first positional argument of every training
-    recipe), which runs the recipe's training jobs.
+    The deployment's training component runs the recipe's training jobs, and
+    its runtime serves the weights. The recipe holds neither: the process holds
+    them in ``reef.scenario.live_objects.LiveObjects``, and
+    ``check_recipe_objects`` refuses a deployment without them.
 
     A job's ``parameters`` belong to its training component, and Reef reads
     none of them. :meth:`default_parameters` gives the recipe's own default
@@ -292,8 +230,6 @@ class WeightTrainingRecipe(Recipe):
     recipe never repeats a setting's name or type anywhere else.
     """
 
-    training_component: TrainingComponent = field(kw_only=False)
-    runtime: InferenceRuntime = field(kw_only=True)
     job_parameters: Mapping[str, Any] | None = config_field(
         None,
         help=(
@@ -301,6 +237,10 @@ class WeightTrainingRecipe(Recipe):
             "component refuses a parameter it does not take."
         ),
     )
+
+    trains_task_jobs: ClassVar[bool] = False
+    """Whether every job of the recipe is a task job. The deployment's training component must then take the
+    recipe's task parameters (``reef.scenario.live_objects.check_recipe_objects``)."""
 
     @classmethod
     def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
@@ -332,50 +272,7 @@ class WeightTrainingRecipe(Recipe):
         """
         return type(self).configured_parameters(self.job_parameters)
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.training_component is None:
-            raise RecipeConfigError(
-                f"{type(self).__name__} requires a training component; pass one via the 'training_component' argument"
-            )
-        if not isinstance(self.training_component, TrainingComponent):
-            raise TypeError(
-                f"{type(self).__name__} requires a TrainingComponent, got {type(self.training_component).__name__}"
-            )
-        if not isinstance(self.runtime, InferenceRuntime):
-            raise RecipeConfigError("weight recipes require an independent inference runtime")
-
     def build_components(self, scenario: str) -> ScenarioComponents:
-        weights = ComponentSpec(
-            kind=self.runtime.served_weight_kind, layout=TrainingArtifactLayout(self.training_component)
-        )
-        return ScenarioComponents({WEIGHTS_COMPONENT: weights})
-
-    def default_start(self) -> DefaultStart:
-        """The training component's untrained checkpoint (``TrainingComponent.default_start``)."""
-        return self.training_component.default_start()
-
-
-def close_runtimes(
-    training_components: Sequence[TrainingComponent], runtime: InferenceRuntime | None
-) -> list[BaseException]:
-    """Close a recipe's training components and inference runtime, and return their close errors in that order.
-
-    Admission closes first, so that no new request starts. Then the training
-    components close, and then the runtime shuts down. A failed close does not
-    stop the next one. ``None`` stands for an absent runtime.
-    """
-    if runtime is not None:
-        runtime.close_admission()
-    errors: list[BaseException] = []
-    for training_component in training_components:
-        try:
-            training_component.close()
-        except BaseException as exc:
-            errors.append(exc)
-    if runtime is not None:
-        try:
-            runtime.shutdown()
-        except BaseException as exc:
-            errors.append(exc)
-    return errors
+        """One component, ``weights``. Its kind and its layout are not configuration yet: the runtime and the
+        training component give them (``reef.scenario.live_objects.scenario_components``)."""
+        return ScenarioComponents({WEIGHTS_COMPONENT: ComponentSpec()})

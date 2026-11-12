@@ -13,8 +13,9 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
-from reef.recipe.loading import build_named_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
+from reef.service.assembly import load_named_recipe
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -73,7 +74,7 @@ inference:
     )
 
     with pytest.raises(RuntimeConfigError, match="unknown runtime type 'missing'"):
-        build_named_recipe("qwen", config_directory=recipes)
+        load_named_recipe("qwen", config_directory=recipes)
 
 
 @pytest.mark.unit
@@ -97,9 +98,11 @@ inference:
         raise AssertionError("recipe resolution must not probe the runtime")
 
     monkeypatch.setattr("urllib.request.urlopen", unexpected_probe)
+    recipe, runtime = load_named_recipe("qwen", config_directory=recipes)
     dispatcher = Dispatcher(
-        build_named_recipe("qwen", config_directory=recipes),
+        recipe,
         InMemoryRepositoryBackend.factory(),
+        live=LiveObjects(runtime=runtime),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -137,8 +140,9 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
         backend_factory = InMemoryRepositoryBackend.factory()
         dispatchers = {
             recipe: Dispatcher(
-                Recipe(name=recipe, runtime=RoutingRuntime(recipe)),
+                Recipe(name=recipe),
                 backend_factory,
+                live=LiveObjects(runtime=RoutingRuntime(recipe)),
                 scenario_storage=SQLiteScenarioStorage(),
                 coordination=memory_coordination(),
             )
@@ -173,8 +177,9 @@ def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path
     async def run() -> None:
         runtime = RuntimeRegistry().build({"type": "none"}, model_path="model")
         dispatcher = Dispatcher(
-            Recipe(name="sft", runtime=runtime),
+            Recipe(name="sft"),
             InMemoryRepositoryBackend.factory(),
+            live=LiveObjects(runtime=runtime),
             scenario_storage=SQLiteScenarioStorage(),
             coordination=memory_coordination(),
         )

@@ -441,8 +441,8 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
     tmp_path: Path, failure: bool
 ) -> None:
     entered, release = Event(), Event()
-    recipe = replace(harness_recipe(tmp_path, holding_method(entered, release, failure)), training_mode="manual")
-    dispatcher = harness_dispatcher(tmp_path, recipe)
+    recipe, live = harness_recipe(tmp_path, holding_method(entered, release, failure))
+    dispatcher = harness_dispatcher(tmp_path, replace(recipe, training_mode="manual"), live)
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
     assert scenario is not None
     headers = {"x-reef-scenario": SCENARIO, "Authorization": "Bearer secret"}

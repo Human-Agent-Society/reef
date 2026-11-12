@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from weakref import WeakKeyDictionary
@@ -32,6 +33,7 @@ from reef.evaluation.harness import ComparePolicy
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
 from reef.storage.sql_coordination import memory_coordination
 from reef.train.component import ScenarioRoot
@@ -60,11 +62,13 @@ def seed_root(recipe: HarnessEvolutionRecipe) -> ScenarioRoot:
 def harness_dispatcher(
     tmp_path: Path,
     recipe: Recipe,
+    live: LiveObjects,
     *,
     hold_local_cycles: bool = False,
     training_manager: TrainingManager | None = None,
 ) -> Dispatcher:
-    """A dispatcher over ``recipe`` with a seeded repository, a durable commit history and a data store.
+    """A dispatcher over ``recipe`` and its ``live`` objects, with a seeded repository, a durable commit history
+    and a data store.
 
     A test that prepares and commits each step itself sets ``hold_local_cycles``, so no local cycle commits the
     same step a second time. ``training_manager`` decides what the scenarios in ``auto`` mode train.
@@ -73,10 +77,10 @@ def harness_dispatcher(
     return Dispatcher(
         recipe,
         harness_repository(tmp_path),
+        live=replace(live, data_store=storage.data),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage,
         record_storage=storage.inner,
-        data_store=storage.data,
         hold_local_cycles=hold_local_cycles,
         coordination=memory_coordination(),
         training_manager=training_manager,

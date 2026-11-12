@@ -13,6 +13,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore
 from reef.storage.evaluations import EvaluationStore
@@ -229,8 +230,8 @@ def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(
     dispatcher = Dispatcher(
         Recipe(),
         backend_factory(tmp_path),
+        live=LiveObjects(data_store=data),
         scenario_storage=factory,
-        data_store=data,
         coordination=memory_coordination(),
     )
     try:

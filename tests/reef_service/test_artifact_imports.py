@@ -10,7 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent, dispatcher, train
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import (
@@ -143,8 +143,9 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     # A restart keeps the chain tip at the last training step and lists the imports.
     component = ImportingComponent(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

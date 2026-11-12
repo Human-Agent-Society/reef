@@ -41,6 +41,7 @@ from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.sample2job import Sample2Job
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.sql_coordination import memory_coordination
 from reef.train import ComponentTrainer, Trainer
 from reef.train.jobs import JobLoop
@@ -200,10 +201,10 @@ def composite_dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatche
     return Dispatcher(
         _TwoTrainerRecipe(backends=backends),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(data_store=storage.data),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage,
         record_storage=storage.inner,
-        data_store=storage.data,
         # Loading a scenario wakes its workers: held, they leave every step to the test.
         hold_local_cycles=True,
         coordination=memory_coordination(),

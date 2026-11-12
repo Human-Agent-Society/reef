@@ -22,7 +22,7 @@ from tests.support.harness_service import harness_repository
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.polling import wait_until
 from tests.support.records import report, token_inference
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
@@ -349,8 +349,9 @@ def build_training_dispatcher(
     hold_local_cycles=False,
 ):
     return Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         hold_local_cycles=hold_local_cycles,
@@ -589,8 +590,9 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
 
     def build(component):
         return Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(component)),
+            TestPolicyRecipe(),
             backend_factory,
+            live=live_objects(component),
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),
             coordination=memory_coordination(),
@@ -827,9 +829,11 @@ def build_harness_evolve_dispatcher(
     tmp_path, backend_factory, *, method=lambda workspace, services: None, agent_record_dir=None
 ):
     """A dispatcher over a pi harness recipe; these tests need an artifact-producing recipe, not its semantics."""
+    recipe, live = harness_recipe(tmp_path, method)
     return Dispatcher(
-        harness_recipe(tmp_path, method),
+        recipe,
         backend_factory,
+        live=live,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         coordination=memory_coordination(),

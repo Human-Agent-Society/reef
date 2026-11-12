@@ -92,10 +92,12 @@ def gepa_backend(
     binary = tmp_path / "gepa-pi"
     binary.write_text(PI_FAKE)
     binary.chmod(0o755)
-    recipe = harness_recipe(tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary))
-    recipe = rebuilt_recipe(recipe, models={"reflection": FakeChat() if reflector is None else reflector})
+    recipe, live = harness_recipe(
+        tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary)
+    )
+    recipe, live = rebuilt_recipe(recipe, live, models={"reflection": FakeChat() if reflector is None else reflector})
     releases = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, "demo", releases), releases
+    return build_harness_backend(recipe, live, "demo", releases), releases
 
 
 def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainingCommit:

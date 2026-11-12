@@ -34,8 +34,8 @@ from aiohttp import web
 from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
-from reef.recipe.base import ServedEndpoint, close_runtimes
 from reef.recipe.composite import CompositeRecipe
+from reef.scenario.live_objects import ServedEndpoint, close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
@@ -44,9 +44,9 @@ from reef.service.assembly import (
     build_dispatcher,
     build_task_files,
     default_served_url,
+    load_deployment,
     open_scenario_storage,
     open_service_coordination,
-    serving_recipe,
     with_harness_components,
 )
 from reef.service.auth import evaluation_token_for
@@ -84,8 +84,8 @@ class InferenceApp(ComponentApp):
     """The inference service owns runtime startup and serves requests from published routes."""
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
-        recipe = serving_recipe(settings, environ)
-        runtime = recipe.runtime
+        recipe, live = load_deployment(settings, environ)
+        runtime = live.runtime
         coordination = open_service_coordination(settings)
         try:
             backends = build_artifact_backend(settings) if runtime is not None and runtime.serves_requests else None
@@ -97,7 +97,7 @@ class InferenceApp(ComponentApp):
                 storage = ObservedScenarioStorage(storage, record_observer)
         except BaseException:
             coordination.close()
-            close_runtimes(recipe.job_components(), runtime)
+            close_runtimes(live.job_components(), runtime)
             raise
         timeout_seconds = settings.inference_timeout_s if runtime is None else runtime.inference_timeout_s
         app = build_inference_app(
@@ -117,6 +117,7 @@ class InferenceApp(ComponentApp):
                     app,
                     settings,
                     recipe,
+                    live,
                     ReplicaRecords(ServedModelsCache(coordination.served_models), storage),
                     environ,
                 )
@@ -124,13 +125,14 @@ class InferenceApp(ComponentApp):
                 data_store.close()
                 storage.close()
                 coordination.close()
-                close_runtimes(recipe.job_components(), runtime)
+                close_runtimes(live.job_components(), runtime)
                 raise
 
         worker = None
         if backends is not None:
             worker = ServingWorker(
                 recipe,
+                live,
                 backends,
                 coordination,
                 worker_id=instance_id("inference-startup"),
@@ -145,7 +147,7 @@ class InferenceApp(ComponentApp):
             data_store.close()
             storage.close()
             coordination.close()
-            close_runtimes(recipe.job_components(), runtime)
+            close_runtimes(live.job_components(), runtime)
 
         app.on_cleanup.append(close_inference)
         return app
@@ -183,26 +185,29 @@ class HarnessApp(ComponentApp):
 class TrainingApp(ComponentApp):
     """Build the training service from its job components and coordination store.
 
-    Values: this stateless builder returns an app with one worker per recipe job component, and refuses a recipe
-    with no job component. The app owns these workers, their components, the runtime and the coordination store.
+    Values: this stateless builder returns an app with one worker per job component of the process, and refuses a
+    deployment with no job component. The app owns these workers, their components, the runtime and the coordination store.
     Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario or artifact stores. It opens
     the data store, which keeps the data directory of each job.
     """
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
-        recipe = serving_recipe(settings, environ)
+        recipe, live = load_deployment(settings, environ)
         if isinstance(recipe, CompositeRecipe):
-            recipe = recipe.with_served_endpoint(
-                ServedEndpoint(url=settings.served_url or default_served_url(settings.host, settings.port), token=None)
+            live = replace(
+                live,
+                served_endpoint=ServedEndpoint(
+                    url=settings.served_url or default_served_url(settings.host, settings.port), token=None
+                ),
             )
-        runtime = recipe.runtime
+        runtime = live.runtime
         try:
-            # The harness training component reads the served endpoint, so it is built after the recipe has it.
-            recipe = with_harness_components(recipe, environ)
+            # The harness training component reads the served endpoint, so it is built after ``live`` has it.
+            live = with_harness_components(recipe, live, environ)
         except BaseException:
-            close_runtimes(recipe.job_components(), runtime)
+            close_runtimes(live.job_components(), runtime)
             raise
-        components = recipe.job_components()
+        components = live.job_components()
         coordination: Coordination | None = None
         task_files: TaskFileStore | None = None
         data_store: DataStore | None = None

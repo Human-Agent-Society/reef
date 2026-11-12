@@ -8,7 +8,7 @@ import time
 import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.records import memory_records
-from tests.support.runtime_stubs import STUB_ROOT, job_sized_stages, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, job_sized_stages, live_objects
 from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import policy_trajectory
 
@@ -26,6 +26,7 @@ from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Suppor
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import load_recipe
+from reef.scenario.live_objects import scenario_components
 from reef.service.deploy.training import training_recipe_config
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
@@ -326,10 +327,11 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
 
 @pytest.mark.unit
 def test_recipe_serves_loaded_weights_and_builds_a_trainer() -> None:
-    recipe = OpenClawRLRecipe(**runtime_bindings(), pipeline_stages=job_sized_stages(OpenClawRLRecipe.pipeline_spec()))
-    components = recipe.build_components("s")
+    recipe = OpenClawRLRecipe(pipeline_stages=job_sized_stages(OpenClawRLRecipe.pipeline_spec()))
+    live = live_objects()
+    components = scenario_components(recipe, live, "s")
     assert components.loaded_component == "weights"
-    trainer = recipe_trainer(recipe, "s", memory_records("s"), root=STUB_ROOT)
+    trainer = recipe_trainer(recipe, live, "s", memory_records("s"), root=STUB_ROOT)
     assert trainer.job_loop is not None
     assert trainer.pipeline.context.job_parameters["trajectory"]["objective"] == "openclawrl"
     trainer.close()
@@ -340,7 +342,7 @@ def openclawrl_recipe(pipeline: dict | None = None, **data) -> OpenClawRLRecipe:
     config: dict = {"data": data}
     if pipeline is not None:
         config["pipeline"] = pipeline
-    recipe = load_recipe(OpenClawRLRecipe, config, {}, **runtime_bindings())
+    recipe = load_recipe(OpenClawRLRecipe, config, {})
     assert isinstance(recipe, OpenClawRLRecipe)
     return recipe
 

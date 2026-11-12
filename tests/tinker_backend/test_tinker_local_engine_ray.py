@@ -28,6 +28,7 @@ import pytest
 
 from reef.dispatcher import Dispatcher
 from reef.inference.serving import AdapterServingRuntime
+from reef.scenario.live_objects import LiveObjects
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -270,13 +271,12 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     try:
         dispatcher = Dispatcher(
             TTTDRecipe(
-                component,
-                runtime=inference,
                 pipeline_stages=PipelineSettings.from_setting(
                     raw["pipeline"], spec=TTTDRecipe.pipeline_spec(), environ={}
                 ),
             ),
             repository,
+            live=LiveObjects(runtime=inference, training_component=component),
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             # A file, as a deployment keeps it: a restarted control plane reads what the engines serve.

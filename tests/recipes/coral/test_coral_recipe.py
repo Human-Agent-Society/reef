@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.support.runtime_stubs import runtime_bindings
 
 reef_recipe = pytest.importorskip("reef.recipe.base", reason="requires a reef checkout")
 
@@ -31,7 +30,7 @@ EXAMPLE = Path(__file__).resolve().parents[3] / "recipes" / "beta" / "coral" / "
 
 
 def coral_recipe(config):
-    return load_recipe(_recipe_cls(), config, {}, **runtime_bindings())
+    return load_recipe(_recipe_cls(), config, {})
 
 
 def test_the_recipe_binds_processor_and_grouped_machinery():

@@ -45,6 +45,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.sample2job import NoJobData
 from reef.scenario.binding import ScenarioBinding
+from reef.scenario.live_objects import LiveObjects, check_root_start, default_start, scenario_components
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.commits import (
@@ -241,36 +242,38 @@ def recovered_trainer_states(
     return states
 
 
-def read_trainer_spec(recipe: Recipe) -> TrainerSpec:
-    """The spec of the one trainer of ``recipe``, which is not a composite.
+def read_trainer_spec(recipe: Recipe, live: LiveObjects) -> TrainerSpec:
+    """The spec of the one trainer of ``recipe``, which is not a composite, on the objects of ``live``.
 
-    - A ``HarnessEvolutionRecipe`` submits each step as a job of the ``harness_component`` that the service gave it
-      (``reef.service.assembly.with_harness_components``).
-    - A ``WeightTrainingRecipe`` submits jobs to its ``training_component``, with its ``parameters_by_kind``.
+    - A ``HarnessEvolutionRecipe`` submits each step as a job of ``live.harness_component``, which the service
+      built (``reef.service.assembly.with_harness_components``).
+    - A ``WeightTrainingRecipe`` submits jobs to ``live.training_component``, with its ``parameters_by_kind``.
     - Any other recipe only reads records.
 
-    The recipe holds the job component and the data store until RFC #1390 takes them off it.
+    The trainer writes the data of each job to ``live.data_store``.
 
     Raise ``TypeError`` for a weight recipe whose class declares no ``sample2job`` stage. Raise
-    ``RecipeConfigError`` for a harness recipe that has no training component.
+    ``RecipeConfigError`` for a harness recipe or a weight recipe when ``live`` has no component for its jobs.
     """
     job_component = None
     job_parameters = None
     if isinstance(recipe, HarnessEvolutionRecipe):
-        if recipe.harness_component is None:
+        if live.harness_component is None:
             raise RecipeConfigError(
                 "harness evolution has no training component to run its jobs: the service builds one with "
                 "reef.service.assembly.with_harness_components"
             )
-        job_component = recipe.harness_component
+        job_component = live.harness_component
     elif isinstance(recipe, WeightTrainingRecipe):
         if type(recipe).pipeline_spec().sample2job is NoJobData:
             raise TypeError(
                 f"{type(recipe).__name__} declares no sample2job: return a PipelineSpec with a Sample2Job subclass "
                 "from pipeline_spec()"
             )
+        if live.training_component is None:
+            raise RecipeConfigError(f"{type(recipe).__name__} requires a training component")
         # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
-        job_component = recipe.training_component
+        job_component = live.training_component
         job_parameters = recipe.parameters_by_kind()
     return TrainerSpec(
         name=recipe.name,
@@ -279,22 +282,23 @@ def read_trainer_spec(recipe: Recipe) -> TrainerSpec:
         training_mode=recipe.training_mode,
         job_parameters=job_parameters,
         job_component=job_component,
-        data_store=recipe.data_store,
+        data_store=live.data_store,
     )
 
 
-def read_trainer_specs(recipe: Recipe) -> TrainerSpec | ComponentTrainerSpecs:
-    """The trainer specs of ``recipe``: one spec for each component of a ``CompositeRecipe``, with the composite's
-    report type, or the one spec of any other recipe (``read_trainer_spec``).
+def read_trainer_specs(recipe: Recipe, live: LiveObjects) -> TrainerSpec | ComponentTrainerSpecs:
+    """The trainer specs of ``recipe`` on the objects of ``live``: one spec for each component of a
+    ``CompositeRecipe``, with the composite's report type, or the one spec of any other recipe
+    (``read_trainer_spec``).
 
     A component of a composite whose trainer only reads records has no mode to run in: its spec has the mode
     ``auto``.
     """
     if not isinstance(recipe, CompositeRecipe):
-        return read_trainer_spec(recipe)
+        return read_trainer_spec(recipe, live)
     specs = {}
     for component, component_recipe in recipe.components.items():
-        spec = read_trainer_spec(component_recipe)
+        spec = read_trainer_spec(component_recipe, live)
         specs[component] = replace(spec, training_mode="auto") if spec.job_component is None else spec
     return ComponentTrainerSpecs(specs, recipe.report_type)
 
@@ -303,6 +307,8 @@ class ScenarioFactory:
     """Register, assemble, and recover complete scenario instances.
 
     Inference loads each selected snapshot. ``served_models`` supplies the actual serving artifact for training.
+    ``live`` holds the runtime, the job components and the data store that the scenarios of ``recipe`` use; the
+    default has none, which fits a recipe that only reads records.
     """
 
     def __init__(
@@ -310,6 +316,7 @@ class ScenarioFactory:
         recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
+        live: LiveObjects | None = None,
         local_artifact_dir: Path | None = None,
         experiment_tracker: ExperimentTracker,
         scenario_storage: ScenarioStorage,
@@ -319,6 +326,7 @@ class ScenarioFactory:
         trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         self._recipe = recipe
+        self.live = LiveObjects() if live is None else live
         #: Builds each scenario's trainers from the recipe's specs; None is ``SpecTrainerBuilder``.
         self.trainer_builder = SpecTrainerBuilder() if trainer_builder is None else trainer_builder
         #: The training requests of every scenario; None builds scenarios that take no request.
@@ -351,7 +359,7 @@ class ScenarioFactory:
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
-        components = self._recipe.build_components(scenario)
+        components = scenario_components(self._recipe, self.live, scenario)
         if registration is None:
             self.register(scenario, backend, components, start)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from
@@ -374,19 +382,19 @@ class ScenarioFactory:
         """Write the root snapshot of the new scenario ``scenario`` and register it with ``backend``.
 
         The root holds the artifact item ``start`` in its component, or the recipe's default start
-        (``Recipe.default_start``) when ``start`` is ``None``. A root of several components holds each other
+        (``reef.scenario.live_objects.default_start``) when ``start`` is ``None``. A root of several components holds each other
         component's default start; a default start with files outside the component directories raises
         ``ReefError``. The registration metadata records the root's ``RootSource`` and, for several components, the
         manifest of the components that the root makes. An item that the component's layout or admission check
-        refuses raises ``ValueError``, and so does an item root that any of the recipe's training components cannot
-        start from (``Recipe.check_root_start``). Nothing is registered after a refusal.
+        refuses raises ``ValueError``, and so does an item root that the training component cannot
+        start from (``reef.scenario.live_objects.check_root_start``). Nothing is registered after a refusal.
         """
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
             root, source = self.root_snapshot(components, start, Path(work))
             if start is not None:
-                self._recipe.check_root_start(ScenarioRoot(root, source))
+                check_root_start(self._recipe, self.live, ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {
                 SCENARIO_METADATA_KEY: scenario_metadata_for(name=scenario, source=source)
             }
@@ -405,7 +413,7 @@ class ScenarioFactory:
         """The unpublished root snapshot of a new scenario that ``components`` serves, under ``work``, and its source."""
         item: tuple[str, Artifact] | None = None
         if start is None:
-            default = self._recipe.default_start()
+            default = default_start(self._recipe, self.live)
             source = RootSource("default", inputs=default.inputs)
         else:
             component, layout = components.import_target(start.component)
@@ -420,7 +428,7 @@ class ScenarioFactory:
                 return stored, source
             components.components[component].validator.validate(stored)
             item = (component, stored)
-            default = self._recipe.default_start()
+            default = default_start(self._recipe, self.live)
         tree = work / "default"
         tree.mkdir()
         default.write(tree)
@@ -499,7 +507,7 @@ class ScenarioFactory:
         served_at_head = served_snapshot(registration, checkpoint_head=checkpoint_head)
         start_artifact = backend.resolve_snapshot(start_artifact.revision)
         checkpoint_commit_number = 0 if checkpoint is None else checkpoint.commit_number
-        runtime = self._recipe.runtime
+        runtime = self.live.runtime
         store = self._storage.open(name)
         store.use_snapshots(RepositoryCommitSnapshots(backend, start_artifact))
         scenario: Scenario | None = None
@@ -556,7 +564,7 @@ class ScenarioFactory:
             recipe = self._recipe.for_record2sample_configs(components, record2sample_config)
             try:
                 trainers = self.trainer_builder.build_trainers(
-                    read_trainer_specs(recipe),
+                    read_trainer_specs(recipe, self.live),
                     name,
                     store.records,
                     components=components,
@@ -602,7 +610,7 @@ class ScenarioFactory:
                 binding=ScenarioBinding(
                     components=components,
                     runtime=runtime,
-                    training_component=self._recipe.training_component,
+                    training_component=self.live.training_component,
                     activation_rule=self._recipe.activation_rule(),
                     served_models=self.served_models,
                     # The recipe's own contract, not the first trainer's: a composite agrees

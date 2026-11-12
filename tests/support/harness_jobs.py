@@ -37,6 +37,7 @@ from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.scenario.live_objects import LiveObjects, harness_models
 from reef.service.assembly import with_harness_components
 from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
 from reef.train.harness_backend import AgentExecution, Method, MethodJob, Workspace
@@ -135,8 +136,9 @@ def harness_recipe(
     activation: PluginReference | None = None,
     job_samples: int | None = None,
     **evolution: Any,
-) -> HarnessEvolutionRecipe:
-    """A pi recipe over the fake binary, its state under ``tmp_path``, with its harness training component.
+) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
+    """A pi recipe over the fake binary, its state under ``tmp_path``, and the live objects that run it: the
+    runtime ``runtime()`` and its harness training component.
 
     ``evaluation`` sets ``EvaluationSettings`` fields beside ``tasks``, and ``evolution`` sets
     ``EvolutionSettings`` fields. ``worker_executor`` places the run workers (``execution.evolution``),
@@ -151,7 +153,6 @@ def harness_recipe(
         ),
         evaluation=EvaluationSettings(tasks=tasks, **dict(evaluation or {})),
         seed=seed,
-        runtime=runtime(),
         worker_executor=ExecutorSettings() if worker_executor is None else worker_executor,
         models=dict(models or {}),
         activation=activation,
@@ -165,7 +166,7 @@ def harness_recipe(
             )
         ),
     )
-    return with_harness_component(recipe, method, score=score, agent=agent)
+    return recipe, with_harness_component(recipe, method, score=score, agent=agent)
 
 
 def with_harness_component(
@@ -175,64 +176,72 @@ def with_harness_component(
     score: Any = marker_score,
     collector: TaskCollector | None = None,
     agent: AgentSettings | None = None,
-) -> HarnessEvolutionRecipe:
-    """``recipe`` with a new harness training component on its settings and models, built from objects: ``method``
-    (a ``Method``, or a function), the scorer ``score`` (a ``TaskScorer``, a function, or None for none), the
-    ``collector`` and the ``agent`` settings. Its runs use the local executor."""
+    live: LiveObjects | None = None,
+) -> LiveObjects:
+    """``live`` with a new harness training component on the settings of ``recipe`` and the models of ``live``,
+    built from objects: ``method`` (a ``Method``, or a function), the scorer ``score`` (a ``TaskScorer``, a
+    function, or None for none), the ``collector`` and the ``agent`` settings. Its runs use the local executor.
+    ``live`` defaults to the runtime ``runtime()`` alone."""
+    live = LiveObjects(runtime=runtime()) if live is None else live
     component = HarnessTrainingComponent(
         recipe.harness_settings(),
-        recipe.harness_models(),
+        harness_models(recipe, live),
         method=resolve_method(method),
         executor=build_executor(None),
         scorer=None if score is None else resolve_task_scorer(score),
         collector=collector,
         agent=agent,
     )
-    return replace(recipe, harness_component=component)
+    return replace(live, harness_component=component)
 
 
 def rebuilt_recipe(
-    recipe: HarnessEvolutionRecipe, *, executor: ProgramExecutor | None = None, **changes: Any
-) -> HarnessEvolutionRecipe:
-    """A copy of ``recipe`` with ``changes`` to its fields and a new harness training component on the changed
-    settings and models, as another process builds its own. The new component has the method, the collector and the
-    agent of ``recipe``'s component, its run executor unless ``executor`` names another, and its scorer unless
-    ``changes`` holds ``scorer`` (a ``TaskScorer``, or None for none)."""
-    component = harness_component(recipe)
+    recipe: HarnessEvolutionRecipe, live: LiveObjects, *, executor: ProgramExecutor | None = None, **changes: Any
+) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
+    """A copy of ``recipe`` with ``changes`` to its fields, and ``live`` with a new harness training component on
+    the changed settings and models, as another process builds its own. The new component has the method, the
+    collector and the agent of ``live``'s component, its run executor unless ``executor`` names another, and its
+    scorer unless ``changes`` holds ``scorer`` (a ``TaskScorer``, or None for none). ``runtime`` in ``changes``
+    replaces the runtime of ``live``."""
+    component = harness_component(live)
     scorer = changes.pop("scorer", component.scorer)
+    if "runtime" in changes:
+        live = replace(live, runtime=changes.pop("runtime"))
     changed = replace(recipe, **changes)
     rebuilt = HarnessTrainingComponent(
         changed.harness_settings(),
-        changed.harness_models(),
+        harness_models(changed, live),
         method=component.method,
         executor=component.executor if executor is None else executor,
         scorer=scorer,
         collector=component.collector,
         agent=component.agent,
     )
-    return replace(changed, harness_component=rebuilt)
+    return changed, replace(live, harness_component=rebuilt)
 
 
-def configured_recipe(recipe: Recipe, environ: Mapping[str, str] | None = None) -> HarnessEvolutionRecipe:
-    """The harness recipe ``recipe`` with the harness training component that the service builds for it from its
-    configuration alone (``with_harness_components``); ``environ`` holds the variables its sandbox and agent read,
-    none by default."""
-    built = with_harness_components(recipe, {} if environ is None else environ)
-    if not isinstance(built, HarnessEvolutionRecipe):
-        raise TypeError("the recipe is not a harness evolution recipe")
-    return built
+def configured_live(
+    recipe: Recipe, live: LiveObjects | None = None, environ: Mapping[str, str] | None = None
+) -> LiveObjects:
+    """``live`` with the harness training component that the service builds for the harness recipe ``recipe`` from
+    its configuration alone (``with_harness_components``). ``live`` defaults to the runtime ``runtime()`` alone;
+    ``environ`` holds the variables that the component's sandbox and agent read, none by default."""
+    live = LiveObjects(runtime=runtime()) if live is None else live
+    return with_harness_components(recipe, live, {} if environ is None else environ)
 
 
-def configured_component(recipe: Recipe, environ: Mapping[str, str] | None = None) -> HarnessTrainingComponent:
-    """The harness training component of ``configured_recipe(recipe, environ)``."""
-    return harness_component(configured_recipe(recipe, environ))
+def configured_component(
+    recipe: Recipe, live: LiveObjects | None = None, environ: Mapping[str, str] | None = None
+) -> HarnessTrainingComponent:
+    """The harness training component of ``configured_live(recipe, live, environ)``."""
+    return harness_component(configured_live(recipe, live, environ))
 
 
-def harness_component(recipe: HarnessEvolutionRecipe) -> HarnessTrainingComponent:
-    """The harness training component that ``recipe`` holds; ``TypeError`` when it holds none of its own."""
-    component = recipe.harness_component
+def harness_component(live: LiveObjects) -> HarnessTrainingComponent:
+    """The harness training component that ``live`` holds; ``TypeError`` when it holds none of its own."""
+    component = live.harness_component
     if not isinstance(component, HarnessTrainingComponent):
-        raise TypeError("the recipe holds no harness training component of its own")
+        raise TypeError("the live objects hold no harness training component of their own")
     return component
 
 
@@ -241,11 +250,14 @@ BACKEND_RELEASES: WeakKeyDictionary[HarnessBackend, TreeArtifacts] = WeakKeyDict
 
 
 def build_harness_backend(
-    recipe: HarnessEvolutionRecipe, scenario: str = "demo", artifacts: TreeArtifacts | None = None
+    recipe: HarnessEvolutionRecipe,
+    live: LiveObjects,
+    scenario: str = "demo",
+    artifacts: TreeArtifacts | None = None,
 ) -> HarnessBackend:
-    """``recipe``'s backend of ``COMPONENT`` in ``scenario``, whose jobs run on the head of ``releases`` (an
-    in-memory history whose base is the seed by default)."""
-    backend = harness_component(recipe).build_backend(scenario, COMPONENT)
+    """The backend of ``COMPONENT`` in ``scenario`` that the harness component of ``live`` builds, whose jobs run
+    on the head of ``releases`` (an in-memory history whose base is ``recipe``'s seed by default)."""
+    backend = harness_component(live).build_backend(scenario, COMPONENT)
     BACKEND_RELEASES[backend] = TreeArtifacts(recipe.seed) if artifacts is None else artifacts
     return backend
 
@@ -259,9 +271,9 @@ def harness_backend(
     tmp_path: Path, method: Any, *, scenario: str = "demo", **recipe_fields: Any
 ) -> tuple[HarnessBackend, TreeArtifacts]:
     """The backend ``harness_recipe`` builds for ``scenario``, over an in-memory history whose base is the seed."""
-    recipe = harness_recipe(tmp_path, method, **recipe_fields)
+    recipe, live = harness_recipe(tmp_path, method, **recipe_fields)
     artifacts = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, scenario, artifacts), artifacts
+    return build_harness_backend(recipe, live, scenario, artifacts), artifacts
 
 
 def changed_rules(text: str) -> Mapping[str, str]:
@@ -372,7 +384,7 @@ __all__ = [
     "TreeArtifacts",
     "changed_rules",
     "configured_component",
-    "configured_recipe",
+    "configured_live",
     "evolution_config",
     "harness_backend",
     "harness_component",

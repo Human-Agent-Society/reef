@@ -6,14 +6,14 @@ weights or the harness*. This package holds everything a method binds to:
 - ``base`` — ``Recipe`` (the default record-only recipe and base contract:
   its stages, its report type and ``build_components``) and
   ``WeightTrainingRecipe``, with its default job parameters.
-- ``harness`` — ``HarnessEvolutionRecipe``, the recipe contract every harness
-  evolution method extends; it assembles ``reef.train.harness_backend``.
-- ``composite`` — ``CompositeRecipe`` binds one recipe per snapshot component
-  and runs their trainers side by side in one scenario.
+- ``harness`` — ``HarnessEvolutionRecipe``, the configuration of every harness
+  evolution method; ``reef.train.harness_backend`` builds itself from it.
+- ``composite`` — ``CompositeRecipe`` binds one recipe per snapshot component;
+  the scenario runs their trainers side by side.
 - ``loading`` — the one loader: ``load_recipe`` makes the recipe value of a
-  class from its config, ``build_recipe`` from a class reference and
-  ``build_named_recipe`` from a deployment preset. A recipe class declares
-  its configuration and does not load itself.
+  class from its config, ``build_recipe`` from a class reference, and
+  ``named_recipe_config`` reads the config of a deployment preset. A recipe
+  class declares its configuration and does not load itself.
 - ``registry`` — dotted class resolution (``recipe_class_for``).
 - ``config_fields`` — one dataclass field as the whole configuration surface
   for one setting (YAML key, env fallback, shared typed parser),
@@ -33,13 +33,19 @@ methods live outside the core package. The repository's sibling
 them at boot nor ships them in its wheel. Deployments select one explicitly by
 its dotted ``package.module:ClassName`` reference.
 
-The recipe decides; it does not execute or deliver. It builds no trainer: the
-scenario factory builds each scenario's trainers from the recipe's values
-(``reef.scenario.factory.read_trainer_specs``). ``build_components`` returns
+The recipe decides; it does not execute or deliver. A recipe is configuration
+(RFC #1390): it has no runtime, no training component and no store, and it
+builds none. The process that runs a service builds those objects and holds
+them in ``reef.scenario.live_objects.LiveObjects``; the service assembly
+(``reef.service.assembly``) makes that value. The scenario factory builds each
+scenario's trainers from the recipe's values and those objects
+(``reef.scenario.factory.read_trainer_specs``). ``build_components`` declares
 the snapshot's components with their kinds, admission checks and client file
-trees, and the scenario binds them with the runtime as peers. Scenario coordination consumes recipes. Recipes depend on ``train``, ``harness``,
-``artifact``, ``storage``, and ``runtime``; none imports this package. Concrete
-weight backends are loaded only when a weight-training recipe builds them.
+trees from the configuration, and
+``reef.scenario.live_objects.scenario_components`` adds what the runtime and
+the training component know about the weight component. Scenario coordination
+consumes recipes. Recipes depend on ``train``, ``harness``, ``artifact`` and
+``storage`` for the types of their values; none imports this package.
 """
 
 from reef.recipe.base import Recipe, WeightTrainingRecipe
@@ -47,7 +53,7 @@ from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config import load_recipe_config
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.loading import build_named_recipe, build_recipe, load_recipe
+from reef.recipe.loading import build_recipe, load_recipe, named_recipe_config
 from reef.recipe.registry import recipe_class_for
 
 __all__ = [
@@ -55,10 +61,10 @@ __all__ = [
     "Recipe",
     "RecipeConfigError",
     "WeightTrainingRecipe",
-    "build_named_recipe",
     "build_recipe",
     "config_field",
     "load_recipe",
     "load_recipe_config",
+    "named_recipe_config",
     "recipe_class_for",
 ]

@@ -32,6 +32,7 @@ from reef.inference.startup import (
 )
 from reef.recipe.base import Recipe
 from reef.scenario.binding import activate_snapshot
+from reef.scenario.live_objects import LiveObjects, scenario_components
 from reef.storage.coordination import Coordination
 from reef.storage.served_models import (
     INFERENCE_OWNER_QUEUE,
@@ -111,7 +112,7 @@ class QueueStartupReporter(StartupReporter):
 class ServingWorker(QueueWorker):
     """Start queued artifacts and retire unused endpoints in the inference service.
 
-    ``recipe`` supplies the runtime and each scenario's components. ``backends`` resolves durable snapshots.
+    ``live`` supplies the runtime, and ``recipe`` with ``live`` each scenario's components. ``backends`` resolves durable snapshots.
     ``coordination`` owns requests and routes. ``local_artifact_dir`` holds materialized snapshots, or uses the repository default.
     A long-lived work lease gives one worker runtime ownership, including health checks and idle periods.
     Other replicas only read routes. The owner recovers completed selections before it takes new work: it opens the
@@ -126,13 +127,14 @@ class ServingWorker(QueueWorker):
     def __init__(
         self,
         recipe: Recipe,
+        live: LiveObjects,
         backends: RepositoryBackendFactory,
         coordination: Coordination,
         *,
         worker_id: str,
         local_artifact_dir: Path | None = None,
     ) -> None:
-        runtime = recipe.runtime
+        runtime = live.runtime
         super().__init__(
             coordination.work_queue,
             SERVING_QUEUE,
@@ -141,6 +143,7 @@ class ServingWorker(QueueWorker):
             slots=1 if runtime is None else runtime.serving_slots,
         )
         self.recipe = recipe
+        self.live = live
         self.backends = backends
         self.routes = coordination.served_models
         self.local_artifact_dir = local_artifact_dir
@@ -173,7 +176,7 @@ class ServingWorker(QueueWorker):
         if self.stopped.is_set():
             return False
         if self.owner is None:
-            runtime = self.recipe.runtime
+            runtime = self.live.runtime
             if runtime is None or not runtime.serves_requests:
                 return False
             self.requeue_expired()
@@ -236,9 +239,9 @@ class ServingWorker(QueueWorker):
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         if self.stopped.is_set():
             raise WorkerStoppedError
-        runtime = self.recipe.runtime
+        runtime = self.live.runtime
         if runtime is None:
-            raise ValueError("the recipe has no inference runtime")
+            raise ValueError("the process has no inference runtime")
         if self.owner is None or self.owner.lease_lost.is_set():
             raise WorkLeaseLostError("the serving worker lost runtime ownership")
         with self.open_lock:
@@ -327,7 +330,7 @@ class ServingWorker(QueueWorker):
             return repository.select(ArtifactSelection.from_dict(value["selection"]))
 
         artifact = selected_artifact(item.payload)
-        components = self.recipe.build_components(item.scenario)
+        components = scenario_components(self.recipe, self.live, item.scenario)
         # The runtime reports each artifact's startup phases to the item's progress (RFC #1283).
         reporter = QueueStartupReporter(self.queue, item, self.worker_id)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
@@ -409,7 +412,7 @@ class ServingWorker(QueueWorker):
         time, so a second item for a served artifact starts nothing."""
         selection = ArtifactSelection.from_dict(item.payload["selection"])
         component = require_text(item.payload.get("component"), "component")
-        components = self.recipe.build_components(item.scenario)
+        components = scenario_components(self.recipe, self.live, item.scenario)
         artifact = components.component_artifact(self.repository(item.scenario).select(selection), component)
         runtime.apply_serving_config(item.scenario, self.routes.read_serving_config(item.scenario))
         served = runtime.serve_artifact(artifact, scenario=item.scenario)

@@ -13,6 +13,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service import assembly
 from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.storage.data import DataStore
@@ -36,7 +37,7 @@ def retention_dispatcher(tmp_path, data: DataStore, task_files: TaskFileStore) -
         Recipe(),
         InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(tmp_path, task_files=task_files, data=data),
-        data_store=data,
+        live=LiveObjects(data_store=data),
         coordination=memory_coordination(),
     )
 

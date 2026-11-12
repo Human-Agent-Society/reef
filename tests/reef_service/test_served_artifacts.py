@@ -8,7 +8,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent, ImportingInference, dispatcher, train
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
@@ -58,8 +58,9 @@ def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, Repository
     component = NamedComponent(tmp_path / "exported")
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     value = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -265,8 +266,9 @@ def test_a_scenario_that_serves_nothing_serves_nothing_after_a_restart(tmp_path)
 
     component = NamedComponent(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -319,8 +321,9 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
     component = ImportingComponent(tmp_path / "restarted-export")
     answering_each_artifact(component)
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

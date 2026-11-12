@@ -9,7 +9,6 @@ import os
 import shutil
 import time
 from collections.abc import Mapping
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +24,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe
+from reef.scenario.live_objects import LiveObjects, harness_models
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import component_files
 from reef.service.deploy.config_utils import load_config
@@ -64,8 +64,9 @@ def campaign_id(sections: Mapping[str, Any]) -> str:
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
-def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutionRecipe:
-    """Build the recipe with deployment credentials, never candidate credentials; its history lives in ``directory``."""
+def load_recipe(sections: Mapping[str, Any], directory: Path) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
+    """Load the recipe, and build the runtime and the harness training component that run it, with deployment
+    credentials, never candidate credentials; the history lives in ``directory``."""
     config = json.loads(json.dumps(sections))
     config["evolution"]["state_dir"] = str(directory / "harness")
     runtime = InferenceProxyRuntime(
@@ -74,19 +75,19 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutio
         api_key=os.environ.get("REEF_UPSTREAM_API_KEY") or None,
         inference_timeout_s=config["evolution"]["evaluation"]["task_timeout_s"],
     )
-    recipe = build_recipe(config["implementation"], config=config, runtime=runtime)
+    recipe = build_recipe(config["implementation"], config=config)
     if not isinstance(recipe, HarnessEvolutionRecipe):
         raise TypeError("the example runs the Meta-Harness method")
     # The recipe is configuration; the harness training component builds the method and the scorer from it.
     component = HarnessTrainingComponent.from_settings(
-        recipe.harness_settings(), recipe.harness_models(), environ=os.environ
+        recipe.harness_settings(), harness_models(recipe, LiveObjects(runtime=runtime)), environ=os.environ
     )
     if not isinstance(component.method, MetaHarness):
         raise TypeError("the example runs the Meta-Harness method")
-    return replace(recipe, harness_component=component)
+    return recipe, LiveObjects(runtime=runtime, harness_component=component)
 
 
-def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher:
+def open_campaign(recipe: HarnessEvolutionRecipe, live: LiveObjects, directory: Path) -> Dispatcher:
     """Use persistent artifacts and SQLite records so a new process can resume.
 
     The recipe's seed is the root snapshot of a new scenario, as the service makes it, so the search starts there.
@@ -101,6 +102,7 @@ def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher
             work_dir=directory / "artifact-work",
             cache_dir=directory / "artifact-cache",
         ),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
         hold_local_cycles=True,
         # The jobs queue is on disk, so a restarted campaign finds the job of its step.
@@ -246,8 +248,8 @@ def main() -> None:
         raise ValueError("place the task checkout under /usr or /opt so Reef's sandbox can read it")
     if shutil.which("reef-terminus") is None:
         raise RuntimeError("reef-terminus is missing; install Reef and this example in the same environment")
-    recipe = load_recipe(sections, directory)
-    dispatcher = open_campaign(recipe, directory)
+    recipe, live = load_recipe(sections, directory)
+    dispatcher = open_campaign(recipe, live, directory)
     try:
         scenario = dispatcher.get_or_create_scenario(SCENARIO)
         if scenario is None:

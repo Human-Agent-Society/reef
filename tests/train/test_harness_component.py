@@ -32,7 +32,8 @@ MARKER = TreePatch(changed_rules("marker rules\n"))
 
 
 def component_of(tmp_path: Path, method) -> HarnessTrainingComponent:
-    component = harness_recipe(tmp_path, method).harness_component
+    _, live = harness_recipe(tmp_path, method)
+    component = live.harness_component
     assert isinstance(component, HarnessTrainingComponent)
     return component
 

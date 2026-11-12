@@ -232,8 +232,8 @@ def test_a_weights_start_the_training_component_refuses_is_refused_before_anythi
             scenario.train_from(base)
         assert scenario.current_snapshot().revision == served
         assert scenario.commit_number == steps
-        assert dispatcher.recipe.runtime is not None
-        assert dispatcher.recipe.runtime.inference_admission_status["open"]
+        assert dispatcher.live.runtime is not None
+        assert dispatcher.live.runtime.inference_admission_status["open"]
     finally:
         dispatcher.close()
 

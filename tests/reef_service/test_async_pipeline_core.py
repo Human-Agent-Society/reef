@@ -9,7 +9,7 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
@@ -143,8 +143,9 @@ def start_dispatcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         component = DurableComponent(tmp_path / "checkpoints", **component_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(directory=tmp_path / "repository")
         dispatcher = Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(component, component.inference), max_staleness=max_staleness),
+            TestPolicyRecipe(max_staleness=max_staleness),
             factory,
+            live=live_objects(component, component.inference),
             local_artifact_dir=tmp_path / "staged",
             experiment_tracker=experiment_tracker,
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),

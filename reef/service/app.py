@@ -271,7 +271,7 @@ def create_app(
     if routing is not None:
         if not accepted_tokens:
             raise ValueError("routing requires a service token")
-        if type(dispatcher.recipe) is not Recipe or dispatcher.recipe.training_component is not None:
+        if type(dispatcher.recipe) is not Recipe or dispatcher.live.training_component is not None:
             raise ValueError("routing requires the base record-only Recipe")
         if preview is None:
             raise ValueError("routing requires the Semantic Router preview settings")
@@ -324,7 +324,7 @@ def create_app(
     configure_browser_access(app, console_origins)
     artifact_evaluations = ArtifactEvaluations(dispatcher) if evaluations is None else evaluations
     if routing is None:
-        runtime = dispatcher.recipe.runtime
+        runtime = dispatcher.live.runtime
         replica = InferenceReplica(
             ServedModelsCache(dispatcher.coordination.served_models),
             dispatcher.record_storage,

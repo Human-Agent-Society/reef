@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
+from reef.scenario.live_objects import LiveObjects
 from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
@@ -151,8 +152,11 @@ def dispatcher_for(
     recipe: Recipe,
     factory: RepositoryBackendFactory | None = None,
     trainer_builder: TrainerBuilder | None = None,
+    live: LiveObjects | None = None,
 ) -> Dispatcher:
     """A dispatcher with a data store, as deployment assembly builds it; the scenario storage owns the task files.
+    ``live`` holds the runtime and the job components of ``recipe``, none by default; the dispatcher gets it with
+    the data store.
 
     ``factory`` defaults to an in-memory repository under ``tmp_path``; a test that restarts passes its own.
     ``trainer_builder`` builds the trainers; None is ``UploadTrainers`` for an ``UploadRecipe``, and the
@@ -169,9 +173,9 @@ def dispatcher_for(
     dispatcher = Dispatcher(
         recipe,
         factory or InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(data_store=data) if live is None else replace(live, data_store=data),
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
-        data_store=data,
         coordination=coordination,
         trainer_builder=trainer_builder,
     )

@@ -82,11 +82,14 @@ import a concrete integration.
 |                         | lifecycle                                                | tied to aiohttp                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/scenario/``      | scenario binding, commit ordering,                       | training algorithms, repository            |
-|                         | recovery, and lifecycle                                  | implementations                            |
+|                         | recovery, and lifecycle; ``LiveObjects``, the runtime,   | implementations                            |
+|                         | training components and data store that one process      |                                            |
+|                         | builds for the recipe                                    |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/recipe/``        | the contract a method implements, dotted                 | external cookbook methods                  |
-|                         | resolution, the recipe loader, the base harness evolution|                                            |
-|                         | recipe, and the built-in generated-task recipe           |                                            |
+| ``reef/recipe/``        | the contract a method implements, dotted                 | external cookbook methods, runtimes,       |
+|                         | resolution, the recipe loader, the base harness evolution| training components, stores                |
+|                         | recipe, and the built-in generated-task recipe; a recipe |                                            |
+|                         | is configuration only                                    |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/train/``         | the trainer, the training job loop, the training         | HTTP endpoints, deployment                 |
 |                         | pipeline, job data types, training components            | configuration parsing                      |
@@ -170,7 +173,7 @@ package's own submodules and third-party libraries):
    * - ``recipe``
      - ``train``, ``inference``, ``harness``, ``evaluation``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``scenario``
-     - ``recipe``, ``train``, ``inference``, ``evaluation``, ``artifact``, ``storage``, ``observability``, ``core``
+     - ``recipe``, ``train``, ``inference``, ``harness``, ``evaluation``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``dispatcher``
      - ``scenario``, ``recipe``, ``train``, ``inference``, ``harness``, ``evaluation``, ``execution``, ``artifact``, ``storage``, ``observability``, ``core``
    * - ``service``
