@@ -796,10 +796,6 @@ KEPT_LIVE_OBJECT_METHODS: dict[tuple[str, str, str], str] = {
     ("reef/recipe/harness.py", "HarnessEvolutionRecipe", "default_start"): (
         "pure configuration: the seed tree that evolution.seed names"
     ),
-    ("reef/recipe/composite.py", "CompositeRecipe", "build_components"): (
-        "pure configuration: each component recipe's declaration under its name; step 8 of RFC #1390 moves the "
-        "fan-out to the scenario factory"
-    ),
 }
 
 
@@ -839,3 +835,37 @@ def test_a_recipe_class_holds_and_returns_no_live_object() -> None:
                         methods.add((relative, node.name, item.name))
     assert annotated == set(KEPT_LIVE_OBJECT_ANNOTATIONS)
     assert methods == set(KEPT_LIVE_OBJECT_METHODS)
+
+
+#: The methods that ``CompositeRecipe`` defines. ``__post_init__`` checks the invariants of the mapping.
+COMPOSITE_RECIPE_METHODS = frozenset({"__post_init__"})
+
+#: The members that answered for the recipes of a composite before RFC #1390 made the composite a mapping. No
+#: recipe class of ``reef/recipe`` defines one: ``reef.recipe.composite.component_recipes`` gives the recipes of a
+#: deployment, and the owner of each result asks them.
+COMPOSITE_FAN_OUT_MEMBERS = frozenset(
+    {
+        "harness_adapter",
+        "harness_state_dir",
+        "scenario_state_dirs",
+        "for_record2sample_configs",
+        "report_contract",
+    }
+)
+
+
+def test_a_composite_recipe_is_a_mapping_of_child_recipes() -> None:
+    # A composite computes nothing from its children (RFC #1390): the class defines ``__post_init__`` alone, and
+    # no recipe class keeps a member that existed to give a caller the composite's answer.
+    fan_out: set[tuple[str, str]] = set()
+    composite_methods: set[str] | None = None
+    for path in sorted((REPO_ROOT / "reef" / "recipe").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            methods = {item.name for item in node.body if isinstance(item, ast.FunctionDef | ast.AsyncFunctionDef)}
+            fan_out.update((node.name, name) for name in methods & COMPOSITE_FAN_OUT_MEMBERS)
+            if node.name == "CompositeRecipe":
+                composite_methods = methods
+    assert composite_methods == COMPOSITE_RECIPE_METHODS
+    assert fan_out == set()

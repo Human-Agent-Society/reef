@@ -41,10 +41,11 @@ from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorker
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
+from reef.recipe.deployment import scenario_state_dirs
 from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
-from reef.scenario.factory import ItemStart
+from reef.scenario.factory import ItemStart, with_record2sample_configs
 from reef.scenario.live_objects import LiveObjects, check_recipe_objects, close_runtimes, scenario_components
 from reef.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
@@ -563,8 +564,10 @@ class Dispatcher(
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
         configs = self.storage.read_settings(scenario).record2sample_config
-        recipe = self.recipe.for_record2sample_configs(scenario_components(self.recipe, self.live, scenario), configs)
-        directories = recipe.scenario_state_dirs(scenario)
+        recipe = with_record2sample_configs(
+            self.recipe, scenario_components(self.recipe, self.live, scenario), configs
+        )
+        directories = scenario_state_dirs(recipe, scenario)
         moved = list(self.registry.archive_store(scenario))
         for directory in directories:
             if directory.exists():

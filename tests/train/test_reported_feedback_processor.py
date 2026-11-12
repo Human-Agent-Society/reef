@@ -106,7 +106,7 @@ def test_a_report_shaped_for_another_component_is_released_not_raised() -> None:
     """Ingress of a scenario with several components admits what any accepts; this trainer keeps only its own."""
     from recipes.tttd.report import TTTDGroupedRolloutReport
     from reef.core.reports import ScoredRolloutReport
-    from reef.recipe.composite import any_component_report
+    from reef.core.reports.any_component import any_component_report
 
     processor = SamplePipeline(report_type=TTTDGroupedRolloutReport)
     processor.push(inference("i1"))

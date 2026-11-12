@@ -34,8 +34,8 @@ from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
+from reef.recipe.deployment import harness_adapter, harness_recipe
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe, load_recipe, named_recipe_config, weight_training_selection
 from reef.recipe.registry import recipe_class_for
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
@@ -302,26 +302,17 @@ def with_harness_components(recipe: Recipe, live: LiveObjects, environ: Mapping[
     The served endpoint must be in ``live`` before the call, because the component reads the models once.
 
     Raise ``ConfigError`` for an ``evolution`` section that names no usable method, scorer, collector, executor or
-    agent. Raise ``ValueError`` for a composite with two harness recipes: their jobs would share one component
-    name.
+    agent. A deployment has at most one harness recipe (``CompositeRecipe``).
     """
-    harness: list[tuple[str | None, HarnessEvolutionRecipe]] = []
-    if isinstance(recipe, CompositeRecipe):
-        harness.extend(
-            (name, child) for name, child in recipe.components.items() if isinstance(child, HarnessEvolutionRecipe)
-        )
-    elif isinstance(recipe, HarnessEvolutionRecipe):
-        harness.append((None, recipe))
-    if not harness:
+    harness = harness_recipe(recipe)
+    if harness is None:
         return live
-    if len(harness) > 1:
-        raise ValueError(f"components {[name for name, _ in harness]} each evolve a harness; a composite evolves one")
-    component, harness_recipe = harness[0]
+    component, child = harness
     return replace(
         live,
         harness_component=HarnessTrainingComponent.from_settings(
-            harness_recipe.harness_settings(),
-            harness_models(harness_recipe, live, component=component),
+            child.harness_settings(),
+            harness_models(child, live, component=component),
             environ=environ,
         ),
     )
@@ -728,7 +719,11 @@ def build_dispatcher(
                     slots=settings.evaluation_max_sandboxes,
                 )
             )
-        if dispatcher.services.runs_control and not dispatcher.services.runs_harness and recipe.harness_adapter:
+        if (
+            dispatcher.services.runs_control
+            and not dispatcher.services.runs_harness
+            and harness_adapter(recipe) is not None
+        ):
             # The harness service runs in another process: it sends each import here to commit.
             dispatcher.workers.add(
                 HarnessSyncWorker(dispatcher.queue, RequestService(dispatcher), worker_id=instance_id("harness-sync"))

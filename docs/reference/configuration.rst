@@ -1500,6 +1500,12 @@ whose recipe component trains weights is deployed the way that recipe is.
 inference runtime serve every recipe component. A top-level ``pipeline`` or
 ``evaluation`` section goes to the recipe component that trains weights.
 
+``components`` holds at least two recipe components. At most one of them
+trains weights, because a snapshot loads one component into the runtime. At
+most one of them is a harness evolution recipe, because a process has one
+harness training component. A recipe component cannot be a composite. Reef
+refuses any other ``components`` object when it loads the configuration.
+
 A scenario's root snapshot keeps one directory per recipe component. Reef
 writes each recipe component's default start there: its seed, and the model
 snapshot under the directory of the recipe component that trains weights. A

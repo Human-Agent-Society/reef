@@ -15,14 +15,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from reef.artifact.components import ArtifactLayout, ScenarioComponents
+from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError
 from reef.harness.tasks.harness_models import HarnessModels
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.interfaces import InferenceRuntime
-from reef.recipe.base import WEIGHTS_COMPONENT, Recipe, WeightTrainingRecipe
-from reef.recipe.composite import CompositeRecipe
+from reef.recipe.base import WEIGHTS_COMPONENT, Recipe, WeightTrainingRecipe, every_check
+from reef.recipe.composite import CompositeRecipe, component_recipes
+from reef.recipe.deployment import harness_recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.storage.data import DataStore
@@ -151,13 +152,10 @@ def close_runtimes(
 def weight_component_name(recipe: Recipe) -> str | None:
     """The name of the scenario component whose weights ``recipe`` trains: ``weights`` for a weight recipe, the
     name of the one weight recipe among a composite's components, and ``None`` for a recipe that trains no weights."""
-    if isinstance(recipe, WeightTrainingRecipe):
-        return WEIGHTS_COMPONENT
-    if isinstance(recipe, CompositeRecipe):
-        # A composite binds at most one weight component.
-        return next(
-            (name for name, child in recipe.components.items() if isinstance(child, WeightTrainingRecipe)), None
-        )
+    # A composite binds at most one weight component.
+    for component, child in component_recipes(recipe):
+        if isinstance(child, WeightTrainingRecipe):
+            return WEIGHTS_COMPONENT if component is None else component
     return None
 
 
@@ -180,8 +178,7 @@ def check_recipe_objects(recipe: Recipe, live: LiveObjects) -> None:
     (``TrainingComponent.check_task_jobs``); a process that holds the facts runs no job and leaves that check to
     the processes that hold the component. Raise ``RecipeConfigError`` otherwise.
     """
-    recipes = recipe.components.values() if isinstance(recipe, CompositeRecipe) else (recipe,)
-    for one in recipes:
+    for _, one in component_recipes(recipe):
         if not isinstance(one, WeightTrainingRecipe):
             continue
         if live.training_facts is not None:
@@ -199,17 +196,40 @@ def check_recipe_objects(recipe: Recipe, live: LiveObjects) -> None:
                 ) from exc
 
 
+def declared_components(recipe: Recipe, scenario: str) -> ScenarioComponents:
+    """The components that every snapshot of ``scenario`` binds, as the configuration of ``recipe`` declares them.
+
+    A recipe other than a composite gives its own declaration (``Recipe.build_components``). A composite gives
+    each child's one declared component under the name that the composite binds the child to; a child that
+    declares no component gives an empty ``ComponentSpec``. Raise ``RecipeConfigError`` for a child of a composite
+    that declares several components.
+    """
+    if not isinstance(recipe, CompositeRecipe):
+        return recipe.build_components(scenario)
+    specs: dict[str, ComponentSpec] = {}
+    for component, child in recipe.components.items():
+        declared = child.build_components(scenario)
+        if len(declared.components) > 1:
+            raise RecipeConfigError(f"component {component!r} serves several components of its own")
+        served = next(iter(declared.components.values()), ComponentSpec())
+        # A recipe's own snapshot check (a recipe serving no component admits its whole snapshot with one) admits
+        # this component here: inside the composite, the component is that recipe's snapshot.
+        checks = every_check(declared.validator, served.validator)
+        specs[component] = served if checks is served.validator else replace(served, validator=checks)
+    return ScenarioComponents(specs)
+
+
 def scenario_components(recipe: Recipe, live: LiveObjects, scenario: str) -> ScenarioComponents:
     """The components that every snapshot of ``scenario`` binds in this deployment.
 
-    The result is what the recipe declares from its configuration (``Recipe.build_components``), with the facts of
+    The result is what the recipe declares from its configuration (``declared_components``), with the facts of
     the weight component that only live objects know: its kind is the runtime's ``served_weight_kind``, and its
     layout is the training component's (``TrainingArtifactLayout``). In a process that holds the backend's facts
     and no component, the layout is the facts' (``TrainingFactsLayout``), which checks no import. A recipe that
     trains no weights gets its declaration unchanged. Raise ``RecipeConfigError`` when the recipe trains weights
     and ``live`` has no runtime, or neither a training component nor the backend's facts.
     """
-    declared = recipe.build_components(scenario)
+    declared = declared_components(recipe, scenario)
     name = weight_component_name(recipe)
     if name is None:
         return declared
@@ -263,17 +283,23 @@ def default_start(recipe: Recipe, live: LiveObjects) -> DefaultStart:
 def check_root_start(recipe: Recipe, live: LiveObjects, root: ScenarioRoot) -> None:
     """Check that training can start from ``root`` before an item start is registered.
 
-    The training component of ``live`` checks the root (``TrainingComponent.root_start``); without one, nothing is
-    checked. For a composite, it checks each component's view of the root (``component_root``). Raise
-    ``ValueError`` on refusal.
+    Each recipe of the deployment (``component_recipes``) has its root checked by the component that runs its
+    jobs (``TrainingComponent.root_start``): the training component of ``live`` for a weight recipe, and the
+    harness component of ``live`` for a harness recipe. A recipe of a composite has its own component's view of
+    the root checked (``component_root``); a recipe on its own has ``root`` checked. Nothing is checked for a
+    recipe that submits no job, and for one whose component ``live`` does not hold. Raise ``ValueError`` on
+    refusal.
     """
-    if live.training_component is None:
-        return
-    if isinstance(recipe, CompositeRecipe):
-        for component in recipe.components:
-            live.training_component.root_start(component_root(root, component))
-    else:
-        live.training_component.root_start(root)
+    for component, child in component_recipes(recipe):
+        job_component: TrainingComponent | None
+        if isinstance(child, WeightTrainingRecipe):
+            job_component = live.training_component
+        elif isinstance(child, HarnessEvolutionRecipe):
+            job_component = live.harness_component
+        else:
+            job_component = None
+        if job_component is not None:
+            job_component.root_start(root if component is None else component_root(root, component))
 
 
 def harness_models(
@@ -306,14 +332,11 @@ def harness_served_model(recipe: Recipe, live: LiveObjects, scenario: str, compo
     ``None`` when the recipe evolves no harness in ``component``: a recipe other than a harness recipe, or a
     composite whose component of that name is none. Raise ``RecipeConfigError`` when ``live`` has no runtime.
     """
-    if isinstance(recipe, CompositeRecipe):
-        harness, named = recipe.components.get(component), component
-    else:
-        harness, named = recipe, None
-    if not isinstance(harness, HarnessEvolutionRecipe):
+    harness = harness_recipe(recipe)
+    if harness is None or harness[0] not in (None, component):
         return None
     try:
-        return harness_models(harness, live, component=named).served(scenario)
+        return harness_models(harness[1], live, component=harness[0]).served(scenario)
     except ConfigError as exc:
         raise RecipeConfigError(str(exc)) from exc
 
@@ -324,6 +347,7 @@ __all__ = [
     "check_recipe_objects",
     "check_root_start",
     "close_runtimes",
+    "declared_components",
     "default_start",
     "harness_models",
     "harness_served_model",

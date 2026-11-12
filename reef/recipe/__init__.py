@@ -8,8 +8,12 @@ weights or the harness*. This package holds everything a method binds to:
   ``WeightTrainingRecipe``, with its default job parameters.
 - ``harness`` — ``HarnessEvolutionRecipe``, the configuration of every harness
   evolution method; ``reef.train.harness_backend`` builds itself from it.
-- ``composite`` — ``CompositeRecipe`` binds one recipe per snapshot component;
+- ``composite`` — ``CompositeRecipe`` maps each snapshot component's name to
+  its recipe, and ``component_recipes`` gives the recipes of any deployment;
   the scenario runs their trainers side by side.
+- ``deployment`` — what the recipes of a deployment answer from configuration
+  alone: the harness recipe, its adapter and its state directory, and the
+  directories of a scenario.
 - ``loading`` — the one loader: ``load_recipe`` makes the recipe value of a
   class from its config, ``build_recipe`` from a class reference, and
   ``named_recipe_config`` reads the config of a deployment preset. A recipe
