@@ -1,11 +1,11 @@
 """Claude Code as the AutoEnvScaling Designer: Reef's pinned Claude Code in a cloud sandbox, signed in with OAuth.
 
 :class:`ClaudeCodeDesigner` runs Claude Code headless (``claude -p``) on the inputs, rules and workspace that pi
-gets (:class:`~recipes.beta.autoenvscaling.designer.AgentDesigner`). Claude Code sends every model call itself, straight
-to Anthropic, with the token in its process environment, so Reef records none of them: the task names its session
-and Claude Code's transcript instead of a model-call record. The agent checks its task with the ``task_check.py``
-command, which reaches a loopback gateway (:class:`CheckGateway`) that runs the checks and answers every model
-route with 404.
+gets (:class:`~recipes.beta.autoenvscaling.designer.AgentDesigner`). Claude Code sends every model call itself,
+straight to Anthropic, with the token in its process environment, so Reef records none of them: the task names its
+session and Claude Code's transcript instead of a model-call record. The agent checks its task with the
+``task_check.py`` command, which reaches a loopback gateway (:class:`CheckGateway`) that runs the checks and answers
+every model route with 404.
 
 The Designer supplies the token through the existing executor environment. The sandbox launcher includes environment
 values in bubblewrap's command arguments. Claude Code removes the token from its Bash, hook and MCP subprocesses
@@ -40,12 +40,12 @@ from recipes.beta.autoenvscaling.designer import (
     DesignedTask,
     DesignerOutageError,
     ModelRefusedError,
+    RepositorySnapshots,
     SeedVariantDesigner,
     TaskVariant,
     agent_prompt,
     agent_rules,
     close_when_stopped,
-    repository_snapshot,
     workspace_reply,
     write_inputs,
 )
@@ -188,7 +188,7 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         self.claude_token = claude_token
         self.model = model
         self.executor = executor
-        self.cache_dir = cache_dir
+        self.snapshots = RepositorySnapshots(cache_dir)
         self.timeout_seconds = timeout_seconds
         self.max_turns = max_turns
         self.has_behaviour_rule = has_behaviour_rule
@@ -252,7 +252,7 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         transcript = ""
         try:
             if source is not None:
-                shutil.copytree(repository_snapshot(source, self.cache_dir), inputs / "repo", symlinks=True)
+                shutil.copytree(self.snapshots.snapshot(source), inputs / "repo", symlinks=True)
             tools = AgentTools(work_dir, CredentialChecks(checks, token=self.claude_token))
             gateway = CheckGateway(tools)
             gateway.start()

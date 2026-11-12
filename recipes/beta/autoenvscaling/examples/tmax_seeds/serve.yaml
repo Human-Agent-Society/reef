@@ -120,7 +120,7 @@ pipeline:
           designer_harness: claude-code
           claude_model: opus
           # Six Designer runs at once, each in its own sandbox.
-          concurrency: 6
+          designer_concurrency: 6
           # Required, and unused here: Claude Code calls Anthropic itself, seeds have no session, and the review is off.
           agent_model: Qwen3.5-9B
           agent_reef_url: http://127.0.0.1:8900

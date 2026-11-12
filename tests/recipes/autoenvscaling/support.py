@@ -7,20 +7,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import importlib.util
 import io
 import json
-import sys
 import tempfile
 import threading
-import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-import pytest
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator, generator_state
 
 from recipes.beta.autoenvscaling import (
@@ -53,15 +49,6 @@ from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedT
 from reef.recipe.generated_tasks.processor import StoredGeneratorState
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-
-
-def stand_in_e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let ``import e2b`` succeed where the package is missing.
-
-    Building the agent Designer checks that the package imports; no test here opens a sandbox.
-    """
-    if importlib.util.find_spec("e2b") is None:
-        monkeypatch.setitem(sys.modules, "e2b", types.ModuleType("e2b"))
 
 
 def sources(count: int) -> list[dict[str, object]]:

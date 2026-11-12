@@ -1,11 +1,12 @@
 """The Designer: who rebuilds one recorded session as a Harbor task, a coding agent by default.
 
 :class:`TaskDesigner` hands its task back as a Designer's reply, so every Designer's task is admitted the same way.
-:class:`AgentDesigner` is pi, Reefine's pinned coding agent, in a cloud sandbox (E2B or Modal). It reads the session, the repository at
-the base commit and its checkout path under ``../inputs/``, writes the task under ``./task/``, and checks it with its
-one tool, ``task_check``. Its model calls and checks go through a loopback gateway (:class:`RecordingGateway`) that
-holds the credentials and records each model call on Reef. :class:`PromptDesigner` is the baseline: the generator
-service's one-reply prompt Designer, one recorded model call whose reply is the task.
+:class:`AgentDesigner` is pi, Reefine's pinned coding agent, in a cloud sandbox (E2B or Modal). It reads the
+session, the repository at the base commit and its checkout path under ``../inputs/``, writes the task under
+``./task/``, and checks it with its one tool, ``task_check``. Its model calls and checks go through a loopback
+gateway (:class:`RecordingGateway`) that holds the credentials and records each model call on Reef.
+:class:`PromptDesigner` is the baseline: the generator service's one-reply prompt Designer, one recorded model call
+whose reply is the task.
 
 A variant of a seeded parent has no session: a :class:`SeedVariantDesigner` writes it with ``vary_seed``, and the agent
 then reads the parent and ``variant.md`` alone, by the seed rules (:data:`SEED_AGENT_RULES`).
@@ -65,10 +66,6 @@ RECORD_READ_TIMEOUT_SECONDS = 120.0
 # The prompt Designer reads the session from its prompt: the eval's session budget.
 PROMPT_SESSION_CHARS = 240_000
 GIT_TIMEOUT_SECONDS = 1800.0
-#: One lock for each repository snapshot, by its cache path.
-SNAPSHOT_LOCKS: dict[Path, threading.Lock] = {}
-#: The lock that guards ``SNAPSHOT_LOCKS``.
-SNAPSHOT_LOCKS_LOCK = threading.Lock()
 # What git says when a clone finds no repository: deleted, private (it asks for credentials) or a wrong URL.
 MISSING_REPOSITORY_ERRORS = (
     "repository not found",
@@ -665,58 +662,72 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
     target = cache_dir / f"{hashlib.sha256(repository.url.encode()).hexdigest()[:8]}-{repository.commit}"
     if target.is_dir():
         return target
-    # Tasks written at once build each snapshot once: the second waits for the first, then finds it.
-    with SNAPSHOT_LOCKS_LOCK:
-        lock = SNAPSHOT_LOCKS.setdefault(target, threading.Lock())
-    with lock:
-        if target.is_dir():
-            return target
-        # The snapshot is built beside its place and moved there once complete, so a partial one is never used.
-        partial = target.with_name(target.name + ".partial")
+    # The snapshot is built beside its place and moved there once complete, so a partial one is never used.
+    partial = target.with_name(target.name + ".partial")
+    shutil.rmtree(partial, ignore_errors=True)
+
+    def git(*arguments: str, cwd: Path | None = None) -> None:
+        # A repository that asks for credentials fails at once instead of waiting on a prompt.
+        subprocess.run(
+            ["git", *arguments],
+            cwd=cwd,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+            stdin=subprocess.DEVNULL,
+            check=True,
+            capture_output=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+
+    try:
+        git("clone", "-q", "--filter=blob:none", "--no-checkout", "--", repository.url, str(partial))
+        git("checkout", "-q", repository.commit, cwd=partial)
+        shutil.rmtree(partial / ".git")
+        git("init", "-q", cwd=partial)
+        # No gc and no auto maintenance (Git 2.54 runs it after a commit even with gc.auto=0) while the agent copies
+        # the snapshot.
+        no_upkeep = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
+        git(*no_upkeep, "add", "-A", cwd=partial)
+        commit = (*no_upkeep, "-c", "user.name=reef", "-c", "user.email=reef@localhost", "commit")
+        git(*commit, "-qm", "base commit", cwd=partial)
+        partial.rename(target)
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
+        failure = f"{' '.join(exc.cmd)} failed for {repository.url}: {stderr[-500:]}"
+        step = exc.cmd[1]
+        if step == "clone" and any(error in stderr.lower() for error in MISSING_REPOSITORY_ERRORS):
+            raise SourceError(f"the repository {repository.url} is not there: {failure}") from exc
+        if step == "checkout" and not any(error in stderr.lower() for error in NETWORK_ERRORS):
+            raise SourceError(f"{repository.url} has no commit {repository.commit} to check out: {failure}") from exc
+        raise DesignerOutageError(failure) from exc
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise DesignerOutageError(f"the snapshot of {repository.url} at {repository.commit} failed: {exc}") from exc
+    finally:
         shutil.rmtree(partial, ignore_errors=True)
+    return target
 
-        def git(*arguments: str, cwd: Path | None = None) -> None:
-            # A repository that asks for credentials fails at once instead of waiting on a prompt.
-            subprocess.run(
-                ["git", *arguments],
-                cwd=cwd,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-                stdin=subprocess.DEVNULL,
-                check=True,
-                capture_output=True,
-                timeout=GIT_TIMEOUT_SECONDS,
-            )
 
-        try:
-            git("clone", "-q", "--filter=blob:none", "--no-checkout", "--", repository.url, str(partial))
-            git("checkout", "-q", repository.commit, cwd=partial)
-            shutil.rmtree(partial / ".git")
-            git("init", "-q", cwd=partial)
-            # No gc and no auto maintenance (Git 2.54 runs it after a commit even with gc.auto=0) while the agent copies
-            # the snapshot.
-            no_upkeep = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
-            git(*no_upkeep, "add", "-A", cwd=partial)
-            commit = (*no_upkeep, "-c", "user.name=reef", "-c", "user.email=reef@localhost", "commit")
-            git(*commit, "-qm", "base commit", cwd=partial)
-            partial.rename(target)
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
-            failure = f"{' '.join(exc.cmd)} failed for {repository.url}: {stderr[-500:]}"
-            step = exc.cmd[1]
-            if step == "clone" and any(error in stderr.lower() for error in MISSING_REPOSITORY_ERRORS):
-                raise SourceError(f"the repository {repository.url} is not there: {failure}") from exc
-            if step == "checkout" and not any(error in stderr.lower() for error in NETWORK_ERRORS):
-                raise SourceError(
-                    f"{repository.url} has no commit {repository.commit} to check out: {failure}"
-                ) from exc
-            raise DesignerOutageError(failure) from exc
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            raise DesignerOutageError(
-                f"the snapshot of {repository.url} at {repository.commit} failed: {exc}"
-            ) from exc
-        finally:
-            shutil.rmtree(partial, ignore_errors=True)
-        return target
+class RepositorySnapshots:
+    """The repository snapshots of one Designer, cached under ``cache_dir``, with one lock for each.
+
+    Values: ``cache_dir`` is the directory of the snapshots (:func:`repository_snapshot`). ``locks`` holds one lock
+    for each repository URL and commit that a task asked for, and ``guard`` guards ``locks``.
+    Purpose: a Designer makes one from its ``cache_dir``, and :meth:`snapshot` gives each session that it rebuilds the
+    snapshot of its repository.
+    """
+
+    def __init__(self, cache_dir: Path) -> None:
+        self.cache_dir = cache_dir
+        self.locks: dict[tuple[str, str], threading.Lock] = {}
+        self.guard = threading.Lock()
+
+    def snapshot(self, source: SessionSource) -> Path:
+        """The snapshot of ``source``'s repository (:func:`repository_snapshot`). Tasks written at once build each
+        snapshot once: the second waits for the first, then finds it."""
+        repository = source.repository
+        with self.guard:
+            lock = self.locks.setdefault((repository.url, repository.commit), threading.Lock())
+        with lock:
+            return repository_snapshot(source, self.cache_dir)
 
 
 def write_inputs(reef: ReefClient, source: SessionSource | None, work_dir: Path, variant: TaskVariant | None) -> None:
@@ -791,7 +802,7 @@ class AgentDesigner(SeedVariantDesigner):
         self.reef = ReefClient(reef_url, token=token, timeout_s=RECORD_READ_TIMEOUT_SECONDS)
         self.scenario = scenario
         self.executor = executor
-        self.cache_dir = cache_dir
+        self.snapshots = RepositorySnapshots(cache_dir)
         self.timeout_seconds = timeout_seconds
         self.max_model_calls = max_model_calls
         self.has_behaviour_rule = has_behaviour_rule
@@ -849,7 +860,7 @@ class AgentDesigner(SeedVariantDesigner):
         calls = ModelCalls(self.max_model_calls)
         try:
             if source is not None:
-                shutil.copytree(repository_snapshot(source, self.cache_dir), inputs / "repo", symlinks=True)
+                shutil.copytree(self.snapshots.snapshot(source), inputs / "repo", symlinks=True)
             tools = AgentTools(work_dir, checks)
             headers = {
                 "x-reef-scenario": self.scenario,
@@ -887,9 +898,9 @@ class AgentDesigner(SeedVariantDesigner):
         prompt: str = AGENT_PROMPT,
         is_seeded: bool = False,
     ) -> None:
-        """pi in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set; ``extra_rules`` extends
-        the Designer's rules and ``prompt`` states the task to write. With ``is_seeded`` the Designer's rules are the
-        seed rules (:func:`agent_rules`): the inputs hold no session.
+        """pi in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set; ``extra_rules``
+        extends the Designer's rules and ``prompt`` states the task to write. With ``is_seeded`` the Designer's rules
+        are the seed rules (:func:`agent_rules`): the inputs hold no session.
 
         Raises :class:`DesignerOutageError` when the run could not start or was stopped, and when the model failed with
         the budget unspent: an outage (a spent plan, a lost sign-in) must not pass for the agent's failure.
@@ -970,7 +981,8 @@ class ModelReplies:
     """One-reply model calls through the Reef at ``reef_url``, each recorded under a scenario.
 
     ``api`` is the dialect: ``openai`` (Chat Completions) goes through the generator service's
-    :class:`~reef.record2sample.generator.designer.ReefDesigner`; ``responses`` makes the same call to the Responses API.
+    :class:`~reef.record2sample.generator.designer.ReefDesigner`; ``responses`` makes the same call to the Responses
+    API.
     """
 
     def __init__(self, *, reef_url: str, token: str | None, api: str) -> None:

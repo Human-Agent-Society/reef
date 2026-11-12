@@ -534,17 +534,13 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
     else:
         validate_tokenizers.assert_not_called()
     validate_slime_args(args, spec)
-    if "harbor" in recipe_job_parameters(config_path):
+    with patch.dict(os.environ, _CONFIG_ENV, clear=False):
+        job_parameters = load_deployment(config_path)["reef"].get("job_parameters", {})
+    if "harbor" in job_parameters:
         from reef.train.slime_backend.harbor_rollouts import check_task_job_options
 
         # A task job's options pass the check that refuses them at its first submit.
         check_task_job_options(args)
-
-
-def recipe_job_parameters(config_path: Path) -> dict:
-    """The deployment's ``recipe.config.job_parameters``, or an empty mapping."""
-    config = yaml.safe_load(config_path.read_text())
-    return config.get("recipe", {}).get("config", {}).get("job_parameters", {}) or {}
 
 
 @pytest.mark.unit

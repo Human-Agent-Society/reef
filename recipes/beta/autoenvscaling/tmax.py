@@ -28,9 +28,9 @@ original image, or one with a binary file is refused.
 
 A task with a binary fixture (a reef task holds text files only), a fixture that no file or several files of the
 task directory match, two fixtures with the same name under ``fixtures/``, no ``From:`` image, no description or no
-final-state tests is refused. So is a task whose environment a variant's reply could not hold. ``test_initial_state.py`` is not used. ``conversion.json`` in the output directory
-lists the converted tasks with the sections of ``container.def`` they leave out, and the refused tasks with the
-reason.
+final-state tests is refused. So is a task whose environment a variant's reply could not hold.
+``test_initial_state.py`` is not used. ``conversion.json`` in the output directory lists the converted tasks with the
+sections of ``container.def`` they leave out, and the refused tasks with the reason.
 """
 
 from __future__ import annotations

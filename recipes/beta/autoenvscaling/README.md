@@ -69,7 +69,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 
 `AutoEnvScalingGenerator` implements `reef.recipe.generated_tasks.TaskGenerator`. One round of the recipe is one generation:
 
-1. `generate` takes the next `count` sessions of the sources file. The Designer rebuilds each session as a task (see [the Designer](#the-designer)), `concurrency` sessions at once.
+1. `generate` takes the next `count` sessions of the sources file. The Designer rebuilds each session as a task (see [the Designer](#the-designer)), `designer_concurrency` sessions at once.
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
 3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. With `contamination` on, the contamination check comes next ([contamination](#contamination)). The test review follows ([the task checks](#the-task-checks)). With `calibration` on, the current solver's rollouts come last ([solver calibration](#solver-calibration)). A duplicate task is invalid.
 4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.rollouts_per_task` rollouts of each training task in a task job; the recipe runs no eval tasks.
@@ -107,7 +107,7 @@ The generation's report gives each session the stage where it stopped:
 
 Three kinds of failure end differently:
 
-- **An outage** is a failure the Designer does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. With Claude Code as the Designer, a run that the model provider refused is not an outage ([Claude Code as the Designer](#claude-code-as-the-designer)). The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still run. The outage's session counts as taken. An outage that leaves the generation with no task makes it fail instead. The generator saves the report of that attempt at once, with its sessions and the outage, since no task waits for results. The recipe tries the generation again up to `generation_attempts` times, and a round whose generation runs out of attempts is incomplete, so a restart gives the round back. A long outage, such as a spent Claude Code weekly limit, still uses up the run's rounds within minutes; restart the run once the outage ends. With `concurrency` above 1, no task starts after an outage, and the tasks still being written are stopped. The slots after the outage take nothing, even one whose task was finished: their sessions and parents go to the next generation. A stopped Claude Code run whose task held the token is still in the report, with stage `credential`, when the run ends within a minute of the stop ([Claude Code as the Designer](#claude-code-as-the-designer)).
+- **An outage** is a failure the Designer does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. With Claude Code as the Designer, a run that the model provider refused is not an outage ([Claude Code as the Designer](#claude-code-as-the-designer)). The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still run. The outage's session counts as taken. An outage that leaves the generation with no task makes it fail instead. The generator saves the report of that attempt at once, with its sessions and the outage, since no task waits for results. The recipe tries the generation again up to `generation_attempts` times, and a round whose generation runs out of attempts is incomplete, so a restart gives the round back. A long outage, such as a spent Claude Code weekly limit, still uses up the run's rounds within minutes; restart the run once the outage ends. With `designer_concurrency` above 1, no task starts after an outage, and the tasks still being written are stopped. The slots after the outage take nothing, even one whose task was finished: their sessions and parents go to the next generation. A stopped Claude Code run whose task held the token is still in the report, with stage `credential`, when the run ends within a minute of the stop ([Claude Code as the Designer](#claude-code-as-the-designer)).
 - **The agent's own limits** are not outages: a run that spent `max_model_calls`, ran out of time or hit its reply budget leaves its task as it stands, and admission checks it like any other task.
 - **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the task store keeps the tasks that the round published before the failure. So does a rollout request of a refusing calibration that the generator service fails ([solver calibration](#solver-calibration)). A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
 
@@ -152,7 +152,7 @@ The generator's `config` keys:
 | `claude_model` | `opus` | with `claude-code`, the model Claude Code asks for (`--model`) |
 | `claude_token_env` | `CLAUDE_CODE_OAUTH_TOKEN` | with `claude-code`, the environment variable that holds the Claude Code OAuth token |
 | `count` | 8 | sessions in each generation |
-| `concurrency` | 1 | tasks of a generation written at once, each in its own sandbox; they start in slot order, and the generation takes them in slot order |
+| `designer_concurrency` | 1 | Designer runs of a generation at once, each in its own sandbox; they start in slot order, and the generation takes them in slot order |
 | `band_low`, `band_high` | 0.25, 0.75 | the pass-rate band; null is no bound |
 | `agent_model` | required | the Designer's model |
 | `agent_reef_url` | required | the Reef that serves `agent_model`, records its calls and holds the sessions |
@@ -213,35 +213,23 @@ By default, the band does not decide what trains. The recipe trains each valid t
 
 ## The training pool review
 
-By default, each train task trains once. With `pool_capacity` above 0 in `pipeline.record2sample.config`, the recipe keeps a training pool, as AutoEnvScaling's self-play loop does. When a task's job ends, the task waits for a job again after the tasks that wait already, so the tasks train in turn. A new generation starts only while fewer tasks than `pool_capacity` are active.
+By default, each train task trains once. AutoEnvScaling's self-play loop keeps a training pool instead: the tasks train in turn, and a review every 16 solver steps retires a task whose last 4 rewards have a pass rate outside 0.25 to 0.75, or a population standard deviation below 0.1. The generated-task recipe's training pool does this with these keys in `pipeline.record2sample.config`; the [configuration reference](../../../docs/reference/configuration.rst#generated-tasks) explains each key, its default and the reasons a review gives:
 
 ```yaml
 pipeline:
   record2sample:
     config:
       pool_capacity: 32
+      review_interval: 16
+      review_window: 4
+      review_band_low: 0.25
+      review_band_high: 0.75
+      review_min_reward_std: 0.1
 ```
 
-Every `review_interval` task jobs, the recipe reviews the pool. For each active task, it reads the last `review_window` rewards that training recorded; a task with fewer rewards stays. The review retires a task for one of these reasons, in this order:
+With `review_interval: 0`, the tasks train in turn and no review retires them, as in AutoEnvScaling's static mode. The recipe's band keys repeat the generator's `band_low` and `band_high`, because the generator does not read the recipe's settings. Set both bands when you change one. Seeds uploaded as train tasks train once; give the seeds to the generator to keep them in the training pool ([seed tasks](#seed-tasks)).
 
-- `below_band`: the pass rate, the mean of those rewards, is below `review_band_low`.
-- `above_band`: the pass rate is above `review_band_high`.
-- `no_reward_spread`: the population standard deviation of the rewards is below `review_min_reward_std`.
-
-A retired task does not train again. With `review_interval: 0`, the tasks train in turn and no review retires them, as in AutoEnvScaling's static mode. The generator still receives the first rollout of each task only.
-
-| Key | Default | Meaning |
-|---|---|---|
-| `pool_capacity` | 0 | 0 trains each task once; above 0, tasks train again, and rounds start only while fewer tasks than this are active |
-| `review_interval` | 16 | task jobs between two reviews; 0 reviews nothing |
-| `review_window` | 4 | the most recent rewards of a task that a review reads; at least 2 |
-| `review_band_low` | 0.25 | the lowest pass rate that keeps a task |
-| `review_band_high` | 0.75 | the highest pass rate that keeps a task |
-| `review_min_reward_std` | 0.1 | the smallest population standard deviation of the rewards that keeps a task; 0 turns this rule off |
-
-The review keys need `pool_capacity` above 0, and `refill_tasks` must stay 1. The recipe's band keys repeat the generator's `band_low` and `band_high`, because the generator does not read the recipe's settings. Set both bands when you change one. Seeds uploaded as train tasks train once; give the seeds to the generator to keep them in the training pool ([seed tasks](#seed-tasks)). The task store keeps each use, review and retired task, and the stage's status shows them under `training_pool`; the [configuration reference](../../../docs/reference/configuration.rst) has the details.
-
-This review differs from AutoEnvScaling's. It reads the rewards of recent training rollouts, which can be one pool cycle old; it does not run the current model again. The trainer can take the next job's tasks before the review at the end of the job before it, so a retired task can train once more. It keeps no reserve of tasks, and it asks the generator for no replacement tasks.
+This review differs from AutoEnvScaling's. It reads the rewards of recent training rollouts, which can be one pool cycle old; it does not run the current model again. It keeps no reserve of tasks, and it asks the generator for no replacement tasks.
 
 ## Solver calibration
 

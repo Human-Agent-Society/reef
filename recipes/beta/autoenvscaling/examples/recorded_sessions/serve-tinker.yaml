@@ -96,7 +96,7 @@ pipeline:
           sources_path: ${REEF_AUTOENVSCALING_SOURCES_PATH}
           count: 8
           # Four agent runs at once, each in its own sandbox; the calibration checks one candidate at a time.
-          concurrency: 4
+          designer_concurrency: 4
           # A task that ran is in the band when the Reasoning Agent passes a quarter to three quarters of its rollouts.
           band_low: 0.25
           band_high: 0.75

@@ -1,4 +1,5 @@
-"""AutoEnvScaling's Designers: the agent's tools, gateway and run outcomes, the prompt Designer's one call, and the sources."""
+"""AutoEnvScaling's Designers: the agent's tools, gateway and run outcomes, the prompt Designer's one call, and the
+sources."""
 
 from __future__ import annotations
 
@@ -41,6 +42,7 @@ from recipes.beta.autoenvscaling.designer import (
     AgentTools,
     ModelCalls,
     RecordingGateway,
+    RepositorySnapshots,
     call_receipt,
     repository_snapshot,
 )
@@ -222,8 +224,9 @@ def test_tasks_written_at_once_build_a_repository_snapshot_once(
         return run(command, **options)  # type: ignore[call-overload]
 
     monkeypatch.setattr(subprocess, "run", slow_clone)
+    cache = RepositorySnapshots(tmp_path / "cache")
     with ThreadPoolExecutor(2) as pool:
-        snapshots = list(pool.map(lambda _: repository_snapshot(source, tmp_path / "cache"), range(2)))
+        snapshots = list(pool.map(lambda _: cache.snapshot(source), range(2)))
     assert len(clones) == 1 and snapshots[0] == snapshots[1]
     assert (snapshots[0] / "base.txt").read_text() == "base"
 

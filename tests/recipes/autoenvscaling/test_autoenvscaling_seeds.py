@@ -32,7 +32,6 @@ from tests.recipes.autoenvscaling.support import (
     run_tasks,
     serving_reef,
     sources_file,
-    stand_in_e2b_package,
     state,
     write_workspace_task,
 )
@@ -54,7 +53,6 @@ from recipes.beta.autoenvscaling import (
     TaskVariant,
     admitted_task,
 )
-from recipes.beta.autoenvscaling import claude_designer as claude_designer_module
 from recipes.beta.autoenvscaling import designer as designer_module
 from recipes.beta.autoenvscaling import load_sources, tmax, workspace_reply
 from recipes.beta.autoenvscaling.checks import PassRateBand
@@ -87,11 +85,6 @@ SESSION_PROMPTS_SHA256 = "e52fc63542fedbb4958efd3f87824252ee549820f6364887549c78
 HISTORY_MARK = "keeps its history up to the checked-out commit"
 # A seed's source record id: "seed-" and 16 hex digits of its digest.
 SEED_ID = "seed-0123456789abcdef"
-
-
-@pytest.fixture(autouse=True)
-def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    stand_in_e2b_package(monkeypatch)
 
 
 def seed_task(number: int, config: Mapping[str, Mapping[str, object]] | None = None) -> HarborTask:
@@ -544,7 +537,6 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
 
     monkeypatch.setattr(designer_module, "session_text", refused)
     monkeypatch.setattr(designer_module, "repository_snapshot", refused)
-    monkeypatch.setattr(claude_designer_module, "repository_snapshot", refused)
     parent = read_harbor_task(write_harbor_task(seed_task(0), tmp_path / "parents"))
     variant = TaskVariant(
         parent=parent.name,
@@ -737,9 +729,9 @@ def test_from_config_refuses_seeds_without_adaptive_or_with_an_unreadable_seed(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(("name", "concurrency"), [("serve-tinker.yaml", 4), ("serve.yaml", 6)])
+@pytest.mark.parametrize(("name", "designer_concurrency"), [("serve-tinker.yaml", 4), ("serve.yaml", 6)])
 def test_the_seed_task_examples_build_claude_code_on_the_seeds_with_a_refusing_calibration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, concurrency: int
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, designer_concurrency: int
 ) -> None:
     write_seeds(tmp_path / "seeds", 2)
     for variable, value in {
@@ -762,7 +754,8 @@ def test_the_seed_task_examples_build_claude_code_on_the_seeds_with_a_refusing_c
     generator = AutoEnvScalingGenerator.from_config(
         config, scenario="autoenvscaling", environ=os.environ, state=state(tmp_path)
     )
-    assert isinstance(generator.designer, ClaudeCodeDesigner) and generator.concurrency == concurrency
+    assert isinstance(generator.designer, ClaudeCodeDesigner)
+    assert generator.designer_concurrency == designer_concurrency
     assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
     [calibration] = [check for check in generator.task_checks if isinstance(check, CalibrationCheck)]
     assert calibration.is_refusing

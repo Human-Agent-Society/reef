@@ -1,6 +1,6 @@
 """The training pool of the generated-task recipe: each use of a train task, the reviews, and the retired tasks.
 
-With a ``pool_capacity`` above 0 (``TrainingPoolSettings``), a train task trains again: when its task job ends, the
+With a ``pool_capacity`` above 0 (``TrainingPool``), a train task trains again: when its task job ends, the
 record-to-sample stage makes the task's next sample, which waits after the samples that wait already. The recipe
 keeps three more values in the task store's documents, besides those of
 :mod:`reef.recipe.generated_tasks.results`. Each document is written once:
@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from reef.core.atif_payloads import canonical_json
-from reef.core.values import require_text
+from reef.core.values import is_whole_number, require_text
 from reef.recipe.generated_tasks.generator import check_rewards
 from reef.storage.tasks import TaskStore
 
@@ -41,13 +41,8 @@ RetirementReason = Literal["below_band", "above_band", "no_reward_spread"]
 RETIREMENT_REASONS: tuple[RetirementReason, ...] = ("below_band", "above_band", "no_reward_spread")
 
 
-def is_whole_number(value: object) -> bool:
-    """Whether ``value`` is an int and not a bool."""
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
 @dataclass(frozen=True)
-class ReviewSettings:
+class PoolReviewRule:
     """The rule of the pool reviews.
 
     Values: ``interval`` is a non-negative int, the task jobs between two reviews; 0 means no review.
@@ -55,8 +50,8 @@ class ReviewSettings:
     ``band_high`` are numbers in [0, 1] with ``band_low <= band_high``, the inclusive bounds of the pass rate
     that keeps a task. ``min_reward_std`` is a non-negative finite number, the smallest population standard
     deviation of the rewards that keeps a task; 0 turns this rule off. The constructor refuses other values.
-    Purpose: ``GeneratedTaskSettings.review_settings`` makes it from ``pipeline.record2sample.config``;
-    ``review_pool`` and ``retirement_reason`` read it.
+    Purpose: ``GeneratedTaskSettings.review_rule`` makes it from the ``review_*`` keys of
+    ``pipeline.record2sample.config``; ``review_pool`` and ``retirement_reason`` read it.
     """
 
     interval: int
@@ -81,24 +76,24 @@ class ReviewSettings:
 
 
 @dataclass(frozen=True)
-class TrainingPoolSettings:
+class TrainingPool:
     """The training pool: the most active train tasks that rounds fill, and the rule of its reviews.
 
     Values: ``capacity`` is a positive int: a round starts only while fewer train tasks than this are active.
-    ``review`` is the ``ReviewSettings`` of the reviews. The constructor refuses other values.
-    Purpose: ``GeneratedTaskSettings.training_pool`` makes it from ``pipeline.record2sample.config`` when
-    ``pool_capacity`` is above 0; ``GeneratedTaskSamples`` takes it when it starts, and reads it at each task job's end
-    and when it decides whether a round is due.
+    ``review_rule`` is the ``PoolReviewRule`` of the reviews. The constructor refuses other values.
+    Purpose: ``GeneratedTaskSettings.training_pool`` makes it from the ``pool_capacity`` and ``review_*`` keys of
+    ``pipeline.record2sample.config`` when ``pool_capacity`` is above 0; ``GeneratedTaskSamples`` takes it when it
+    starts, and reads it at each task job's end and when it decides whether a round is due.
     """
 
     capacity: int
-    review: ReviewSettings
+    review_rule: PoolReviewRule
 
     def __post_init__(self) -> None:
         if not is_whole_number(self.capacity) or self.capacity < 1:
             raise ValueError("a training pool's capacity must be a positive integer")
-        if not isinstance(self.review, ReviewSettings):
-            raise ValueError("a training pool's review must be ReviewSettings")
+        if not isinstance(self.review_rule, PoolReviewRule):
+            raise ValueError("a training pool's review_rule must be a PoolReviewRule")
 
 
 @dataclass(frozen=True)
@@ -125,7 +120,7 @@ class TaskUse:
         if not is_whole_number(self.use_index) or self.use_index < 0:
             raise ValueError("a task use's use_index must be a non-negative integer")
         if not isinstance(self.rewards, tuple):
-            raise ValueError("a task use's rewards must be a tuple of finite numbers")
+            raise TypeError("a task use's rewards must be a tuple of finite numbers")
         if self.rewards:
             check_rewards(self.rewards)
 
@@ -174,7 +169,9 @@ class RetiredTask:
         require_text(self.task_name, "task_name")
         if not is_whole_number(self.review) or self.review < 0:
             raise ValueError("a retired task's review must be a non-negative integer")
-        if not isinstance(self.rewards, tuple) or len(self.rewards) < 2:
+        if not isinstance(self.rewards, tuple):
+            raise TypeError("a retired task's rewards must be a tuple of finite numbers")
+        if len(self.rewards) < 2:
             raise ValueError("a retired task needs two or more rewards")
         check_rewards(self.rewards)
         if self.reason not in RETIREMENT_REASONS:
@@ -297,22 +294,22 @@ def pool_reviews(store: TaskStore) -> tuple[PoolReview, ...]:
     return tuple(sorted(reviews, key=lambda review: review.review))
 
 
-def retirement_reason(rewards: Sequence[float], settings: ReviewSettings) -> RetirementReason | None:
+def retirement_reason(rewards: Sequence[float], rule: PoolReviewRule) -> RetirementReason | None:
     """Return why a review retires a task with these rewards, or None when the review keeps the task.
 
     ``rewards`` holds two or more numbers. Both bounds of the band keep a task.
     """
     pass_rate = statistics.fmean(rewards)
-    if pass_rate < settings.band_low:
+    if pass_rate < rule.band_low:
         return "below_band"
-    if pass_rate > settings.band_high:
+    if pass_rate > rule.band_high:
         return "above_band"
-    if statistics.pstdev(rewards) < settings.min_reward_std:
+    if statistics.pstdev(rewards) < rule.min_reward_std:
         return "no_reward_spread"
     return None
 
 
-def review_pool(store: TaskStore, settings: ReviewSettings, task_names: Sequence[str]) -> PoolReview | None:
+def review_pool(store: TaskStore, rule: PoolReviewRule, task_names: Sequence[str]) -> PoolReview | None:
     """Run the review that is due, save it, and return it; return None when no review is due.
 
     ``task_names`` are the train tasks of the complete generations. The review reads each of them that no
@@ -320,12 +317,12 @@ def review_pool(store: TaskStore, settings: ReviewSettings, task_names: Sequence
     review again at a later call: a task that it retired stays retired with its saved rewards and reason, and the
     review reads the rewards of the other tasks at that call.
     """
-    if settings.interval == 0:
+    if rule.interval == 0:
         return None
     review = len(pool_reviews(store))
     uses = task_uses(store)
     jobs = len({use.job_id for found in uses.values() for use in found})
-    if jobs < (review + 1) * settings.interval:
+    if jobs < (review + 1) * rule.interval:
         return None
     saved = retired_tasks(store)
     kept = 0
@@ -337,8 +334,8 @@ def review_pool(store: TaskStore, settings: ReviewSettings, task_names: Sequence
                 retired_reasons[name] = saved[name].reason
             continue
         rewards = tuple(reward for use in uses.get(name, ()) for reward in use.rewards)
-        recent = rewards[-settings.window :]
-        reason = retirement_reason(recent, settings) if len(recent) == settings.window else None
+        recent = rewards[-rule.window :]
+        reason = retirement_reason(recent, rule) if len(recent) == rule.window else None
         if reason is None:
             kept += 1
             continue

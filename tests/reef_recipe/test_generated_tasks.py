@@ -4,15 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 import pytest
 import sqlalchemy.exc
-from tests.reef_recipe.support import CommittingPipeline
+from tests.reef_recipe.support import (
+    DESCRIPTION,
+    InlineWorker,
+    ScriptedGenerator,
+    generated,
+    handed_out_names,
+    job_data_stage,
+    rounds,
+    scenario_session,
+    stage_settings,
+    train_job,
+)
 from tests.support.runtime_stubs import StubFacts, StubTrainingComponent
-from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
 from reef.artifact import SnapshotRef
@@ -22,7 +32,7 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
+from reef.execution.jobs import SupportsReceipt
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import WeightTrainingRecipe
@@ -31,17 +41,14 @@ from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecip
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
-    GeneratorState,
     HeldOutTask,
     RejectedTask,
     RolledOutTask,
-    TaskGenerator,
     TaskValidationResult,
 )
 from reef.recipe.generated_tasks.processor import (
     DeliveryJob,
     GeneratedTaskSamples,
-    GeneratedTaskSettings,
     GenerationJob,
     GenerationOutcome,
     StoredGeneratorState,
@@ -51,17 +58,16 @@ from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_gen
 from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
-from reef.sample2job import Sample2JobSettings
 from reef.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
-from reef.storage.scenario import ScenarioStore
+from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.tasks import TaskStorage
 from reef.train.component import TrainingComponent
 from reef.train.pipeline import TrainingPipeline
 
 MODULE = "tests.reef_recipe.test_generated_tasks"
-DESCRIPTION = "shell tasks with hidden state under /var and /etc"
+#: The module of the scripted generator that a pipeline section names.
+SUPPORT_MODULE = "tests.reef_recipe.support"
 #: The ``rollout`` job parameter of the recipe's task jobs.
 ROLLOUT = {"rollouts_per_task": 2}
 
@@ -106,25 +112,8 @@ def report(
     )
 
 
-def stage_settings(config: Mapping[str, object]) -> tuple[GeneratedTaskSettings, Sample2JobSettings]:
-    """Split one flat config, as a test writes it, into the settings of the two stages."""
-    sample_names = {field.name for field in dataclasses.fields(GeneratedTaskSettings)}
-    batch_names = {field.name for field in dataclasses.fields(Sample2JobSettings)}
-    unknown = sorted(set(config) - sample_names - batch_names)
-    if unknown:
-        raise ValueError(f"unknown stage settings: {', '.join(unknown)}")
-    return (
-        GeneratedTaskSettings(**{key: value for key, value in config.items() if key in sample_names}),
-        Sample2JobSettings(**{key: value for key, value in config.items() if key in batch_names}),
-    )
-
-
 #: The trainer's sample count: the job_samples of ``GeneratedTaskJobData``, one task.
 BATCH_SIZE = 1
-
-
-def job_data_stage(settings: Sample2JobSettings, context: PipelineContext) -> GeneratedTaskJobData:
-    return GeneratedTaskJobData(context, buffer_size=settings.buffer_size, job_samples=settings.job_samples)
 
 
 def processor(**config: object) -> TrainingPipeline:
@@ -135,16 +124,6 @@ def processor(**config: object) -> TrainingPipeline:
         record2sample=GeneratedTaskSamples(context, sample_settings),
         sample2job=job_data_stage(batch_settings, context),
     )
-
-
-def handed_out_names(p: TrainingPipeline) -> list[str]:
-    """The names of the tasks that the next job's data takes: in ``manual``, the oldest training request's."""
-    if p.training_mode == "auto":
-        entries = p.auto_entries()
-    else:
-        request = next(iter(p.training_requests.values()), None)
-        entries = () if request is None else p.request_entries(request)
-    return [sample.metadata["task"]["name"] for _, sample in entries]
 
 
 # ------------------------------------------------------------------------------------------------- the rounds
@@ -197,55 +176,6 @@ def test_a_rollout_result_reads_back_from_its_document_as_the_generators_result(
         ran.generated(task_for("t-b", "r", 1))
 
 
-class ScriptedGenerator(TaskGenerator):
-    """A task generator that returns scripted tasks, refuses scripted names, and keeps what it was sent."""
-
-    built: list[dict[str, object]] = []
-
-    def __init__(
-        self,
-        rounds: list[tuple[HarborTask, ...]] | None = None,
-        *,
-        invalid: Mapping[str, str] | None = None,
-        failing: str | None = None,
-        failing_results: bool = False,
-    ) -> None:
-        self.rounds = list(rounds) if rounds is not None else []
-        self.invalid = dict(invalid or {})
-        self.failing = failing
-        self.failing_results = failing_results
-        self.requests: list[TaskGenerationRequest] = []
-        self.validated: list[str] = []
-        self.results: list[tuple[GeneratedTaskResult, ...]] = []
-        self.result_generations: list[int] = []
-
-    @classmethod
-    def from_config(
-        cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
-    ) -> Self:
-        cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ), "state": state})
-        return cls()
-
-    async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
-        self.requests.append(request)
-        if not self.rounds:
-            return ()
-        return self.rounds.pop(0)
-
-    async def validate(self, task: HarborTask) -> TaskValidationResult:
-        self.validated.append(task.name)
-        if task.name == self.failing:
-            raise RuntimeError("the checks could not run")
-        error = self.invalid.get(task.name)
-        return TaskValidationResult((error,) if error else ())
-
-    async def record_results(self, results: tuple[GeneratedTaskResult, ...], *, generation: int) -> None:
-        self.results.append(results)
-        self.result_generations.append(generation)
-        if self.failing_results:
-            raise RuntimeError("the generator lost its state directory")
-
-
 class SlowGenerator(ScriptedGenerator):
     """A generator whose generate call takes longer than a short deadline."""
 
@@ -273,48 +203,6 @@ class OverlapGenerator(ScriptedGenerator):
             self.in_flight -= 1
 
 
-def generated(round_number: int, *indices: int) -> tuple[HarborTask, ...]:
-    """Tasks of one round."""
-    return tuple(
-        task_for(f"harbor-{round_number:05d}-{index:03d}", f"designer-{index}", 9000 + 10 * round_number + index)
-        for index in indices
-    )
-
-
-class Unbound(BackgroundJobRunner):
-    """The runner of a test worker that runs rounds itself. The real worker thread never calls it."""
-
-    async def run(self, job: SupportsReceipt) -> SupportsReceipt:
-        raise RuntimeError("no processor bound")
-
-
-class InlineWorker(BackgroundJobWorker):
-    """Runs each round the moment it is submitted, on this thread, so a test reads the outcome right away."""
-
-    def __init__(self) -> None:
-        super().__init__(Unbound(), thread_name="test-rounds", concurrency=1)
-        self.generation: BackgroundJobRunner | None = None
-        self.submitted: list[SupportsReceipt] = []
-        self.outcomes: list[SupportsReceipt] = []
-
-    def submit(self, job: SupportsReceipt) -> bool:
-        self.submitted.append(job)
-        if self.generation is None:
-            return False
-        try:
-            self.outcomes.append(asyncio.run(self.generation.run(job)))
-        except Exception:
-            self.outcomes.append(Failed(job.receipt))
-        return True
-
-    def poll(self) -> list[SupportsReceipt]:
-        outcomes, self.outcomes = self.outcomes, []
-        return outcomes
-
-    def close(self) -> None:
-        self.generation = None
-
-
 class DeferredWorker(InlineWorker):
     """Takes a round the moment it is submitted and runs it on ``finish``; the outcome lands on the next poll."""
 
@@ -336,48 +224,9 @@ class DeferredWorker(InlineWorker):
             self.outcomes.append(asyncio.run(self.generation.run(job)))
 
 
-def scenario_session(tmp_path: Path, scenario: str = "tasks") -> tuple[ScenarioStore, SampleStore]:
-    """A scenario session in a SQLite storage under ``tmp_path``, and its sample store in a data store."""
-    return open_sample_store(tmp_path / "records", scenario)
-
-
 def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
     """The task stores of a scenario session in a SQLite storage under ``tmp_path``."""
     return scenario_session(tmp_path, scenario)[0].tasks
-
-
-def rounds(
-    tmp_path: Path,
-    task_generator: ScriptedGenerator,
-    service: StandInGenerator | None = None,
-    *,
-    worker: InlineWorker | DeferredWorker | None = None,
-    **config: object,
-) -> tuple[TrainingPipeline, StandInGenerator]:
-    """A generated-task pipeline; ``worker`` runs the generation and delivery jobs, inline by default."""
-    service = service if service is not None else StandInGenerator(tmp_path / "tasks")
-    worker = worker if worker is not None else InlineWorker()
-    session, samples = scenario_session(tmp_path)
-    context = PipelineContext(
-        "tasks",
-        task_storage=session.tasks,
-        samples=samples.for_trainer(""),
-        training_mode=str(config.pop("training_mode", "auto")),
-    )
-    sample_settings, batch_settings = stage_settings(
-        {"buffer_size": 2, "rounds": 3, "description": DESCRIPTION, **config}
-    )
-    generation = GeneratedTaskSamples(
-        context, sample_settings, task_generator=task_generator, generator_service=service, worker=worker
-    )
-    built = CommittingPipeline(
-        context,
-        session,
-        record2sample=generation,
-        sample2job=job_data_stage(batch_settings, context),
-    )
-    worker.generation = generation
-    return built, service
 
 
 def looked(p: TrainingPipeline) -> bool:
@@ -385,27 +234,6 @@ def looked(p: TrainingPipeline) -> bool:
     p.ready(BATCH_SIZE)
     p.ready(BATCH_SIZE)
     return p.ready(BATCH_SIZE)
-
-
-def train_job(
-    p: TrainingPipeline, rewards: Mapping[str, Sequence[float]] | None = None, *, error: str | None = None
-) -> list[str]:
-    """Train the handed-out task job as the trainer and the training component do, and return its task names.
-
-    The trainer commits the job's submission, then the job's end. Each task's rollouts earn ``rewards[name]``,
-    1.0 and 0.0 by default. A job with ``error`` failed and reports no metrics.
-    """
-    data = p.build_job_data(BATCH_SIZE)
-    names = [item.metadata["task"]["name"] for item in data.samples]
-    # The submission's commit counts the tasks trained.
-    p.acknowledge(data.data_id)
-    if error is None:
-        rollout_rewards = {name: list((rewards or {}).get(name, (1.0, 0.0))) for name in names}
-        outcome = JobOutcome("job", "tinker", "finished", {"rollout_rewards": rollout_rewards, "rollout_samples": 4})
-    else:
-        outcome = JobOutcome("job", "tinker", "failed", error=error)
-    p.job_ended(outcome)
-    return names
 
 
 def unfinished(p: TrainingPipeline) -> int:
@@ -980,7 +808,7 @@ def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str,
 def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_once_for_each_scenario(
     tmp_path: Path,
 ) -> None:
-    generator = {"module": f"{MODULE}:ScriptedGenerator", "config": {"count": 3}}
+    generator = {"module": f"{SUPPORT_MODULE}:ScriptedGenerator", "config": {"count": 3}}
     environ = {"TASKS_KEY": "secret"}
     recipe = generated_pipeline_recipe(
         environ,
@@ -1031,7 +859,7 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
 
 
 def test_a_generator_without_the_task_storage_of_a_scenario_session_is_refused() -> None:
-    generator = {"module": f"{MODULE}:ScriptedGenerator"}
+    generator = {"module": f"{SUPPORT_MODULE}:ScriptedGenerator"}
     record2sample = {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {"generator": generator}}
     recipe = generated_pipeline_recipe({}, {"record2sample": record2sample})
     ScriptedGenerator.built.clear()
@@ -1055,7 +883,7 @@ def test_a_pipeline_section_that_names_no_usable_stage_is_refused(pipeline: Mapp
 @pytest.mark.parametrize(
     ("generator", "message"),
     [
-        (f"{MODULE}:ScriptedGenerator.missing", "cannot import pipeline.record2sample.config.generator"),
+        (f"{SUPPORT_MODULE}:ScriptedGenerator.missing", "cannot import pipeline.record2sample.config.generator"),
         ("reef.recipe.generated_tasks:GeneratedTaskRecipe", "must name a class that inherits TaskGenerator"),
         ("reef.recipe.generated_tasks:TaskGenerator", "names an abstract class"),
     ],

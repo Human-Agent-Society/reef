@@ -38,7 +38,6 @@ from tests.recipes.autoenvscaling.support import (
     serving_reef,
     source_of,
     sources,
-    stand_in_e2b_package,
     state,
     state_document,
 )
@@ -78,11 +77,6 @@ SAFEGUARDS_TEXT = (
     "https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\n"
     "Details: `[cyber]`\n\nRequest ID: req_011Cgr2aqWqyhnxgsFFCWiR8"
 )
-
-
-@pytest.fixture(autouse=True)
-def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    stand_in_e2b_package(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -814,9 +808,8 @@ def test_claude_config_builds_claude_code_on_the_agent_settings(tmp_path: Path) 
     designer = generator.designer
     assert isinstance(designer, ClaudeCodeDesigner)
     assert (designer.claude_token, designer.model, designer.max_turns) == (TOKEN, "opus", 80)
-    assert (
-        designer.reef.token == "reef-token" and designer.cache_dir == Path(generator.temporary.name) / "repositories"
-    )
+    assert designer.reef.token == "reef-token"
+    assert designer.snapshots.cache_dir == Path(generator.temporary.name) / "repositories"
 
 
 @pytest.mark.unit

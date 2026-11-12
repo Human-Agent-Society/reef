@@ -25,7 +25,6 @@ from tests.recipes.autoenvscaling.support import (
     generating_config,
     report,
     serving_reef,
-    stand_in_e2b_package,
     state,
 )
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator, task_for
@@ -37,11 +36,6 @@ from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
 from reef.recipe.generated_tasks.generator import RejectedTask, RolledOutTask
 from reef.record2sample.generator import GeneratorError, WrittenTask
-
-
-@pytest.fixture(autouse=True)
-def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    stand_in_e2b_package(monkeypatch)
 
 
 FINDING = {

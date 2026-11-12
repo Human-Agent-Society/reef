@@ -24,7 +24,6 @@ from tests.recipes.autoenvscaling.support import (
     parents,
     report,
     run_tasks,
-    stand_in_e2b_package,
     state,
 )
 
@@ -46,11 +45,6 @@ from recipes.beta.autoenvscaling.generator import ParentTask
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource
 from reef.core.plugins import PluginConfigError
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask
-
-
-@pytest.fixture(autouse=True)
-def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    stand_in_e2b_package(monkeypatch)
 
 
 @pytest.mark.unit

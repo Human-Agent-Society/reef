@@ -31,7 +31,6 @@ from tests.recipes.autoenvscaling.support import (
     run_tasks,
     serving_reef,
     sources_file,
-    stand_in_e2b_package,
     state,
     write_workspace_task,
 )
@@ -80,11 +79,6 @@ from reef.train.tinker_backend.objectives import resolve_objective
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes/beta/autoenvscaling/examples"
 TINKER_EXAMPLES = ("recorded_sessions/serve-tinker.yaml", "tmax_seeds/serve-tinker.yaml")
 SLIME_EXAMPLE = "tmax_seeds/serve.yaml"
-
-
-@pytest.fixture(autouse=True)
-def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
-    stand_in_e2b_package(monkeypatch)
 
 
 @pytest.mark.unit
@@ -246,9 +240,9 @@ class GatheringStandIn(StandInDesigner):
 
 
 @pytest.mark.unit
-def test_tasks_are_written_at_once_up_to_the_concurrency_and_keep_their_order(tmp_path: Path) -> None:
+def test_tasks_are_written_at_once_up_to_the_designer_concurrency_and_keep_their_order(tmp_path: Path) -> None:
     stand_in = GatheringStandIn(limit=3)
-    generator = autoenvscaling(tmp_path, stand_in, source_count=5, count=5, concurrency=3)
+    generator = autoenvscaling(tmp_path, stand_in, source_count=5, count=5, designer_concurrency=3)
     tasks = asyncio.run(generator.generate(REQUEST))
     assert stand_in.full.is_set() and stand_in.most == 3, "three tasks were written at once, and never more"
     assert [task.name for task in tasks] == [f"harbor-00000-{index:03d}-autoenvscaling" for index in range(5)]
@@ -296,7 +290,7 @@ def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(
     tmp_path: Path, stopped_error: DesignerOutageError, stages: list[tuple[int, str]]
 ) -> None:
     stand_in = OutageStandIn(stopped_error)
-    generator = autoenvscaling(tmp_path, stand_in, source_count=4, count=4, concurrency=2)
+    generator = autoenvscaling(tmp_path, stand_in, source_count=4, count=4, designer_concurrency=2)
     with pytest.raises(DesignerOutageError, match="the Designer could not rebuild session-1"):
         asyncio.run(generator.generate(REQUEST))
     assert stand_in.stopped.wait(10), "the task being written after the outage was stopped"
@@ -715,7 +709,7 @@ def test_from_config_builds_the_designer_and_keeps_its_snapshots_in_a_temporary_
         state=state(tmp_path),
     )
     assert isinstance(generator.designer, AgentDesigner) and generator.designer.upstream.api_key == "designer-token"
-    assert generator.designer.cache_dir == Path(generator.temporary.name) / "repositories"
+    assert generator.designer.snapshots.cache_dir == Path(generator.temporary.name) / "repositories"
     assert generator.count == 2
     assert (generator.band.low, generator.band.high) == (0.25, None)
     assert [source.record_id for source in generator.sources] == ["session-1", "session-2"]
@@ -748,9 +742,9 @@ def test_from_config_builds_the_designer_and_keeps_its_snapshots_in_a_temporary_
         ({"designer": "prompt", "agent_api": "anthropic"}, "agent_api openai or responses"),
         ({"max_model_calls": 0}, "max_model_calls must be positive"),
         ({"count": 0}, "count and max_checks must be positive"),
-        ({"concurrency": 0}, "concurrency must be a positive integer"),
-        ({"concurrency": True}, "concurrency must be a positive integer"),
-        ({"concurrency": "2"}, "concurrency must be a positive integer"),
+        ({"designer_concurrency": 0}, "designer_concurrency must be a positive integer"),
+        ({"designer_concurrency": True}, "designer_concurrency must be a positive integer"),
+        ({"designer_concurrency": "2"}, "designer_concurrency must be a positive integer"),
         ({"band_low": 0.8}, "band_low must not exceed band_high"),
         ({"band_high": 1.5}, r"band_high must be in \[0, 1\]"),
         ({"band_low": "low"}, "band_low must be a number"),

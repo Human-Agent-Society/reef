@@ -94,6 +94,7 @@ from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
+from reef.core.values import is_whole_number
 from reef.execution.sandbox.config import remote_executor
 from reef.execution.sandbox.process import SandboxUnavailableError
 from reef.execution.sandbox.remote import RemoteExecutor
@@ -126,8 +127,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_COUNT = 8
 DEFAULT_VARIANT_SHARE = 0.5
-#: How many tasks of a generation are written at once; 1 writes them in turn.
-DEFAULT_CONCURRENCY = 1
+#: How many Designer runs of a generation write tasks at once; 1 writes them in turn.
+DEFAULT_DESIGNER_CONCURRENCY = 1
 # The most parents an adaptive generator keeps; the oldest go first.
 MAX_PARENTS = 256
 # A variant or a seed takes no session from the walk, so its proposal has no walk position.
@@ -238,7 +239,7 @@ CONFIG_KEYS = frozenset(
         "claude_model",
         "claude_token_env",
         "count",
-        "concurrency",
+        "designer_concurrency",
         "band_low",
         "band_high",
         "max_checks",
@@ -456,7 +457,8 @@ class GeneratorChecks(CandidateChecks):
 
 
 class ProposalRefusedError(ValueError):
-    """A session became no task: ``stage`` says where it stopped; ``record_id`` is the Designer's last recorded call."""
+    """A session became no task: ``stage`` says where it stopped; ``record_id`` is the Designer's last recorded
+    call."""
 
     def __init__(self, reason: str, *, stage: str, record_id: str = "") -> None:
         super().__init__(reason)
@@ -483,8 +485,8 @@ class GenerationCursor:
             ("next_position", self.next_position),
             ("next_seed", self.next_seed),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"a cursor's {name} must be a non-negative int, not {value!r}")
+            if not is_whole_number(value) or value < 0:
+                raise ValueError(f"a cursor's {name} must be a non-negative integer, not {value!r}")
 
 
 @dataclass(frozen=True)
@@ -979,8 +981,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
     also reviews the tests. A review that only measures records its result in ``validate`` and nowhere else. A
     refusing calibration that finds the task outside the band gives it the stage ``calibration``.
 
-    Values: ``count``, ``max_checks`` and ``concurrency`` are positive. ``band`` is a PassRateBand, also used by
-    ``calibration`` when present. Checks run in order: oracle, task_checks, then calibration.
+    Values: ``count``, ``max_checks`` and ``designer_concurrency`` are positive. ``band`` is a PassRateBand, also used
+    by ``calibration`` when present. Checks run in order: oracle, task_checks, then calibration.
     ``calibration`` is a CalibrationCheck or None. ``state`` is the generator's durable state. ``cursor`` is
     the cursor saved in the state document ``cursor``, and ``generation`` is the generation that ``generate``
     makes now. ``is_adaptive``
@@ -990,9 +992,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
     saved in the state document ``adaptive``, in insertion order, with unique names and at most
     MAX_PARENTS entries; empty unless ``is_adaptive``. ``seeds`` are the seed
     tasks in directory-name order, empty unless ``is_adaptive``; ``sources`` and ``seeds`` are not both empty.
-    ``seed_designer`` is ``designer`` when it is a :class:`SeedVariantDesigner`, or None; it is set when there are seeds
-    or a parent has a ``seed_task``. ``seed_checks`` is the :class:`SeedCheck`, then the contamination checks among
-    the given checks: the checks a seed runs. ``temporary`` is the generator's temporary directory: it holds the
+    ``seed_designer`` is ``designer`` when it is a :class:`SeedVariantDesigner`, or None; it is set when there are
+    seeds or a parent has a ``seed_task``. ``seed_checks`` is the :class:`SeedCheck`, then the contamination checks
+    among the given checks: the checks a seed runs. ``temporary`` is the generator's temporary directory: it holds the
     directory of each run until the run ends, and the repository snapshots of a Designer that ``from_config`` built.
     Nothing in it is read after a restart.
     Purpose: the generated-task recipe builds it with ``from_config`` and calls ``generate``, ``validate`` and
@@ -1016,12 +1018,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
         is_adaptive: bool = False,
         variant_share: float = DEFAULT_VARIANT_SHARE,
         seeds: tuple[HarborTask, ...] = (),
-        concurrency: int = DEFAULT_CONCURRENCY,
+        designer_concurrency: int = DEFAULT_DESIGNER_CONCURRENCY,
     ) -> None:
         if count < 1 or max_checks < 1:
             raise ValueError("count and max_checks must be positive")
-        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
-            raise ValueError("concurrency must be a positive integer")
+        if not is_whole_number(designer_concurrency) or designer_concurrency < 1:
+            raise ValueError("designer_concurrency must be a positive integer")
         if seeds and not is_adaptive:
             raise ValueError("seed tasks need adaptive: true")
         if not sources and not seeds:
@@ -1047,7 +1049,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         self.state = state
         self.temporary = temporary
         self.count = count
-        self.concurrency = concurrency
+        self.designer_concurrency = designer_concurrency
         self.band = band
         self.max_checks = max_checks
         self.task_checks: tuple[TaskCheck, ...] = (OracleCheck(service), *task_checks)
@@ -1147,7 +1149,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 is_adaptive=is_adaptive,
                 variant_share=variant_share,
                 seeds=seed_tasks(Path(seed_tasks_path).expanduser()) if seed_tasks_path is not None else (),
-                concurrency=config.get("concurrency", DEFAULT_CONCURRENCY),
+                designer_concurrency=config.get("designer_concurrency", DEFAULT_DESIGNER_CONCURRENCY),
             )
         except (OSError, ValueError, SandboxUnavailableError) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc
@@ -1190,8 +1192,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         The sources file says what the tasks are, so the request's description goes unused. A request that
         carries source records is refused: this generator chooses its own sessions. The slots go to variants first,
         then to the seeds not taken yet (:meth:`seed_slot`), then to sessions; without sessions, the generation ends
-        when its variants and seeds run out. Up to ``concurrency`` tasks are written at once, started in slot order
-        (:meth:`slot_task`); the slots are still taken in order.
+        when its variants and seeds run out. Up to ``designer_concurrency`` tasks are written at once, started in slot
+        order (:meth:`slot_task`); the slots are still taken in order.
 
         A slot that an outage stopped takes nothing, but a stopped run whose task held the Claude Code token is a
         proposal with stage ``credential``, since the token may have left the sandbox: :meth:`rebuilt` gives the run
@@ -1217,7 +1219,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         tasks: list[HarborTask] = []
         slots = self.slots()
         task_slots = {index: slot for index, slot in enumerate(slots) if isinstance(slot, TaskSlot)}
-        designer_slots = asyncio.Semaphore(self.concurrency)
+        designer_slots = asyncio.Semaphore(self.designer_concurrency)
         stopped = asyncio.Event()
         writing = {
             index: asyncio.ensure_future(self.slot_task(slot, designer_slots, stopped))
@@ -1347,11 +1349,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """The task of ``slot`` (:meth:`rebuilt`), once one of ``designer_slots`` is free.
 
         The slots start in order. An outage or a cancellation sets ``stopped`` before it frees its slot, so no slot
-        starts after it: the slots after it end with :class:`DesignerOutageError`, and ``generate`` takes none of them.
+        starts after it: the slots after it are cancelled before their Designer runs, and ``generate`` takes none of
+        them.
         """
         async with designer_slots:
             if stopped.is_set():
-                raise DesignerOutageError("the generation stopped before this slot started")
+                raise asyncio.CancelledError("the generation stopped before this slot started")
             try:
                 return await self.rebuilt(
                     slot.source,

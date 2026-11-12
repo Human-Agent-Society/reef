@@ -2134,19 +2134,19 @@ which are not records.
    ``pipeline.record2sample.config.pool_capacity`` : 0
        0 trains each train task once. Above 0, a task trains again after its job ends, and rounds start only while fewer tasks than this are active.
 
-   ``pipeline.record2sample.config.review_interval`` : 16
+   ``pipeline.record2sample.config.review_interval`` : 0
        task jobs between two pool reviews; 0 reviews nothing
 
-   ``pipeline.record2sample.config.review_window`` : 4
+   ``pipeline.record2sample.config.review_window`` : 2
        the most recent rewards of a task that a review reads; at least 2
 
-   ``pipeline.record2sample.config.review_band_low`` : 0.25
+   ``pipeline.record2sample.config.review_band_low`` : 0
        a review retires a task whose pass rate is below this; between 0 and 1
 
-   ``pipeline.record2sample.config.review_band_high`` : 0.75
+   ``pipeline.record2sample.config.review_band_high`` : 1
        a review retires a task whose pass rate is above this; between ``review_band_low`` and 1
 
-   ``pipeline.record2sample.config.review_min_reward_std`` : 0.1
+   ``pipeline.record2sample.config.review_min_reward_std`` : 0
        a review retires a task whose rewards have a smaller population standard deviation; 0 turns this rule off
 
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
@@ -2170,29 +2170,12 @@ The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
 With ``pipeline.record2sample.config.pool_capacity`` above 0, the train tasks
-form a training pool. When a task's job ends, the stage saves a new task item
-for the task's next use, ``<scenario>.generated-tasks.<task name>@<k>`` for
-use ``k``, after the items that wait. So the tasks train in turn, and each
-item trains once. The trainer can start the next job before the stage reads
-the end of the job before it; the tasks of that next job wait for the end of
-their own job. A new round starts only while fewer tasks than
-``pool_capacity`` are active, so the pool can hold more tasks than the
-capacity by the train tasks of one generation. The ``review_*`` keys need
-``pool_capacity`` above 0, and ``refill_tasks`` must stay 1. Imported train
-tasks still train once.
-
-Two cases break the turn order:
-
-- A failed task job reports no rewards. When the trainer starts the next job
-  before the stage reads the end of a failed job, the stage cannot tell the
-  tasks of the two jobs apart. The tasks of the next job then also get a use
-  with no rewards and a new item while they train, and their rewards in that
-  job are not kept.
-- The tasks of a job that a new training start cancelled go back to the pool
-  when a later job ends. When that job held so many tasks that fewer than
-  ``job_samples`` wait, and the pool is full, no job and no round can start,
-  also after a restart. Restart with a larger ``pool_capacity`` and rounds
-  left: a round starts, and the next job end returns those tasks.
+form a training pool. When a task's job ends, the task waits for a job again
+after the tasks that wait already, so the tasks train in turn. A new round
+starts only while fewer tasks than ``pool_capacity`` are active, so the pool
+can hold more tasks than the capacity by the train tasks of one generation.
+The ``review_*`` keys need ``pool_capacity`` above 0, and ``refill_tasks``
+must stay 1. Imported train tasks still train once.
 
 After every ``review_interval`` task jobs, a review reads the last
 ``review_window`` rewards of each active task. A failed task job counts too.
@@ -2204,23 +2187,18 @@ The review retires a task for one of these reasons, in this order:
 - ``no_reward_spread``: the population standard deviation of the rewards is
   below ``review_min_reward_std``.
 
-A pass rate on a bound keeps the task. A retired task does not train again:
-the scenario stops using its item that waits. The review reads the rewards
-that training recorded, so they can be one pool cycle old. The trainer can
-take the next job's tasks before the review at the end of the job before it,
-so a retired task can train in that next job once more. With
-``review_interval: 0``, the tasks train in turn and no review retires them. The
+A pass rate on a bound keeps the task. A retired task does not train again,
+except in a job whose tasks the trainer took before the review. The review
+reads the rewards that training recorded, so they can be one pool cycle old.
+The defaults run no review, and each of their rules keeps every task. The
 generator still receives the first rollout of each task only.
 
-The task store keeps each use of a task with its rewards, each review, and
-each retired task with its rewards, pass rate and reason. The status shows
-them under ``training_pool``: ``capacity``, ``active``, ``retired``,
-``reviews``, and ``last_review_retired``. The task store and the scenario's
-items hold the pool, so a restart continues it in the same order. A review
-that a stop or a failed write cut short runs again at the next job end, and
-it keeps the tasks that it retired already. When a deployment sets
-``pool_capacity`` on a scenario whose train tasks trained once, those tasks
-join the pool at the start.
+The status shows the pool under ``training_pool``: ``capacity``, ``active``,
+``retired``, ``reviews``, and ``last_review_retired``. The task store keeps
+each use of a task with its rewards, each review, and each retired task with
+its reason, so a restart continues the pool in the same order. When a
+deployment sets ``pool_capacity`` on a scenario whose train tasks trained
+once, those tasks join the pool at the start.
 
 The saved train tasks become task items that the scenario uses,
 ``<scenario>.generated-tasks.<task name>``, and train like every other
