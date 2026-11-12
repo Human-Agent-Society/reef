@@ -2735,6 +2735,18 @@ component makes. The training backend and its configuration decide it:
 |                             |                                                | validation       |
 +-----------------------------+------------------------------------------------+------------------+
 
+A weight component of the Slime or the Tinker backend also takes a base root:
+a directory that holds ``base.json`` alone. The file names a deployment's
+default start by its inputs, for example
+``{"format": "reef-base-root-1", "inputs": {"model": "/models/qwen", "lora_rank": "8"}}``,
+and the artifact stands for the base model with no adapter (`Artifact imports
+<python-api.rst#artifact-imports>`__). Reef accepts it only when the inputs
+equal the inputs of this deployment's default start, which the ``source`` of
+a scenario's ``creation`` row shows. Another base model, rank or service
+answers HTTP 400 and names each input that differs. Serving such an artifact
+serves the base model. Reef does not write a base root yet, and no backend
+starts training from one yet.
+
 A component without a layout, such as the records of a trainer that serves
 nothing, takes no import.
 

@@ -219,6 +219,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return self.facts.name
 
     @property
+    def default_start_inputs(self) -> Mapping[str, str]:
+        return self.facts.default_start_inputs
+
+    @property
     def artifact_format(self) -> ArtifactFormat | None:
         return self.facts.artifact_format
 
@@ -485,8 +489,10 @@ class TinkerTrainingComponent(TinkerJobComponent):
         return DefaultStart(model_files=TinkerBaseFiles(self), inputs=self.facts.default_start_inputs)
 
     def check_artifact(self, files: ArtifactFiles) -> None:
-        """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""
-        self.check_manifest(files)
+        """A base root of this component's model, rank and service, or a manifest of a checkpoint of them whose
+        state path resolves on the service."""
+        if not self.is_own_base_root(files):
+            self.check_manifest(files)
 
     def import_start(self, artifact_dir: Path) -> str:
         return self.import_manifest(artifact_dir)

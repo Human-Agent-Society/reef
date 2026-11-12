@@ -110,7 +110,8 @@ class ArtifactWeights(ConfiguredPlugin, ABC):
     a materialized snapshot and the ``layout`` that the engines load, and
     returns ``WeightFiles`` of that layout with the snapshot's weights. Equal
     snapshots give files of equal content. It raises ``ReefError`` when the
-    snapshot gives no files of ``layout``.
+    snapshot gives no files of ``layout``. The runtimes do not call it for a base root
+    (``reef.artifact.base_root``), which holds no weight files.
 
     Purpose: the serving runtimes of ``reef.inference.serving`` call it at each load. ``ArtifactWeightFiles``,
     the default, reads the snapshot's own files. A training backend whose

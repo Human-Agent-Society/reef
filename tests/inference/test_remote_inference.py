@@ -14,7 +14,7 @@ from contextlib import contextmanager
 import pytest
 from aiohttp import web
 
-from reef.artifact import Artifact
+from reef.artifact import BASE_FILE, Artifact, BaseRoot
 from reef.core.errors import ReefError, RuntimeConfigError
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat, WeightFiles
 from reef.inference import deployment as deployment_module
@@ -235,9 +235,11 @@ def test_service_starts_engines_and_publishes_weight_files_through_the_component
     backend.unload_adapter("math@inc:2")
     assert events[-1] == ("unload", "math@inc:2") and not served.exists()
 
+    # A Hugging Face snapshot directory links its files into the cache; the component gets the files themselves.
     weights = tmp_path / "hf"
     weights.mkdir()
-    (weights / "config.json").write_text("{}")
+    (tmp_path / "blob").write_text("{}")
+    (weights / "config.json").symlink_to(tmp_path / "blob")
     backend.load_weight_files(WeightFiles(weights, "full"), adapter_name=None, runtime_load_id="inc:3")
     _, layout, name, version, contents, served = events[-1]
     assert (layout, name, version, contents) == ("full", None, "inc:3", {"config.json": "{}"})
@@ -517,6 +519,32 @@ def test_full_weight_runtime_loads_a_published_checkpoint_through_the_component(
     assert (layout, name, loaded, contents) == ("full", None, version, {"config.json": "{}"})
     runtime.shutdown()
     assert "close" not in events
+
+
+def test_a_base_root_reaches_the_component_as_the_base_models_files_or_as_no_load(component, tmp_path):
+    url, events, _, _ = component
+    # The base model as the deployment resolves it: a Hugging Face snapshot directory, whose files are links.
+    model = tmp_path / "snapshots" / "commit"
+    model.mkdir(parents=True)
+    (tmp_path / "blob").write_text("{}")
+    (model / "config.json").symlink_to(tmp_path / "blob")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / BASE_FILE).write_text(BaseRoot({"model": str(model)}).to_text())
+    full = RuntimeRegistry().build(
+        serving_config(url, artifact_format=ArtifactFormat("full").to_dict()), model_path=str(model), environ=TOKENS
+    )
+    full.open()
+    version = full.activate_checkpoint(Artifact.local(root))
+    _, layout, name, loaded, contents, _ = events[-2]
+    assert (layout, name, loaded, contents) == ("full", None, version, {"config.json": "{}"})
+
+    adapters = RuntimeRegistry().build(serving_config(url, adapter_capacity=2), model_path=str(model), environ=TOKENS)
+    adapters.open()
+    calls = len(events)
+    assert adapters.activate_checkpoint(Artifact.local(root), scenario="math") == adapters.base_version
+    assert events[calls:] == []
+    assert adapters.served_model_name("math") == str(model)
 
 
 def test_a_runtime_whose_handler_fails_starts_no_engine(component, tmp_path):

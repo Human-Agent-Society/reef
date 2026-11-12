@@ -239,6 +239,18 @@ class AdapterResidencyManager:
                 sorted((self.adapters[name] for name in self.current.values()), key=lambda adapter: adapter.order)
             )
 
+    def serve_base(self, scenario: str) -> None:
+        """Record that ``scenario`` serves no adapter from now on, and unload nothing.
+
+        The revision that it served stays resident and is no longer protected: ``retire`` unloads it, and a
+        load that needs its slot evicts it. Nothing happens when the scenario serves none.
+        """
+        require_name(scenario, "scenario")
+        with self.lock:
+            name = self.current.pop(scenario, None)
+            if name is not None:
+                self.note("serves_base", name, scenario)
+
     def release(self, scenario: str, engine: AdapterEngine) -> None:
         """Unload the revision ``scenario`` serves, after which the scenario serves no adapter.
 
