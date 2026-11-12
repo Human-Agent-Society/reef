@@ -22,7 +22,7 @@ from reef.core.snapshot import SnapshotRef
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.scenario import ScenarioStoreConflict
+from reef.storage.scenario import ScenarioStoreConflictError
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 
@@ -39,7 +39,7 @@ def record(record_id: str, *, scenario: str = "math") -> AgentRecord:
 def commit(step: int = 1, *, scenario: str = "math") -> CommitRecord:
     return CommitRecord(
         scenario=scenario,
-        step=step,
+        commit_number=step,
         snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
@@ -74,7 +74,7 @@ def open_storage(request, tmp_path):
 
 def test_commit_is_fenced_and_preserves_readable_records(store):
     store.records.append(record("record-1"))
-    accepted = store.commit_step(expected_step=0, commit=commit())
+    accepted = store.append_commit(expected_commit_number=0, commit=commit())
 
     assert accepted == commit()
     assert store.history() == (accepted,)
@@ -83,10 +83,10 @@ def test_commit_is_fenced_and_preserves_readable_records(store):
 
 
 def test_retry_returns_original_timestamp_even_after_later_commits(store):
-    original = store.commit_step(expected_step=0, commit=commit())
-    store.commit_step(expected_step=1, commit=commit(2))
+    original = store.append_commit(expected_commit_number=0, commit=commit())
+    store.append_commit(expected_commit_number=1, commit=commit(2))
 
-    accepted = store.commit_step(expected_step=0, commit=replace(original, recorded_at=9999.0))
+    accepted = store.append_commit(expected_commit_number=0, commit=replace(original, recorded_at=9999.0))
 
     assert accepted.recorded_at == original.recorded_at
     assert len(store.history()) == 2
@@ -97,9 +97,9 @@ def test_retry_with_tuple_values_matches_the_stored_json(store):
     # A stored record reads back lists where the caller's commit held tuples.
     tuples = replace(commit(), algorithm_state={"path": ("a", "b")}, metrics={"paths": ({"stages": ()},)})
 
-    original = store.commit_step(expected_step=0, commit=tuples)
+    original = store.append_commit(expected_commit_number=0, commit=tuples)
 
-    assert store.commit_step(expected_step=0, commit=tuples) == original
+    assert store.append_commit(expected_commit_number=0, commit=tuples) == original
     assert store.history()[0].metrics == {"paths": [{"stages": []}]}
 
 
@@ -114,29 +114,29 @@ def test_retry_with_tuple_values_matches_the_stored_json(store):
     ],
 )
 def test_retry_rejects_different_committed_content(store, changed):
-    original = store.commit_step(expected_step=0, commit=commit())
+    original = store.append_commit(expected_commit_number=0, commit=commit())
 
-    with pytest.raises(ScenarioStoreConflict, match="conflicts"):
-        store.commit_step(expected_step=0, commit=replace(original, **changed))
+    with pytest.raises(ScenarioStoreConflictError, match="conflicts"):
+        store.append_commit(expected_commit_number=0, commit=replace(original, **changed))
 
     assert store.history() == (original,)
 
 
-def test_commit_rejects_skips_wrong_expected_step_and_foreign_scenario(store):
-    with pytest.raises(ScenarioStoreConflict, match="current step is 0"):
-        store.commit_step(expected_step=1, commit=commit(2))
-    with pytest.raises(ScenarioStoreConflict, match="commit step must be 1"):
-        store.commit_step(expected_step=0, commit=commit(2))
-    with pytest.raises(ScenarioStoreConflict, match="scenario 'code'"):
-        store.commit_step(expected_step=0, commit=commit(scenario="code"))
+def test_commit_rejects_skips_wrong_expected_commit_number_and_foreign_scenario(store):
+    with pytest.raises(ScenarioStoreConflictError, match="current commit number is 0"):
+        store.append_commit(expected_commit_number=1, commit=commit(2))
+    with pytest.raises(ScenarioStoreConflictError, match="commit number must be 1"):
+        store.append_commit(expected_commit_number=0, commit=commit(2))
+    with pytest.raises(ScenarioStoreConflictError, match="scenario 'code'"):
+        store.append_commit(expected_commit_number=0, commit=commit(scenario="code"))
 
     assert store.history() == ()
 
 
 @pytest.mark.parametrize("expected", [-1, True, 0.5])
-def test_commit_validates_expected_step(store, expected):
-    with pytest.raises(ValueError, match="expected_step"):
-        store.commit_step(expected_step=expected, commit=commit())
+def test_commit_validates_expected_commit_number(store, expected):
+    with pytest.raises(ValueError, match="expected_commit_number"):
+        store.append_commit(expected_commit_number=expected, commit=commit())
 
 
 def test_recover_adopts_checkpoint_and_preserves_its_fields(store):
@@ -145,7 +145,7 @@ def test_recover_adopts_checkpoint_and_preserves_its_fields(store):
     head = store.recover(checkpoint=checkpoint)
 
     assert head is checkpoint
-    assert head.step == 2
+    assert head.commit_number == 2
     assert head.checkpoint is True
     assert head.operation == "training"
     assert head.operation_verified is True
@@ -154,7 +154,7 @@ def test_recover_adopts_checkpoint_and_preserves_its_fields(store):
     assert head.consumed_ids == frozenset({"record-2"})
     assert store.records.count("math") == 1
     assert store.history() == (head,)
-    store.commit_step(expected_step=2, commit=commit(3))
+    store.append_commit(expected_commit_number=2, commit=commit(3))
     assert store.training_run_position() == (0, 2)
 
 
@@ -181,7 +181,7 @@ def operation_commit(step: int, operation: str) -> CommitRecord:
     """An activation or a new training start at ``step``: it names an artifact and carries no trainer state."""
     return CommitRecord(
         scenario="math",
-        step=step,
+        commit_number=step,
         snapshot=commit().snapshot,
         checkpoint=False,
         algorithm_state=None,
@@ -192,11 +192,11 @@ def operation_commit(step: int, operation: str) -> CommitRecord:
 
 
 def test_training_position_ignores_activate_and_resets_on_train_from(store):
-    store.commit_step(expected_step=0, commit=commit())
-    store.commit_step(expected_step=1, commit=operation_commit(2, "activate"))
+    store.append_commit(expected_commit_number=0, commit=commit())
+    store.append_commit(expected_commit_number=1, commit=operation_commit(2, "activate"))
     assert store.training_run_position() == (0, 1)
-    store.commit_step(expected_step=2, commit=operation_commit(3, "train_from"))
-    store.commit_step(expected_step=3, commit=commit(4))
+    store.append_commit(expected_commit_number=2, commit=operation_commit(3, "train_from"))
+    store.append_commit(expected_commit_number=3, commit=commit(4))
     assert store.training_run_position() == (3, 1)
 
 
@@ -218,14 +218,14 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
     with pytest.raises(RuntimeError, match="store is closed"):
         store.history()
     with pytest.raises(RuntimeError, match="store is closed"):
-        store.commit_step(expected_step=0, commit=commit())
+        store.append_commit(expected_commit_number=0, commit=commit())
     with pytest.raises(RuntimeError, match="store is closed"):
         store.recover(checkpoint=None)
     with pytest.raises(RuntimeError, match="store is closed"):
         _ = store.records
 
 
-def sqlite_session(*, database=None, initial_step=0):
+def sqlite_session(*, database=None, initial_commit_number=0):
     opened = SQLiteScenarioDatabase(database)
     files = LocalTaskFileStore()
     tasks = opened.task_storage(files, "math")
@@ -237,7 +237,7 @@ def sqlite_session(*, database=None, initial_step=0):
         training_state=opened.training_state(),
         evaluations=opened.evaluation_store(),
         database=opened,
-        initial_step=initial_step,
+        initial_commit_number=initial_commit_number,
     )
 
 
@@ -253,12 +253,12 @@ def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):
         assert head == commit(3)
         assert session.records.count("math") == 3
         assert len(session.records.audit_page("math")) == 3
-        session.commit_step(expected_step=3, commit=commit(4))
+        session.append_commit(expected_commit_number=3, commit=commit(4))
 
 
 @pytest.mark.parametrize("written", [False, True])
-def test_a_failed_commit_step_stores_no_commit(monkeypatch, written):
-    """The commit step is one transaction, so a failure after the insert also rolls the insert back."""
+def test_a_failed_append_stores_no_commit(monkeypatch, written):
+    """The append of a commit is one transaction, so a failure after the insert also rolls the insert back."""
     with closing(sqlite_session()) as session:
         journal = session.commit_history
         session.records.append(record("record-1"))
@@ -271,23 +271,25 @@ def test_a_failed_commit_step_stores_no_commit(monkeypatch, written):
 
         monkeypatch.setattr(journal, "append", interrupt_append)
         with pytest.raises(OSError, match="interrupted append"):
-            session.commit_step(expected_step=0, commit=commit())
+            session.append_commit(expected_commit_number=0, commit=commit())
         assert session.history() == ()
         assert session.records.count("math") == 1
 
         monkeypatch.setattr(journal, "append", append)
-        session.commit_step(expected_step=0, commit=replace(commit(), recorded_at=9999.0))
+        session.append_commit(expected_commit_number=0, commit=replace(commit(), recorded_at=9999.0))
         assert len(session.history()) == 1
         assert session.records.count("math") == 1
 
 
-@pytest.mark.parametrize("steps,checkpoint_step,message", [([2], 0, "resumes at step 2"), ([1, 3], 0, "jumps")])
-def test_recovery_rejects_gaps_after_checkpoint(steps, checkpoint_step, message):
+@pytest.mark.parametrize(
+    "steps,checkpoint_commit_number,message", [([2], 0, "resumes at commit 2"), ([1, 3], 0, "jumps")]
+)
+def test_recovery_rejects_gaps_after_checkpoint(steps, checkpoint_commit_number, message):
     with closing(sqlite_session()) as session:
         for step in steps:
             session.commit_history.append(commit(step))
         with pytest.raises(ReefError, match=message):
-            session.recover(checkpoint=None if checkpoint_step == 0 else commit(checkpoint_step))
+            session.recover(checkpoint=None if checkpoint_commit_number == 0 else commit(checkpoint_commit_number))
 
 
 def test_recovery_rejects_journal_for_another_scenario():
@@ -297,11 +299,11 @@ def test_recovery_rejects_journal_for_another_scenario():
             session.recover(checkpoint=None)
 
 
-def test_existing_initial_step_is_fenced_without_history():
-    with closing(sqlite_session(initial_step=3)) as session:
-        with pytest.raises(ScenarioStoreConflict, match="current step is 3"):
-            session.commit_step(expected_step=0, commit=commit())
-        session.commit_step(expected_step=3, commit=commit(4))
+def test_existing_initial_commit_number_is_fenced_without_history():
+    with closing(sqlite_session(initial_commit_number=3)) as session:
+        with pytest.raises(ScenarioStoreConflictError, match="current commit number is 3"):
+            session.append_commit(expected_commit_number=0, commit=commit())
+        session.append_commit(expected_commit_number=3, commit=commit(4))
 
 
 def test_conflicting_sessions_have_only_one_winner(open_storage):
@@ -313,8 +315,10 @@ def test_conflicting_sessions_have_only_one_winner(open_storage):
         def try_commit(session, label):
             barrier.wait(timeout=10)
             try:
-                return session.commit_step(expected_step=0, commit=replace(commit(), metrics={"writer": label}))
-            except ScenarioStoreConflict:
+                return session.append_commit(
+                    expected_commit_number=0, commit=replace(commit(), metrics={"writer": label})
+                )
+            except ScenarioStoreConflictError:
                 return None
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -341,12 +345,12 @@ def test_memory_sessions_wait_for_another_sessions_transaction(write: bool) -> N
 
         def append() -> None:
             started.set()
-            second.commit_step(expected_step=0, commit=commit())
+            second.append_commit(expected_commit_number=0, commit=commit())
 
         with ThreadPoolExecutor(max_workers=1) as pool:
             with database._transaction(write=write) as connection:
                 # Shared-cache reads lock the table until their transaction ends.
-                connection.exec_driver_sql("SELECT step FROM scenario_commit").fetchall()
+                connection.exec_driver_sql("SELECT commit_number FROM scenario_commit").fetchall()
                 pending = pool.submit(append)
                 assert started.wait(5)
                 with pytest.raises(TimeoutError):
@@ -358,13 +362,15 @@ def test_memory_sessions_wait_for_another_sessions_transaction(write: bool) -> N
 def test_session_refreshes_cached_history_after_another_writer(open_storage):
     factory = open_storage()
     with closing(factory.open("math")) as first, closing(factory.open("math")) as second:
-        first.commit_step(expected_step=0, commit=commit())
+        first.append_commit(expected_commit_number=0, commit=commit())
         assert first.history() == (commit(),)
-        second.commit_step(expected_step=1, commit=commit(2))
-        with pytest.raises(ScenarioStoreConflict, match="conflicts"):
-            first.commit_step(expected_step=1, commit=replace(commit(2), metrics={"different": True}))
-        assert first.commit_step(expected_step=1, commit=replace(commit(2), recorded_at=9999.0)) == commit(2)
-        first.commit_step(expected_step=2, commit=commit(3))
+        second.append_commit(expected_commit_number=1, commit=commit(2))
+        with pytest.raises(ScenarioStoreConflictError, match="conflicts"):
+            first.append_commit(expected_commit_number=1, commit=replace(commit(2), metrics={"different": True}))
+        assert first.append_commit(expected_commit_number=1, commit=replace(commit(2), recorded_at=9999.0)) == commit(
+            2
+        )
+        first.append_commit(expected_commit_number=2, commit=commit(3))
         assert second.history() == first.history()
     factory.close()
 
@@ -376,9 +382,9 @@ def _commit_in_process(directory, started, ready, results, label):
         if not started.wait(timeout=20):
             raise RuntimeError("commit process was not started")
         try:
-            session.commit_step(expected_step=0, commit=replace(commit(), metrics={"writer": label}))
+            session.append_commit(expected_commit_number=0, commit=replace(commit(), metrics={"writer": label}))
             results.put("accepted")
-        except ScenarioStoreConflict:
+        except ScenarioStoreConflictError:
             results.put("conflict")
     factory.close()
 
@@ -422,7 +428,7 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
     factory = SQLiteScenarioStorage(tmp_path)
     with closing(factory.open("math")) as session:
         session.records.append(record("record-1"))
-        session.commit_step(expected_step=0, commit=commit())
+        session.append_commit(expected_commit_number=0, commit=commit())
     assert tmp_path / f"{key}.sqlite3" in factory.state_paths("math")
 
     first_archive = factory.archive("math")
@@ -431,7 +437,7 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
     with closing(factory.open("math")) as session:
         assert session.history() == ()
         assert session.records.count("math") == 0
-        session.commit_step(expected_step=0, commit=commit())
+        session.append_commit(expected_commit_number=0, commit=commit())
     second_archive = factory.archive("math")
     assert set(first_archive).isdisjoint(second_archive)
     assert all(Path(location).exists() for location in first_archive)
@@ -448,7 +454,7 @@ def test_an_archive_skips_a_wal_file_that_sqlite_removed_while_it_moved_the_file
 
     factory = SQLiteScenarioStorage(tmp_path)
     reader = factory.open("math")
-    reader.commit_step(expected_step=0, commit=commit())
+    reader.append_commit(expected_commit_number=0, commit=commit())
     database, wal, _ = factory.state_paths("math")
     with closing(sqlite3.connect(database)) as connection:
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -476,7 +482,7 @@ def test_storage_close_preserves_existing_session_and_rejects_new_operations():
         assert factory.archive("math") == ()
         factory.close()
         factory.close()
-        session.commit_step(expected_step=0, commit=commit())
+        session.append_commit(expected_commit_number=0, commit=commit())
         with pytest.raises(RuntimeError, match="storage is closed"):
             factory.open("math")
         with pytest.raises(RuntimeError, match="storage is closed"):

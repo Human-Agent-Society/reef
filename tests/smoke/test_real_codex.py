@@ -37,7 +37,7 @@ MODEL = "smoke-model"
 SKILL_MARKER = "The Reef Codex skill marker is TIDEPOOL-SKILL-27."
 
 
-def _response(status: str, output: list[dict[str, Any]]) -> dict[str, Any]:
+def response(status: str, output: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "id": "resp_reef_smoke",
         "object": "response",
@@ -74,11 +74,11 @@ def _response(status: str, output: list[dict[str, Any]]) -> dict[str, Any]:
 
 class StubResponses(ThreadingHTTPServer):
     def __init__(self) -> None:
-        super().__init__(("127.0.0.1", 0), StubHandler)
+        super().__init__(("127.0.0.1", 0), ResponsesHandler)
         self.requests: list[tuple[str, str, str]] = []
 
 
-class StubHandler(BaseHTTPRequestHandler):
+class ResponsesHandler(BaseHTTPRequestHandler):
     server: StubResponses
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -106,14 +106,14 @@ class StubHandler(BaseHTTPRequestHandler):
             "content": [{"type": "output_text", "text": "READY", "annotations": [], "logprobs": []}],
         }
         events = [
-            {"type": "response.created", "response": _response("in_progress", []), "sequence_number": 0},
+            {"type": "response.created", "response": response("in_progress", []), "sequence_number": 0},
             {
                 "type": "response.output_item.done",
                 "item": message,
                 "output_index": 0,
                 "sequence_number": 1,
             },
-            {"type": "response.completed", "response": _response("completed", [message]), "sequence_number": 2},
+            {"type": "response.completed", "response": response("completed", [message]), "sequence_number": 2},
         ]
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -123,7 +123,7 @@ class StubHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"data: [DONE]\n\n")
 
 
-def _server() -> tuple[StubResponses, str]:
+def started_server() -> tuple[StubResponses, str]:
     server = StubResponses()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
@@ -133,13 +133,13 @@ def model_binding(base_url: str) -> ModelBinding:
     return ModelBinding(base_url=base_url, model=MODEL, api_key="reef-smoke-key", api="responses").with_metadata()
 
 
-def _bound_files(files: Mapping[str, str] | None = None, *, binding: ModelBinding) -> dict[str, str]:
+def bound_files(files: Mapping[str, str] | None = None, *, binding: ModelBinding) -> dict[str, str]:
     """The source tree ``files`` rendered for codex under ``binding``."""
     descriptor = get_adapter("codex")
     return render_tree(HarnessTree(dict(files or {})), descriptor, binding.config_overlays(descriptor))
 
 
-def _capturing_wrapper(tmp_path: Path, capture: Path) -> str:
+def capturing_wrapper(tmp_path: Path, capture: Path) -> str:
     wrapper = tmp_path / "codex-capturing"
     wrapper.write_text(
         "#!/bin/sh\n"
@@ -153,9 +153,9 @@ def _capturing_wrapper(tmp_path: Path, capture: Path) -> str:
 
 
 def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
-    server, base_url = _server()
+    server, base_url = started_server()
     try:
-        files = _bound_files(
+        files = bound_files(
             {
                 "skills/reef-smoke/SKILL.md": f"# Reef smoke skill\n\n{SKILL_MARKER}",
                 "commands/reef-command.md": "Reef smoke command",
@@ -167,7 +167,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
             get_adapter("codex"),
             files,
             "Reply with exactly the word READY",
-            binary=_capturing_wrapper(tmp_path, capture),
+            binary=capturing_wrapper(tmp_path, capture),
             timeout=120.0,
         )
     finally:
@@ -204,7 +204,7 @@ def test_real_codex_session_config_lets_the_model_ask_the_person_to_leave_the_sa
     default and tells the model how to ask the person before a command runs outside the sandbox. The rendered tree
     holds no rule that skips that ask."""
     descriptor = get_adapter("codex")
-    files = descriptor.place_root(_bound_files(binding=model_binding("http://127.0.0.1:9")), str(tmp_path))
+    files = descriptor.place_root(bound_files(binding=model_binding("http://127.0.0.1:9")), str(tmp_path))
     assert not any(path.startswith("codex/rules/") for path in files)
     for relative, text in files.items():
         (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
@@ -230,10 +230,10 @@ def test_real_codex_session_config_lets_the_model_ask_the_person_to_leave_the_sa
 
 @pytest.mark.parametrize("reasoning", [True, False])
 def test_codex_sends_reasoning_parameters_only_when_supported(reasoning: bool) -> None:
-    server, base_url = _server()
+    server, base_url = started_server()
     try:
         binding = replace(model_binding(base_url), metadata=ModelMetadata(640_000, reasoning))
-        files = _bound_files(binding=binding)
+        files = bound_files(binding=binding)
         result = run_task(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert result.exit_code == 0, result.stderr
         assert "fallback metadata" not in result.stdout + result.stderr
@@ -248,15 +248,15 @@ def test_codex_sends_reasoning_parameters_only_when_supported(reasoning: bool) -
 
 
 def test_metadata_preserves_codex_unknown_model_instructions() -> None:
-    server, base_url = _server()
+    server, base_url = started_server()
     try:
         descriptor = get_adapter("codex")
         binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
-        before = run_task(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        before = run_task(descriptor, bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert before.exit_code == 0, before.stderr
         assert "fallback metadata" in before.stdout
         after = run_task(
-            descriptor, _bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
+            descriptor, bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
         )
         assert after.exit_code == 0, after.stderr
         assert "fallback metadata" not in after.stdout + after.stderr
@@ -321,15 +321,15 @@ GPT_5_5_KEEPS_A_SENTENCE = pytest.mark.xfail(
     "model", [pytest.param("gpt-5.5", marks=GPT_5_5_KEEPS_A_SENTENCE), "gpt-5.6-sol", "gpt-6-astra"]
 )
 def test_codex_model_switch_keeps_bundled_instructions_and_tools(model: str) -> None:
-    server, base_url = _server()
+    server, base_url = started_server()
     try:
         descriptor = get_adapter("codex")
         # The option goes before the "--" that ends the options; the prompt follows it.
         switched = replace(descriptor, argv=(*descriptor.argv[:-2], "--model", model, *descriptor.argv[-2:]))
         binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
-        before = run_task(switched, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        before = run_task(switched, bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         after = run_task(
-            switched, _bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
+            switched, bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
         )
         assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)
         assert "fallback metadata" not in after.stdout + after.stderr
@@ -352,13 +352,13 @@ def test_codex_model_switch_keeps_bundled_instructions_and_tools(model: str) -> 
 )
 @pytest.mark.parametrize("reasoning", [True, False])
 def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: str, reasoning: bool) -> None:
-    server, base_url = _server()
+    server, base_url = started_server()
     try:
         descriptor = get_adapter("codex")
         binding = ModelBinding(base_url=base_url, model=model, api="responses")
-        before = run_task(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        before = run_task(descriptor, bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         configured = replace(binding, metadata=ModelMetadata(32_000, reasoning))
-        after = run_task(descriptor, _bound_files(binding=configured), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        after = run_task(descriptor, bound_files(binding=configured), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)
         assert "fallback metadata" not in after.stdout + after.stderr
         started = next(
@@ -394,12 +394,12 @@ def test_real_codex_takes_every_part_of_a_tree_in_an_run_and_over_a_persons_own_
     """Every part an evolved tree may hold reaches the model, in a run and on a person's machine, where Codex
     keeps the person's own home, empty here, and takes the skills from the plugin the layer registers.
     Unregistering leaves the person's config without the plugin."""
-    server, base_url = _server()
+    server, base_url = started_server()
     descriptor = get_adapter("codex")
     binding = ModelBinding(base_url=base_url, model="gpt-6-astra", api_key="reef-smoke-key", api="responses")
     try:
         if form == "run":
-            files = _bound_files(CODEX_PARTS, binding=binding)
+            files = bound_files(CODEX_PARTS, binding=binding)
             result = run_task(descriptor, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
             assert result.exit_code == 0, result.stderr
         else:

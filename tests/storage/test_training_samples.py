@@ -118,7 +118,7 @@ def test_a_listing_shows_the_samples_without_reading_their_content(scenario, mon
 
 def test_get_reads_the_samples_of_the_ids_that_the_scenario_uses_in_item_order(scenario):
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2"), upload("t3", math="train")])
-    assert [stored.sample_id for stored in scenario.samples.get(("t3", "t1", "t2", "missing"))] == ["t1", "t3"]
+    assert [stored.sample_id for stored in scenario.samples.read(("t3", "t1", "t2", "missing"))] == ["t1", "t3"]
 
 
 def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(scenario):
@@ -127,9 +127,9 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
     made = trajectory("a1", group_id="g", source_agent_record_ids=("r1",))
     task = made_task("x", source_agent_record_ids=("r2",), metadata={"task": {"name": "x"}})
     grid = (("a:r1:0", made), ("generated-tasks/x", task))
-    assert samples.for_trainer("a").add_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 2
-    assert samples.for_trainer("a").add_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 0
-    samples.for_trainer("b").add_record_samples(None, ("r3",), (("b:r3:0", trajectory("b")),))
+    assert samples.for_trainer("a").write_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 2
+    assert samples.for_trainer("a").write_record_samples("a:r1", ("r1", "i1", "r2"), grid) == 0
+    samples.for_trainer("b").write_record_samples(None, ("r3",), (("b:r3:0", trajectory("b")),))
 
     item_id = stage_item_id("math", "a:r1:0")
     assert (item_id, stage_item_id("math", "generated-tasks/x")) == ("math.a:r1:0", "math.generated-tasks.x")
@@ -154,8 +154,8 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
     assert (other.component, other.group, other.sample.source_agent_record_ids) == ("b", None, ())
 
     # An item that exists stays as it is.
-    assert samples.for_trainer("a").add_record_samples(None, ("r4",), (("a:r1:0", trajectory("other")),)) == 0
-    assert samples.get((item_id,))[0].sample == made
+    assert samples.for_trainer("a").write_record_samples(None, ("r4",), (("a:r1:0", trajectory("other")),)) == 0
+    assert samples.read((item_id,))[0].sample == made
     state = samples.state
     assert state.consumed_record_ids("a") == {"r1", "i1", "r2", "r4"}
     assert state.consumed_record_ids("b") == {"r3"} and state.consumed_record_ids("") == frozenset()
@@ -164,7 +164,7 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
 def training_commit(step: int, *consumed: str, component: str | None = None) -> CommitRecord:
     return CommitRecord(
         scenario="math",
-        step=step,
+        commit_number=step,
         snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
@@ -183,14 +183,16 @@ def train_counts(samples: SampleStore) -> dict[str, dict[str, int]]:
 def test_a_commit_counts_each_sample_it_consumed_once_for_its_trainer(scenario):
     session = scenario.session
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2", math="train")])
-    session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
+    session.append_commit(expected_commit_number=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
     assert train_counts(scenario.samples) == {"t1": {"": 1}, "t2": {}}
     # A retry of the stored commit counts nothing again; a later commit counts again.
-    session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
-    session.commit_step(expected_step=1, commit=training_commit(2, consumed_sample_id("t1"), consumed_sample_id("t2")))
+    session.append_commit(expected_commit_number=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
+    session.append_commit(
+        expected_commit_number=1, commit=training_commit(2, consumed_sample_id("t1"), consumed_sample_id("t2"))
+    )
     assert train_counts(scenario.samples) == {"t1": {"": 2}, "t2": {"": 1}}
     # The commit of one component of several counts for that component only.
-    session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("t2"), component="b"))
+    session.append_commit(expected_commit_number=2, commit=training_commit(3, consumed_sample_id("t2"), component="b"))
     _, second = scenario.samples.page()
     assert second.train_counts == {"": 1, "b": 1}
     assert (second.train_count(""), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
@@ -200,19 +202,21 @@ def test_a_commit_counts_more_samples_than_one_statement_can_name(scenario):
     # PostgreSQL takes at most 65535 parameters in one statement, and each count row has several.
     sample_ids = [f"t{index}" for index in range(20_000)]
     commit = training_commit(1, *(consumed_sample_id(sample_id) for sample_id in sample_ids))
-    scenario.session.commit_step(expected_step=0, commit=commit)
+    scenario.session.append_commit(expected_commit_number=0, commit=commit)
     counts = scenario.session.training_state.train_counts(sample_ids)
     assert len(counts) == len(sample_ids) and counts["t19999"] == {"": 1}
 
 
 def test_train_counts_survive_an_item_that_leaves_and_comes_back(scenario):
     scenario.data.create("acme", [upload("t1", math="train"), upload("t2", math="train")])
-    scenario.session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), component="a"))
+    scenario.session.append_commit(
+        expected_commit_number=0, commit=training_commit(1, consumed_sample_id("t1"), component="a")
+    )
     last = scenario.samples.page()[-1].sequence
     scenario.data.update("acme", ["t1"], {"scenarios": {"math": None}})
     assert scenario.ids() == ["t2"]
     scenario.data.update("acme", ["t1"], {"scenarios": {"math": "train"}})
-    (again,) = scenario.samples.get(("t1",))
+    (again,) = scenario.samples.read(("t1",))
     assert again.train_counts == {"a": 1}
     assert scenario.samples.page()[-1].sample_id == "t1" and scenario.samples.page()[-1].sequence > last
 
@@ -229,7 +233,7 @@ def test_a_commit_that_fails_counts_no_sample(scenario, monkeypatch):
 
     monkeypatch.setattr(history, "append", append_then_fail)
     with pytest.raises(RuntimeError, match="after the counts"):
-        session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1")))
+        session.append_commit(expected_commit_number=0, commit=training_commit(1, consumed_sample_id("t1")))
     assert train_counts(scenario.samples) == {"t1": {}}
     assert session.history() == ()
 
@@ -239,7 +243,7 @@ def test_imported_tasks_are_the_tasks_that_no_stage_made(scenario):
     scenario.data.create("acme", [upload("t1", math="train")])
     scenario.task("task-a", "train")
     scenario.task("held", "eval", 9001)
-    samples.for_trainer("").add_record_samples(
+    samples.for_trainer("").write_record_samples(
         None, (), (("generated-tasks/g", made_task("g", metadata={"task": {"name": "g"}})),)
     )
     assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [
@@ -258,7 +262,7 @@ def test_the_listing_of_the_imported_tasks_reads_no_task_files(scenario, monkeyp
     samples = scenario.samples
     scenario.task("task-a", "train")
     scenario.task("held", "eval", 9001)
-    samples.for_trainer("").add_record_samples(
+    samples.for_trainer("").write_record_samples(
         None, (), (("generated-tasks/g", made_task("g", metadata={"task": {"name": "g"}})),)
     )
     imported = samples.imported_tasks()
@@ -280,7 +284,7 @@ def test_the_task_directories_of_many_tasks_are_read_at_the_same_time(scenario, 
     for name in names:
         scenario.task(name, "eval")
     scenario.data.create("acme", [upload("trajectory", math="train")])
-    expected = tuple(stored.sample.task_path for stored in samples.get(names))
+    expected = tuple(stored.sample.task_path for stored in samples.read(names))
 
     # Each read waits until every reader has started one: a store that reads one directory at a time never ends.
     started = threading.Barrier(TASK_PATH_READERS, timeout=10)
@@ -297,12 +301,16 @@ def test_the_task_directories_of_many_tasks_are_read_at_the_same_time(scenario, 
 def test_a_restart_counts_the_trained_samples_from_the_commits(open_durable_storage):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         consumed = (consumed_sample_id("upload"), consumed_sample_id("a:r1:0"))
-        session.commit_step(expected_step=0, commit=training_commit(1, *consumed, component="a"))
+        session.append_commit(expected_commit_number=0, commit=training_commit(1, *consumed, component="a"))
 
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         state = session.training_state
         assert state.train_counts(["upload", "a:r1:0", "untrained"]) == {"upload": {"a": 1}, "a:r1:0": {"a": 1}}
         # A later commit of the same trainer counts again, and one of another trainer counts for that trainer.
-        session.commit_step(expected_step=1, commit=training_commit(2, consumed_sample_id("upload"), component="a"))
-        session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("upload"), component="b"))
+        session.append_commit(
+            expected_commit_number=1, commit=training_commit(2, consumed_sample_id("upload"), component="a")
+        )
+        session.append_commit(
+            expected_commit_number=2, commit=training_commit(3, consumed_sample_id("upload"), component="b")
+        )
         assert state.train_counts(["upload"]) == {"upload": {"a": 2, "b": 1}}

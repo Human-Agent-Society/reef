@@ -6,9 +6,9 @@ from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
-from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.trajectories import policy_trajectory
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
 from recipes.tttd.objective import adaptive_entropic_advantages
@@ -17,12 +17,13 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
+from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples
 from reef.train import PipelineContext, Trainer
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import TrajectorySample, trajectory_groups
 
 
@@ -97,9 +98,7 @@ def _processor(experiment_logger=None, job_samples=None) -> TrainingPipeline:
 
 
 def _recipe(config: dict) -> TTTDRecipe:
-    recipe = TTTDRecipe.from_environment(
-        {}, config={"model": {"path": "Qwen/Qwen3-8B"}, **config}, **runtime_bindings()
-    )
+    recipe = load_recipe(TTTDRecipe, {"model": {"path": "Qwen/Qwen3-8B"}, **config}, {})
     assert isinstance(recipe, TTTDRecipe)
     return recipe
 
@@ -117,7 +116,7 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
         }
     )
 
-    pipeline = recipe.build_pipeline(PipelineContext("discovery", report_type=recipe.report_type))
+    pipeline = recipe.stages().build(PipelineContext("discovery", report_type=recipe.report_type))
 
     assert isinstance(pipeline.record2sample, TTTDSamples)
     assert isinstance(pipeline.sample2job, TTTDJobData)
@@ -129,7 +128,7 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
 
 @pytest.mark.unit
 def test_tttd_default_grid_is_the_paper_grid() -> None:
-    pipeline = _recipe({"data": {}}).build_pipeline(PipelineContext("discovery"))
+    pipeline = _recipe({"data": {}}).stages().build(PipelineContext("discovery"))
 
     assert isinstance(pipeline.sample2job, TTTDJobData)
     assert (pipeline.sample2job.groups_per_step, pipeline.sample2job.rollouts_per_group) == (8, 64)
@@ -154,8 +153,8 @@ def test_tttd_refuses_the_grid_in_the_recipe_config(key: str) -> None:
 )
 def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict, message: str) -> None:
     recipe = _recipe({"data": {}, "pipeline": pipeline})
-    with pytest.raises(RecipeConfigError, match=message):
-        recipe.build_pipeline(PipelineContext("discovery", report_type=recipe.report_type))
+    with pytest.raises(PluginConfigError, match=message):
+        recipe.stages().build(PipelineContext("discovery", report_type=recipe.report_type))
 
 
 @pytest.mark.unit
@@ -184,7 +183,7 @@ def test_tttd_job_data_needs_the_tttd_sample_stage() -> None:
 @pytest.mark.unit
 def test_tttd_backend_contract_owns_its_dynamic_function_paths() -> None:
     pytest.importorskip("torch")
-    from reef.train.slime_backend.algorithm import resolve_objective_paths
+    from reef.train.slime_backend.loss_families import resolve_objective_paths
 
     args = SimpleNamespace(
         loss_family="tttd",
@@ -601,13 +600,13 @@ def test_tttd_objective_flags_a_batch_of_constant_groups() -> None:
     # The processor keeps one constant-reward group when every group is
     # constant; the objective reports that batch, whose advantages carry no
     # signal, through constant_groups_retained.
-    from reef.train.slime_backend.objectives import resolve_slime_objective
+    from reef.train.slime_backend.objectives import resolve_objective
     from reef.train.types import JobData
 
     def sample(record_id: str, reward: float) -> TrajectorySample:
         return policy_trajectory(record_id, (5, 1), (1,), (-0.1,), reward)
 
-    objective = resolve_slime_objective("tttd")
+    objective = resolve_objective("tttd")
     constant = JobData(
         "b",
         tuple(

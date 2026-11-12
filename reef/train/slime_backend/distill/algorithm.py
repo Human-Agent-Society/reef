@@ -1,7 +1,7 @@
 """The driver side of a distillation family: its settings, its wire row and the base every recipe subclasses.
 
 A recipe's family is a thin subclass of :class:`DistillAlgorithm`: it names
-itself (``loss_family``), carries its defaults in a :class:`DistillSettings`
+itself (``loss_family``), carries its defaults in a :class:`DistillAlgorithmSettings`
 subclass, and its ``objective.py`` forwards the worker hooks to
 :mod:`.objective`. Everything else, the wire row, the flags, the validation,
 lives here, so SDFT, SDPO and OPD differ only in their prefix, their
@@ -32,12 +32,12 @@ from urllib.parse import urlsplit
 
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm
-from reef.train.slime_backend.data_builder import build_policy_rollout_data
 from reef.train.slime_backend.distill.teacher_engine import (
     ENGINE_TEACHER_BATCH_KEYS,
     TeacherEngine,
     validate_teacher_tokenizer,
 )
+from reef.train.slime_backend.policy_rows import build_policy_rollout_data
 from reef.train.types import TrajectorySample
 
 #: ``self``: the student's own weights read a privileged prefix (the current
@@ -53,7 +53,7 @@ DIVERGENCES = ("forward", "reverse", "jsd")
 
 
 @dataclass(frozen=True)
-class DistillSettings:
+class DistillAlgorithmSettings:
     """Driver options of a distillation family, parsed from its ``--<family>-*`` flags.
 
     A recipe's family subclasses this with its own defaults. ``top_k`` selects
@@ -210,7 +210,7 @@ def build_distill_rollout_data(payload: Mapping[str, Any], samples: Sequence, sp
         teacher_rows.append(row[5])
         sample_weights.append(float(row[6]))
 
-    data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec)
+    data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec.loss_family)
     teacher_tokens: list[list[int]] = []
     for index, (row_teacher, tokens, response_length) in enumerate(
         zip(teacher_rows, data["tokens"], data["response_lengths"], strict=True)
@@ -270,7 +270,7 @@ class DistillAlgorithm(SlimeAlgorithm):
     rollout_log_skip_keys = ("teacher_tokens", "distill_sample_weights", *TEACHER_BATCH_KEYS)
     required_objective_hooks = ("custom_loss_function_path", "reef_actor_pre_train_hook_path")
     #: The recipe's settings type, with its defaults.
-    settings_type: type[DistillSettings] = DistillSettings
+    settings_type: type[DistillAlgorithmSettings] = DistillAlgorithmSettings
 
     def __init__(self, teacher: TeacherEngine | None = None) -> None:
         #: The teacher engine a bound instance scores with; None leaves scoring to the actor.
@@ -309,7 +309,7 @@ class DistillAlgorithm(SlimeAlgorithm):
                 "--hidden-dropout 0: the ids come from a forward before the step"
             )
 
-    def parse_specific_options(self, arguments: Sequence[str]) -> tuple[DistillSettings, list[str]]:
+    def parse_specific_options(self, arguments: Sequence[str]) -> tuple[DistillAlgorithmSettings, list[str]]:
         prefix = f"--{self.loss_family}-"
         # Field defaults for the help text: a family that requires an option, such as a separate
         # teacher's checkpoint, has no valid default instance.
@@ -426,7 +426,7 @@ class DistillAlgorithm(SlimeAlgorithm):
 
     def apply_driver_options(self, args: Namespace, options: object | None) -> None:
         super().apply_driver_options(args, options)
-        settings = options if isinstance(options, DistillSettings) else self.settings_type()
+        settings = options if isinstance(options, DistillAlgorithmSettings) else self.settings_type()
         args.distill_teacher = settings.teacher
         args.distill_divergence = settings.divergence
         args.distill_top_k = settings.top_k
@@ -451,9 +451,9 @@ class DistillAlgorithm(SlimeAlgorithm):
         critic_only_steps: int = 0,
     ) -> DistillAlgorithm:
         # A checkpoint teacher travels on args; a teacher engine is scored by the bound instance.
-        if config is not None and not isinstance(config, DistillSettings):
+        if config is not None and not isinstance(config, DistillAlgorithmSettings):
             raise TypeError(f"{self.loss_family} algorithm config must be {self.settings_type.__name__}")
-        if isinstance(config, DistillSettings) and config.teacher_url:
+        if isinstance(config, DistillAlgorithmSettings) and config.teacher_url:
             teacher = TeacherEngine(
                 url=config.teacher_url,
                 model_path=config.teacher_model_path,
@@ -480,9 +480,9 @@ class DistillAlgorithm(SlimeAlgorithm):
         return build_distill_rollout_data(payload, samples, self)
 
 
-def settings_from_args(args: Namespace) -> DistillSettings:
+def settings_from_args(args: Namespace) -> DistillAlgorithmSettings:
     """The family's settings as the training component stamped them on ``args`` (worker side)."""
-    return DistillSettings(
+    return DistillAlgorithmSettings(
         teacher=args.distill_teacher,
         divergence=args.distill_divergence,
         top_k=args.distill_top_k,
@@ -506,7 +506,7 @@ __all__ = [
     "TEACHER_BATCH_KEYS",
     "TEACHER_SOURCES",
     "DistillAlgorithm",
-    "DistillSettings",
+    "DistillAlgorithmSettings",
     "build_distill_rollout_data",
     "distill_sample_row",
     "settings_from_args",

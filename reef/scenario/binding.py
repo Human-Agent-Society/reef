@@ -29,7 +29,7 @@ class ScenarioBinding:
     #: when set, every report on this scenario is parsed through it at
     #: ingress. ``None`` keeps open ingress.
     report_type: type[ReportBase] | None = None
-    #: Whether the record import refuses image content (``Recipe.refuses_images``).
+    #: Whether the record import refuses image content (``reef.recipe.deployment.refuses_images``).
     refuses_images: bool = False
     #: The training component of a weight-training recipe, which its trainer submits jobs to.
     training_component: TrainingComponent | None = None

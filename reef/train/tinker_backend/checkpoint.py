@@ -29,7 +29,7 @@ class TinkerCheckpoint:
     all the parameters, which Spindle's full-parameter training saves. ``state_path`` (the weights and optimizer state
     that a later job restores) and ``sampler_path`` (the weights that the service's sampler serves; for a LoRA, the
     adapter that a serving runtime downloads to load into its own engines) are ``tinker://`` paths. ``service`` is the base URL of
-    the Tinker-compatible service that holds every path (``TinkerConfig.base_url``), or ``None`` for Thinking
+    the Tinker-compatible service that holds every path (``TinkerSettings.base_url``), or ``None`` for Thinking
     Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
     writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole snapshot, and reads them
     back to start a job. The serving side reads the same manifest as a ``TinkerArtifact``.

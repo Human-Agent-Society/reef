@@ -16,7 +16,7 @@ from reef.core.training_request import TrainingRequest, normalize_training_reque
 from reef.core.trajectories import has_image_content
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
-from reef.storage.records import RecordConflict
+from reef.storage.records import RecordConflictError
 from reef.storage.work_queue import WorkItem
 from reef.train.trainer import Trainer
 
@@ -49,7 +49,7 @@ def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any])
     must pass the screens (``training_request_refusal``), a trainer that trains must take the request's samples
     (``Trainer.check_request``), and ``train_from`` must name an artifact of the scenario. The training mode does
     not matter: a request trains in ``auto`` too. Raise ``ValueError`` for a refused request, and
-    ``RecordConflict`` for an ID that the scenario queued with another payload.
+    ``RecordConflictError`` for an ID that the scenario queued with another payload.
     """
     if current.training_requests is None:
         raise ValueError(f"scenario {current.name!r} takes no training requests: it has no training request queue")
@@ -72,7 +72,7 @@ def file_request(current: Scenario, request_id: str, payload: Mapping[str, Any])
             ):
                 raise ValueError(f"train_from names no artifact of the scenario: {parsed.train_from!r}")
         return current.training_requests.file(request_id, request)
-    except RecordConflict:
+    except RecordConflictError:
         current.operations.increment("ingest/rejected_conflict_total")
         raise
     except ValueError:
@@ -113,7 +113,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
             for reference in item.references:
                 source = preceding.get(reference)
                 if source is None:
-                    stored_reference = current.records.get_for_audit(item.scenario, reference)
+                    stored_reference = current.records.read_for_audit(item.scenario, reference)
                     source = stored_reference.item if stored_reference is not None else current.used_record(reference)
                 if source is None or source.request_type is not RequestType.INFERENCE:
                     raise ReportValidationError(
@@ -130,7 +130,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
     except ReportValidationError:
         current.operations.increment("ingest/rejected_report_total")
         raise
-    except RecordConflict:
+    except RecordConflictError:
         current.operations.increment("ingest/rejected_conflict_total")
         raise
     except ValueError:
@@ -159,7 +159,7 @@ def append_record(current: Scenario, item: AgentRecord) -> tuple[AgentRecord, bo
     try:
         with current.operations.measure("ingest/write"):
             appended = current.records.append_result(item)
-    except RecordConflict:
+    except RecordConflictError:
         current.operations.increment("ingest/rejected_conflict_total")
         raise
     current.operations.increment("ingest/accepted_total" if appended.inserted else "ingest/duplicates_total")
@@ -175,7 +175,7 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     try:
         with current.operations.measure("ingest/write"):
             appended = current.records.append_many(items)
-    except RecordConflict:
+    except RecordConflictError:
         current.operations.increment("ingest/rejected_conflict_total")
         raise
     for result in appended:

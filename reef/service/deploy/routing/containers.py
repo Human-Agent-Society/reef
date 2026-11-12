@@ -24,6 +24,7 @@ from pathlib import Path
 
 import yaml
 
+from reef.core.errors import InternalError
 from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
 from reef.storage.durable_files import fsync_dir
 
@@ -80,7 +81,7 @@ IMAGE_BUILD_RECIPE = hashlib.sha256(
 IMAGE_CACHE_TAG = f"reef-semantic-router:{SEMANTIC_ROUTER_REVISION[:12]}-{IMAGE_BUILD_RECIPE}"
 
 
-class ContainerCommandError(RuntimeError):
+class ContainerCommandError(InternalError):
     """The CLI failed; a submitted mutation may still have reached the daemon.
 
     ``outcome_unknown`` is a bool. True means a mutation may have reached the daemon although its result is

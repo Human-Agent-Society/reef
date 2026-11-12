@@ -197,7 +197,7 @@ def test_reef_eval_entrypoint_dispatches_the_documented_workload(
         # query local too, regardless of what is listening on the example port.
         def _training_steps(request, timeout):
             assert request.full_url.endswith("/reef/status")
-            status = {"scenarios": {"sao-smoke": {"scenario_step": len(calls) * 6}}}
+            status = {"scenarios": {"sao-smoke": {"commit_number": len(calls) * 6}}}
             return io.BytesIO(json.dumps(status).encode())
 
         monkeypatch.setattr(urllib.request, "urlopen", _training_steps)

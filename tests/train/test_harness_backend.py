@@ -1,6 +1,6 @@
-"""The harness backend's step: from the head tree and the method's workspace to a published, rejected or skipped step.
+"""The harness backend's job: from the head tree and the method's workspace to a published, rejected or skipped job.
 
-Each step runs through the phases the trainer runs (``backend_step``) on an
+Each job runs through the phases the trainer runs (``backend_step``) on an
 in-memory commit history whose root snapshot is the pi seed; the test
 records a published tree as the next snapshot, as the scenario committer
 does. Tasks run the fake pi binary, whose score prefers rules that hold
@@ -14,9 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
-from tests.support.harness_service import backend_step
-from tests.support.harness_steps import (
+from tests.support.harness_jobs import (
     MODEL,
     PI_SEED,
     UNCHANGED,
@@ -27,7 +25,10 @@ from tests.support.harness_steps import (
     harness_recipe,
     head_of,
     marker_score,
+    rebuilt_recipe,
 )
+from tests.support.harness_service import backend_step
+from tests.support.trajectories import recorded_trajectory
 
 import reef.evaluation.harness.runner as harness_runner
 from reef.core.evaluation import RolloutScore
@@ -41,7 +42,7 @@ from reef.harness.tree import HarnessTree, TreePatch
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.state import HarnessState
-from reef.train.harness_backend.workspace import StepOutput
+from reef.train.harness_backend.workspace import JobOutput
 from reef.train.types import JobData, NoArtifactPublication, SavedArtifactPublication, TrainingCommit
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
@@ -74,7 +75,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
     backend, _ = harness_backend(tmp_path, step)
     head = HarnessTree(head_of(backend).files)
     result = backend_step(backend, data(1), HarnessState().to_json())
-    # The step names the tree kinds its patch changes; the scenario's activation rule decides from them.
+    # The job names the tree kinds its patch changes; the scenario's activation rule decides from them.
     assert result.metrics["selected"] is True and set(result.metrics["patch_parts"].values()) == {"rules"}
     assert result.metrics["patch"] == MARKER.to_json() and result.metrics["head_checksum"] == head.checksum()
     assert result.metrics["method_summary"] == "added the marker" and result.metrics["method_notes"] == {
@@ -108,7 +109,7 @@ def test_the_cache_reuses_the_head_scores_in_the_next_step(tmp_path: Path) -> No
     assert (first.metrics["runs_run"], first.metrics["runs_cached"]) == (2, 0)
     published(artifacts, "r1", first)
     second = backend_step(backend, data(2), first.state)
-    # The head is the candidate of step 1: its score comes from the history, only the new candidate runs.
+    # The head is the candidate of job 1: its score comes from the history, only the new candidate runs.
     assert (second.metrics["runs_run"], second.metrics["runs_cached"]) == (1, 1)
     assert second.metrics["selected"] is False and state_of(second).failure_streak == 1
 
@@ -168,7 +169,7 @@ def test_a_harness_file_that_cannot_be_read_skips_the_step_and_the_state_still_c
         (lambda state: (state / "notes.bin").write_bytes(b"\xff notes"), "holds a file that is not UTF-8 text at"),
         (
             lambda state: (state / "notes.txt").write_text("more notes"),
-            "holds 29 bytes, and a step commits at most 16",
+            "holds 29 bytes, and a job commits at most 16",
         ),
     ],
     ids=["binary-file", "too-large"],
@@ -233,14 +234,14 @@ def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path:
         "holds": "the instructions that Reef's extension adds to pi's system prompt in every session",
         "review": False,
     }
-    step_dir = Path(result.metrics["step_record"])
-    assert step_dir == (tmp_path / "harness" / "demo" / "harness" / "steps" / "1").resolve()
-    assert not (step_dir / "scratch").exists() and (step_dir / "output" / "report.md").read_text() == "kept"
-    assert json.loads((step_dir / "calls.json").read_text()) == []
+    job_dir = Path(result.metrics["step_record"])
+    assert job_dir == (tmp_path / "harness" / "demo" / "harness" / "steps" / "1").resolve()
+    assert not (job_dir / "scratch").exists() and (job_dir / "output" / "report.md").read_text() == "kept"
+    assert json.loads((job_dir / "calls.json").read_text()) == []
     # The records route serves no credential that a method or a client left in the record.
-    leak = backend.records.read(str(step_dir), "output/leak.json")["text"]
+    leak = backend.records.read(str(job_dir), "output/leak.json")["text"]
     assert "sk-abcdef" not in leak and "[redacted credential]" in leak
-    listed = {entry["path"] for entry in backend.records.read(str(step_dir), None)["files"]}
+    listed = {entry["path"] for entry in backend.records.read(str(job_dir), None)["files"]}
     assert {"calls.json", "material/evaluation.json", "material/request.json"} <= listed
 
 
@@ -279,7 +280,7 @@ REFUSED_CALLS = {
     "no-scorer": (False, PI_SEED.apply(MARKER), ("one",), "RuntimeError: the deployment configured no"),
     "invalid-tree": (True, PI_SEED.apply(TreePatch({"notes.txt": "x"})), ("one",), "ValueError: the tree fails"),
     "one-string": (True, PI_SEED.apply(MARKER), "one", "TypeError: tasks must be a sequence of tasks"),
-    "over-budget": (True, PI_SEED.apply(MARKER), ("one", "two"), "RuntimeError: 2 runs must run, and the step's"),
+    "over-budget": (True, PI_SEED.apply(MARKER), ("one", "two"), "RuntimeError: 2 runs must run, and the job's"),
 }
 
 
@@ -296,9 +297,9 @@ def test_a_refused_evaluate_call_adds_no_candidate(
             refusals.append(f"{type(exc).__name__}: {exc}")
         return
 
-    recipe = harness_recipe(tmp_path, step, max_runs_per_step=1, evaluation={} if scored else {"policy": "none"})
-    recipe = recipe if scored else replace(recipe, scorer=None)
-    backend = build_harness_backend(recipe, "demo")
+    recipe, live = harness_recipe(tmp_path, step, max_runs_per_step=1, evaluation={} if scored else {"policy": "none"})
+    recipe, live = (recipe, live) if scored else rebuilt_recipe(recipe, live, scorer=None)
+    backend = build_harness_backend(recipe, live, "demo")
     result = backend_step(backend, data(1), HarnessState().to_json())
     assert len(refusals) == 1 and refusals[0].startswith(refusal)
     # The history holds the head alone, and no run completed.
@@ -325,14 +326,14 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_run_budget(
     result = backend_step(backend, data(1), HarnessState().to_json())
     # The run whose scorer raised spent the budget, so the retries run nothing.
     assert scored == ["one"] and result.metrics["method_runs"] == 1
-    assert errors == ["the scorer broke"] + ["1 runs must run, and the step's run budget has 0 left"] * 2
+    assert errors == ["the scorer broke"] + ["1 runs must run, and the job's run budget has 0 left"] * 2
 
 
 def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -> None:
     backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
-    prepared = backend.prepare_step(data(1), HarnessState().to_json(), 0, head=head_of(backend))
-    backend.abort_step(prepared)
-    failed = backend.failed_step_metrics()
+    prepared = backend.prepare_job(data(1), HarnessState().to_json(), 0, head=head_of(backend))
+    backend.abort_job(prepared)
+    failed = backend.failed_job_metrics()
     assert failed["failed_stage"] == "evaluating" and failed["patch"] == MARKER.to_json()
 
 
@@ -349,12 +350,12 @@ def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> Non
     holder: dict = {}
 
     def step(workspace, services):
-        progress = holder["backend"].step_progress
+        progress = holder["backend"].job_progress
         seen.append((progress.phase, progress.request_id, progress.runs_total))
         return MARKER
 
     def score(task, result):
-        progress = holder["backend"].step_progress
+        progress = holder["backend"].job_progress
         seen.append((progress.phase, progress.request_id, progress.runs_total))
         return 1.0
 
@@ -362,14 +363,14 @@ def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> Non
     holder["backend"] = backend
     backend_step(backend, data(1, request=REQUEST), HarnessState().to_json())
     assert seen == [("proposing", "ask-1", None), ("evaluating", "ask-1", 2), ("evaluating", "ask-1", 2)]
-    assert backend.step_progress is None
+    assert backend.job_progress is None
 
 
 def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method_reads_them(tmp_path: Path) -> None:
     seen: dict = {"phases": []}
 
     def phase() -> tuple[str, int | None]:
-        progress = backend.step_progress
+        progress = backend.job_progress
         return progress.phase, progress.runs_total
 
     def step(workspace, services):
@@ -467,14 +468,14 @@ def test_the_method_summary_and_notes_are_recorded_bounded(tmp_path: Path) -> No
     assert result.metrics["selected"] is True and result.metrics["patch"] == {"rules.md": "marker rules\n"}
     assert result.metrics["method_summary"] == clipped
     assert result.metrics["method_notes"] == {"hypothesis": clipped, "scores": {"before": 0.5, "after": [1.0]}}
-    # The step record keeps what the method wrote in its output/, bounded as the metrics are.
+    # The job record keeps what the method wrote in its output/, bounded as the metrics are.
     summary_file = Path(result.metrics["step_record"]) / "output" / "summary.md"
     assert summary_file.read_text(encoding="utf-8") == clipped + "\n"
     json.loads(json.dumps(result.metrics, allow_nan=False))
     # Notes that are not a JSON object are refused where the method writes them.
     for bad in ({1: "x"}, {"score": float("nan")}, {"path": Path("notes")}):
         with pytest.raises(ValueError, match="notes must be a JSON object"):
-            StepOutput(notes=bad)
+            JobOutput(notes=bad)
 
 
 def test_a_skip_keeps_the_method_summary_and_notes(tmp_path: Path) -> None:
@@ -504,7 +505,7 @@ def test_the_requires_a_method_adds_join_the_persons_in_the_commit(tmp_path: Pat
     json.loads(json.dumps(result.metrics, allow_nan=False))
     # A malformed item is refused where the method writes it.
     with pytest.raises(ValueError, match="kind must be one of"):
-        StepOutput(requires=({"name": "bad", "kind": "secret"},))
+        JobOutput(requires=({"name": "bad", "kind": "secret"},))
 
 
 @pytest.mark.parametrize(
@@ -540,7 +541,7 @@ def test_a_candidate_only_evaluation_runs_no_current_run_and_still_settles(tmp_p
 
     monkeypatch.setattr(harness_runner, "run_task", spy)
     backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
-    prepared = backend.prepare_step(data(1), HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(data(1), HarnessState().to_json(), 0, head=head_of(backend))
     candidate = prepared.candidate
     assert candidate is not None
     for bad in ((), ("served",), ("candidate", "served")):
@@ -564,7 +565,7 @@ def test_a_candidate_only_evaluation_runs_no_current_run_and_still_settles(tmp_p
         "candidate_score",
         "candidate_agents",
         "candidate_paths",
-        # What each candidate run was graded on, so a rejected step names the task and the reply.
+        # What each candidate run was graded on, so a rejected job names the task and the reply.
         "candidate_runs",
         "evaluation_sides",
     }
@@ -577,7 +578,7 @@ def test_a_candidate_only_evaluation_runs_no_current_run_and_still_settles(tmp_p
     assert (paired["runs_run"], paired["runs_cached"]) == (1, 1)
 
     policy = FloorPolicy(backend)
-    result = backend.settle_step(prepared, policy.decide(candidate, evaluation))
+    result = backend.settle_job(prepared, policy.decide(candidate, evaluation))
     assert result.metrics["selected"] is True and result.metrics["selection"]["policy"] == "floor"
     assert (result.metrics["passed"], result.metrics["failed"], result.metrics["failed_rollouts"]) == (1, 0, 0)
     assert result.metrics["floor_score"] == 1.0
@@ -594,12 +595,12 @@ def test_a_candidate_only_evaluation_runs_no_current_run_and_still_settles(tmp_p
 def test_a_candidate_that_misses_the_floor_is_rejected_and_joins_the_history(tmp_path: Path) -> None:
     """A rejection counts toward the failure streak, publishes nothing, and still joins the history."""
     backend, _ = harness_backend(tmp_path, lambda workspace, services: PLAIN)
-    prepared = backend.prepare_step(data(2), HarnessState().to_json(), 1, head=head_of(backend))
+    prepared = backend.prepare_job(data(2), HarnessState().to_json(), 1, head=head_of(backend))
     candidate = prepared.candidate
     assert candidate is not None
     policy = FloorPolicy(backend)
     decision = policy.decide(candidate, policy.evaluate(candidate))
-    result = backend.settle_step(prepared, decision)
+    result = backend.settle_job(prepared, decision)
     assert result.metrics["selected"] is False and result.metrics["failed"] == 1
     assert decision.reason == "candidate missed the floor on 1 of 1 tasks"
     assert result.state["failure_streak"] == 1
@@ -609,7 +610,7 @@ def test_a_candidate_that_misses_the_floor_is_rejected_and_joins_the_history(tmp
     assert isinstance(result.publication, NoArtifactPublication)
 
 
-# -- step progress, for the request page -----------------------------------------------------------------------------
+# -- job progress, for the request page -----------------------------------------------------------------------------
 
 
 def test_step_progress_carries_the_methods_model_calls_as_they_happen(tmp_path: Path, monkeypatch) -> None:
@@ -618,42 +619,42 @@ def test_step_progress_carries_the_methods_model_calls_as_they_happen(tmp_path: 
     held: dict[str, object] = {}
 
     def answer(self, messages, **params):
-        seen.append(held["backend"].step_progress.activity)  # mid-call: the wait is already on the page
+        seen.append(held["backend"].job_progress.activity)  # mid-call: the wait is already on the page
         return "ok"
 
     monkeypatch.setattr(ModelBinding, "chat", answer)
 
     def method(workspace, services):
         services.models.served.chat([{"role": "user", "content": "design"}])
-        seen.append(held["backend"].step_progress.activity)
+        seen.append(held["backend"].job_progress.activity)
         return MARKER
 
     backend, _ = harness_backend(tmp_path, method)
     held["backend"] = backend
-    prepared = backend.prepare_step(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(backend))
+    prepared = backend.prepare_job(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(backend))
     waiting, answered = seen
     assert [line["text"] for line in waiting] == [f"asking {MODEL.model}"]
     assert [line["kind"] for line in answered] == ["model", "model"]
     assert answered[1]["text"].startswith(f"{MODEL.model} answered in") and "failed" not in answered[1]
     # The evaluation phase keeps the method's lines.
-    assert backend.step_progress.activity == answered
-    backend.abort_step(prepared)
-    assert backend.step_progress is None
+    assert backend.job_progress.activity == answered
+    backend.abort_job(prepared)
+    assert backend.job_progress is None
 
 
 def test_step_progress_is_cleared_by_a_skip_or_a_failed_method(tmp_path: Path) -> None:
     skipping, _ = harness_backend(tmp_path, lambda workspace, services: None, scenario="skipping")
-    prepared = skipping.prepare_step(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(skipping))
-    assert prepared.outcome == "skip" and skipping.step_progress is None
+    prepared = skipping.prepare_job(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(skipping))
+    assert prepared.outcome == "skip" and skipping.job_progress is None
 
     def raising(workspace, services):
         raise RuntimeError("poison method")
 
     failing, _ = harness_backend(tmp_path, raising, scenario="failing")
     with pytest.raises(RuntimeError, match="poison method"):
-        failing.prepare_step(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(failing))
-    assert failing.step_progress is None
-    # The failed request's row names the phase the step reached and its record, which keeps the calls made.
-    failed = failing.failed_step_metrics()
+        failing.prepare_job(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(failing))
+    assert failing.job_progress is None
+    # The failed request's row names the phase the job reached and its record, which keeps the calls made.
+    failed = failing.failed_job_metrics()
     assert failed["failed_stage"] == "proposing"
     assert json.loads((Path(failed["step_record"]) / "calls.json").read_text(encoding="utf-8")) == []

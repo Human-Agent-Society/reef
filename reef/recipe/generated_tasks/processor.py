@@ -43,7 +43,7 @@ from reef.core.config import config_option
 from reef.core.job_data import JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
-from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
+from reef.core.tasks.split import TaskSplit, TaskSplitConflictError, extend_split_by_source
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks.generator import (
@@ -66,7 +66,7 @@ from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.record2sample.reports import report_score
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.samples import StoredSample, TrainerSamples
-from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
+from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflictError, TaskStore, TaskStoreError
 from reef.train.types import JobData, Sample
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ def assigned_split(store: TaskStore, task: HarborTask, *, seed: int, eval_fracti
     """Return the split of a task: the split of its published name, or else the split of its source records.
 
     Tasks that share a source record get the same split, and a published task keeps its split. Raises
-    ``TaskSplitConflict`` if the sources of the task join tasks of both splits.
+    ``TaskSplitConflictError`` if the sources of the task join tasks of both splits.
     """
     published = {stored.name: stored for stored in store.tasks()}
     existing = published.get(task.name)
@@ -229,6 +229,7 @@ def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskSamp
                 "split": stored.split,
             }
         },
+        files=store.task_files(stored.files_digest),
     )
 
 
@@ -481,13 +482,13 @@ class StoredGeneratorState(GeneratorState):
         self.store.write_state_document(key=key, document=document)
 
     def remove(self, key: str) -> None:
-        self.store.remove_state_document(key=key)
+        self.store.delete_state_document(key=key)
 
     def keys(self, prefix: str = "") -> tuple[str, ...]:
         return self.store.state_document_keys(prefix=prefix)
 
     def save_files(self, directory: Path) -> str:
-        return self.store.save_files(directory)
+        return self.store.write_files(directory)
 
     def files(self, digest: str) -> Path:
         return self.store.path(digest)
@@ -627,7 +628,7 @@ class GenerationRunner(BackgroundJobRunner):
                 directories = tuple(
                     write_harbor_task(task, Path(staging) / str(index)) for index, task in enumerate(generated)
                 )
-                generation = self.task_store.save_candidates(generation=job.generation, directories=directories)
+                generation = self.task_store.write_candidates(generation=job.generation, directories=directories)
         candidates = generation.candidates or ()
         for index in generation.pending_indices:
             candidate = candidates[index]
@@ -645,7 +646,7 @@ class GenerationRunner(BackgroundJobRunner):
                         self.task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction
                     )
                     self.task_store.publish_task(generation=job.generation, index=index, split=split)
-                except (TaskConflict, TaskSplitConflict) as conflict:
+                except (TaskConflictError, TaskSplitConflictError) as conflict:
                     self.task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
             else:
                 self.task_store.reject_task(

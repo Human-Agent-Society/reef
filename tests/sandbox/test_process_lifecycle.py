@@ -5,14 +5,14 @@ from __future__ import annotations
 import os
 import sys
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.support.polling import wait_until
 
-from reef.execution.processes import ProcessRequest, ProcessScope, ProcessScopeClosed
+from reef.execution.processes import ProcessRequest, ProcessScope, ProcessScopeClosedError
 
 pytestmark = pytest.mark.unit
 
@@ -20,13 +20,6 @@ pytestmark = pytest.mark.unit
 def request(tmp_path: Path, source: str, **changes: object) -> ProcessRequest:
     base = ProcessRequest(argv=(sys.executable, "-c", source), cwd=tmp_path, env=dict(os.environ), timeout_seconds=5.0)
     return replace(base, **changes)
-
-
-def wait_for_file(path: Path) -> None:
-    deadline = time.monotonic() + 5
-    while not path.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert path.exists()
 
 
 def test_execution_keeps_output_exit_status_and_explicit_environment(tmp_path: Path) -> None:
@@ -67,11 +60,11 @@ def test_stop_waits_for_cleanup_and_rejects_new_launches(tmp_path: Path) -> None
     )
     with ThreadPoolExecutor() as pool:
         pending = pool.submit(scope.run, request(tmp_path, source, grace_seconds=1.0))
-        wait_for_file(tmp_path / "ready")
+        wait_until((tmp_path / "ready").exists, timeout_seconds=5)
         (pid,) = scope.pids()
         scope.request_stop()
         assert not scope.wait_closed(0)
-        with pytest.raises(ProcessScopeClosed):
+        with pytest.raises(ProcessScopeClosedError):
             scope.run(request(tmp_path, "raise SystemExit(0)"))
         scope.request_stop(grace_seconds=0)  # repeated closure must not shorten the accepted grace
         assert scope.wait_closed(5)
@@ -87,7 +80,7 @@ def test_ignoring_term_forces_group_kill_after_grace(tmp_path: Path) -> None:
     source = "import pathlib, signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path('ready').touch(); time.sleep(60)"
     with ThreadPoolExecutor() as pool:
         pending = pool.submit(scope.run, request(tmp_path, source, grace_seconds=0.15))
-        wait_for_file(tmp_path / "ready")
+        wait_until((tmp_path / "ready").exists, timeout_seconds=5)
         (pid,) = scope.pids()
         scope.request_stop()
         assert not scope.wait_closed(0.02)
@@ -105,11 +98,11 @@ def test_child_scope_is_stopped_with_its_owner(tmp_path: Path) -> None:
         pending = pool.submit(
             child.run, request(tmp_path, "import pathlib,time; pathlib.Path('ready').touch(); time.sleep(60)")
         )
-        wait_for_file(tmp_path / "ready")
+        wait_until((tmp_path / "ready").exists, timeout_seconds=5)
         parent.request_stop()
         assert parent.wait_closed(5)
         assert pending.result(timeout=5).reason == "stopped"
-    with pytest.raises(ProcessScopeClosed):
+    with pytest.raises(ProcessScopeClosedError):
         child.run(request(tmp_path, "pass"))
     with pytest.raises(ValueError, match="cycle"):
         child.attach(parent)
@@ -123,7 +116,7 @@ def test_concurrent_spawn_and_close_cannot_lose_a_child(tmp_path: Path) -> None:
         start.wait()
         try:
             return scope.run(request(tmp_path, "import time; time.sleep(60)")).reason
-        except ProcessScopeClosed:
+        except ProcessScopeClosedError:
             return "refused"
 
     with ThreadPoolExecutor() as pool:

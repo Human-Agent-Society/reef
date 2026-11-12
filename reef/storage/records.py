@@ -15,7 +15,7 @@ from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 
 
-class RecordConflict(ReefError):
+class RecordConflictError(ReefError):
     """A record id already identifies different content."""
 
 
@@ -55,7 +55,7 @@ class RecordStore(ABC):
 
     Reads are scoped to the supplied scenario. Record ids are
     unique across the store: retries with identical content are idempotent,
-    while different content raises ``RecordConflict``. Retry comparison ignores
+    while different content raises ``RecordConflictError``. Retry comparison ignores
     ``created_at``.
 
     Append sequences increase and must never be reused, including after
@@ -86,7 +86,7 @@ class RecordStore(ABC):
         """Validate retry content without appending or changing its receipt."""
 
     @abstractmethod
-    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+    def read(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
         """Read one training-visible record in the supplied scenario."""
 
     @abstractmethod
@@ -118,7 +118,7 @@ class RecordStore(ABC):
         """The append sequence of the newest training-visible record of ``scenario``; 0 when it has none."""
 
     @abstractmethod
-    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+    def read_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         """Read a retained record with its append sequence."""
 
     @abstractmethod
@@ -135,7 +135,7 @@ class RecordStore(ABC):
     def trajectory(self, scenario: str, agent_record_id: str) -> tuple[str, ...]:
         """The record IDs of the trajectory that the record ends, oldest first (RFC #1054); ``()`` when the record is
         not stored. A store that keeps no trajectories treats each record as a trajectory of one call."""
-        return () if self.get_for_audit(scenario, agent_record_id) is None else (agent_record_id,)
+        return () if self.read_for_audit(scenario, agent_record_id) is None else (agent_record_id,)
 
     def loss(self, scenario: str) -> RecordLoss:
         """The records that retention deleted, including after a restart; a store without retention returns zero."""
@@ -149,7 +149,7 @@ class RecordStore(ABC):
 __all__ = [
     "AgentRecord",
     "AppendResult",
-    "RecordConflict",
+    "RecordConflictError",
     "RecordLoss",
     "RecordRetention",
     "RecordStore",

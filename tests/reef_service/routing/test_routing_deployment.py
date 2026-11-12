@@ -17,7 +17,7 @@ from tests.reef_service.routing.routing_fakes import DOMAIN_LABELS, FakeRuntime,
 from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
 from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate, render_external
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
-from reef.service.deploy.service_config import ServiceConfig, normalize_service_config, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
 from reef.service.routing import RoutingSnapshot
 
 pytestmark = pytest.mark.unit
@@ -704,7 +704,7 @@ def test_validate_checks_a_source_without_an_image_as_fully_as_a_render(tmp_path
     manifest = policy_manifest(tmp_path / "manifest.json", classifier)
     without_image(manifest)
     (tmp_path / "vela-domain" / "model.safetensors").write_text("other weights")
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="base",
         host="127.0.0.1",
         tokens=("unit-token",),

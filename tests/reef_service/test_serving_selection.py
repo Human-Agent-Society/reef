@@ -7,7 +7,7 @@ import pytest
 from reef.core.errors import DeployConfigError
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.deploy.serving import ENGINES, NONE, TRAINER, serving_mode, serving_runtime_config
 from reef.train.slime_backend.launch import SlimeDeployment
 from reef.train.tinker_backend.launch import TinkerDeployment
@@ -16,14 +16,14 @@ RECIPE = "recipes.sao.recipe:SAORecipe"
 ADAPTER = ArtifactFormat("adapter", 16, ("all",))
 
 
-def tinker(**changes) -> ServiceConfig:
-    return ServiceConfig(
+def tinker(**changes) -> ServiceSettings:
+    return ServiceSettings(
         recipe=RECIPE, training_backend="tinker", training_backend_options={"state-dir": "state"}, **changes
     )
 
 
-def slime(**changes) -> ServiceConfig:
-    return ServiceConfig(recipe=RECIPE, training_backend="slime", **changes)
+def slime(**changes) -> ServiceSettings:
+    return ServiceSettings(recipe=RECIPE, training_backend="slime", **changes)
 
 
 def test_without_settings_each_backend_serves_in_its_default_mode():
@@ -40,7 +40,7 @@ def test_without_settings_each_backend_serves_in_its_default_mode():
         {"tensor_parallel_size": 2},
         {"inference_options": {"context-length": 4096}},
         {"inference_remote": {"url": "https://gpu-host.example"}},
-        {"inference_handler_factory": "reef.inference.sglang.chat.SGLangInferenceHandler"},
+        {"inference_handler_factory": "reef.inference.sglang.chat:SGLangInferenceHandler"},
         {"inference_handler_config": {"tool_call_parser": "qwen25"}},
         {"inference_prefix_sharing": True},
         {"inference_max_loaded_adapters": 4},
@@ -80,7 +80,7 @@ def test_engine_serving_runs_the_settings_engines_for_the_components_release_for
         inference_remote={"url": "https://gpu-host.example"},
         inference_max_loaded_adapters=3,
         inference_prefix_sharing=True,
-        inference_handler_factory="reef.inference.sglang.chat.SGLangInferenceHandler",
+        inference_handler_factory="reef.inference.sglang.chat:SGLangInferenceHandler",
         inference_handler_config={"tool_call_parser": "qwen25"},
         inference_timeout_s=60.0,
         execution_config={"execution": {"rollout": {"backend": "ray", "options": {"queue": "gpu"}}}},

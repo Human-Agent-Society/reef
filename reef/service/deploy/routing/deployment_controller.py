@@ -28,6 +28,7 @@ from pathlib import Path
 
 import yaml
 
+from reef.core.errors import InternalError
 from reef.service.deploy.routing.containers import (
     ContainerCommandError,
     ContainerEventStream,
@@ -49,7 +50,7 @@ from reef.service.deploy.routing.reef_lifecycle_client import (
     LifecycleStatus,
     ReefLifecycleClient,
     RoutingControlError,
-    RoutingControlTimeout,
+    RoutingControlTimeoutError,
 )
 from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry
 from reef.service.deploy.routing.renderer import (
@@ -61,7 +62,7 @@ from reef.service.deploy.routing.renderer import (
     router_configuration,
     write_private_document,
 )
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.routing import MAX_READINESS_TIMEOUT_SECONDS, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import RESPONSE_WRITE_ALLOWANCE_SECONDS
 
@@ -79,11 +80,11 @@ ACTIVATION_FAILED = "failed"
 IMAGE_BUILD_LOG = "semantic-router-build.log"
 
 
-class RoutingDeploymentError(RuntimeError):
+class RoutingDeploymentError(InternalError):
     """A managed routing operation cannot complete safely. An unhandled error stops the stack."""
 
 
-class RoutingReadinessTimeout(RoutingDeploymentError):
+class RoutingReadinessTimeoutError(RoutingDeploymentError):
     """The router or the REEF child did not become ready before the readiness deadline.
 
     Unlike other deployment errors, bounded recovery may follow it with another restart, as it does a failed
@@ -121,7 +122,7 @@ class RoutingDeploymentController:
     """
 
     def __init__(
-        self, settings: ServiceConfig, runtime: ContainerRuntime, *, registry_root: Path | None = None
+        self, settings: ServiceSettings, runtime: ContainerRuntime, *, registry_root: Path | None = None
     ) -> None:
         policy = settings.routing_deployment
         self.policy = policy
@@ -476,7 +477,7 @@ class RoutingDeploymentController:
             return
         if self.stop_requested:
             raise InterruptedError("routing startup stopped")
-        raise RoutingReadinessTimeout("routing deployment did not become ready before its deadline")
+        raise RoutingReadinessTimeoutError("routing deployment did not become ready before its deadline")
 
     def complete_start(self) -> None:
         self.join_start()
@@ -585,7 +586,7 @@ class RoutingDeploymentController:
             self.next_probe = now + 1
             try:
                 self.check_status(control.request())
-            except RoutingControlTimeout:
+            except RoutingControlTimeoutError:
                 # A child event loop busy with a large request can miss this read. The orchestrator's watchdog
                 # stops the stack when the child exits, so only a reply is checked here; the router checks go on.
                 self.event("status_timeout")
@@ -611,7 +612,7 @@ class RoutingDeploymentController:
         """
         try:
             return control.request(deadline=deadline)
-        except RoutingControlTimeout:
+        except RoutingControlTimeoutError:
             if time.monotonic() < deadline:
                 raise
             return None
@@ -1025,7 +1026,7 @@ class RoutingDeploymentController:
                         "routing mutation outcome unknown; manual reconciliation required"
                     ) from exc
                 self.event("recovery_failed")
-            except RoutingReadinessTimeout:
+            except RoutingReadinessTimeoutError:
                 self.event("recovery_failed")
         self.event("stopping")
 

@@ -22,7 +22,7 @@ class TinkerArtifact:
 
     Values: ``base_model`` is non-empty. ``sampler_path`` is a ``tinker://`` path to the weights that the service's
     sampler serves; for a LoRA, it is the adapter that a serving runtime downloads to load into its own engines.
-    ``service`` is the base URL of the Tinker-compatible service that holds the path (``TinkerConfig.base_url``), or
+    ``service`` is the base URL of the Tinker-compatible service that holds the path (``TinkerSettings.base_url``), or
     ``None`` for Thinking Machines' hosted Tinker.
 
     Purpose: ``from_dict`` makes the value from a snapshot's manifest, and ``read`` from the manifest in a directory. The Tinker inference runtime and

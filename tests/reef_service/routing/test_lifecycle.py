@@ -49,7 +49,7 @@ from reef.service.deploy.routing.reef_lifecycle_client import (
     RoutingControlError,
 )
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import (
     INFERENCE_FINALIZATION,
     REQUEST_ACCEPTANCE,
@@ -67,7 +67,7 @@ from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingSnapshot
 from reef.storage.record_items import ItemRecordStore
-from reef.storage.records import AppendResult, RecordConflict
+from reef.storage.records import AppendResult, RecordConflictError
 
 pytestmark = pytest.mark.unit
 
@@ -307,7 +307,7 @@ def test_unexpected_stream_error_does_not_send_a_successful_terminal_response() 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("failure", [ValueError, RecordConflict, RuntimeError])
+@pytest.mark.parametrize("failure", [ValueError, RecordConflictError, RuntimeError])
 def test_a_record_failure_after_stream_headers_never_writes_a_second_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: type[Exception]
 ) -> None:
@@ -1307,7 +1307,7 @@ def test_an_open_with_two_slow_healthy_providers_opens_on_its_first_attempt(tmp_
     """The reviewed case: sequential provider checks outlast the old budget of only Scenario previews (11 s here)."""
     policy = RoutingDeploymentSettings(deployment_id="unit-routing", selection_timeout_seconds=1)
     controller = RoutingDeploymentController(
-        ServiceConfig(recipe="base", routing_deployment=policy, inference_timeout_s=6),
+        ServiceSettings(recipe="base", routing_deployment=policy, inference_timeout_s=6),
         FakeRuntime([]),
         registry_root=tmp_path / "registry",
     )

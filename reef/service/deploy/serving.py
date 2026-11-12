@@ -3,26 +3,27 @@
 The serving runtime is chosen and configured here, not by the training
 backend. ``serving_mode`` reads ``inference.serving`` (or its default), and
 ``serving_runtime_config`` writes the runtime config that the HTTP service
-builds once the training component exists, because the engines need the
-component's ``ArtifactFormat``. The training backend contributes only its
+builds from the training backend's ``ArtifactFormat``, which the engines need:
+the training component's, or the backend's facts' in a process that builds no
+component. The training backend contributes only its
 default mode and, for ``trainer`` serving, the config of its own serving
 runtime.
 """
 
 from __future__ import annotations
 
-import importlib
 from collections.abc import Mapping
 from dataclasses import asdict
-from importlib.metadata import entry_points
 from typing import Any
 
 from reef.core.errors import DeployConfigError
+from reef.core.plugins import PluginConfigError, plugin_class_reference
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.execution.executor.config import role_executor_settings
+from reef.inference.deployment import BUILTIN_ENGINES, INFERENCE_BACKEND_GROUP
 from reef.inference.interfaces import InferenceHandler
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeployment
 
 #: Reef's engines on an inference component serve the snapshots.
@@ -55,25 +56,17 @@ ENGINE_SETTINGS = (
 )
 
 
-def inference_handler_factory_for(path: str | None) -> type[InferenceHandler] | None:
-    """Load an optional request handler factory selected by deployment config."""
-    if path is None:
+def inference_handler_factory_for(reference: str | None) -> type[InferenceHandler] | None:
+    """The ``InferenceHandler`` class that ``inference.handler-factory`` names as ``package.module:ClassName``.
+
+    None without the setting. Raise ``PluginConfigError`` for a reference that names no such class.
+    """
+    if reference is None:
         return None
-    if not isinstance(path, str) or not path.strip():
-        raise ValueError("inference.handler-factory must be a non-empty dotted path")
-    module_path, separator, attribute = path.strip().rpartition(".")
-    if not separator or not module_path or not attribute:
-        raise ValueError("inference.handler-factory must be a dotted path")
-    try:
-        factory = getattr(importlib.import_module(module_path), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise ValueError(f"cannot load inference.handler-factory {path!r}") from exc
-    if not isinstance(factory, type) or not issubclass(factory, InferenceHandler):
-        raise ValueError(f"inference.handler-factory {path!r} must inherit InferenceHandler")
-    return factory
+    return InferenceHandler.resolve_class(reference, setting="inference.handler-factory")
 
 
-def configured_engine_settings(settings: ServiceConfig) -> list[str]:
+def configured_engine_settings(settings: ServiceSettings) -> list[str]:
     """The public names of the engine settings that ``settings`` sets."""
     values = asdict(settings)
     configured = [name for key, name in ENGINE_SETTINGS if values[key] not in (None, {}, False)]
@@ -82,7 +75,7 @@ def configured_engine_settings(settings: ServiceConfig) -> list[str]:
     return configured
 
 
-def serving_mode(settings: ServiceConfig, backend: TrainingDeployment) -> str:
+def serving_mode(settings: ServiceSettings, backend: TrainingDeployment) -> str:
     """The serving of a weight-training deployment: ``engines``, ``trainer``, ``none`` or a ``module:Factory``.
 
     ``inference.serving`` names it. Without it, ``inference.backend: none``
@@ -113,7 +106,7 @@ def serving_mode(settings: ServiceConfig, backend: TrainingDeployment) -> str:
     return selected
 
 
-def prepare_engine_serving(config: dict[str, Any], settings: ServiceConfig) -> None:
+def prepare_engine_serving(config: dict[str, Any], settings: ServiceSettings) -> None:
     """Check the engine settings and record their resolved values in ``config["reef"]``.
 
     The engines are tensor-parallel engines of ``inference.tensor-parallel-size``
@@ -133,15 +126,16 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceConfig) -> N
     if any(name.startswith("sglang-") for name in options):
         raise DeployConfigError("inference.options uses native SGLang names without the sglang- prefix")
     engine = settings.inference_backend or "sglang"
-    if (
-        engine not in ("sglang", "vllm")
-        and ":" not in engine
-        and not entry_points(group="reef.inference_backends", name=engine)
-    ):
-        raise DeployConfigError(
-            f"unknown inference backend {engine!r}: name sglang, vllm, an installed reef.inference_backends "
-            "entry point, or module:factory"
+    try:
+        # The inference component imports the class; this host only checks that the name selects one.
+        plugin_class_reference(
+            engine,
+            builtins={name: classes.service for name, classes in BUILTIN_ENGINES.items()},
+            entry_point_group=INFERENCE_BACKEND_GROUP,
+            setting="inference backend",
         )
+    except PluginConfigError as exc:
+        raise DeployConfigError(str(exc)) from exc
     if engine == "vllm" and num_gpus != parallel_size:
         # vLLM ships no router, so one engine serves.
         raise DeployConfigError(
@@ -156,9 +150,9 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceConfig) -> N
 
 
 def serving_runtime_config(
-    settings: ServiceConfig, backend: TrainingDeployment, artifact_format: ArtifactFormat | None
+    settings: ServiceSettings, backend: TrainingDeployment, artifact_format: ArtifactFormat | None
 ) -> dict[str, Any]:
-    """The runtime config of the deployment's serving, for releases of ``artifact_format``.
+    """The runtime config of the deployment's serving, for snapshots of ``artifact_format``.
 
     ``engines`` gives a ``remote_serving`` config over the resolved engine
     settings, the inference component of ``inference.remote`` and the
@@ -166,7 +160,7 @@ def serving_runtime_config(
     and ``none`` the null runtime. A ``module:Factory`` gets
     ``inference.serving-config`` and the artifact format as ``artifact_format``
     (``None`` when the snapshots hold no weight files). Raise
-    ``DeployConfigError`` when Reef's engines would serve releases without
+    ``DeployConfigError`` when Reef's engines would serve snapshots without
     weight files.
     """
     mode = serving_mode(settings, backend)
@@ -190,7 +184,7 @@ def serving_runtime_config(
         engine_weights = backend.engine_weights(asdict(settings))
         if engine_weights is None:
             raise DeployConfigError(
-                "the training backend's releases hold no weight files that engines load, and it names no way to "
+                "the training backend's snapshots hold no weight files that engines load, and it names no way to "
                 "fetch them; set inference.serving: trainer"
             )
         artifact_format, weights = engine_weights.artifact_format, engine_weights.weights

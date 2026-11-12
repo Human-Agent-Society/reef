@@ -34,8 +34,9 @@ from aiohttp import web
 from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
-from reef.recipe.base import ServedEndpoint, close_runtimes
 from reef.recipe.composite import CompositeRecipe
+from reef.recipe.deployment import harness_adapter, refuses_images
+from reef.scenario.live_objects import ServedEndpoint, close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
@@ -44,12 +45,14 @@ from reef.service.assembly import (
     build_dispatcher,
     build_task_files,
     default_served_url,
+    load_deployment,
+    load_serving_deployment,
     open_scenario_storage,
     open_service_coordination,
-    serving_recipe,
+    with_harness_components,
 )
 from reef.service.auth import evaluation_token_for
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import ServedModelsCache, build_inference_app
 from reef.service.routed_replica import ReplicaRecords, add_replica_routing
@@ -69,22 +72,25 @@ class ComponentApp(ABC):
     """
 
     @abstractmethod
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application: ...
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application: ...
 
 
 class ControlApp(ComponentApp):
     """Control: the Reef HTTP API except the data routes."""
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         return build_app(settings, environ=environ, components=frozenset({"control"}))
 
 
 class InferenceApp(ComponentApp):
-    """The inference service owns runtime startup and serves requests from published routes."""
+    """The inference service owns runtime startup and serves requests from published routes.
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
-        recipe = serving_recipe(settings, environ)
-        runtime = recipe.runtime
+    It runs no training job, so it builds no training component for a backend that states its facts
+    (``load_serving_deployment``)."""
+
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
+        recipe, live = load_serving_deployment(settings, environ)
+        runtime = live.runtime
         coordination = open_service_coordination(settings)
         try:
             backends = build_artifact_backend(settings) if runtime is not None and runtime.serves_requests else None
@@ -96,7 +102,7 @@ class InferenceApp(ComponentApp):
                 storage = ObservedScenarioStorage(storage, record_observer)
         except BaseException:
             coordination.close()
-            close_runtimes(recipe.job_components(), runtime)
+            close_runtimes(live.job_components(), runtime)
             raise
         timeout_seconds = settings.inference_timeout_s if runtime is None else runtime.inference_timeout_s
         app = build_inference_app(
@@ -108,8 +114,8 @@ class InferenceApp(ComponentApp):
             tokens=settings.tokens,
             evaluation_tokens=evaluation_token_for(settings.tokens),
             timeout_seconds=timeout_seconds,
-            for_codex=recipe.harness_adapter == "codex",
-            refuses_images=recipe.refuses_images,
+            for_codex=harness_adapter(recipe) == "codex",
+            refuses_images=refuses_images(recipe),
         )
         if settings.routing_manifest is not None:
             try:
@@ -117,6 +123,7 @@ class InferenceApp(ComponentApp):
                     app,
                     settings,
                     recipe,
+                    live,
                     ReplicaRecords(ServedModelsCache(coordination.served_models), storage),
                     environ,
                 )
@@ -124,13 +131,14 @@ class InferenceApp(ComponentApp):
                 data_store.close()
                 storage.close()
                 coordination.close()
-                close_runtimes(recipe.job_components(), runtime)
+                close_runtimes(live.job_components(), runtime)
                 raise
 
         worker = None
         if backends is not None:
             worker = ServingWorker(
                 recipe,
+                live,
                 backends,
                 coordination,
                 worker_id=instance_id("inference-startup"),
@@ -145,7 +153,7 @@ class InferenceApp(ComponentApp):
             data_store.close()
             storage.close()
             coordination.close()
-            close_runtimes(recipe.job_components(), runtime)
+            close_runtimes(live.job_components(), runtime)
 
         app.on_cleanup.append(close_inference)
         return app
@@ -155,7 +163,7 @@ class DataApp(ComponentApp):
     """The data service: a dispatcher that loads each scenario on demand, for the checks of a write and for the
     reads, and runs the data workers."""
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         return create_data_app(
             build_dispatcher(settings, environ=environ, components=frozenset({"data"})),
             tokens=settings.tokens,
@@ -167,9 +175,9 @@ class HarnessApp(ComponentApp):
     """The harness service: a dispatcher that loads each scenario on demand, without activating it, and serves the
     routes that a harness client calls."""
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({"harness"}))
-        if not dispatcher.recipe.harness_adapter:
+        if harness_adapter(dispatcher.recipe) is None:
             dispatcher.close()
             raise ValueError(f"recipe {settings.recipe!r} evolves no harness, so it has no harness service")
         return create_harness_app(
@@ -183,20 +191,29 @@ class HarnessApp(ComponentApp):
 class TrainingApp(ComponentApp):
     """Build the training service from its job components and coordination store.
 
-    Values: this stateless builder returns an app with one worker per recipe job component, and refuses a recipe
-    with no job component. The app owns these workers, their components, the runtime and the coordination store.
+    Values: this stateless builder returns an app with one worker per job component of the process, and refuses a
+    deployment with no job component. The app owns these workers, their components, the runtime and the coordination store.
     Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario or artifact stores. It opens
     the data store, which keeps the data directory of each job.
     """
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
-        recipe = serving_recipe(settings, environ)
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
+        recipe, live = load_deployment(settings, environ)
         if isinstance(recipe, CompositeRecipe):
-            recipe = recipe.with_served_endpoint(
-                ServedEndpoint(url=settings.served_url or default_served_url(settings.host, settings.port), token=None)
+            live = replace(
+                live,
+                served_endpoint=ServedEndpoint(
+                    url=settings.served_url or default_served_url(settings.host, settings.port), token=None
+                ),
             )
-        components = recipe.job_components()
-        runtime = recipe.runtime
+        runtime = live.runtime
+        try:
+            # The harness training component reads the served endpoint, so it is built after ``live`` has it.
+            live = with_harness_components(recipe, live, environ)
+        except BaseException:
+            close_runtimes(live.job_components(), runtime)
+            raise
+        components = live.job_components()
         coordination: Coordination | None = None
         task_files: TaskFileStore | None = None
         data_store: DataStore | None = None
@@ -268,7 +285,7 @@ class QueueServiceApp(ComponentApp):
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
         app = service_application(settings.tokens)
 
@@ -293,7 +310,7 @@ COMPONENT_APPS: dict[str, ComponentApp] = {
 
 def build_component_app(
     component: str,
-    settings: ServiceConfig,
+    settings: ServiceSettings,
     *,
     environ: Mapping[str, str] | None = None,
 ) -> web.Application:

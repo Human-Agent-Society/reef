@@ -9,14 +9,13 @@ import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Self
 from urllib.parse import quote, urlencode
 
 from reef.core.weight_layout import WeightFiles
-from reef.execution.executor.placement import DeploymentResources
-from reef.inference.deployment import InferenceConnection, InferenceService
+from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
 from reef.inference.interfaces import InferenceBackend
-from reef.inference.remote.config import CONTROL_PATH, CONTROL_PROTOCOL, RemoteInferenceSettings
+from reef.inference.remote.config import CONTROL_PATH, RemoteInferenceSettings
 
 #: Bound on one control call other than an engine start; a full-weight upload legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400
@@ -143,7 +142,9 @@ class RemoteInferenceBackend(InferenceBackend):
         if runtime_load_id is not None:
             query["runtime_load_id"] = runtime_load_id
         with tempfile.TemporaryFile() as archive:
-            with tarfile.open(fileobj=archive, mode="w") as tar:
+            # A Hugging Face snapshot directory, such as the base model's, links each file into its cache: the
+            # archive holds the files themselves, since the component refuses a link that leaves its directory.
+            with tarfile.open(fileobj=archive, mode="w", dereference=True) as tar:
                 for entry in sorted(files.path.iterdir()):
                     tar.add(entry, arcname=entry.name)
             size = archive.tell()
@@ -163,8 +164,6 @@ class RemoteInferenceService(InferenceService):
     (``engines_lost``), and ``restart_engines`` starts them again.
     ``close`` stops the engines.
     """
-
-    connection_protocol = CONTROL_PROTOCOL
 
     def __init__(
         self,
@@ -188,6 +187,24 @@ class RemoteInferenceService(InferenceService):
         self.closed = False
         self.instance: str | None = None
 
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> Self:
+        """Build the service from a training deployment's inference input.
+
+        ``config`` has ``remote`` (the ``inference.remote`` section), ``engine``
+        (the ``inference.backend`` name), ``engine_config`` (that backend's own
+        input) and ``num_gpus``. The control token is read from this process's
+        environment.
+        """
+        settings = RemoteInferenceSettings.from_mapping(config["remote"])
+        return cls(
+            settings,
+            engine=config["engine"],
+            engine_config=config["engine_config"],
+            num_gpus=config["num_gpus"],
+            control_token=settings.token(settings.control_token_env, os.environ),
+        )
+
     def attach(self) -> InferenceConnection | None:
         """Take over the engines that the component runs, without a restart, so requests in flight go on; None
         when it runs none. A control restart attaches to the engines that the previous control started."""
@@ -199,15 +216,15 @@ class RemoteInferenceService(InferenceService):
             return None
         self.started = True
         self.instance = instance
-        return InferenceConnection(self.connection_protocol, None)
+        return InferenceConnection(None)
 
-    def start(self, resources: DeploymentResources | None = None) -> InferenceConnection:
+    def start(self, resources: InferenceResources | None = None) -> InferenceConnection:
         """Start the engines; ``resources`` are unused, since the component reserves its own GPUs."""
         if self.started or self.closed:
             raise RuntimeError("inference service can only be started once")
         self.started = True
         self.restart_engines()
-        return InferenceConnection(self.connection_protocol, None)
+        return InferenceConnection(None)
 
     def restart_engines(self) -> int:
         """Start the engines on the component, replacing any it runs; return the number of engines."""
@@ -233,7 +250,6 @@ class RemoteInferenceService(InferenceService):
         return answer.get("instance") != self.instance or not answer["engines"]
 
     def backend(self, connection: InferenceConnection) -> InferenceBackend:
-        self.require_connection(connection)
         return RemoteInferenceBackend(self.control, self)
 
     def check_health(self) -> None:
@@ -249,25 +265,3 @@ class RemoteInferenceService(InferenceService):
         self.closed = True
         if self.started:
             self.control.call("DELETE", "engines", timeout_s=HEALTH_TIMEOUT_S)
-
-    def require_connection(self, connection: InferenceConnection) -> None:
-        if connection.protocol != self.connection_protocol:
-            raise ValueError(f"incompatible remote inference connection: {connection.protocol!r}")
-
-
-def create_inference(config: Mapping[str, Any]) -> RemoteInferenceService:
-    """Build the service from a training deployment's inference input.
-
-    ``config`` has ``remote`` (the ``inference.remote`` section), ``engine``
-    (the ``inference.backend`` name), ``engine_config`` (that backend's own
-    input) and ``num_gpus``. The control token is read from this process's
-    environment.
-    """
-    settings = RemoteInferenceSettings.from_mapping(config["remote"])
-    return RemoteInferenceService(
-        settings,
-        engine=config["engine"],
-        engine_config=config["engine_config"],
-        num_gpus=config["num_gpus"],
-        control_token=settings.token(settings.control_token_env, os.environ),
-    )

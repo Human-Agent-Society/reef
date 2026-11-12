@@ -12,7 +12,15 @@ from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.job_data import job_data_ref
 
-from reef.artifact import REFERENCE_FILE, Artifact, DirectoryFiles, HuggingFaceRevision, read_reference
+from reef.artifact import (
+    BASE_FILE,
+    REFERENCE_FILE,
+    Artifact,
+    BaseRoot,
+    DirectoryFiles,
+    HuggingFaceRevision,
+    read_reference,
+)
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.core.weight_layout import ArtifactFormat
@@ -20,20 +28,16 @@ from reef.inference.tinker import TinkerInferenceRuntime
 from reef.service.deploy.training import training_deployment_for
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob, job_id_for
 from reef.train.tinker_backend import client as client_module
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
-from reef.train.tinker_backend.config import SpindleFullConfig
+from reef.train.tinker_backend.config import SpindleFullSettings
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
 from reef.train.tinker_backend.launch import SpindleFullDeployment, spindle_full_settings
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow
-from reef.train.tinker_backend.objectives import (
-    TinkerObjective,
-    register_tinker_objective,
-    unregister_tinker_objective,
-)
+from reef.train.tinker_backend.objectives import TinkerObjective, register_objective, unregister_objective
+from reef.train.tinker_backend.signals import TrainingSignal
 from reef.train.tinker_backend.spindle_export import CheckpointExporter, checkpoint_directory, checkpoint_upload
 
 MODEL = "org/model"
@@ -43,9 +47,9 @@ RELEASES = "org/model-releases"
 FILES = {"config.json": b"{}", "model.safetensors": b"base-weights"}
 
 
-def settings(tmp_path: Path, **options: str) -> SpindleFullConfig:
+def settings(tmp_path: Path, **options: str) -> SpindleFullSettings:
     values = {"state_dir": str(tmp_path / "state"), "base_url": SPINDLE, "base": BASE, "release_repo": RELEASES}
-    return SpindleFullConfig(**{**values, **options})
+    return SpindleFullSettings(**{**values, **options})
 
 
 class Exporter(CheckpointExporter):
@@ -111,9 +115,9 @@ class Objective(TinkerObjective):
 @pytest.fixture
 def objective():
     value = Objective()
-    register_tinker_objective(value)
+    register_objective(value.name, value)
     yield value
-    unregister_tinker_objective(value.name)
+    unregister_objective(value.name)
 
 
 @pytest.fixture
@@ -243,6 +247,11 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
     (copy / "model.safetensors").write_bytes(b"other-weights")
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
         component.check_artifact(DirectoryFiles(copy))
+    # The base of this component is its reference to the base revision, so it takes no base root.
+    (tmp_path / "base-root").mkdir()
+    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.default_start().inputs).to_text())
+    with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
+        component.check_artifact(DirectoryFiles(tmp_path / "base-root"))
 
 
 @pytest.mark.unit
@@ -263,7 +272,7 @@ def test_the_component_trains_the_repo_of_its_base_on_a_spindle_deployment(tmp_p
     with pytest.raises(ValueError, match="not the repo of the base"):
         SpindleFullTrainingComponent("other/model", settings(tmp_path), client, Exporter())
     with pytest.raises(ValueError, match="requires base_url"):
-        SpindleFullConfig(state_dir=str(tmp_path), base=BASE, release_repo=RELEASES)
+        SpindleFullSettings(state_dir=str(tmp_path), base=BASE, release_repo=RELEASES)
     with pytest.raises(ValueError, match="40-digit commit SHA"):
         settings(tmp_path, base=f"hf://{MODEL}@main")
 

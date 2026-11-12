@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
-from tests.support.harness_steps import build_harness_backend, harness_recipe
+from tests.support.harness_jobs import build_harness_backend, harness_recipe
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
 from reef.evaluation.harness import EvaluationWorkerPool, TaskScorer, evaluation_selection
@@ -120,7 +120,7 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
         f"with open({str(roots)!r}, 'a') as log: log.write(os.getcwd()+'\\n')\n"
     )
     binary.chmod(0o755)
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path,
         lambda workspace, services: None,
         score=IsolationScorer(),
@@ -128,7 +128,7 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
         worker_executor=ExecutorSettings(executor_backend, workers=workers),
         binary=str(binary),
     )
-    backend = build_harness_backend(recipe, "test")
+    backend = build_harness_backend(recipe, live, "test")
     pool = backend.evaluator.worker_pool
     try:
         for cycle in range(2):

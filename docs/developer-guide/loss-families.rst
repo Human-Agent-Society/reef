@@ -7,12 +7,20 @@ one backend. Preparation runs on the job's full data; tensor loss hooks run afte
 the backend's forward passes.
 
 - ``reef/train/slime_backend/`` holds Slime integration machinery, with the
-  ``SlimeObjective`` base class and its registry in ``objectives.py``. Each
+  ``SlimeObjective`` base class and its table in ``objectives.py`` and the
+  loss families in ``loss_families.py``. Each
   method's Slime implementation lives in ``recipes/<name>/slime/``. Its
   ``__init__.py`` holds the objective and the spec, torch-free code that runs in
   the Slime component's process, and its ``objective.py`` contains worker hooks.
-- Methods can also supply a ``TinkerObjective`` and a Tinker loss implementation.
-  TTTD shares one signal function between its Slime and Tinker objectives.
+- ``reef/train/tinker_backend/`` has modules of the same names for Tinker: a
+  method can also supply a ``TinkerObjective`` and a ``TinkerLoss``.
+  TTTD computes its advantages in one function that names no backend
+  (``recipes/tttd/objective.py``); its Slime and Tinker objectives both call it.
+
+The two backends share no code: each has its own objectives, loss families,
+``TrainingSignal`` and step schedule. A Slime module of a method imports from
+``reef.train.slime_backend`` only, and a Tinker module from
+``reef.train.tinker_backend`` only.
 
 A recipe names its objective in ``default_parameters()``, a parameter that Reef
 reads as opaque data. ``TrainingSignal`` carries advantages, metrics and proposed
@@ -35,17 +43,94 @@ Layout
    recipes/<name>/slime/
      __init__.py     the spec: a SlimeAlgorithm subclass, no torch; a custom
                      wire row's shaper and payload builder live here too
-     objective.py    the @objective hooks, torch
+     objective.py    the @worker_hook hooks, torch
 
-A package ``__init__`` registers its objective and its family by reference
-(``register_objective_ref("<name>", "my_pkg.slime:MyObjective")`` and
-``register_loss_family_ref("<name>", "my_pkg.slime:MyAlgorithm")``);
-``loss_families.py`` imports the reference on first resolve so
-``@register_loss_family`` runs at boot. An external family decorates its class
-the same way. The objective names it in ``loss_family``. Resolving the
-reference imports the module, which registers the family. The Slime component
-also keeps the reference on ``args.loss_family_ref``, so each Megatron worker,
-whose registry starts empty, can import it too.
+Register a method
+-----------------
+
+A method makes one registration call for each backend that it supports, in its
+package ``__init__``. The call names the objective by reference, so the public
+half of the package imports none of the method's backend code:
+
+.. code:: python
+
+   # my_pkg/__init__.py
+   from reef.train.slime_backend.objectives import register_objective
+
+   register_objective("my", "my_pkg.slime:MyObjective")
+
+``register_objective`` records the reference and imports nothing. The first
+``resolve_objective("my")`` imports ``my_pkg.slime``. That module defines the
+objective and, under ``@register_loss_family``, the loss family that the
+objective names in ``loss_family``:
+
+.. code:: python
+
+   # my_pkg/slime/__init__.py
+   from reef.train.slime_backend.algorithm import SlimeAlgorithm
+   from reef.train.slime_backend.loss_families import register_loss_family
+   from reef.train.slime_backend.objectives import SlimeObjective
+
+
+   @register_loss_family
+   class MyAlgorithm(SlimeAlgorithm):
+       loss_family = "my"
+       ...
+
+
+   class MyObjective(SlimeObjective):
+       name = "my"
+       loss_family = "my"
+       ...
+
+So a process knows a method's loss family after it resolved the method's
+objective, or after it resolved the family's dotted reference. The decorator
+also records the reference of the class (``my_pkg.slime:MyAlgorithm``). The
+Slime component sends that reference to the job's driver and stamps it on
+``args.loss_family_ref``, so each Megatron worker, which starts without the
+component's registrations, imports the family too.
+
+Slime keeps three tables. ``objectives.OBJECTIVES`` maps a name to an
+objective, or to the reference of an objective that the process did not import
+yet. ``loss_families.LOSS_FAMILIES`` maps a name to an imported family.
+``loss_families.LOSS_FAMILY_REFERENCES`` maps a name to the reference that
+another process imports; it holds the built-in families from the start.
+
+Tinker registers the same way, with the functions of its own package:
+
+.. code:: python
+
+   # my_pkg/__init__.py
+   from reef.train.tinker_backend.objectives import register_objective
+
+   register_objective("my", "my_pkg.tinker:MyTinkerObjective")
+
+   # my_pkg/tinker.py
+   from reef.train.tinker_backend.loss_families import register_loss_family
+   from reef.train.tinker_backend.losses import TinkerLoss
+   from reef.train.tinker_backend.objectives import TinkerObjective
+
+
+   @register_loss_family
+   class MyTinkerLoss(TinkerLoss):
+       loss_family = "my"
+       ...
+
+
+   class MyTinkerObjective(TinkerObjective):
+       name = "my"
+       loss_family = "my"
+       ...
+
+Tinker trains in the component's process, so it keeps two tables only:
+``objectives.OBJECTIVES`` and ``loss_families.LOSS_FAMILIES``. A package that
+supports both backends imports each ``register_objective`` under its own name
+(see ``recipes/tttd/__init__.py``).
+
+A test or a deployment module can also register an instance:
+``register_objective(objective.name, objective)`` and
+``register_loss_family(family)``. A Slime family that registers as an instance
+has no reference, so only that process knows it.
 
 Family to Slime flags
 ---------------------
@@ -87,7 +172,8 @@ The spec
 
 .. code:: python
 
-   from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
+   from reef.train.slime_backend.algorithm import SlimeAlgorithm
+   from reef.train.slime_backend.loss_families import register_loss_family
 
 
    @register_loss_family
@@ -137,7 +223,8 @@ Objective hooks
 ---------------
 
 ``objective.py`` registers each channel the spec listed in
-``required_objective_hooks``. The worker imports the module at init, checks that
+``required_objective_hooks``, with ``@worker_hook("<channel>")``
+(``reef.train.slime_backend.algorithm``). The worker imports the module at init, checks that
 every declared channel is present, and projects the dotted paths onto ``args``.
 A missing module or hook stops the worker; nothing falls back to Slime's default
 loss.
@@ -236,7 +323,7 @@ and each such recipe's family is a thin subclass of it:
   ``importance-sampling-level``, ``skip-response-tokens``, ``jsd-beta``) and
   the settings they stamp on ``args`` under ``distill_*`` names, which the
   worker hooks read whatever the prefix was. A family names itself, sets
-  its defaults in a ``DistillSettings`` subclass, and its ``objective.py``
+  its defaults in a ``DistillAlgorithmSettings`` subclass, and its ``objective.py``
   forwards ``<name>_loss`` and ``<name>_actor_pre_train`` to
   ``distill.objective``.
 - The teacher is ``self`` (the student's own weights reading the privileged

@@ -2,22 +2,25 @@
 
 from __future__ import annotations
 
-import importlib
+from collections.abc import Mapping
 from dataclasses import asdict, replace
-from importlib.metadata import entry_points
 from typing import Any
 
+from reef.core.config import config_arguments
+from reef.core.plugins import PluginConfigError, resolve_plugin_class
 from reef.inference.remote.config import RemoteInferenceSettings
+from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.composite import CompositeRecipe
+from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.service.deploy.config_utils import DeployConfigError, config_value
 from reef.service.deploy.inference import http_service, local_inference_component
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.service.deploy.serving import ENGINES, NONE, prepare_engine_serving, serving_mode
 from reef.train.deployment import TrainingDeployment
 
-# Built-ins are references, so discovery does not import execution dependencies.
-_BUILTINS = {
+#: The bundled training backends, as references so that reading the table imports no training dependency.
+BUILTIN_DEPLOYMENTS = {
     "slime": "reef.train.slime_backend.launch:SlimeDeployment",
     "tinker": "reef.train.tinker_backend.launch:TinkerDeployment",
     "spindle_full": "reef.train.tinker_backend.launch:SpindleFullDeployment",
@@ -25,25 +28,57 @@ _BUILTINS = {
 
 
 def training_deployment_for(name: str | None) -> TrainingDeployment:
-    """Load one built-in, installed entry point, or module:class deployment definition."""
-    selected = name or "slime"
-    reference = _BUILTINS.get(selected, selected)
-    if ":" not in reference:
-        matches = tuple(entry_points(group="reef.training_backends", name=selected))
-        if len(matches) != 1:
-            reason = "unknown" if not matches else "ambiguous"
-            raise DeployConfigError(
-                f"{reason} training backend {selected!r}; install its integration or use module:class"
-            )
-        reference = matches[0].value
-    module, _, attribute = reference.partition(":")
+    """The deployment definition of the ``training.backend`` value ``name`` (default ``slime``).
+
+    ``name`` is a bundled backend, an installed ``reef.training_backends`` entry point, or a
+    ``package.module:ClassName`` reference; each names a ``TrainingDeployment`` class, made with no arguments.
+    Raise ``DeployConfigError`` for another name.
+    """
     try:
-        definition = getattr(importlib.import_module(module), attribute)
-    except (ImportError, AttributeError) as exc:
-        raise DeployConfigError(f"cannot load training backend {selected!r}: {exc}") from exc
-    if not isinstance(definition, type) or not issubclass(definition, TrainingDeployment):
-        raise DeployConfigError("training backend must name a TrainingDeployment class")
-    return definition()
+        deployment_class = resolve_plugin_class(
+            name or "slime",
+            builtins=BUILTIN_DEPLOYMENTS,
+            entry_point_group="reef.training_backends",
+            base=TrainingDeployment,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+            setting="training backend",
+        )
+    except PluginConfigError as exc:
+        raise DeployConfigError(str(exc)) from exc
+    return deployment_class()
+
+
+def training_recipe_config(
+    recipe_type: type[WeightTrainingRecipe], settings: Mapping[str, Any], *, model_path: str
+) -> dict[str, Any]:
+    """The flat recipe config of a weight training deployment, from the recipe's keys of its ``reef`` section.
+
+    ``settings`` is the recipe-owned slice of the deployment's flat ``reef`` section: the caller removes the
+    service's own keys first (``service_owned_keys``). Only keys the operator set are forwarded under ``data``, so
+    every default lives with the config fields of ``recipe_type``, never in the service layer. This step only
+    translates the layout; the loader's field resolution converts the types. ``model_path`` goes under
+    ``model.path``. Raise ``RecipeConfigError`` for a key that ``recipe_type`` does not declare: the operator set
+    a value that nothing would consume.
+    """
+    field_names = {argument.name for argument in config_arguments(recipe_type)}
+    data: dict[str, Any] = {}
+    unknown: list[str] = []
+    for key, value in settings.items():
+        if key in field_names:
+            # A YAML key left empty (None) is unset, not a value to parse.
+            if value is not None:
+                data[key] = value
+        else:
+            unknown.append(key)
+    if unknown:
+        known = ", ".join(f"reef.{name}" for name in sorted(field_names))
+        raise RecipeConfigError(
+            f"{recipe_type.__name__} does not consume {', '.join(f'reef.{key}' for key in sorted(unknown))}; "
+            f"the recipe would silently run with its defaults instead. "
+            f"Settings {recipe_type.__name__} consumes: {known}. "
+            f"A new setting is declared with config_field() on the recipe dataclass "
+            f"(see reef.recipe.config_fields)."
+        )
+    return {"data": data, "model": {"path": model_path}}
 
 
 def local_model_required(config: dict[str, Any]) -> bool:
@@ -76,7 +111,7 @@ NO_INFERENCE_REFUSED_SETTINGS = (
 )
 
 
-def validate_no_inference(settings: ServiceConfig) -> None:
+def validate_no_inference(settings: ServiceSettings) -> None:
     """Refuse what ``inference.backend: none`` cannot run: engines, colocation and anything that calls the model.
 
     The deployment trains on uploaded or imported data and serves no request.

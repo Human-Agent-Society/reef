@@ -2,7 +2,7 @@
 
 The component (``python -m reef.inference.remote``) runs in its own process
 with its own Ray session that declares two pretend GPUs, and starts the stub
-engine (``tests.support._stub_engine``). The test process is the control
+engine (``tests.support.stub_engine``). The test process is the control
 plane: it builds Tinker's training component and the serving runtime of its
 adapters as the HTTP service does and drives one
 TTTD step through the Dispatcher, then restarts. The Tinker SDK and the
@@ -28,6 +28,7 @@ import pytest
 
 from reef.dispatcher import Dispatcher
 from reef.inference.serving import AdapterServingRuntime
+from reef.scenario.live_objects import LiveObjects
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -36,7 +37,7 @@ from reef.train.jobs import JobLoopState
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL = "Qwen/Qwen3-8B"
 REAL = os.environ.get("REEF_TEST_TINKER_REAL") == "1" and bool(os.environ.get("TINKER_API_KEY"))
-ENGINE = "tests.support._stub_engine:create_inference"
+ENGINE = "tests.support.stub_engine:StubEngineService"
 TOKENS = {"REEF_REMOTE_CONTROL_TOKEN": "control-secret", "REEF_REMOTE_INFERENCE_TOKEN": "inference-secret"}
 SCENARIO = "erdos"
 
@@ -229,7 +230,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     from reef.dispatcher import Dispatcher
     from reef.storage.sql_coordination import open_coordination
     from reef.storage.sqlite import SQLiteScenarioStorage
-    from reef.train.pipeline import PipelineConfig
+    from reef.train.pipeline import PipelineSettings
 
     if not REAL:
         monkeypatch.syspath_prepend(str(write_fake_sdk(tmp_path, MODEL)))
@@ -248,7 +249,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
             "model-path": MODEL,
             "backend": ENGINE,
             "num-gpus": 2,
-            "handler-factory": "reef.inference.sglang.chat.SGLangInferenceHandler",
+            "handler-factory": "reef.inference.sglang.chat:SGLangInferenceHandler",
             "remote": {"url": url},
         },
         "training": {
@@ -270,13 +271,12 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     try:
         dispatcher = Dispatcher(
             TTTDRecipe(
-                component,
-                runtime=inference,
-                pipeline_stages=PipelineConfig.from_setting(
+                pipeline_stages=PipelineSettings.from_setting(
                     raw["pipeline"], spec=TTTDRecipe.pipeline_spec(), environ={}
                 ),
             ),
             repository,
+            live=LiveObjects(runtime=inference, training_component=component),
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             # A file, as a deployment keeps it: a restarted control plane reads what the engines serve.

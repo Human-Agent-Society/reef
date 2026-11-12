@@ -11,14 +11,17 @@ from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._trajectories import policy_trajectory
 from tests.support.artifact_versions import ImportingComponent
-from tests.support.harness_steps import IdleMethod, harness_recipe
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.harness_jobs import evolution_config, runtime
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
+from tests.support.training_deployment import LocalFacts, LocalServingFactory, facts_component_factory
+from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.files import DirectoryFiles
 from reef.artifact.sources import ArtifactSources, DirectorySource
+from reef.core.errors import InternalError
 from reef.core.job_data import JobData
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
@@ -28,7 +31,11 @@ from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
+from reef.inference.serving import AdapterServingRuntime
 from reef.recipe import CompositeRecipe, Recipe
+from reef.recipe.errors import RecipeConfigError
+from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.record2sample.service import (
     RECORD_SELECTION_KIND,
     SAMPLES_QUEUE,
@@ -36,6 +43,7 @@ from reef.record2sample.service import (
     Selection,
     request_selection,
 )
+from reef.scenario.live_objects import LiveObjects, check_recipe_objects, scenario_components
 from reef.service import assembly
 from reef.service import components as component_apps
 from reef.service.app import create_data_app
@@ -43,15 +51,18 @@ from reef.service.components import build_component_app
 from reef.service.data_service import DataJob, DataWorker
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.service.scenario_files import artifact_directory
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
-from reef.train.component import TrainingJob
+from reef.train.component import TrainingFactsLayout, TrainingJob
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JOBS_QUEUE, JobQueueComponent, TrainingJobWorker
+from reef.train.tinker_backend.facts import TinkerFacts
+from reef.train.tinker_backend.launch import TinkerComponentFactory
 from reef.train.training_requests import TrainingRequestQueue
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
@@ -64,8 +75,8 @@ from reef.core.errors import ReefError
 from reef.dispatcher.dispatcher import build_default_dispatcher
 
 
-def settings(tmp_path: Path) -> ServiceConfig:
-    return ServiceConfig(
+def settings(tmp_path: Path) -> ServiceSettings:
+    return ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_work_dir=str(tmp_path / "work"),
@@ -106,8 +117,8 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
 ) -> None:
     config = replace(settings(tmp_path), task_file_dir=str(tmp_path / "task-files"))
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    recipe = Recipe(training_component=component)
-    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    deployment = (Recipe(), LiveObjects(training_component=component))
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
     trajectory = policy_trajectory("sample", (1, 2), (1,), (-0.1,), 1.0, artifact_id="v1")
     coordination = assembly.open_service_coordination(config)
     view = JobQueueComponent(component, coordination.work_queue, owns_component=False)
@@ -148,9 +159,9 @@ def test_a_training_worker_start_failure_closes_its_component_and_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
 ) -> None:
     component = StubTrainingComponent()
-    recipe = Recipe(training_component=component)
+    deployment = (Recipe(), LiveObjects(training_component=component))
     coordination = memory_coordination()
-    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
     monkeypatch.setattr(component_apps, "open_service_coordination", lambda settings: coordination)
     threads: list[Thread | None] = []
     start = TrainingJobWorker.start
@@ -182,15 +193,21 @@ def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_e
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = replace(settings(tmp_path), served_url="http://reef-control:8000")
-    recipe = CompositeRecipe(components={"harness": harness_recipe(tmp_path, IdleMethod()), "records": Recipe()})
-    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    # The training service builds the harness training component from the recipe's settings, after the live
+    # objects have the served endpoint.
+    harness = load_recipe(HarnessEvolutionRecipe, evolution_config(state_dir=str(tmp_path / "harness")), {})
+    deployment = (
+        CompositeRecipe(components={"harness": harness, "records": Recipe()}),
+        LiveObjects(runtime=runtime()),
+    )
+    monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
     bindings = []
     start = TrainingJobWorker.start
 
     def observe_start(worker: TrainingJobWorker) -> None:
         component = worker.component
         assert isinstance(component, HarnessTrainingComponent)
-        bindings.append(component.steps.recipe.model_binding("math"))
+        bindings.append(component.models.served("math"))
         start(worker)
 
     monkeypatch.setattr(TrainingJobWorker, "start", observe_start)
@@ -352,11 +369,11 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(ini
     assert changes.training_requests == ["math"]
 
     # A job that a worker takes changes nothing to commit; its checkpoint and its end each wake control.
-    queue.add(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))
+    queue.append(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))
     job = queue.take(JOBS_QUEUE, "training-1", ["job:stub"])
     watcher.run_once()
     assert changes.jobs == []
-    queue.add_progress(JOBS_QUEUE, job.id, "training-1", {"step": 0}, number=0)
+    queue.append_progress(JOBS_QUEUE, job.id, "training-1", {"step": 0}, number=0)
     watcher.run_once()
     assert changes.jobs == ["math"]
     queue.finish(JOBS_QUEUE, job.id, "training-1", {"state": "finished", "metrics": {}})
@@ -379,6 +396,143 @@ def test_the_inference_component_answers_from_served_models_alone(tmp_path: Path
             assert missing.status == 404
 
     asyncio.run(run())
+
+
+def weight_settings(tmp_path: Path, training: dict, inference: dict | None = None) -> ServiceSettings:
+    """The settings of a deployment that trains SAO's weights on the ``training`` section's backend, with its
+    stores under ``tmp_path``."""
+    raw = {
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
+        "inference": {"model-path": "/models/test", **(inference or {})},
+        "training": training,
+        "pipeline": {"sample2job": {"config": {"job_samples": 1}}},
+    }
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    stores = settings(tmp_path)
+    return replace(
+        service_config_from_mapping(config),
+        agent_record_dir=stores.agent_record_dir,
+        artifact_work_dir=stores.artifact_work_dir,
+        artifact_cache_dir=stores.artifact_cache_dir,
+        artifact_backend=stores.artifact_backend,
+        tokens=stores.tokens,
+    )
+
+
+@pytest.mark.unit
+def test_the_inference_service_serves_an_activated_artifact_without_a_training_component(
+    tmp_path: Path, monkeypatch
+) -> None:
+    deployment = weight_settings(tmp_path, {"backend": "tests.support.training_deployment:FactsDeployment"})
+    # The two processes reach the same artifact repository.
+    repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    monkeypatch.setattr(assembly, "build_artifact_backend", lambda settings: repository)
+    monkeypatch.setattr(component_apps, "build_artifact_backend", lambda settings: repository)
+    runtimes: list[StubInferenceRuntime] = []
+    build_runtime = LocalServingFactory.__call__
+
+    def keep_runtime(factory, *arguments):
+        runtimes.append(build_runtime(factory, *arguments))
+        return runtimes[-1]
+
+    monkeypatch.setattr(LocalServingFactory, "__call__", keep_runtime)
+    control = assembly.build_dispatcher(deployment, environ={}, components=frozenset({"control"}))
+    built_before = facts_component_factory.built
+
+    async def run() -> None:
+        app = build_component_app("inference", deployment, environ={})
+        # The backend states its facts, so the inference service built the runtime and no component.
+        assert facts_component_factory.built == built_before
+        control_runtime, inference_runtime = runtimes
+        async with TestClient(TestServer(app)) as client:
+            auth = {"Authorization": f"Bearer {TOKEN}"}
+            created = await asyncio.to_thread(control.get_or_create_scenario, "math")
+            artifact_id = created.serving_artifact_id()
+            deadline = asyncio.get_running_loop().time() + 20
+            while True:
+                status = await (await client.get("/reef/scenarios/math/inference/status", headers=auth)).json()
+                if status["state"] == "ready":
+                    break
+                assert status["state"] in ("pending", "starting"), status
+                assert asyncio.get_running_loop().time() < deadline, status
+                await asyncio.sleep(0.05)
+            assert status["artifact_id"] == artifact_id
+        assert inference_runtime.activated_ids == [artifact_id]
+        assert control_runtime.activated_ids == []
+
+    try:
+        asyncio.run(run())
+    finally:
+        control.close()
+
+
+@pytest.mark.unit
+def test_the_inference_service_of_a_tinker_deployment_builds_its_engines_from_the_facts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    for name in ("TINKER_API_KEY", "REEF_REMOTE_CONTROL_TOKEN", "REEF_REMOTE_INFERENCE_TOKEN"):
+        monkeypatch.setenv(name, "test-key")
+    built: list[object] = []
+    monkeypatch.setattr(TinkerComponentFactory, "__call__", lambda *arguments: built.append(arguments))
+    deployment = weight_settings(
+        tmp_path,
+        {"backend": "tinker", "options": {"state-dir": str(tmp_path / "state"), "lora-rank": 16}},
+        {"model-path": "Qwen/Qwen3-8B", "backend": "sglang", "num-gpus": 2, "remote": {"url": "https://gpu.example"}},
+    )
+    recipe, live = assembly.load_serving_deployment(deployment, {})
+    try:
+        assert built == [] and live.training_component is None
+        assert isinstance(live.training_facts, TinkerFacts)
+        # Tinker's snapshots hold no weight files, so the engines load what the deployment's weights plugin fetches.
+        assert isinstance(live.runtime, AdapterServingRuntime)
+        weights = scenario_components(recipe, live, "math").components["weights"]
+        assert weights.loaded and isinstance(weights.layout, TrainingFactsLayout)
+        assert not weights.layout.resolves_references
+        with pytest.raises(InternalError, match="the control service checks an import"):
+            weights.layout.check(DirectoryFiles(tmp_path))
+    finally:
+        assert live.runtime is not None
+        live.runtime.shutdown()
+
+
+@pytest.mark.unit
+def test_the_inference_service_builds_the_component_of_a_backend_that_states_no_facts(tmp_path: Path) -> None:
+    marker = tmp_path / "component"
+    deployment = weight_settings(
+        tmp_path, {"backend": "tests.support.training_deployment:LocalDeployment", "options": {"marker": str(marker)}}
+    )
+
+    async def run() -> None:
+        app = build_component_app("inference", deployment, environ={})
+        assert marker.exists()
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.get("/healthz")).status == 200
+
+    asyncio.run(run())
+    # The service owns the component that it built, and closes it.
+    assert Path(f"{marker}.closed").exists()
+
+
+@pytest.mark.unit
+def test_live_objects_hold_the_training_component_or_the_facts_of_its_backend() -> None:
+    with pytest.raises(ValueError, match="not both"):
+        LiveObjects(training_component=StubTrainingComponent(), training_facts=LocalFacts())
+    with pytest.raises(TypeError, match="training_facts"):
+        LiveObjects(training_facts=StubTrainingComponent())
+    recipe = TestPolicyRecipe()
+    with pytest.raises(RecipeConfigError, match="requires a training component"):
+        scenario_components(recipe, LiveObjects(runtime=runtime()), "math")
+    with pytest.raises(RecipeConfigError, match="inference runtime"):
+        scenario_components(recipe, LiveObjects(training_facts=LocalFacts()), "math")
+    with pytest.raises(RecipeConfigError, match="inference runtime"):
+        check_recipe_objects(recipe, LiveObjects(training_facts=LocalFacts()))
+    from_facts = scenario_components(recipe, LiveObjects(runtime=runtime(), training_facts=LocalFacts()), "math")
+    from_component = scenario_components(recipe, live_objects(), "math")
+    assert from_facts.loaded_component == from_component.loaded_component == "weights"
+    assert from_facts.components["weights"].kind == from_component.components["weights"].kind
+    # Full weights resolve a reference in both.
+    assert from_facts.components["weights"].layout.resolves_references
+    assert from_component.components["weights"].layout.resolves_references
 
 
 @pytest.mark.unit
@@ -442,8 +596,9 @@ def test_control_and_data_load_a_scenario_without_activating_its_engine(tmp_path
 
     def dispatcher(components: frozenset[str]) -> Dispatcher:
         return Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            TestPolicyRecipe(),
             repository,
+            live=live_objects(component, component.inference),
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
             components=components,
@@ -473,8 +628,9 @@ def test_the_data_service_reads_the_artifact_that_control_commits_after_the_data
 
     def dispatcher(components: frozenset[str]) -> Dispatcher:
         return Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            TestPolicyRecipe(),
             repository,
+            live=live_objects(component, component.inference),
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
             components=components,

@@ -27,16 +27,12 @@ from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import local_model_required
 from reef.tinker.weights import TinkerSamplerWeights
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob, job_id_for
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
-from reef.train.tinker_backend.objectives import (
-    TinkerObjective,
-    register_tinker_objective,
-    unregister_tinker_objective,
-)
+from reef.train.tinker_backend.objectives import TinkerObjective, register_objective, unregister_objective
+from reef.train.tinker_backend.signals import TrainingSignal
 from reef.train.types import JobData, TrajectorySample
 
 TOKENS = ("REEF_REMOTE_CONTROL_TOKEN", "REEF_REMOTE_INFERENCE_TOKEN")
@@ -133,9 +129,9 @@ class SampleObjective(TinkerObjective):
 @pytest.fixture
 def objective():
     value = SampleObjective()
-    register_tinker_objective(value)
+    register_objective(value.name, value)
     yield value
-    unregister_tinker_objective(value.name)
+    unregister_objective(value.name)
 
 
 @pytest.fixture(autouse=True)

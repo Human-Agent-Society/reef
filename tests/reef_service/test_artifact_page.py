@@ -22,8 +22,8 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import UNCHANGED, harness_recipe
 from tests.support.harness_service import catalog, harness_dispatcher, report_records, wait_for_rows
-from tests.support.harness_steps import UNCHANGED, harness_recipe
 
 from reef.core.plugins import PluginReference
 from reef.dispatcher import Dispatcher
@@ -90,8 +90,8 @@ def train_request(text: str, *, session: str = "3f1c2a9d0b7e", artifact_id: str 
 
 def _dispatcher(tmp_path: Path) -> Dispatcher:
     activation = PluginReference(AlwaysActivate, {"review_kinds": ["extension"]})
-    recipe = harness_recipe(tmp_path, answer, seed=SEED, score=evaluate, activation=activation)
-    return harness_dispatcher(tmp_path, replace(recipe, training_mode="manual"))
+    recipe, live = harness_recipe(tmp_path, answer, seed=SEED, score=evaluate, activation=activation)
+    return harness_dispatcher(tmp_path, replace(recipe, training_mode="manual"), live)
 
 
 def _chain(tmp_path: Path) -> Dispatcher:

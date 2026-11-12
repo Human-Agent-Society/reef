@@ -6,19 +6,22 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepositoryBackend
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginReference
 from reef.core.snapshot import ItemIdentity, RootSource
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
-from reef.recipe import CompositeRecipe, Recipe
+from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError
 from reef.recipe.harness import HarnessLayout
+from reef.record2sample import NoSamples
+from reef.sample2job import NoJobData
 from reef.scenario.factory import ItemStart
 from reef.scenario.registry import InstanceState
 from reef.storage.commits import SCENARIO_METADATA_KEY
@@ -26,6 +29,7 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import ScenarioRoot, TrainingComponent
 from reef.train.jobs import JobLoopState
+from reef.train.pipeline import PipelineSettings
 
 
 def test_dispatcher_constructor_has_no_redundant_scenario_binding_stores() -> None:
@@ -54,13 +58,13 @@ def test_scenario_owns_recipe_derived_policy_and_its_root_release() -> None:
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact == root
 
 
-def test_scenario_step_is_owned_by_scenario() -> None:
+def test_commit_number_is_owned_by_scenario() -> None:
     scenario = build_default_dispatcher(
         scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     ).get_or_create_scenario("math")
 
     assert not hasattr(scenario.repository.start_artifact, "scenario")
-    assert scenario.scenario_step == 0
+    assert scenario.commit_number == 0
     assert scenario.repository.current_artifact.revision
     assert scenario.repository.checkpoint_artifact.revision
     assert not hasattr(scenario, "release_id")
@@ -76,7 +80,7 @@ def test_scenario_owns_scenario_scoped_repository() -> None:
 
     assert not hasattr(repository, "scenario")
     assert not hasattr(repository.start_artifact, "scenario")
-    assert scenario.scenario_step == 0
+    assert scenario.commit_number == 0
     assert repository.checkpoint_artifact == repository.current_artifact
     assert not hasattr(scenario, "base_artifact")
     assert not hasattr(scenario, "current_artifact")
@@ -90,13 +94,13 @@ def test_scenario_metadata_round_trips() -> None:
         scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     ).get_or_create_scenario("math")
     source = RootSource("default", inputs={"seed": "s"})
-    metadata = scenario_metadata_for(name=scenario.name, source=source, scenario_step=scenario.scenario_step)
+    metadata = scenario_metadata_for(name=scenario.name, source=source, commit_number=scenario.commit_number)
 
-    assert metadata["format"] == "reef-scenario/7"
+    assert metadata["format"] == "reef-scenario/8"
     # The registration is carried by the root snapshot, so it names no start_artifact.
     assert "start_artifact" not in metadata
     assert metadata["source"] == {"kind": "default", "inputs": {"seed": "s"}}
-    assert metadata["scenario_step"] == 0
+    assert metadata["commit_number"] == 0
     assert metadata["operation"] == "training"
     assert "recipe" not in metadata
     checkpoint_head = scenario.repository.require_current_artifact()
@@ -121,7 +125,7 @@ def test_checkpoint_metadata_names_only_a_training_step(operation) -> None:
     from reef.storage.commits import parse_scenario_metadata, scenario_metadata_for
 
     base = SnapshotRef("base", None)
-    metadata = scenario_metadata_for(name="math", source=RootSource("default"), start_artifact=base, scenario_step=1)
+    metadata = scenario_metadata_for(name="math", source=RootSource("default"), start_artifact=base, commit_number=1)
     metadata["operation"] = operation
     metadata["record_progress"] = {"high_water_sequence": 0, "high_water_offset": 0, "consumed_ids": []}
     with pytest.raises(ValueError, match="operation must be 'training'"):
@@ -274,14 +278,14 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
 
     base = SnapshotRef("base-release", None)
     head = SnapshotRef("checkpoint-release", base.revision)
-    # Persisted reef-scenario/7 metadata contains registration and recovery
+    # Persisted reef-scenario/8 metadata contains registration and recovery
     # fields; the containing artifact supplies the checkpoint release identity.
     metadata = {
-        "format": "reef-scenario/7",
+        "format": "reef-scenario/8",
         "scenario": "math",
         "source": {"kind": "item", "item": "upload-1", "uri": "s3://bucket/upload-1/", "version": ""},
         "start_artifact": encode_snapshot_ref(base),
-        "scenario_step": 3,
+        "commit_number": 3,
         "algorithm_state": {"steps": 3},
         "record_progress": {
             "high_water_sequence": 7,
@@ -301,7 +305,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     assert source == RootSource("item", item="upload-1", uri="s3://bucket/upload-1/", version="")
     assert isinstance(checkpoint, CommitRecord)
     assert checkpoint.snapshot == head
-    assert checkpoint.step == 3
+    assert checkpoint.commit_number == 3
     assert checkpoint.checkpoint is True
     # Metadata that names no active_artifact belongs to a checkpoint the activation rule activated.
     assert checkpoint.activated is True
@@ -318,7 +322,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
         name=name,
         source=source,
         start_artifact=registered_base,
-        scenario_step=checkpoint.step,
+        commit_number=checkpoint.commit_number,
         algorithm_state=checkpoint.algorithm_state,
         record_progress=RecordProgress(
             checkpoint.high_water_sequence,
@@ -330,7 +334,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     )
     assert encoded == {
         **metadata,
-        "format": "reef-scenario/7",
+        "format": "reef-scenario/8",
         "operation": "training",
         "record_progress": {
             "high_water_sequence": 7,
@@ -365,7 +369,7 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
         name="math",
         source=source,
         start_artifact=base,
-        scenario_step=2,
+        commit_number=2,
         record_progress=progress,
         active_artifact=served,
     )
@@ -375,14 +379,14 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
     assert active_snapshot((checkpoint,), served_snapshot(held, checkpoint_head=head)) == served
 
     activated = scenario_metadata_for(
-        name="math", source=source, start_artifact=base, scenario_step=2, record_progress=progress
+        name="math", source=source, start_artifact=base, commit_number=2, record_progress=progress
     )
     assert served_snapshot(activated, checkpoint_head=head) == head
     with pytest.raises(ValueError, match="active_artifact must be an object"):
         served_snapshot({**held, "active_artifact": "served-release"}, checkpoint_head=head)
     with pytest.raises(ValueError, match="names no active_artifact"):
         scenario_metadata_for(name="math", source=source, active_artifact=served)
-    with pytest.raises(ValueError, match="start_artifact exactly after step zero"):
+    with pytest.raises(ValueError, match="start_artifact exactly after commit number zero"):
         scenario_metadata_for(name="math", source=source, start_artifact=base)
 
 
@@ -390,14 +394,14 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
     "changes, message",
     [
         ({"record_progress": None}, "requires record_progress"),
-        ({"scenario_step": True}, "scenario_step must be non-negative"),
+        ({"commit_number": True}, "commit_number must be non-negative"),
         ({"operation": "promote"}, "operation must be 'training'"),
-        ({"start_artifact": None}, "after step zero requires start_artifact"),
+        ({"start_artifact": None}, "after commit number zero requires start_artifact"),
         ({"source": {"kind": "base"}}, "a root source is"),
         # A scenario that an earlier Reef stored is refused, not read: it is created again.
         (
             {"format": "reef-scenario/4"},
-            r"format 'reef-scenario/4'; this Reef reads reef-scenario/7",
+            r"format 'reef-scenario/4'; this Reef reads reef-scenario/8",
         ),
     ],
 )
@@ -407,11 +411,11 @@ def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) ->
 
     base = SnapshotRef("base", None)
     metadata = {
-        "format": "reef-scenario/7",
+        "format": "reef-scenario/8",
         "scenario": "math",
         "source": {"kind": "default", "inputs": {}},
         "start_artifact": encode_snapshot_ref(base),
-        "scenario_step": 1,
+        "commit_number": 1,
         "record_progress": {
             "high_water_sequence": 0,
             "high_water_offset": 0,
@@ -438,20 +442,13 @@ class _RootImportingComponent(StubTrainingComponent):
         return TrainingComponent.root_start(self, root)
 
 
-class _SharedRuntime(StubInferenceRuntime):
-    """A stub runtime that serves each training scenario its own weights, so scenarios share one deployment."""
-
-    @property
-    def shared_by_training_scenarios(self) -> bool:
-        return True
-
-
-def _weights_dispatcher(tmp_path, backend_factory, model: str) -> Dispatcher:
+def weights_dispatcher(tmp_path, backend_factory, model: str) -> Dispatcher:
     """A dispatcher of the test policy recipe whose training component's default start is the model ``model``."""
     component = _RootImportingComponent(model)
     return Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, _SharedRuntime())),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, StubInferenceRuntime(shared_by_training_scenarios=True)),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -460,7 +457,7 @@ def _weights_dispatcher(tmp_path, backend_factory, model: str) -> Dispatcher:
 
 @pytest.mark.unit
 def test_two_scenarios_own_distinct_root_releases(tmp_path) -> None:
-    dispatcher = _weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
+    dispatcher = weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:
         first, second = (dispatcher.get_or_create_scenario(name) for name in ("first", "second"))
         roots = [scenario.repository.start_artifact for scenario in (first, second)]
@@ -482,17 +479,17 @@ def test_two_scenarios_own_distinct_root_releases(tmp_path) -> None:
 def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario(tmp_path) -> None:
     """The old scenario keeps serving and training its own root; a new scenario gets the new default start."""
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
-    first = _weights_dispatcher(tmp_path, backend_factory, "old-model")
+    first = weights_dispatcher(tmp_path, backend_factory, "old-model")
     old_root = first.get_or_create_scenario("old").repository.start_artifact
     first.close()
 
-    second = _weights_dispatcher(tmp_path, backend_factory, "new-model")
+    second = weights_dispatcher(tmp_path, backend_factory, "new-model")
     try:
         old = second.get_or_create_scenario("old")
         assert old.repository.start_artifact == old.current_snapshot() == old_root
         # The runtime serves the old scenario's own root.
         wait_for_serving(second, "old")
-        assert second.recipe.runtime.served == "old-model"
+        assert second.live.runtime.served == "old-model"
         assert old.served_artifact_id() == old.repository.resolve(old_root).artifact_id
         old_start = Path(JobLoopState.from_dict(old.trainer.state).start)
         assert (old_start / "model.txt").read_text() == "old-model"
@@ -508,7 +505,7 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
 
 @pytest.mark.unit
 def test_concurrent_creations_of_one_name_register_one_root(tmp_path) -> None:
-    dispatcher = _weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
+    dispatcher = weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:
         with ThreadPoolExecutor(max_workers=8) as executor:
             results = list(executor.map(lambda _: dispatcher.create_scenario("shared"), range(8)))
@@ -523,7 +520,7 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
     """A registration in ``reef-scenario/4`` named a shared base snapshot; this Reef refuses it with a clear error."""
     backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     (tmp_path / "old-root").mkdir()
-    stored = {"format": "reef-scenario/4", "scenario": "math", "base_artifact": {}, "scenario_step": 0}
+    stored = {"format": "reef-scenario/4", "scenario": "math", "base_artifact": {}, "commit_number": 0}
     backend_factory("math").register(Artifact.local(tmp_path / "old-root"), metadata={SCENARIO_METADATA_KEY: stored})
     dispatcher = build_default_dispatcher(
         backend_factory=backend_factory, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
@@ -531,7 +528,7 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
     try:
         with pytest.raises(
             ValueError,
-            match=r"'reef-scenario/4'; this Reef reads reef-scenario/7",
+            match=r"'reef-scenario/4'; this Reef reads reef-scenario/8",
         ):
             dispatcher.get_or_create_scenario("math")
     finally:
@@ -571,8 +568,8 @@ def test_composite_item_roots_are_checked_before_registration(
     tmp_path: Path, component: str, accepts_item: bool
 ) -> None:
     training = _RootImportingComponent("base-model") if accepts_item else _NoArtifactStarts("base-model")
-    weights = TestPolicyRecipe(**runtime_bindings(training, _SharedRuntime()))
-    recipe = CompositeRecipe(components={"weights": weights, "harness": ItemTreeRecipe()})
+    live = live_objects(training, StubInferenceRuntime(shared_by_training_scenarios=True))
+    recipe = CompositeRecipe(components={"weights": TestPolicyRecipe(), "harness": ItemTreeRecipe()})
     backend_factory = InMemoryRepositoryBackend.factory()
     directory = tmp_path / "item"
     directory.mkdir()
@@ -590,6 +587,7 @@ def test_composite_item_roots_are_checked_before_registration(
     dispatcher = Dispatcher(
         recipe,
         backend_factory,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
     )
@@ -630,7 +628,7 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
             ItemIdentity("upload-1"), directory.as_uri(), DirectorySource(directory, source_version="v1", link=False)
         )
 
-    dispatcher = _weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
+    dispatcher = weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:
         with pytest.raises(ValueError, match=r"config\.json and weight files"):
             dispatcher.create_scenario("refused", item(notes))
@@ -647,8 +645,9 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
 
     component = _NoArtifactStarts("base-model")
     pinned = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, _SharedRuntime())),
+        TestPolicyRecipe(),
         InMemoryRepositoryBackend.factory(),
+        live=live_objects(component, StubInferenceRuntime(shared_by_training_scenarios=True)),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -658,3 +657,24 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
         assert not pinned.has_scenario("refused")
     finally:
         pinned.close()
+
+
+@pytest.mark.unit
+def test_a_stage_that_refuses_its_config_fails_the_scenario_with_a_recipe_config_error(tmp_path: Path) -> None:
+    """The scenario factory builds the trainers from the recipe's stages, and reports a stage's refusal as an error
+    of the recipe's config."""
+    stages = PipelineSettings(
+        record2sample=PluginReference(NoSamples, {"typo": 1}), sample2job=PluginReference(NoJobData, {})
+    )
+    dispatcher = Dispatcher(
+        Recipe(pipeline_stages=stages),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
+    )
+    try:
+        with pytest.raises(RecipeConfigError, match="typo"):
+            dispatcher.get_or_create_scenario("math")
+        assert dispatcher.registry.get_optional("math") is None
+    finally:
+        dispatcher.close()

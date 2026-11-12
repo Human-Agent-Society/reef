@@ -25,7 +25,7 @@ Check health and status
 
 It reports these values for every scenario:
 
-- the step counter and the latest committed step outcome
+- the commit number (``commit_number``) and the outcome of the latest training commit (``last_training_commit``)
 - the artifact that answers the scenario's requests (``served_artifact_id``)
 - whether a job's data is waiting, and the processor's state
 - whether inference is admitted or paused while a snapshot loads
@@ -226,10 +226,10 @@ For a scenario with several components, restore an earlier complete selection:
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/json" -d '{"step": 12}' \
+     -H "Content-Type: application/json" -d '{"commit_number": 12}' \
      "$REEF_URL/reef/scenarios/code-repair/restore"
 
-Choose a step from ``GET /reef/scenarios/code-repair/operations``, or use step 0 for the starting artifacts. Reef restores all active component IDs together and appends a ``restore`` operation. It creates no artifacts and leaves the training starts unchanged. The answer's ``components`` gives the restored mapping. Poll startup status before sending inference requests.
+Choose a commit number from ``GET /reef/scenarios/code-repair/operations``, or use 0 for the starting artifacts. Reef restores all active component IDs together and appends a ``restore`` operation. It creates no artifacts and leaves the training starts unchanged. The answer's ``components`` gives the restored mapping. Poll startup status before sending inference requests.
 
 Activation alone does not last under the default rule. The trainer still continues from its training start, and Reef activates the next artifact that it makes. To go back to an older artifact for good, activate it and do one of these:
 
@@ -261,7 +261,7 @@ Track experiments with W&B
 
 Tracking is optional and off by default; ``observability.wandb`` in `Configuration <../reference/configuration.rst#experiment-tracking>`__ lists every key. Export ``WANDB_API_KEY`` before starting the stack; there is no key field, and Reef refuses Slime's ``--wandb-key`` flag so a credential never enters a command line or a run config.
 
-What you see in W&B: one group per scenario and one run per scenario, plus a new run after every train-from, so the training from each new start is its own curve. An activation does not end a run. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit history, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
+What you see in W&B: one group per scenario and one run per scenario, plus a new run after every train-from, so the training from each new start is its own curve. An activation does not end a run. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/commit_number`` that joins it to the commit history, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
 
 The same run also receives ``operations/*`` every 10 seconds, plotted against
 ``operations/time_seconds``. Use these panels to inspect unread records,
@@ -316,7 +316,7 @@ After a step commits, ``/reef/status`` reports its scenario's
 ``error``. Repository revisions stay internal.
 The ``state`` is ``synchronized`` when the backend head names the chain tip,
 ``pending`` when updating it failed, or ``conflict`` when another writer moved it to an
-unrelated release. The committed step remains successful. Before another commit,
+unrelated snapshot. The committed step remains successful. Before another commit,
 Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
@@ -406,6 +406,14 @@ Give each process its own ``storage.artifact-work-dir`` and
 on its command line. A process keeps its working copy of the artifact
 repository there, and two processes in one working copy break each other's
 fetches.
+
+**Training dependencies.** The inference service builds no training component
+for the ``slime``, ``tinker`` and ``spindle_full`` backends. It reads what it
+needs about the backend from the config. With ``slime``, its environment needs
+no Slime, Megatron, Ray, PyTorch or Transformers. For a training backend
+plugin that states no facts from its config, the inference service builds the
+backend's training component, as the other services do. Install that
+backend's dependencies there.
 
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
@@ -660,7 +668,7 @@ gives the necessary behavior. With a plugin backend, Reef does not use Git LFS
 and does not need its tools. Do not set ``storage.artifact-repository``: Reef
 refuses that configuration, because the plugin reads its own config.
 
-A change from one backend to another does not move releases. Keep the old
+A change from one backend to another does not move snapshots. Keep the old
 store readable while scenarios refer to its snapshots, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
 
@@ -919,12 +927,12 @@ a storage plugin. Reef calls ``from_config(config)`` to make the plugin. The
 plugin implements two methods:
 
 - ``check_creation(scenario, registered_count=...)``: to refuse a new
-  scenario, raise ``reef.core.errors.ScenarioLimitReached`` (HTTP 409).
+  scenario, raise ``reef.core.errors.ScenarioLimitReachedError`` (HTTP 409).
 - ``admit_load(scenario, loaded=...)``: return a ``LoadAdmission``. Its
   ``unload_count`` is the number of loaded scenarios that Reef must unload
   first. Its ``candidates`` are the scenarios that Reef tries, in that order.
   Reef unloads only idle candidates. If too few candidates are idle, Reef
-  refuses the load with ``reef.core.errors.ScenarioCapacityFull`` (HTTP 503).
+  refuses the load with ``reef.core.errors.ScenarioCapacityFullError`` (HTTP 503).
   The plugin can also raise that error itself.
 
 Reef calls the plugin before it creates a scenario and before it loads one.
@@ -936,8 +944,8 @@ refuses that configuration.
 Upgrade from a Reef that wrote older formats
 --------------------------------------------
 
-This Reef reads only the formats that it writes: ``reef-commit/8`` commit
-records, ``reef-scenario/7`` scenario metadata, and the current tables of the
+This Reef reads only the formats that it writes: ``reef-commit/9`` commit
+records, ``reef-scenario/8`` scenario metadata, and the current tables of the
 record database, the data store and the coordination store. It does not
 upgrade a store that an older Reef wrote.
 

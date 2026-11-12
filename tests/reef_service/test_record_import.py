@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import RecordingComponent
 from tests.support.samples import made_task
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -20,6 +21,7 @@ from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.record2sample import ReportSamples
 from reef.sample2job import Sample2Job
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sql_coordination import memory_coordination
@@ -74,27 +76,36 @@ class LearningRecipe(Recipe):
     def report_type(self):
         return ScoredRolloutReport
 
-    def build(
+
+class LearningTrainers(OneTrainerBuilder):
+    """Builds the trainer of ``recipe``: its jobs run on a ``RecordingComponent`` that keeps them in
+    ``recipe.batches``, on the trainer's own thread."""
+
+    def __init__(self, recipe: LearningRecipe) -> None:
+        self.recipe = recipe
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=feedback_pipeline,
-            job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
+            job_loop=JobLoop(RecordingComponent(self.recipe.batches), scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            report_type=self.report_type,
-            training_mode=self.training_mode,
+            report_type=spec.report_type,
+            training_mode=spec.training_mode,
             root=root,
         )
 
@@ -110,10 +121,10 @@ def image_payload():
     return {**inference_payload("q"), "messages": [{"role": "user", "content": [image]}]}
 
 
-def served_recipe() -> LearningRecipe:
-    """A learning recipe whose runtime names an HTTP engine and a model, so its scenarios have a served model; the
+def served_live() -> LiveObjects:
+    """Live objects whose runtime names an HTTP engine and a model, so a recipe's scenarios have a served model; the
     app's ``inference_handler`` answers for that engine."""
-    return LearningRecipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="example-model"))
+    return LiveObjects(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="example-model"))
 
 
 class EchoHandler(InferenceHandler):
@@ -125,12 +136,14 @@ class EchoHandler(InferenceHandler):
         return inference_payload(payload["messages"][0]["content"])["response"]
 
 
-def dispatcher_for(tmp_path, recipe):
+def dispatcher_for(tmp_path, recipe, live=None):
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
+        trainer_builder=LearningTrainers(recipe) if isinstance(recipe, LearningRecipe) else None,
     )
 
 
@@ -154,7 +167,7 @@ async def wait_for_training(scenario, recipe, count):
 
 @pytest.mark.parametrize("endpoint", ("/v1/chat/completions", "/v1/messages"))
 def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
-    dispatcher = dispatcher_for(tmp_path, served_recipe())
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe(), served_live())
     dispatcher.get_or_create_scenario("s")
     handler = EchoHandler()
     text = "x" * (3 * 1024 * 1024)
@@ -199,8 +212,8 @@ def test_record_import_takes_a_long_trajectory_and_keeps_its_body_limit(tmp_path
 
 @pytest.mark.parametrize("bulk", (False, True))
 def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk):
-    recipe = served_recipe()
-    dispatcher = dispatcher_for(tmp_path, recipe)
+    recipe = LearningRecipe()
+    dispatcher = dispatcher_for(tmp_path, recipe, served_live())
     handler = EchoHandler()
 
     async def run():
@@ -272,7 +285,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
             ]
             assert all(sample.metadata["response"]["choices"] for sample in samples)
             for index in range(6):
-                stored = scenario.records.get_for_audit("s", f"offline-{index}")
+                stored = scenario.records.read_for_audit("s", f"offline-{index}")
                 assert stored.item.payload == inference_payload(f"offline-{index}")
 
     try:
@@ -316,13 +329,13 @@ def test_import_admission_authentication_and_scenario_isolation(tmp_path):
                 }
             scenario = dispatcher.get_or_create_scenario("s")
             assert scenario.records.count("s") == 1
-            assert scenario.records.get("s", "first").payload == body["payload"]
+            assert scenario.records.read("s", "first").payload == body["payload"]
             other_headers = {**HEADERS, "x-reef-scenario": "other"}
             response = await client.post("/reef/records", headers=other_headers, json=imported("second"))
             assert response.status == 200
             other = dispatcher.get_or_create_scenario("other")
-            assert other.records.get("other", "first") is None
-            assert scenario.records.get("s", "second") is None
+            assert other.records.read("other", "first") is None
+            assert scenario.records.read("s", "second") is None
             response = await client.post(
                 "/reef/records",
                 headers=other_headers,
@@ -356,7 +369,7 @@ def test_imported_reports_follow_the_recipes_report_schema(tmp_path):
                 json=imported("missing-score", {"references": ["source"]}, "report"),
             )
             assert response.status == 400
-            assert dispatcher.get_or_create_scenario("s").records.get("s", "missing-score") is None
+            assert dispatcher.get_or_create_scenario("s").records.read("s", "missing-score") is None
 
     try:
         asyncio.run(run())
@@ -473,7 +486,7 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
                 },
             )
             assert response.status == 409
-            assert scenario.records.get("s", "new") is None
+            assert scenario.records.read("s", "new") is None
             response = await client.post(
                 endpoint,
                 headers={**HEADERS, "x-reef-scenario": "other"},
@@ -488,7 +501,7 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
                 json={"records": [imported("large", {"text": "x" * MAX_RECORD_IMPORT_BYTES})]},
             )
             assert response.status == 413
-            assert scenario.records.get("s", "large") is None
+            assert scenario.records.read("s", "large") is None
             assert not dispatcher.recipe.batches
 
     try:

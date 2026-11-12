@@ -26,7 +26,7 @@ from typing import Any
 
 import yaml
 
-from reef.core.errors import RuntimeConfigError
+from reef.core.errors import InternalError, RuntimeConfigError
 from reef.execution.executor import Executor
 from reef.execution.executor.config import ExecutorSelection, role_executor_settings, select_executor
 from reef.execution.executor.ray import RayExecutor
@@ -83,7 +83,7 @@ def _log(msg: str) -> None:
     print(f"[reef] {msg}", file=sys.stderr)
 
 
-class DeployStartupError(RuntimeError):
+class DeployStartupError(InternalError):
     """A deployment failed to start; includes its reason and local log location."""
 
 
@@ -466,7 +466,9 @@ def resolve_deployment_config(
         else:
             assemble_provider_services(normalized_config)
         attach_generator_service(normalized_config)
-    except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
+    except DeployConfigError:
+        raise
+    except ValueError as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     return normalized_config, source_root
 
@@ -531,6 +533,8 @@ def run_component(config_path: str | None, overrides: dict[str, str] | None, com
     _log(f"service: {component}")
     try:
         app = build_component_app(component, settings)
+    except (RecipeConfigError, RuntimeConfigError):
+        raise
     except ValueError as exc:
         raise DeployConfigError(str(exc)) from exc
     web.run_app(app, host=settings.host, port=settings.port)

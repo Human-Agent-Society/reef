@@ -13,23 +13,26 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._activation_rule_plugin import ComponentRule
-from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.activation_rule_plugin import ComponentRule
 from tests.support.artifact_versions import inference, report
-from tests.support.harness_steps import IdleMethod, evolution_config
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.harness_jobs import IdleMethod, evolution_config
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
+from reef.core.plugins import PluginConfigError
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.service import deploy
 from reef.service.app import create_app
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import JobStatus, TrainingJob
+from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.job_queue import JobQueueComponent
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
@@ -40,8 +43,10 @@ GENERATED_TASK_RECIPE = "reef.recipe.generated_tasks:GeneratedTaskRecipe"
 def test_configured_handler_rejects_a_function() -> None:
     from reef.service.deploy.serving import inference_handler_factory_for
 
-    with pytest.raises(ValueError, match="must inherit InferenceHandler"):
-        inference_handler_factory_for("reef.inference.http.provider_request_headers")
+    with pytest.raises(ValueError, match="must name a class that inherits InferenceHandler"):
+        inference_handler_factory_for("reef.inference.http:provider_request_headers")
+    with pytest.raises(ValueError, match=r"must be 'package\.module:ClassName'"):
+        inference_handler_factory_for("reef.inference.sglang.chat.SGLangInferenceHandler")
 
 
 class _Process:
@@ -64,7 +69,7 @@ class _Process:
         return self.returncode
 
 
-def _example_owned(relative_path: str):
+def example_owned(relative_path: str):
     """An example-owned stack, skipped where the examples do not ship.
 
     The package job runs this suite against the installed distribution, so
@@ -81,10 +86,10 @@ def _example_owned(relative_path: str):
 
 
 #: The CPU in-process training deployment, whose component records the settings it was built with.
-LOCAL_TRAINING_BACKEND = "tests.support._training_deployment:LocalDeployment"
+LOCAL_TRAINING_BACKEND = "tests.support.training_deployment:LocalDeployment"
 
 
-def _settings(**overrides) -> ServiceConfig:
+def service_settings(**overrides) -> ServiceSettings:
     recipe_settings = dict(overrides.pop("recipe_settings", {}))
     values = {
         "host": "0.0.0.0",
@@ -107,7 +112,7 @@ def _settings(**overrides) -> ServiceConfig:
         "recipe_settings": recipe_settings,
     }
     values.update(overrides)
-    return ServiceConfig(**values)
+    return ServiceSettings(**values)
 
 
 @pytest.fixture
@@ -119,8 +124,10 @@ def stub_repository(monkeypatch):
 
 
 def build(tmp_path: Path, **overrides) -> Dispatcher:
-    """``deploy.build_dispatcher`` of ``_settings(**overrides)``, with its records under ``tmp_path``."""
-    return deploy.build_dispatcher(_settings(agent_record_dir=str(tmp_path / "agent-record"), **overrides), environ={})
+    """``deploy.build_dispatcher`` of ``service_settings(**overrides)``, with its records under ``tmp_path``."""
+    return deploy.build_dispatcher(
+        service_settings(agent_record_dir=str(tmp_path / "agent-record"), **overrides), environ={}
+    )
 
 
 @pytest.mark.unit
@@ -145,7 +152,7 @@ def test_service_config_preserves_inference_handler_config() -> None:
         {
             "reef": {
                 "recipe": OPENCLAWRL_RECIPE,
-                "inference_handler_factory": "example.factory",
+                "inference_handler_factory": "example:Factory",
                 "inference_handler_config": {"tool_call_parser": "qwen25"},
             }
         }
@@ -242,7 +249,7 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
 @pytest.mark.parametrize(
     "relative_path",
     # example-owned stacks (the openclawrl config lives with its example, like recipes/tttd/examples/tttd/serve.yaml)
-    (_example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),),
+    (example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),),
 )
 def test_training_configs_leave_max_staleness_unset_and_make_checkpoint_budget_mandatory(
     relative_path, monkeypatch
@@ -275,20 +282,20 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", factory)
 
     dispatcher = deploy.build_dispatcher(
-        _settings(agent_record_dir=str(tmp_path / "agent-record")),
+        service_settings(agent_record_dir=str(tmp_path / "agent-record")),
         environ={},
     )
 
     assert dispatcher.recipe.name == "openclawrl"
     # The recipe's trainers add their jobs to the jobs queue; the training worker runs them on the component.
-    queued = dispatcher.recipe.training_component
+    queued = dispatcher.live.training_component
     assert isinstance(queued, JobQueueComponent)
     component = queued.component
     assert component.received_model_path == "/models/demo"
     assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
     assert component.config["batch_size"] == 4
     # The backend serves its own snapshots by default (``inference.serving: trainer``).
-    assert isinstance(dispatcher.recipe.runtime, StubInferenceRuntime)
+    assert isinstance(dispatcher.live.runtime, StubInferenceRuntime)
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
         "context": RepositoryBackendContext(work_dir=Path("/state/work"), cache_dir=Path("/state/cache")),
@@ -312,7 +319,11 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repo
     )
 
     recipe = dispatcher.recipe
-    assert recipe.evolution.adapter == "pi" and isinstance(recipe.method, IdleMethod)
+    assert isinstance(recipe, HarnessEvolutionRecipe) and recipe.evolution.adapter == "pi"
+    # The dispatcher's live objects hold the jobs queue's view of the component that the service built.
+    queued = dispatcher.live.harness_component
+    assert isinstance(queued, JobQueueComponent) and isinstance(queued.component, HarnessTrainingComponent)
+    assert isinstance(queued.component.method, IdleMethod)
     assert recipe.configured_tasks() == ("t",)
 
 
@@ -321,7 +332,7 @@ def test_build_dispatcher_applies_common_recipe_controls(stub_repository, tmp_pa
     dispatcher = build(
         tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings={"sample2job": {"config": {"buffer_size": 4}}}
     )
-    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).buffer_size == 4
+    assert dispatcher.recipe.stages().build(PipelineContext("s")).buffer_size == 4
 
 
 @pytest.mark.unit
@@ -331,8 +342,8 @@ def test_a_sample2job_batch_size_is_an_unknown_stage_key(stub_repository, tmp_pa
         tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings={"sample2job": {"config": {"batch_size": 4}}}
     )
     # Stage configs are checked when a scenario builds its pipeline.
-    with pytest.raises(RecipeConfigError, match="unknown config fields: batch_size"):
-        dispatcher.recipe.build_pipeline(PipelineContext("s"))
+    with pytest.raises(PluginConfigError, match="unknown config fields: batch_size"):
+        dispatcher.recipe.stages().build(PipelineContext("s"))
 
 
 @pytest.mark.unit
@@ -341,7 +352,7 @@ def test_a_sample2job_batch_size_is_an_unknown_stage_key(stub_repository, tmp_pa
     [
         (
             OPENCLAWRL_RECIPE,
-            {"module": "tests.support._activation_rule_plugin:ComponentRule", "config": {"component": "weights"}},
+            {"module": "tests.support.activation_rule_plugin:ComponentRule", "config": {"component": "weights"}},
             ComponentRule,
         ),
         # A recipe that trains no weights reads the section too.
@@ -424,13 +435,13 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
     from reef.service.deploy.serving import serving_runtime_config
     from reef.service.deploy.training import training_deployment_for
 
-    settings = _settings(
+    settings = service_settings(
         training_backend="slime",
         inference_backend="sglang",
         inference_num_gpus=1,
         tensor_parallel_size=1,
         inference_remote={"url": "http://inference:8000"},
-        inference_handler_factory="reef.inference.sglang.chat.SGLangInferenceHandler",
+        inference_handler_factory="reef.inference.sglang.chat:SGLangInferenceHandler",
         inference_handler_config={"tool_call_parser": "qwen25"},
     )
     backend = training_deployment_for("slime")
@@ -452,7 +463,7 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
 
     assert dispatcher.recipe.name == "sao"
     # The training backend built the component (the inference branch builds none).
-    component = dispatcher.recipe.training_component.component
+    component = dispatcher.live.training_component.component
     assert component.received_model_path == "/models/demo"
 
 
@@ -462,8 +473,8 @@ def test_build_dispatcher_gives_max_staleness_to_the_record_to_sample_stage_only
     dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
 
     # The window belongs to the record-to-sample stage; the training component never receives it.
-    assert "max_staleness" not in dispatcher.recipe.training_component.component.config
-    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).record2sample.max_staleness == 2
+    assert "max_staleness" not in dispatcher.live.training_component.component.config
+    assert dispatcher.recipe.stages().build(PipelineContext("s")).record2sample.max_staleness == 2
 
 
 @pytest.mark.unit
@@ -490,12 +501,7 @@ class AdapterInference(StubInferenceRuntime):
     """Serve each snapshot under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
 
     def __init__(self, *, per_scenario_adapters: bool) -> None:
-        super().__init__()
-        self.adapters_per_scenario = per_scenario_adapters
-
-    @property
-    def per_scenario_adapters(self) -> bool:
-        return self.adapters_per_scenario
+        super().__init__(per_scenario_adapters=per_scenario_adapters)
 
     def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         return f"adapter:{scenario}:{self.served}"
@@ -517,8 +523,9 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
     component = HeldJobComponent(tmp_path / "checkpoints")
     runtime = AdapterInference(per_scenario_adapters=per_scenario_adapters)
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, runtime)),
+        TestPolicyRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component, runtime),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -593,7 +600,7 @@ def test_service_tokens_merge_token_and_tokens_and_drop_empties() -> None:
 
 
 def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
-    """``reef.token`` feeds ``ServiceConfig.tokens`` under another name; the
+    """``reef.token`` feeds ``ServiceSettings.tokens`` under another name; the
     recipe-owned remainder of the section must still exclude it, or every
     training recipe would reject the cookbook configs as unconsumed settings."""
     from reef.service.assembly import _recipe_owned_settings
@@ -931,7 +938,7 @@ def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("config_path", [_example_owned("recipes/opd/examples/math/serve.yaml")])
+@pytest.mark.parametrize("config_path", [example_owned("recipes/opd/examples/math/serve.yaml")])
 def test_opd_example_trains_an_adapter_against_the_teacher_engine(monkeypatch, config_path) -> None:
     from tests.support.config_helpers import load_deployment
 

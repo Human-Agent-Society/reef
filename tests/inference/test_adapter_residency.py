@@ -9,8 +9,8 @@ import pytest
 from reef.core.weight_layout import WeightFiles
 from reef.inference.interfaces import AdapterEngine
 from reef.inference.residency import (
-    AdapterCapacityExhausted,
-    AdapterEvictionFailed,
+    AdapterCapacityExhaustedError,
+    AdapterEvictionFailedError,
     AdapterResidencyError,
     AdapterResidencyManager,
     adapter_name,
@@ -105,7 +105,7 @@ def test_capacity_exhaustion_fails_closed_when_every_slot_is_protected(engine: F
     manager = AdapterResidencyManager(capacity=2)
     manager.activate("a", "a1", engine, files=FILES)
     manager.activate("b", "b1", engine, files=FILES)
-    with pytest.raises(AdapterCapacityExhausted, match="exhausted"):
+    with pytest.raises(AdapterCapacityExhaustedError, match="exhausted"):
         manager.activate("c", "c1", engine, files=FILES)
     assert engine.unloaded == []
     assert current(manager, "c") is None
@@ -118,20 +118,20 @@ def test_supersede_lets_a_paused_scenario_evict_its_own_current_revision(engine:
     manager.activate("a", "a1", engine, files=FILES)
     manager.activate("b", "b1", engine, files=FILES)
     # Without supersede a's own current revision is protected like any other.
-    with pytest.raises(AdapterCapacityExhausted):
+    with pytest.raises(AdapterCapacityExhaustedError):
         manager.activate("a", "a2", engine, files=FILES)
     manager.activate("a", "a2", engine, files=FILES, supersede=True)
     assert engine.unloaded == [adapter_name("a", "a1")]
     assert current(manager, "a") == "a2" and current(manager, "b") == "b1"
     # A peer's current revision is still never the victim.
-    with pytest.raises(AdapterCapacityExhausted):
+    with pytest.raises(AdapterCapacityExhaustedError):
         manager.activate("c", "c1", engine, files=FILES, supersede=True)
 
 
 def test_make_room_refuses_when_every_slot_is_protected(engine: FakeEngine) -> None:
     manager = AdapterResidencyManager(capacity=1)
     manager.activate("a", "a1", engine, files=FILES)
-    with pytest.raises(AdapterCapacityExhausted):
+    with pytest.raises(AdapterCapacityExhaustedError):
         manager.make_room("b", engine, supersede=True)
     assert engine.unloaded == [] and current(manager, "a") == "a1"
 
@@ -141,7 +141,7 @@ def test_failed_unload_leaks_the_slot_visibly_and_is_retried_first(engine: FakeE
     manager.activate("a", "a1", engine, files=FILES)
     manager.activate("a", "a2", engine, files=FILES)
     engine.fail_unload.add(adapter_name("a", "a1"))
-    with pytest.raises(AdapterCapacityExhausted, match="leaked"):
+    with pytest.raises(AdapterCapacityExhaustedError, match="leaked"):
         manager.activate("a", "a3", engine, files=FILES)
     status = manager.status()
     assert status["leaked"] == 1 and status["resident"] == 2
@@ -160,7 +160,7 @@ def test_a_failed_eviction_carries_the_engine_failure_as_its_cause(engine: FakeE
     manager = AdapterResidencyManager(capacity=1)
     manager.activate("a", "a1", engine, files=FILES)
     engine.fail_unload.add(adapter_name("a", "a1"))
-    with pytest.raises(AdapterCapacityExhausted, match="engine keeps") as excinfo:
+    with pytest.raises(AdapterCapacityExhaustedError, match="engine keeps") as excinfo:
         manager.activate("a", "a2", engine, files=FILES, supersede=True)
     assert isinstance(excinfo.value.__cause__, RuntimeError)
 
@@ -305,7 +305,7 @@ def test_capacity_rejection_names_the_slot_count_the_engine_needs(engine: FakeEn
     """#65: the operator cannot infer the fix from a list of adapter names."""
     manager = AdapterResidencyManager(capacity=1)
     manager.activate("a", "a1", engine, files=FILES)
-    with pytest.raises(AdapterCapacityExhausted) as raised:
+    with pytest.raises(AdapterCapacityExhaustedError) as raised:
         manager.activate("b", "b1", engine, files=FILES)
     message = str(raised.value)
     assert "2 scenarios share this engine" in message
@@ -322,13 +322,13 @@ def test_a_refused_eviction_is_distinguishable_from_a_plain_rejection(engine: Fa
     manager.activate("a", "a1", engine, files=FILES)
     manager.activate("a", "a2", engine, files=FILES)
     engine.fail_unload.add(adapter_name("a", "a1"))
-    with pytest.raises(AdapterEvictionFailed, match="engine keeps"):
+    with pytest.raises(AdapterEvictionFailedError, match="engine keeps"):
         manager.activate("b", "b1", engine, files=FILES)
 
-    # A plain rejection is the base class only, so `except AdapterEvictionFailed`
-    # cannot swallow it and `except AdapterCapacityExhausted` still catches both.
+    # A plain rejection is the base class only, so `except AdapterEvictionFailedError`
+    # cannot swallow it and `except AdapterCapacityExhaustedError` still catches both.
     full = AdapterResidencyManager(capacity=1)
     full.activate("a", "a1", FakeEngine(), files=FILES)
-    with pytest.raises(AdapterCapacityExhausted) as raised:
+    with pytest.raises(AdapterCapacityExhaustedError) as raised:
         full.activate("b", "b1", FakeEngine(), files=FILES)
-    assert not isinstance(raised.value, AdapterEvictionFailed)
+    assert not isinstance(raised.value, AdapterEvictionFailedError)

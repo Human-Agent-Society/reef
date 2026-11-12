@@ -5,23 +5,28 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from recipes.tttd.objective import tttd_signal
-from reef.train.algos.signals import TrainingSignal
+from recipes.tttd.objective import tttd_advantages
+from reef.train.tinker_backend.loss_families import register_loss_family
 from reef.train.tinker_backend.losses import MatrixInput, TinkerLoss, TokenRow
-from reef.train.tinker_backend.objectives import TinkerObjective, register_tinker_objective
+from reef.train.tinker_backend.objectives import TinkerObjective
+from reef.train.tinker_backend.schedule import next_steps
+from reef.train.tinker_backend.signals import TrainingSignal
 from reef.train.types import JobData
 
 
-@register_tinker_objective
 class TttdTinkerObjective(TinkerObjective):
     name = "tttd"
     loss_family = "tttd"
 
     def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
-        return tttd_signal(data, state)
+        advantages, metrics = tttd_advantages(data)
+        steps = next_steps(state)
+        return TrainingSignal("train", {"steps": steps}, {**metrics, "steps": steps}, advantages)
 
 
+@register_loss_family
 class TttdTinkerLoss(TinkerLoss):
+    loss_family = "tttd"
     needs_base_logprobs = True
 
     def inputs(

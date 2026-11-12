@@ -16,7 +16,7 @@ from typing import Any
 
 from reef.artifact.artifact import (
     Artifact,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactPublicationError,
     SnapshotRef,
     artifact_components,
@@ -35,11 +35,19 @@ from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
+from reef.core.plugins import PluginConfigError
+from reef.core.reports import ReportBase, shared_report_type
 from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.composite import CompositeRecipe, component_recipes
+from reef.recipe.deployment import refuses_images
+from reef.recipe.errors import RecipeConfigError
+from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.sample2job import NoJobData
 from reef.scenario.binding import ScenarioBinding
+from reef.scenario.live_objects import LiveObjects, check_root_start, default_start, scenario_components
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import ScenarioArtifactFiles
 from reef.storage.commits import (
@@ -57,6 +65,7 @@ from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
 from reef.train.component import ScenarioRoot
 from reef.train.trainer import ComponentTrainer
+from reef.train.trainer_builder import ComponentTrainerSpecs, SpecTrainerBuilder, TrainerBuilder, TrainerSpec
 from reef.train.training_requests import TrainingRequestQueue
 
 
@@ -94,13 +103,13 @@ class RepositoryCommitSnapshots(CommitSnapshots):
             self.start_ids = frozenset(artifact_components(self.backend.materialize(self.start)))
         made = [id_ for id_ in artifact_ids.values() if id_ not in seen and id_ not in self.start_ids]
         if not made:
-            raise CommitHistoryError(f"commit step {record.step} made an artifact, but names no new artifact ID")
+            raise CommitHistoryError(f"commit {record.commit_number} made an artifact, but names no new artifact ID")
         return made[0]
 
     def snapshot(self, record: CommitRecord, seen: set[str], active: SnapshotRef) -> SnapshotRef:
         selection = record.selection
         if selection is None:
-            raise CommitHistoryError(f"commit step {record.step} has no selection")
+            raise CommitHistoryError(f"commit {record.commit_number} has no selection")
         if record.checkpoint:
             return self.binding(self.made_artifact(record, seen))
         if record.operation == "training":
@@ -128,8 +137,8 @@ class RepositoryCommitSnapshots(CommitSnapshots):
             if record.snapshot == UNLOCATED_SNAPSHOT:
                 try:
                     record = replace(record, snapshot=self.snapshot(record, seen, active))
-                except ArtifactNotFound as exc:
-                    raise CommitHistoryError(f"commit step {record.step} names a missing artifact: {exc}") from exc
+                except ArtifactNotFoundError as exc:
+                    raise CommitHistoryError(f"commit {record.commit_number} names a missing artifact: {exc}") from exc
             seen.update((record.artifact_ids or {}).values())
             if record.activates:
                 active = record.snapshot
@@ -141,7 +150,7 @@ def committed_records(store: ScenarioStore, head_record: CommitRecord | None) ->
     records = store.history()
     if not records and head_record is not None:
         # No durable log: the head adopted from checkpoint metadata is the
-        # only committed step there is.
+        # only commit there is.
         records = (head_record,)
     return records
 
@@ -235,10 +244,117 @@ def recovered_trainer_states(
     return states
 
 
+def read_trainer_spec(recipe: Recipe, live: LiveObjects) -> TrainerSpec:
+    """The spec of the one trainer of ``recipe``, which is not a composite, on the objects of ``live``.
+
+    - A ``HarnessEvolutionRecipe`` submits each step as a job of ``live.harness_component``, which the service
+      built (``reef.service.assembly.with_harness_components``).
+    - A ``WeightTrainingRecipe`` submits jobs to ``live.training_component``, with its ``parameters_by_kind``.
+    - Any other recipe only reads records.
+
+    The trainer writes the data of each job to ``live.data_store``.
+
+    Raise ``TypeError`` for a weight recipe whose class declares no ``sample2job`` stage. Raise
+    ``RecipeConfigError`` for a harness recipe or a weight recipe when ``live`` has no component for its jobs.
+    """
+    job_component = None
+    job_parameters = None
+    if isinstance(recipe, HarnessEvolutionRecipe):
+        if live.harness_component is None:
+            raise RecipeConfigError(
+                "harness evolution has no training component to run its jobs: the service builds one with "
+                "reef.service.assembly.with_harness_components"
+            )
+        job_component = live.harness_component
+    elif isinstance(recipe, WeightTrainingRecipe):
+        if type(recipe).pipeline_spec().sample2job is NoJobData:
+            raise TypeError(
+                f"{type(recipe).__name__} declares no sample2job: return a PipelineSpec with a Sample2Job subclass "
+                "from pipeline_spec()"
+            )
+        if live.training_component is None:
+            raise RecipeConfigError(f"{type(recipe).__name__} requires a training component")
+        # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
+        job_component = live.training_component
+        job_parameters = recipe.parameters_by_kind()
+    return TrainerSpec(
+        name=recipe.name,
+        stages=recipe.stages(),
+        report_type=recipe.report_type,
+        training_mode=recipe.training_mode,
+        job_parameters=job_parameters,
+        job_component=job_component,
+        data_store=live.data_store,
+    )
+
+
+def scenario_report_type(recipe: Recipe) -> type[ReportBase] | None:
+    """The report contract that the ingress of a scenario of ``recipe`` checks; ``None`` keeps ingress open.
+
+    It is the contract of the report types that the deployment's recipes declare
+    (``reef.core.reports.shared_report_type`` over ``component_recipes``): a recipe's own ``report_type``, and
+    for a composite the one that its components share, or a contract that a payload meets when any component's
+    parses it. Each trainer parses reports with its own component's contract, so a weight recipe with a strict
+    report and a harness recipe with a plain scored one share a scenario: ingress refuses only a report that no
+    component takes.
+    """
+    return shared_report_type(child.report_type for _, child in component_recipes(recipe))
+
+
+def with_record2sample_configs(
+    recipe: Recipe, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
+) -> Recipe:
+    """``recipe`` with a scenario's own record-to-sample keys ``configs``, by component name
+    (``ScenarioSettings.record2sample_config``), over the record-to-sample config of each component's recipe
+    (``Recipe.with_record2sample_config``). The trainer builder builds the scenario's trainers from the result.
+
+    ``components`` is what the scenario serves. Empty ``configs`` return ``recipe``. A composite gives each child
+    the keys under the child's component name. Any other recipe takes the keys of the one component that its
+    trainer binds, which is the records component for a scenario with no component; it raises
+    ``RecipeConfigError`` when the scenario serves several components.
+    """
+    if not configs:
+        return recipe
+    if isinstance(recipe, CompositeRecipe):
+        return replace(
+            recipe,
+            components={
+                component: child.with_record2sample_config(configs.get(component, {}))
+                for component, child in recipe.components.items()
+            },
+        )
+    if len(components.names) > 1:
+        raise RecipeConfigError(
+            f"{type(recipe).__name__} serves components {list(components.names)}: only a composite recipe gives "
+            "each trainer its own record2sample config"
+        )
+    component = components.names[0] if components.names else RECORDS_COMPONENT
+    return recipe.with_record2sample_config(configs.get(component, {}))
+
+
+def read_trainer_specs(recipe: Recipe, live: LiveObjects) -> TrainerSpec | ComponentTrainerSpecs:
+    """The trainer specs of ``recipe`` on the objects of ``live``: one spec for each component of a
+    ``CompositeRecipe``, with the scenario's report type (``scenario_report_type``), or the one spec of any other
+    recipe (``read_trainer_spec``).
+
+    A component of a composite whose trainer only reads records has no mode to run in: its spec has the mode
+    ``auto``.
+    """
+    if not isinstance(recipe, CompositeRecipe):
+        return read_trainer_spec(recipe, live)
+    specs = {}
+    for component, component_recipe in recipe.components.items():
+        spec = read_trainer_spec(component_recipe, live)
+        specs[component] = replace(spec, training_mode="auto") if spec.job_component is None else spec
+    return ComponentTrainerSpecs(specs, scenario_report_type(recipe))
+
+
 class ScenarioFactory:
     """Register, assemble, and recover complete scenario instances.
 
-    Inference loads each selected release. ``served_models`` supplies the actual serving artifact for training.
+    Inference loads each selected snapshot. ``served_models`` supplies the actual serving artifact for training.
+    ``live`` holds the runtime, the job components and the data store that the scenarios of ``recipe`` use; the
+    default has none, which fits a recipe that only reads records.
     """
 
     def __init__(
@@ -246,14 +362,19 @@ class ScenarioFactory:
         recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
+        live: LiveObjects | None = None,
         local_artifact_dir: Path | None = None,
         experiment_tracker: ExperimentTracker,
         scenario_storage: ScenarioStorage,
         experiment_reports: ExperimentReportQueue | None = None,
         served_models: ServedModels | None = None,
         training_requests: TrainingRequestQueue | None = None,
+        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         self._recipe = recipe
+        self.live = LiveObjects() if live is None else live
+        #: Builds each scenario's trainers from the recipe's specs; None is ``SpecTrainerBuilder``.
+        self.trainer_builder = SpecTrainerBuilder() if trainer_builder is None else trainer_builder
         #: The training requests of every scenario; None builds scenarios that take no request.
         self._training_requests = training_requests
         self.served_models = served_models
@@ -284,7 +405,7 @@ class ScenarioFactory:
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
-        components = self._recipe.build_components(scenario)
+        components = scenario_components(self._recipe, self.live, scenario)
         if registration is None:
             self.register(scenario, backend, components, start)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from
@@ -307,19 +428,19 @@ class ScenarioFactory:
         """Write the root snapshot of the new scenario ``scenario`` and register it with ``backend``.
 
         The root holds the artifact item ``start`` in its component, or the recipe's default start
-        (``Recipe.default_start``) when ``start`` is ``None``. A root of several components holds each other
+        (``reef.scenario.live_objects.default_start``) when ``start`` is ``None``. A root of several components holds each other
         component's default start; a default start with files outside the component directories raises
         ``ReefError``. The registration metadata records the root's ``RootSource`` and, for several components, the
         manifest of the components that the root makes. An item that the component's layout or admission check
-        refuses raises ``ValueError``, and so does an item root that any of the recipe's training components cannot
-        start from (``Recipe.check_root_start``). Nothing is registered after a refusal.
+        refuses raises ``ValueError``, and so does an item root that the training component cannot
+        start from (``reef.scenario.live_objects.check_root_start``). Nothing is registered after a refusal.
         """
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
             root, source = self.root_snapshot(components, start, Path(work))
             if start is not None:
-                self._recipe.check_root_start(ScenarioRoot(root, source))
+                check_root_start(self._recipe, self.live, ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {
                 SCENARIO_METADATA_KEY: scenario_metadata_for(name=scenario, source=source)
             }
@@ -338,7 +459,7 @@ class ScenarioFactory:
         """The unpublished root snapshot of a new scenario that ``components`` serves, under ``work``, and its source."""
         item: tuple[str, Artifact] | None = None
         if start is None:
-            default = self._recipe.default_start()
+            default = default_start(self._recipe, self.live)
             source = RootSource("default", inputs=default.inputs)
         else:
             component, layout = components.import_target(start.component)
@@ -353,7 +474,7 @@ class ScenarioFactory:
                 return stored, source
             components.components[component].validator.validate(stored)
             item = (component, stored)
-            default = self._recipe.default_start()
+            default = default_start(self._recipe, self.live)
         tree = work / "default"
         tree.mkdir()
         default.write(tree)
@@ -389,7 +510,7 @@ class ScenarioFactory:
             raise ValueError(f"invalid scenario metadata for {name!r}")
         if not components.single:
             # A registration names the components its snapshots bind. One made by a
-            # recipe serving a single component, or none, has releases with no
+            # recipe serving a single component, or none, has snapshots with no
             # component directories to carry forward; refuse rather than compose
             # the whole flat tree into every component.
             if registered_components is None:
@@ -431,15 +552,15 @@ class ScenarioFactory:
         # What served after the artifact head's commit; the commit history's activations come after it.
         served_at_head = served_snapshot(registration, checkpoint_head=checkpoint_head)
         start_artifact = backend.resolve_snapshot(start_artifact.revision)
-        checkpoint_step = 0 if checkpoint is None else checkpoint.step
-        runtime = self._recipe.runtime
+        checkpoint_commit_number = 0 if checkpoint is None else checkpoint.commit_number
+        runtime = self.live.runtime
         store = self._storage.open(name)
         store.use_snapshots(RepositoryCommitSnapshots(backend, start_artifact))
         scenario: Scenario | None = None
         trainers: tuple[ComponentTrainer, ...] = ()
         try:
             head_record = store.recover(checkpoint=checkpoint)
-            scenario_step = 0 if head_record is None else head_record.step
+            commit_number = 0 if head_record is None else head_record.commit_number
             recovered_states = recovered_trainer_states(store, name, head_record, components)
 
             # Publication stages durable bytes before the commit record is durable, while
@@ -447,7 +568,9 @@ class ScenarioFactory:
             # two leaves the commit history's checkpoint ahead of that pointer.
             if store.durable:
                 checkpoints = [
-                    record for record in store.history() if record.trained_artifact and record.step >= checkpoint_step
+                    record
+                    for record in store.history()
+                    if record.trained_artifact and record.commit_number >= checkpoint_commit_number
                 ]
                 if checkpoints:
                     checkpoint_head = checkpoints[-1].snapshot
@@ -484,24 +607,33 @@ class ScenarioFactory:
             # The scenario's own record-to-sample keys (RFC #1362). The instance keeps them, so that a process that
             # loaded the scenario can see that control changed them (``Scenario.record2sample_config``).
             record2sample_config = self._storage.read_settings(name).record2sample_config
-            trainers = self._recipe.for_record2sample_configs(components, record2sample_config).build_trainers(
-                name,
-                store.records,
-                components=components,
-                algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
-                experiment_logger=experiment_logger,
-                task_storage=store.tasks,
-                artifacts=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
-                samples=self._storage.sample_store(name, store),
-                root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
-            )
+            recipe = with_record2sample_configs(self._recipe, components, record2sample_config)
+            try:
+                trainers = self.trainer_builder.build_trainers(
+                    read_trainer_specs(recipe, self.live),
+                    name,
+                    store.records,
+                    components=components,
+                    algorithm_states={
+                        component: state.algorithm_state for component, state in recovered_states.items()
+                    },
+                    experiment_logger=experiment_logger,
+                    task_storage=store.tasks,
+                    artifacts=ScenarioArtifactFiles(
+                        name=name, store=store, repository=repository, components=components
+                    ),
+                    samples=self._storage.sample_store(name, store),
+                    root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
+                )
+            except PluginConfigError as exc:
+                raise RecipeConfigError(str(exc)) from exc
             if any(
                 component_trainer.trainer.trains
                 and component_trainer.trainer.pipeline.training_mode != self._recipe.training_mode
                 for component_trainer in trainers
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
-                raise ValueError("recipe.build must pass its training_mode to Trainer.build")
+                raise ValueError("every trainer that trains must run the recipe's training_mode")
             if len(trainers) > 1 and not store.durable:
                 raise ReefError(
                     f"scenario {name!r} runs a trainer per component: each recovers from its own commits, "
@@ -514,7 +646,7 @@ class ScenarioFactory:
                     scenario=name,
                     recipe=self._recipe.name,
                     source_artifacts=root_artifacts,
-                    scenario_step=scenario_step,
+                    commit_number=commit_number,
                     store=store,
                     reports=self.experiment_reports,
                 )
@@ -524,18 +656,18 @@ class ScenarioFactory:
                 binding=ScenarioBinding(
                     components=components,
                     runtime=runtime,
-                    training_component=self._recipe.training_component,
+                    training_component=self.live.training_component,
                     activation_rule=self._recipe.activation_rule(),
                     served_models=self.served_models,
-                    # The recipe's own contract, not the first trainer's: a composite agrees
-                    # one across its components, whatever order they are listed in.
-                    report_type=self._recipe.report_type,
-                    refuses_images=self._recipe.refuses_images,
+                    # The deployment's contract, not the first trainer's: the components of a composite
+                    # agree one, whatever order they are listed in.
+                    report_type=scenario_report_type(self._recipe),
+                    refuses_images=refuses_images(self._recipe),
                 ),
                 repository=repository,
                 root_source=root_source,
                 trainers=trainers,
-                scenario_step=scenario_step,
+                commit_number=commit_number,
                 store=store,
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,

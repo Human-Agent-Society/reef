@@ -25,12 +25,13 @@ from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import DeployConfigError
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor.arguments import normalize_native_options
-from reef.train.component import TrainingComponent, TrainingComponentFactory
+from reef.train.component import TrainingBackendFacts, TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import EngineWeights, InProcessTrainingDeployment
-from reef.train.tinker_backend.config import SpindleFullConfig, TinkerConfig, TinkerServiceConfig
+from reef.train.tinker_backend.config import SpindleFullSettings, TinkerServiceSettings, TinkerSettings
+from reef.train.tinker_backend.facts import SpindleFullFacts, TinkerFacts
 
 
-def service_settings[T: TinkerServiceConfig](options: Mapping[str, Any], config_type: type[T]) -> T:
+def service_settings[T: TinkerServiceSettings](options: Mapping[str, Any], config_type: type[T]) -> T:
     """Parse ``training.options`` into ``config_type``, with the declared types (CLI and YAML values are text)."""
     values = {key.replace("-", "_"): value for key, value in normalize_native_options(options).items()}
     try:
@@ -41,9 +42,9 @@ def service_settings[T: TinkerServiceConfig](options: Mapping[str, Any], config_
         raise DeployConfigError(f"training.options: {exc}") from exc
 
 
-def tinker_settings(options: Mapping[str, Any]) -> TinkerConfig:
+def tinker_settings(options: Mapping[str, Any]) -> TinkerSettings:
     """Parse ``training.options`` into the Tinker settings."""
-    return service_settings(options, TinkerConfig)
+    return service_settings(options, TinkerSettings)
 
 
 class TinkerDeployment(InProcessTrainingDeployment):
@@ -94,14 +95,22 @@ class TinkerComponentFactory(TrainingComponentFactory):
     kind = TinkerDeployment.component_type
 
     def config_type(self) -> type:
-        return TinkerConfig
+        return TinkerSettings
+
+    def facts(
+        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
+    ) -> TrainingBackendFacts | None:
+        """The ``TinkerFacts`` of the config's settings: no SDK client, sampler or API key."""
+        return TinkerFacts.of(
+            model_path, TinkerSettings(**{key: value for key, value in config.items() if key != "type"})
+        )
 
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         from reef.tinker.sampling import TinkerSDKSampler
         from reef.train.tinker_backend.client import TinkerSDKClient
         from reef.train.tinker_backend.component import TinkerTrainingComponent
 
-        settings = TinkerConfig(**{key: value for key, value in config.items() if key != "type"})
+        settings = TinkerSettings(**{key: value for key, value in config.items() if key != "type"})
         key = environ.get(settings.api_key_env)
         if not key:
             raise ValueError(f"Tinker requires the environment variable {settings.api_key_env}")
@@ -127,9 +136,9 @@ class TinkerComponentFactory(TrainingComponentFactory):
 component_factory = TinkerComponentFactory()
 
 
-def spindle_full_settings(options: Mapping[str, Any]) -> SpindleFullConfig:
+def spindle_full_settings(options: Mapping[str, Any]) -> SpindleFullSettings:
     """Parse ``training.options`` into the Spindle full-parameter settings."""
-    return service_settings(options, SpindleFullConfig)
+    return service_settings(options, SpindleFullSettings)
 
 
 class SpindleFullDeployment(InProcessTrainingDeployment):
@@ -168,7 +177,15 @@ class SpindleFullComponentFactory(TrainingComponentFactory):
     kind = SpindleFullDeployment.component_type
 
     def config_type(self) -> type:
-        return SpindleFullConfig
+        return SpindleFullSettings
+
+    def facts(
+        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
+    ) -> TrainingBackendFacts | None:
+        """The ``SpindleFullFacts`` of the config's settings: no SDK client, sampler, exporter or API key."""
+        return SpindleFullFacts.of(
+            model_path, SpindleFullSettings(**{key: value for key, value in config.items() if key != "type"})
+        )
 
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         from reef.tinker.sampling import TinkerSDKSampler
@@ -176,7 +193,7 @@ class SpindleFullComponentFactory(TrainingComponentFactory):
         from reef.train.tinker_backend.full import SpindleFullTrainingComponent
         from reef.train.tinker_backend.spindle_export import ModalCheckpointExporter
 
-        settings = SpindleFullConfig(**{key: value for key, value in config.items() if key != "type"})
+        settings = SpindleFullSettings(**{key: value for key, value in config.items() if key != "type"})
         key = environ.get(settings.api_key_env)
         if not key:
             raise ValueError(f"Spindle requires the environment variable {settings.api_key_env}")

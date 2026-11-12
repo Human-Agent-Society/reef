@@ -67,11 +67,13 @@ def collect(work: Path) -> dict:
     commits = []
     for path in sorted((work / "agent-record").glob("*.sqlite3")) if (work / "agent-record").is_dir() else []:
         with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
-            rows = connection.execute("SELECT commit_json FROM scenario_commit ORDER BY step").fetchall()
-        # ``CommitRecord`` reads every stored record format, also the formats of older runs.
+            rows = connection.execute("SELECT commit_json FROM scenario_commit ORDER BY commit_number").fetchall()
+        # ``CommitRecord`` reads the current stored record format.
         commits.extend(CommitRecord.from_dict(json.loads(text)) for (text,) in rows)
     commits.sort(key=lambda commit: commit.recorded_at)
-    releases = [{"artifact_id": "seed", "step": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}]
+    releases = [
+        {"artifact_id": "seed", "commit_number": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}
+    ]
     previous = seed_files
     # The tree of each artifact, so an activation or a new training start shows the tree it names.
     files_by_artifact: dict[str, dict] = {}
@@ -87,7 +89,7 @@ def collect(work: Path) -> dict:
             releases.append(
                 {
                     "artifact_id": artifact_id,
-                    "step": commit.step,
+                    "commit_number": commit.commit_number,
                     "kind": operation,
                     "recorded_at": commit.recorded_at,
                     "patch": [],
@@ -109,7 +111,7 @@ def collect(work: Path) -> dict:
         releases.append(
             {
                 "artifact_id": artifact_id if published else None,
-                "step": commit.step,
+                "commit_number": commit.commit_number,
                 "kind": "published" if published else ("skipped" if metrics.get("skipped") else "rejected"),
                 "skipped": metrics.get("skipped"),
                 "recorded_at": commit.recorded_at,
@@ -242,10 +244,10 @@ function renderChain() {
   D.releases.forEach((r, i) => {
     const d = document.createElement('div'); d.className = 'rel' + (i === state.release ? ' sel' : ''); d.tabIndex = 0;
     const v = r.result || {};
-    const source = r.step ? 'method proposal' : 'the served tree before any step';
+    const source = r.commit_number ? 'method proposal' : 'the served tree before any step';
     const muts = r.diff ? '' : (r.patch || []).map(path => `<li>${esc(path)}</li>`).join('');
     const diff = r.diff ? ['added','updated','removed'].filter(k => r.diff[k].length).map(k => `<li>${k}: ${r.diff[k].map(esc).join(', ')}</li>`).join('') : '';
-    d.innerHTML = `<div class="id">${r.step ? 'step ' + r.step + ' · ' : ''}${esc(short(r.artifact_id) || '-')}</div>` +
+    d.innerHTML = `<div class="id">${r.commit_number ? 'commit ' + r.commit_number + ' · ' : ''}${esc(short(r.artifact_id) || '-')}</div>` +
       `<div class="k ${r.kind}">${esc(r.kind)}${r.skipped ? ': ' + esc(r.skipped) : ''}</div>` +
       `<div>${esc(source)}</div>` + (r.summary ? `<div>${esc(r.summary)}</div>` : '') +
       (v.wins != null ? `<div>W / L / T ${v.wins} / ${v.losses} / ${v.ties} · candidate ${v.candidate_score} vs current ${v.current_score}</div>` : '') +
@@ -256,7 +258,7 @@ function renderChain() {
     el.appendChild(d);
   });
   const sel = document.getElementById('relsel'); sel.innerHTML = '';
-  D.releases.forEach((r, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (r.step ? 'step ' + r.step + ' ' : 'seed ') + short(r.artifact_id); o.selected = i === state.release; sel.appendChild(o); });
+  D.releases.forEach((r, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (r.commit_number ? 'commit ' + r.commit_number + ' ' : 'seed ') + short(r.artifact_id); o.selected = i === state.release; sel.appendChild(o); });
 }
 function layout(g) {
   // Layers by breadth first walk from the start stage; a stage keeps the first layer it is reached in.

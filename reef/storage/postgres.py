@@ -42,7 +42,7 @@ from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 MAX_PARAMETERS = 65535
 
 #: The version of the record schema that this adapter writes and reads; it opens no other version.
-POSTGRES_SCHEMA_VERSION = 22
+POSTGRES_SCHEMA_VERSION = 23
 
 
 class PostgresRecordDatabase:
@@ -204,7 +204,7 @@ class PostgresScenarioDatabase(SQLScenarioDatabase):
                 self._database.check_store(connection, self.storage_id, write=write)
                 yield connection
 
-    def _insert_if_absent(
+    def _write_if_absent(
         self, connection: Connection, table: Table, values: Mapping[str, object] | Sequence[Mapping[str, object]]
     ) -> bool:
         rows = [dict(values)] if isinstance(values, Mapping) else [dict(row) for row in values]
@@ -345,7 +345,7 @@ class PostgresScenarioStorage(ScenarioStorage):
     def archive(self, scenario: str) -> tuple[str, ...]:
         with self._lock:
             self._ensure_open()
-            self.data.remove_scenario(self.read_settings(scenario).owner or scenario, scenario)
+            self.data.delete_scenario(self.read_settings(scenario).owner or scenario, scenario)
             storage_id = self._database.archive(scenario)
             archived_files = self.task_files.archive(scenario)
             if storage_id is None:

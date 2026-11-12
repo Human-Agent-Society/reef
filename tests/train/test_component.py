@@ -8,10 +8,12 @@ import pytest
 from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import StubTrainingComponent
 
+from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
+from reef.core.errors import RuntimeConfigError
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
-from reef.train.algos.signals import PreparedJob
-from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob, job_id_for
+from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob, job_id_for, training_backend_facts
+from reef.train.slime_backend.signals import PreparedJob
 from reef.train.types import JobData
 
 
@@ -180,3 +182,40 @@ def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp
     )
     with pytest.raises(ValueError, match="takes no imported snapshots"):
         StubTrainingComponent(artifact_format=None).check_artifact(DirectoryFiles(full))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("artifact_format", [ArtifactFormat("full"), ArtifactFormat("adapter", 8, ("q_proj",))])
+def test_a_base_root_is_admitted_exactly_for_the_default_start_that_it_names(tmp_path, artifact_format):
+    component = StubTrainingComponent(artifact_format=artifact_format)
+    assert component.default_start_inputs == {"model": "stub"}
+    (tmp_path / BASE_FILE).write_text(BaseRoot({"model": "stub"}).to_text())
+    component.check_artifact(DirectoryFiles(tmp_path))
+    (tmp_path / BASE_FILE).write_text(BaseRoot({"model": "stub", "lora_rank": "8"}).to_text())
+    with pytest.raises(ValueError, match=r"another default start than this deployment's \(lora_rank: '8', not None"):
+        component.check_artifact(DirectoryFiles(tmp_path))
+    (tmp_path / BASE_FILE).write_text(BaseRoot({"model": "other"}).to_text())
+    with pytest.raises(ValueError, match="model: 'other', not 'stub'"):
+        component.check_artifact(DirectoryFiles(tmp_path))
+    (tmp_path / BASE_FILE).write_text("{}")
+    with pytest.raises(ValueError, match=r"the object \{format, inputs\}"):
+        component.check_artifact(DirectoryFiles(tmp_path))
+
+
+#: A factory that overrides no ``facts``: the stand-in backend of ``tests.support.training_deployment``.
+LOCAL_FACTORY = "tests.support.training_deployment:component_factory"
+
+
+@pytest.mark.unit
+def test_a_backend_that_states_no_facts_answers_none_and_builds_nothing(tmp_path, monkeypatch):
+    """The default of ``TrainingComponentFactory.facts``: a caller that needs the facts builds the component."""
+    marker = tmp_path / "built"
+    assert training_backend_facts({"type": LOCAL_FACTORY, "marker": str(marker)}, model_path="m", environ={}) is None
+    assert not marker.exists()
+    with pytest.raises(RuntimeConfigError, match="dotted reference as type"):
+        training_backend_facts({}, model_path="m", environ={})
+    from tests.support.training_deployment import component_factory
+
+    monkeypatch.setattr(type(component_factory), "facts", lambda *args: {"name": "local"})
+    with pytest.raises(TypeError, match="must state TrainingBackendFacts or None"):
+        training_backend_facts({"type": LOCAL_FACTORY}, model_path="m", environ={})

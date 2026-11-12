@@ -9,7 +9,7 @@ import pytest
 
 from reef.execution.executor.delegating import DelegatingExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 
 torch = pytest.importorskip("torch")
 
@@ -92,7 +92,7 @@ class _RecordingRolloutExecutor(DelegatingExecutor):
 def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor(monkeypatch):
     from reef.inference.sglang.control import SGLangControl
 
-    args = SGLangConfig("model", 1, 1, 1, executor=_RecordingRolloutExecutor)
+    args = SGLangSettings("model", 1, 1, 1, executor=_RecordingRolloutExecutor)
     manager = SGLangControl(args, "placement")
     executor = manager._serving
     assert executor.config.options == {"config": args, "pg": "placement"}
@@ -135,7 +135,7 @@ def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
     )
     killed = []
     monkeypatch.setattr(module.ray, "kill", lambda worker, **kwargs: killed.append(worker))
-    args = SGLangConfig("model", 1, 1, 1)
+    args = SGLangSettings("model", 1, 1, 1)
     with pytest.raises(RuntimeError, match="failed init"):
         module.SGLangWorker(args, "borrowed-placement")
     assert killed == [engine]
@@ -146,7 +146,7 @@ def _worker(module, group, config=None):
     from reef.inference.recovery import InferenceControl
 
     worker = object.__new__(module.SGLangWorker)
-    worker.config = SGLangConfig("model", 1, 1, 1) if config is None else config
+    worker.config = SGLangSettings("model", 1, 1, 1) if config is None else config
     worker.cluster = types.SimpleNamespace(group=group, routers=[])
     worker._closed = False
     worker._control = InferenceControl(module._SGLangEngineGroup(worker))
@@ -196,13 +196,13 @@ def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch:
         "prm_teacher_topk_log_probs_cand": [[[[-0.1, -0.2], [-0.3, -0.4]]]],
     }
 
-    from reef.train.slime_backend.loss_families import LOSS_FAMILIES
+    from reef.train.slime_backend.loss_families import resolve_loss_family
 
     # Each family declares its own columns; the manager applies whatever the
     # active family declared. Both sets here, so one call covers the table.
     declared = {
-        **LOSS_FAMILIES.resolve("sao").rollout_tensor_dtypes,
-        **LOSS_FAMILIES.resolve("openclawrl").rollout_tensor_dtypes,
+        **resolve_loss_family("sao").rollout_tensor_dtypes,
+        **resolve_loss_family("openclawrl").rollout_tensor_dtypes,
     }
     tensorize_external_fields(data, declared)
 
@@ -220,7 +220,7 @@ def test_uncertain_weight_update_synchronously_retires_engine_handles(monkeypatc
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-1")),
     ]
     group = _ServerGroup(list(engines))
-    manager = _worker(module, group, SGLangConfig("model", 1, 1, 1, pause_mode="retract"))
+    manager = _worker(module, group, SGLangSettings("model", 1, 1, 1, pause_mode="retract"))
     killed = []
     monkeypatch.setattr(module.ray, "kill", lambda engine, **kwargs: killed.append((engine, kwargs)))
 
@@ -277,7 +277,7 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
     ]
     # The dead slot recovers later; the pause fences the engines that survive.
     group = _ServerGroup([*engines, None])
-    manager = _worker(module, group, SGLangConfig("model", 1, 1, 1, pause_mode=pause_mode))
+    manager = _worker(module, group, SGLangSettings("model", 1, 1, 1, pause_mode=pause_mode))
 
     manager.pause_generation_for_update()
 
@@ -397,7 +397,7 @@ def test_shutdown_retires_the_engines_and_the_router_once(monkeypatch):
     module = _load_manager_module(monkeypatch, serving=True)
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
     group = _ServerGroup([engine])
-    worker = _worker(module, group, SGLangConfig("model", 1, 1, 1, pause_mode="retract"))
+    worker = _worker(module, group, SGLangSettings("model", 1, 1, 1, pause_mode="retract"))
     stopped = []
     router = types.SimpleNamespace(
         is_alive=lambda: False,

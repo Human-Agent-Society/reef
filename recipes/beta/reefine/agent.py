@@ -1,16 +1,16 @@
-"""Reefine's agent: a pi session that makes the change a request asks for in the step's tree, and tries it.
+"""Reefine's agent: a pi session that makes the change a request asks for in the job's tree, and tries it.
 
 The text answer (:mod:`recipes.beta.reefine.answer`) writes a request's files
 in a few model calls and never runs them. The agent gives the request to a
-coding agent instead: pi, the harness being evolved, working in the step's
+coding agent instead: pi, the harness being evolved, working in the job's
 ``harness/`` directory itself, with the network and three tools of its own.
-``harness_check`` runs the tree through the step's validation;
+``harness_check`` runs the tree through the job's validation;
 ``harness_trial`` runs an online task or scripted session checks;
 ``harness_progress`` saves findings that stay available after compaction.
-When the agent stops, its tree is read back as the step's candidate and
+When the agent stops, its tree is read back as the job's candidate and
 reviewed like a text answer.
 
-The agent's current directory is ``harness/``. Beside it, in the step's
+The agent's current directory is ``harness/``. Beside it, in the job's
 workspace, it writes ``output/design.md``, ``output/requires.json`` and
 ``output/progress.md``, and reads the API reference in ``scratch/``; its own
 configuration and sessions are under ``scratch/agent``. The run keeps its
@@ -19,8 +19,8 @@ left, that tree in ``output/``.
 
 The agent holds no credential. Online model and provider calls go through a
 loopback gateway (:mod:`recipes.beta.reefine.agent_gateway`) that spends from
-the step's model-call budget and records into the step's ``calls.json``. Its
-isolation is the executor the recipe built for it
+the job's model-call budget and records into the job's ``calls.json``. Its
+isolation is the executor that the deployment's agent settings name
 (``evolution.agent.sandbox``). Scripted trials use a fixed local
 model in that same executor.
 """
@@ -57,7 +57,7 @@ from recipes.beta.reefine.trial import trial_script
 from reef.core.prompts import untrusted_text
 from reef.core.training_request import TrainingRequest
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, ProgramTimeout
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, ProgramTimeoutError
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import TreeLayout
@@ -66,8 +66,8 @@ from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import headless_argv, launch_agent, read_session
 from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
-from reef.train.harness_backend import Services, Workspace
-from reef.train.harness_backend.agent.run import AgentExecution, agent_env
+from reef.train.harness_backend import AgentExecution, Services, Workspace
+from reef.train.harness_backend.agent.run import agent_env
 
 AGENT_RULES = Path(__file__).with_name("agent_rules.md")
 AGENT_TOOLS = Path(__file__).with_name("agent_tools.ts")
@@ -79,13 +79,13 @@ MAX_TRIAL_TEXT = 4000
 MAX_TRIAL_CALLS = 30
 MAX_STDERR_CHARS = 2000
 
-#: In the step's ``output/``: what the agent writes beside the tree, and what the run keeps of it.
+#: In the job's ``output/``: what the agent writes beside the tree, and what the run keeps of it.
 DESIGN_FILE = "design.md"
 REQUIRES_FILE = "requires.json"
 CHECKS_FILE = "agent-checks.jsonl"
 SESSION_FILE = "agent-session.jsonl"
 LEFT_TREE_DIR = "agent-harness"
-#: In the step's ``scratch/``: the API reference the agent reads, and pi's own directory for the agent's session.
+#: In the job's ``scratch/``: the API reference the agent reads, and pi's own directory for the agent's session.
 REFERENCE_FILE = "reference/pi-extension-api.md"
 AGENT_HOME = "agent"
 
@@ -101,8 +101,8 @@ class ReefineAgent:
     the agent and its trials run under, pi's binary there, and the time limit
     of the whole agent run. ``trial_timeout_s`` > 0 bounds each trial.
     ``provider`` is the deployment's multimodal gateway, ``None`` for none.
-    Purpose: ``ReefineRecipe.build_backend`` makes one per scenario;
-    ``ReefineMethod`` runs the agent on a request step with it.
+    Purpose: ``ReefineMethod`` makes one for a request job, from the agent that the job's services hold
+    (``Services.agent``) and its own config, and runs the agent with it.
     """
 
     execution: AgentExecution
@@ -254,20 +254,20 @@ def unread_lines(left_out: Mapping[str, str], paths: Iterable[str], layout: Tree
 
 
 class AgentRun:
-    """One agent run in a step's workspace, and what its two tools, ``check`` and ``trial``, do with its tree.
+    """One agent run in a job's workspace, and what its two tools, ``check`` and ``trial``, do with its tree.
 
-    Values: ``workspace`` is the step's workspace, whose ``harness/`` the
-    agent edits; ``services`` checks trees and meters the step; ``head`` is the
-    tree the step started from; ``agent`` says where and how long the agent
-    and its trials run; ``descriptor`` is pi's. ``served`` is the step's
+    Values: ``workspace`` is the job's workspace, whose ``harness/`` the
+    agent edits; ``services`` checks trees and meters the job; ``head`` is the
+    tree the job started from; ``agent`` says where and how long the agent
+    and its trials run; ``descriptor`` is pi's. ``served`` is the job's
     served model. ``gateway`` and ``session`` are ``None`` until the run
     starts them. ``trials`` ≥ 0 counts the trials run; ``deadline`` (on
     ``time.monotonic``) ends the run, and no trial runs into its last
     ``finish_seconds``. ``checks`` holds every check and trial result in
     order.
-    Purpose: ``answer_with_agent`` makes one per request step; the gateway's
+    Purpose: ``answer_with_agent`` makes one per request job; the gateway's
     ``CheckTool`` and ``TrialTool`` call ``check`` and ``trial`` while the
-    agent works, and the step reads the candidate with ``read`` when the
+    agent works, and the job reads the candidate with ``read`` when the
     agent stops.
     """
 
@@ -300,7 +300,7 @@ class AgentRun:
 
     def write_checks(self) -> None:
         """Write the checks and trials to ``output/agent-checks.jsonl``, once the agent's files are back: a cloud
-        sandbox's copy replaces the step's directory when the agent stops."""
+        sandbox's copy replaces the job's directory when the agent stops."""
         if self.checks:
             lines = "".join(json.dumps(check, ensure_ascii=False) + "\n" for check in self.checks)
             (self.workspace.output / CHECKS_FILE).write_text(lines, encoding="utf-8")
@@ -372,7 +372,7 @@ class AgentRun:
         except ValueError as error:
             self.services.calls.note("check", f"the tree cannot be read: {error}", failed=True)
             return self.record_check("check", {"valid": False, "problems": [str(error)]})
-        # The tree as it stands, the head included: the step skips an unchanged tree, the agent's checks do not.
+        # The tree as it stands, the head included: the job skips an unchanged tree, the agent's checks do not.
         validation = self.services.check(candidate)
         changes = self.head.diff(candidate).changes
         result: dict[str, Any] = {
@@ -415,7 +415,7 @@ class AgentRun:
         binding = ModelBinding(base_url=self.gateway.base_url, model=self.served.model, api=self.served.api)
         files = rendered_files(candidate, binding, self.descriptor)
         before = self.gateway.provider_call_count()
-        # A trial runs where a session of the person's would: outside the step's directory.
+        # A trial runs where a session of the person's would: outside the job's directory.
         root = Path(tempfile.mkdtemp(prefix="reef-agent-trial-"))
         started = time.monotonic()
         checksum = candidate.checksum()
@@ -454,7 +454,7 @@ class AgentRun:
                 return self.record_check(
                     "trial", {**result, "candidate": checksum, "seconds": round(time.monotonic() - started, 1)}
                 )
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             limit = f"the trial ran past its {timeout:g} s limit"
             self.services.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
             return self.record_check(
@@ -496,7 +496,7 @@ class AgentRun:
 
 
 class CheckTool(AgentTool):
-    """``check``: the agent's tree through the step's validation, with what a request may not change named."""
+    """``check``: the agent's tree through the job's validation, with what a request may not change named."""
 
     name = "check"
     description = "Validate the tree in harness/ as the step validates a request's change."
@@ -537,7 +537,7 @@ class TrialTool(AgentTool):
 def answer_with_agent(
     workspace: Workspace, services: Services, head: HarnessTree, request: TrainingRequest, agent: ReefineAgent
 ) -> Answer:
-    """Run the agent on one request in the step's tree and read its work back: the change with the notes the step
+    """Run the agent on one request in the job's tree and read its work back: the change with the notes the job
     records, or the empty change with the reason under ``failure``. When the answer's tree is not the one the agent
     left, that tree stays in ``output/agent-harness/`` for diagnosis; it is never published."""
     (workspace.output / REQUIRES_FILE).write_text("[]\n", encoding="utf-8")
@@ -600,7 +600,7 @@ def answer_with_agent(
                     "maxTokens (Reef renders the model binding's max_output_tokens into it)"
                 )
             break
-    except ProgramTimeout:
+    except ProgramTimeoutError:
         record["timed_out"] = True
     except ProgramLaunchError as error:
         services.calls.note("agent", f"the coding agent run failed: {error}", failed=True)
@@ -629,7 +629,7 @@ def answer_with_agent(
 
 
 def read_answer(run: AgentRun, request: TrainingRequest, record: dict[str, Any]) -> Answer:
-    """The agent's work as the step's answer: its change, design and requires, reviewed."""
+    """The agent's work as the job's answer: its change, design and requires, reviewed."""
     notes: dict[str, Any] = {"agent": record}
     design_path = run.workspace.output / DESIGN_FILE
     design = design_path.read_text(encoding="utf-8", errors="replace").strip() if design_path.is_file() else ""
@@ -689,7 +689,7 @@ def keep_session(sessions: Path, target: Path) -> None:
 
 
 def keep_left_tree(workspace: Workspace, candidate: HarnessTree) -> None:
-    """Copy the tree the agent left to ``output/agent-harness/`` when the step's candidate is another one."""
+    """Copy the tree the agent left to ``output/agent-harness/`` when the job's candidate is another one."""
     try:
         left = workspace.tree()
     except ValueError:

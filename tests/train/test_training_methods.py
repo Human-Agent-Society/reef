@@ -9,11 +9,12 @@ from typing import Any
 
 import pytest
 from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
-from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, live_objects
+from tests.support.trainers import recipe_trainer
+from tests.support.trajectories import policy_trajectory
 
-from reef.core.job_data import JobOutcome, TaskSample
+from reef.core.job_data import JobOutcome, TaskFiles, TaskSample
 from reef.storage.samples import SampleKind
 from reef.train.component import job_id_for
 from reef.train.jobs import JobLoop, JobLoopState
@@ -22,13 +23,13 @@ from reef.train.learning_rate import (
     LearningRateScheduleState,
     resolve_learning_rate_schedule_state,
 )
-from reef.train.pipeline import PipelineConfig
+from reef.train.pipeline import PipelineSettings
 from reef.train.types import JobData
 
 SFT = LearningRateSchedule("sft", 2e-5, warmup_steps=4, decay_style="cosine", decay_steps=8, min_learning_rate=2e-6)
 RL = LearningRateSchedule("rl", 1e-6, warmup_steps=2)
 #: The staged recipe's stages with jobs of one sample.
-ONE_SAMPLE_JOBS = PipelineConfig.from_setting(
+ONE_SAMPLE_JOBS = PipelineSettings.from_setting(
     {"sample2job": {"config": {"job_samples": 1}}}, spec=StagedRecipe.pipeline_spec(), environ={}
 )
 
@@ -123,10 +124,10 @@ def task(name: str) -> JobData:
 
 @pytest.mark.unit
 def test_a_single_method_recipe_trains_every_job_with_its_default_objective() -> None:
-    recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=ONE_SAMPLE_JOBS)
+    recipe = StagedRecipe(pipeline_stages=ONE_SAMPLE_JOBS)
     sft = {"objective": "sft"}
     assert recipe.parameters_by_kind() == {"trajectory": sft, "task": sft}
-    trainer = recipe.build("scenario", memory_records("scenario"), root=STUB_ROOT)
+    trainer = recipe_trainer(recipe, live_objects(), "scenario", memory_records("scenario"), root=STUB_ROOT)
     stage = trainer.pipeline.sample2job
     assert stage.job_parameters(batch("b")) == stage.job_parameters(task("t")) == sft
     assert stage.experiment_config() == {"job_parameters": {"trajectory": sft, "task": sft}}
@@ -144,7 +145,9 @@ def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default
             }
 
     component = StubTrainingComponent()
-    trainer = SupervisedThenPolicy(**runtime_bindings(component), pipeline_stages=ONE_SAMPLE_JOBS).build(
+    trainer = recipe_trainer(
+        SupervisedThenPolicy(pipeline_stages=ONE_SAMPLE_JOBS),
+        live_objects(component),
         "scenario",
         memory_records("scenario"),
         root=STUB_ROOT,
@@ -154,7 +157,9 @@ def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default
     loop.submit(JobLoopState(component.base_start), batch("first"), stage.job_parameters(batch("first")))
     finished = JobLoopState(component.base_start, finished_jobs=1, last_job=JobOutcome("j", "stub", "finished"))
     (tmp_path / "second").mkdir()
-    second = JobData("second", (TaskSample(tmp_path / "second"),))
+    task_files = loop.data_store.task_files
+    digest = task_files.write("scenario", tmp_path / "second")
+    second = JobData("second", (TaskSample(task_files.path("scenario", digest), files=TaskFiles("scenario", digest)),))
     loop.submit(finished, second, stage.job_parameters(second))
     assert [job.parameters for job in component.submitted] == [
         {"objective": "sft", "learning_rate_schedule": SFT.to_dict()},

@@ -41,10 +41,10 @@ class SQLTrainingState(TrainingState):
 
     Values: ``commits`` is the commit table and ``consumed`` the stage record table, both in the namespace of the
     scenario. ``counts`` holds, for each sample ID, the number of commits of each trainer that list the sample
-    (``consumed_sample_id``), over the commits up to step ``read_step``; the trainer of a commit is its ``component``,
+    (``consumed_sample_id``), over the commits up to ``read_commit_number``; the trainer of a commit is its ``component``,
     or ``""`` when it names none.
     Purpose: a SQL scenario database makes it in ``training_state()``; ``SampleStore`` reads it. ``train_counts``
-    reads the commits after ``read_step`` first, so the counts follow the commit history with no table of their own.
+    reads the commits after ``read_commit_number`` first, so the counts follow the commit history with no table of their own.
     """
 
     def __init__(self, database: SQLScenarioDatabase, commits: ScopedTable, consumed: ScopedTable) -> None:
@@ -52,7 +52,7 @@ class SQLTrainingState(TrainingState):
         self.commits = commits
         self.consumed = consumed
         self.counts: dict[str, dict[str, int]] = {}
-        self.read_step = 0
+        self.read_commit_number = 0
         self.lock = Lock()
 
     def train_counts(self, sample_ids: Sequence[str]) -> dict[str, dict[str, int]]:
@@ -62,18 +62,18 @@ class SQLTrainingState(TrainingState):
         with self.lock:
             with self.database._transaction(write=False) as connection:
                 rows = connection.execute(
-                    select(table.c.step, table.c.commit_json)
-                    .where(self.commits.condition(), table.c.step > self.read_step)
-                    .order_by(table.c.step)
+                    select(table.c.commit_number, table.c.commit_json)
+                    .where(self.commits.condition(), table.c.commit_number > self.read_commit_number)
+                    .order_by(table.c.commit_number)
                 ).all()
-            for step, commit_json in rows:
+            for commit_number, commit_json in rows:
                 record = CommitRecord.from_dict(json.loads(commit_json))
                 trainer = record.component or ""
                 for consumed in record.consumed_ids:
                     if consumed.startswith(CONSUMED_SAMPLE_PREFIX):
                         by_trainer = self.counts.setdefault(consumed.removeprefix(CONSUMED_SAMPLE_PREFIX), {})
                         by_trainer[trainer] = by_trainer.get(trainer, 0) + 1
-                self.read_step = step
+                self.read_commit_number = commit_number
             return {sample_id: dict(self.counts[sample_id]) for sample_id in sample_ids if sample_id in self.counts}
 
     def consumed_record_ids(self, trainer: str) -> frozenset[str]:
@@ -92,7 +92,7 @@ class SQLTrainingState(TrainingState):
         ]
         if rows:
             with self.database._transaction(write=True) as connection:
-                self.database._insert_if_absent(connection, self.consumed.table, rows)
+                self.database._write_if_absent(connection, self.consumed.table, rows)
 
 
 __all__ = ["SQLTrainingState", "stage_record_table"]

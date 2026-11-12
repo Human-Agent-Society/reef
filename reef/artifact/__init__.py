@@ -1,4 +1,4 @@
-"""Storage for the snapshot chain: every publication as an immutable release.
+"""Storage for the snapshot chain: every publication as an immutable snapshot.
 
 The package owns bytes and heads — persisted, staged, materialized on
 demand. *When* a head moves is the scenario committer's decision, one
@@ -8,12 +8,12 @@ level up. Boundaries this package holds:
   repository; the factory owns the scenario-name-to-backend mapping. Nothing
   here knows what a scenario, trainer, or commit history is;
   ``ArtifactSnapshotChain``'s caller decides transaction ordering.
-- Releases are immutable and heads move only by compare-and-swap
+- Snapshots are immutable and heads move only by compare-and-swap
   (``activate`` takes ``expected``; ``publish`` takes
   ``expected_parent``), so concurrent publication conflicts loudly
-  (``ArtifactConflict``) instead of losing a snapshot.
-- A ``local:`` release has identity but no durable bytes; activation and
-  a new training start refuse it as a source (``SnapshotNotRestorable``).
+  (``ArtifactConflictError``) instead of losing a snapshot.
+- A ``local:`` snapshot has identity but no durable bytes; activation and
+  a new training start refuse it as a source (``SnapshotNotRestorableError``).
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it
 through a ``CachedRepositoryBackendFactory`` subclass; the dispatcher takes
@@ -29,6 +29,12 @@ snapshot. A root that holds the recipe's ``DefaultStart`` reads its model
 files (a ``BaseModelFiles``, for example a ``ModelDirectory``) only when the
 scenario is created, so a process that only opens scenarios makes none.
 
+An artifact of a weight component has one of three forms: its own weight files, a
+reference to a Hugging Face commit that holds them (``REFERENCE_FILE``, RFC #995), or
+a base root, which holds ``BASE_FILE`` alone and stands for the deployment's base
+model (``reef.artifact.base_root``). Readers accept a base root; no code in Reef
+writes one yet.
+
 Backends used with a scenario commit history must subclass
 ``StagedSnapshotRepositoryBackend``. ``publish`` must accept
 ``advance_head=False`` and persist resolvable bytes without advancing its head.
@@ -43,15 +49,16 @@ They remain usable without a commit history.
 
 from reef.artifact.artifact import (
     Artifact,
-    ArtifactConflict,
+    ArtifactConflictError,
     ArtifactError,
     ArtifactMaterializationError,
-    ArtifactNotFound,
+    ArtifactNotFoundError,
     ArtifactPublicationError,
     ArtifactSourceError,
     ArtifactValidator,
     SnapshotRef,
 )
+from reef.artifact.base_root import BASE_FILE, BaseRoot, base_root_of, read_base_root
 from reef.artifact.composite import compose_snapshot
 from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_checksum
 from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
@@ -71,7 +78,7 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedSnapshotRepositoryBackend,
 )
-from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorable
+from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorableError
 from reef.artifact.sources import (
     REFERENCE_FILE,
     ArtifactSourceReader,
@@ -92,14 +99,15 @@ from reef.artifact.sources import (
 )
 
 __all__ = [
+    "BASE_FILE",
     "REFERENCE_FILE",
     "AdapterArtifactError",
     "Artifact",
-    "ArtifactConflict",
+    "ArtifactConflictError",
     "ArtifactError",
     "ArtifactFiles",
     "ArtifactMaterializationError",
-    "ArtifactNotFound",
+    "ArtifactNotFoundError",
     "ArtifactPublicationError",
     "ArtifactSnapshotChain",
     "ArtifactSourceError",
@@ -107,6 +115,7 @@ __all__ = [
     "ArtifactSources",
     "ArtifactValidator",
     "BaseModelFiles",
+    "BaseRoot",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
     "DefaultStart",
@@ -131,14 +140,16 @@ __all__ = [
     "RepositoryBackendFactory",
     "S3PrefixFiles",
     "S3Reader",
-    "SnapshotNotRestorable",
+    "SnapshotNotRestorableError",
     "SnapshotRef",
     "SourceFiles",
     "StagedSnapshotRepositoryBackend",
+    "base_root_of",
     "compose_snapshot",
     "directory_checksum",
     "download_huggingface_snapshot",
     "parse_huggingface_source",
+    "read_base_root",
     "read_peft_config",
     "read_reference",
 ]

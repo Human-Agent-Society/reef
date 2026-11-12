@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import VERSION_FILE, StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -14,26 +14,19 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
-from reef.storage.job_data import read_job_data
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class SharedRuntime(StubInferenceRuntime):
-    """A stub runtime that several training scenarios can share."""
-
-    @property
-    def shared_by_training_scenarios(self) -> bool:
-        return True
-
-
-def _dispatcher(
+def training_dispatcher(
     tmp_path, runtime: StubInferenceRuntime, *, shares_scenarios: bool = False
 ) -> tuple[Dispatcher, StubTrainingComponent]:
     component = StubTrainingComponent(tmp_path / "checkpoints", shares_scenarios=shares_scenarios)
     dispatcher = Dispatcher(
-        TestPolicyRecipe(component, runtime=runtime),
+        TestPolicyRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=runtime, training_component=component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -41,7 +34,7 @@ def _dispatcher(
     return dispatcher, component
 
 
-def _train(dispatcher: Dispatcher, scenario: str) -> None:
+def train(dispatcher: Dispatcher, scenario: str) -> None:
     """Feed one scored exchange of ``scenario``, answered by the artifact it serves, and wait until its job ends."""
     served = dispatcher.get_or_create_scenario(scenario).serving_artifact_id()
     inference = f"{scenario}-i1"
@@ -76,7 +69,7 @@ def _train(dispatcher: Dispatcher, scenario: str) -> None:
 
 @pytest.mark.unit
 def test_a_runtime_that_serves_one_model_binds_training_to_one_scenario(tmp_path) -> None:
-    dispatcher, _ = _dispatcher(tmp_path, StubInferenceRuntime())
+    dispatcher, _ = training_dispatcher(tmp_path, StubInferenceRuntime())
     try:
         dispatcher.get_or_create_scenario("math")
         with pytest.raises(ReefError, match="training is already bound to scenario 'math'"):
@@ -88,7 +81,9 @@ def test_a_runtime_that_serves_one_model_binds_training_to_one_scenario(tmp_path
 
 @pytest.mark.unit
 def test_a_shared_runtime_binds_one_scenario_when_the_training_component_does_not_share(tmp_path) -> None:
-    dispatcher, _ = _dispatcher(tmp_path, SharedRuntime(), shares_scenarios=False)
+    dispatcher, _ = training_dispatcher(
+        tmp_path, StubInferenceRuntime(shared_by_training_scenarios=True), shares_scenarios=False
+    )
     try:
         dispatcher.get_or_create_scenario("math")
         with pytest.raises(ReefError, match="training is already bound to scenario 'math'"):
@@ -99,13 +94,13 @@ def test_a_shared_runtime_binds_one_scenario_when_the_training_component_does_no
 
 @pytest.mark.unit
 def test_a_shared_runtime_trains_each_scenario_on_the_one_training_component(tmp_path) -> None:
-    runtime = SharedRuntime()
-    dispatcher, component = _dispatcher(tmp_path, runtime, shares_scenarios=True)
+    runtime = StubInferenceRuntime(shared_by_training_scenarios=True)
+    dispatcher, component = training_dispatcher(tmp_path, runtime, shares_scenarios=True)
     try:
-        _train(dispatcher, "math")
-        _train(dispatcher, "code")
+        train(dispatcher, "math")
+        train(dispatcher, "code")
         # Each scenario submitted its own job of its own records, and each one's checkpoint became its head.
-        assert [source_record_id(read_job_data(job.data_dir).samples[0]) for job in component.submitted] == [
+        assert [source_record_id(job.read_data().samples[0]) for job in component.submitted] == [
             "math-i1",
             "code-i1",
         ]

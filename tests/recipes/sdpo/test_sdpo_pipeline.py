@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.records import memory_records
-from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT
 
 from recipes.sdpo import SDPOJobData, SDPORecipe, SDPOReport, SDPOSamples
 from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOSettings
@@ -24,11 +24,13 @@ from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.plugins import PluginConfigError
 from reef.recipe.errors import RecipeConfigError
+from reef.recipe.loading import load_recipe
+from reef.service.deploy.training import training_recipe_config
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill.algorithm import settings_from_args
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.objectives import resolve_objective
 from reef.train.types import JobData
 
 QUESTION = [{"role": "user", "content": "What is the boiling point of water?"}]
@@ -254,7 +256,7 @@ def test_the_prompt_window_sits_inside_the_teacher_window() -> None:
 
 
 def recipe_from(config: Mapping[str, Any]) -> SDPORecipe:
-    recipe = SDPORecipe.from_environment({}, config=config, **runtime_bindings())
+    recipe = load_recipe(SDPORecipe, config, {})
     assert isinstance(recipe, SDPORecipe)
     return recipe
 
@@ -263,8 +265,8 @@ def recipe_from(config: Mapping[str, Any]) -> SDPORecipe:
 def test_sdpo_recipe_trains_samples_from_the_paper_grid() -> None:
     recipe = recipe_from({})
     assert recipe.report_type is SDPOReport
-    assert resolve_slime_objective(recipe.default_parameters()["trajectory"]["objective"]).rollout_unit == "sample"
-    pipeline = recipe.build_pipeline(PipelineContext("science", SDPOReport))
+    assert resolve_objective(recipe.default_parameters()["trajectory"]["objective"]).rollout_unit == "sample"
+    pipeline = recipe.stages().build(PipelineContext("science", SDPOReport))
     record2sample, sample2job = pipeline.record2sample, pipeline.sample2job
     assert isinstance(record2sample, SDPOSamples)
     assert isinstance(sample2job, SDPOJobData)
@@ -293,7 +295,7 @@ def test_the_pipeline_section_configures_each_stage_and_the_job_stage_reads_the_
             }
         }
     )
-    pipeline = recipe.build_pipeline(PipelineContext("science", SDPOReport))
+    pipeline = recipe.stages().build(PipelineContext("science", SDPOReport))
     record2sample, sample2job = pipeline.record2sample, pipeline.sample2job
     assert isinstance(record2sample, SDPOSamples) and isinstance(sample2job, SDPOJobData)
     # The job stage reads the grid and the teacher's windows from the sample stage.
@@ -308,8 +310,8 @@ def test_the_pipeline_section_configures_each_stage_and_the_job_stage_reads_the_
 def test_the_sample_stage_refuses_rendering_settings(key: str, value: Any) -> None:
     # The training component renders with its own chat template and template arguments.
     recipe = recipe_from({"pipeline": {"record2sample": {"config": {key: value}}}})
-    with pytest.raises(RecipeConfigError, match=f"unknown config fields: {key}"):
-        recipe.build_pipeline(PipelineContext("science", SDPOReport))
+    with pytest.raises(PluginConfigError, match=f"unknown config fields: {key}"):
+        recipe.stages().build(PipelineContext("science", SDPOReport))
 
 
 @pytest.mark.unit
@@ -318,15 +320,15 @@ def test_the_recipe_refuses_stage_settings_in_the_wrong_place() -> None:
     with pytest.raises(RecipeConfigError, match="does not consume"):
         recipe_from({"data": {"groups_per_step": 4}})
     with pytest.raises(RecipeConfigError, match="does not consume"):
-        SDPORecipe.service_config({"tokenizer-path": "/models/test"}, model_path="/models/test")
+        training_recipe_config(SDPORecipe, {"tokenizer-path": "/models/test"}, model_path="/models/test")
     # A key in the wrong stage, and an invalid teacher window, fail when the pipeline builds.
     context = PipelineContext("science", SDPOReport)
-    with pytest.raises(RecipeConfigError, match="success_reward_threshold"):
-        recipe_from({"pipeline": {"record2sample": {"config": {"success_reward_threshold": 1}}}}).build_pipeline(
+    with pytest.raises(PluginConfigError, match="success_reward_threshold"):
+        recipe_from({"pipeline": {"record2sample": {"config": {"success_reward_threshold": 1}}}}).stages().build(
             context
         )
-    with pytest.raises(RecipeConfigError, match="max_teacher_prompt_tokens"):
-        recipe_from({"pipeline": {"record2sample": {"config": {"max_teacher_tokens": 0}}}}).build_pipeline(context)
+    with pytest.raises(PluginConfigError, match="max_teacher_prompt_tokens"):
+        recipe_from({"pipeline": {"record2sample": {"config": {"max_teacher_tokens": 0}}}}).stages().build(context)
 
 
 def wire(weights: list[float]) -> dict[str, Any]:

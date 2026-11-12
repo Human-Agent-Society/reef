@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflict, MemoryDataStore, NewItem, StoredItem
-from reef.storage.tasks import LocalTaskFileStore, SplitName
+from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, MemoryDataStore, NewItem, StoredItem
+from reef.storage.tasks import LocalTaskFileStore, SplitName, TaskFileStore
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
 CONSUMED_SAMPLE_PREFIX = "sample:"
@@ -56,7 +56,7 @@ class StoredSample:
     """One item that a scenario uses, as its trainers read it, with the train counts of each trainer.
 
     Values: ``sequence`` is the positive sequence of the scenario's use of the item (``DataStore.scenario_items``),
-    or the item's sequence when ``SampleStore.get`` read it. ``sample_id`` is the item's ID. ``split`` is the
+    or the item's sequence when ``SampleStore.read`` read it. ``sample_id`` is the item's ID. ``split`` is the
     item's split for the scenario: ``train``, or ``eval`` for an imported task that an evaluation runs. ``sample`` is
     the ``TrajectorySample`` or ``TaskSample`` of the item. ``train_counts`` maps each trainer (its component, or
     ``""`` for the only trainer of a scenario) to the positive number of its committed jobs that listed
@@ -155,7 +155,7 @@ class SampleStore:
     ``state`` its training state.
 
     Purpose: ``ScenarioStorage.sample_store`` makes it for an open scenario. The listings and evaluations read it,
-    and ``Recipe.build_trainers`` gives each trainer its ``TrainerSamples`` (``for_trainer``).
+    and the scenario factory's trainer builder gives each trainer its ``TrainerSamples`` (``for_trainer``).
     """
 
     data: DataStore
@@ -221,7 +221,7 @@ class SampleStore:
         origin = item.metadata.get("origin")
         return origin if isinstance(origin, Mapping) and origin.get("scenario") == self.scenario else None
 
-    def get(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
+    def read(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
         """The samples of ``sample_ids`` that the scenario uses, in the order of their items. The store reads them
         ``MAX_QUERY_LIMIT`` at a time: a request can name tens of thousands of samples, and one read for each would
         hold the trainer's lock for minutes."""
@@ -243,7 +243,7 @@ class SampleStore:
     def task_paths(self, sample_ids: Sequence[str]) -> tuple[Path, ...]:
         """The task directories of the tasks of ``sample_ids`` that the scenario uses, in the order of their items.
 
-        It gives the directories that ``get`` gives for the same tasks, and reads ``TASK_PATH_READERS`` of them from
+        It gives the directories that ``read`` gives for the same tasks, and reads ``TASK_PATH_READERS`` of them from
         the task file store at the same time. An ID of a trajectory, or of an item that the scenario does not use,
         gives no directory.
         """
@@ -281,7 +281,12 @@ class SampleStore:
         else:
             name = {"name": item.item_id, "files_digest": item.digest, "split": split}
             metadata = {"task": name} if own is None else item.metadata["task_metadata"]
-            sample = TaskSample(self.data.task_path(item), source_agent_record_ids=records, metadata=metadata)
+            sample = TaskSample(
+                self.data.task_path(item),
+                source_agent_record_ids=records,
+                metadata=metadata,
+                files=self.data.item_task_files(item),
+            )
         component = None if own is None else own["component"]
         group = None if own is None else item.metadata.get("group")
         return StoredSample(sequence, item.item_id, split, sample, train_counts, component, group)
@@ -306,10 +311,13 @@ class SampleStore:
         return tuple(found)
 
 
-def memory_samples(scenario: str) -> SampleStore:
-    """The sample store of ``scenario`` in process memory, for a trainer without a scenario session: a data store whose
-    owner is the scenario, with its task files in a temporary directory, and a training state in memory."""
-    return SampleStore(MemoryDataStore(LocalTaskFileStore()), scenario, scenario, MemoryTrainingState())
+def memory_samples(scenario: str, task_files: TaskFileStore | None = None) -> SampleStore:
+    """The sample store of ``scenario`` in process memory, for a trainer without a scenario session: a new data store
+    whose owner is the scenario, and a training state in memory. The store keeps its task files in ``task_files``;
+    ``None`` gives a temporary directory. A trainer that trains passes the task file store of its job loop's data
+    store, so that the store that writes a job's data holds the files of the job's tasks."""
+    store = MemoryDataStore(LocalTaskFileStore() if task_files is None else task_files)
+    return SampleStore(store, scenario, scenario, MemoryTrainingState())
 
 
 @dataclass(frozen=True)
@@ -333,13 +341,13 @@ class TrainerSamples:
         """The samples that the trainer reads: its own, and the uploads and imported tasks (``SampleStore.page``)."""
         return self.store.page(after_sequence=after_sequence, limit=limit, kind=kind, trainer=self.trainer)
 
-    def get(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
-        return self.store.get(sample_ids)
+    def read(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
+        return self.store.read(sample_ids)
 
     def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         return self.store.imported_tasks(split)
 
-    def add_record_samples(
+    def write_record_samples(
         self,
         group: str | None,
         record_ids: Sequence[str],
@@ -383,7 +391,7 @@ class TrainerSamples:
                         task = shutil.copytree(sample.task_path, Path(directory) / item_id)
                         task_metadata = {"kind": "task", **metadata, "task_metadata": dict(sample.metadata)}
                         store.data.create(store.owner, [NewItem(item_id, task, task_metadata)])
-            except ItemConflict:
+            except ItemConflictError:
                 # Another process made the same sample first: its item wins.
                 continue
             new += 1

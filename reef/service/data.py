@@ -31,13 +31,14 @@ from reef.core.errors import ReefError
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import has_image_content
 from reef.dispatcher import Dispatcher
+from reef.recipe.deployment import refuses_images
 from reef.service.tasks import unpack_task_archive
 from reef.storage.data import (
     ITEM_KINDS,
     MAX_QUERY_LIMIT,
     DataStore,
     ItemKind,
-    ItemNotFound,
+    ItemNotFoundError,
     NewItem,
     StoredItem,
     check_item_id,
@@ -60,7 +61,7 @@ SYNC_WAIT_SECONDS = 30.0
 SYNC_POLL_SECONDS = 0.05
 
 
-class NoDataStore(ReefError):
+class DataStoreUnavailableError(ReefError):
     """The deployment has no data store, so it serves no data route."""
 
 
@@ -70,7 +71,7 @@ class DataAccess:
 
     Values: ``store`` is the deployment's data store, or None for a deployment without one; ``queue`` is the work
     queue that carries the data syncs and transfers; ``scenarios`` checks the scenarios that the items name;
-    ``refuses_images`` is whether the deployment's recipe refuses image content (``Recipe.refuses_images``).
+    ``refuses_images`` is whether the deployment refuses image content (``reef.recipe.deployment.refuses_images``).
 
     Purpose: the data routes and the data service make one from their dispatcher (``of``); the functions of this
     module and of ``reef.service.data_transfer`` read it, and no other part of the dispatcher.
@@ -83,12 +84,12 @@ class DataAccess:
 
     @classmethod
     def of(cls, dispatcher: Dispatcher) -> DataAccess:
-        return cls(dispatcher.data_store, dispatcher.queue, dispatcher, dispatcher.recipe.refuses_images)
+        return cls(dispatcher.data_store, dispatcher.queue, dispatcher, refuses_images(dispatcher.recipe))
 
     def require_store(self) -> DataStore:
-        """The data store; ``NoDataStore`` for a deployment without one."""
+        """The data store; ``DataStoreUnavailableError`` for a deployment without one."""
         if self.store is None:
-            raise NoDataStore("this deployment has no data store")
+            raise DataStoreUnavailableError("this deployment has no data store")
         return self.store
 
 
@@ -135,7 +136,7 @@ def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait
         pending = {
             item_id
             for item_id in pending
-            if (item := queue.get(DATA_SYNC_QUEUE, item_id)) is not None and not item.final
+            if (item := queue.read(DATA_SYNC_QUEUE, item_id)) is not None and not item.final
         }
         if not pending or time.monotonic() >= deadline:
             break
@@ -272,7 +273,7 @@ def replace_task_item(data: DataAccess, owner: str, item_id: str, archive: Path)
     ``archive``, then sync the scenarios that use it; return ``{owner, item, synced}``, without content.
 
     Each evaluation attempt reads the item's current files, so a retry and a new evaluation run the new ones.
-    ``ItemNotFound`` for an unknown item; ``ValueError`` for an archive of no task or of several, for a directory
+    ``ItemNotFoundError`` for an unknown item; ``ValueError`` for an archive of no task or of several, for a directory
     that is not named ``item_id`` or that Harbor cannot load, and for an item of another kind. Nothing changes then.
     """
     with tempfile.TemporaryDirectory(prefix="reef-task-replace-") as work:
@@ -390,10 +391,10 @@ def group_items(
 
 
 def read_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
-    """One item of ``owner`` with its content; ``ItemNotFound`` for an unknown ID."""
+    """One item of ``owner`` with its content; ``ItemNotFoundError`` for an unknown ID."""
     item = data.require_store().read(owner, item_id)
     if item is None:
-        raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+        raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
     return {"owner": owner, **item_json(item, content=True)}
 
 
@@ -401,7 +402,7 @@ def update_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
     """Apply ``{"ids": [...], "patch": {...}}``, one JSON merge patch on each item's metadata; return the items.
 
     The scenarios that the patch adds to an item, or moves to another split, are checked first. Raise
-    ``ItemNotFound`` for an unknown ID and ``ValueError`` for a patch that ``patched_metadata`` refuses.
+    ``ItemNotFoundError`` for an unknown ID and ``ValueError`` for a patch that ``patched_metadata`` refuses.
     """
     check_owner(owner)
     ids, patch = body.get("ids"), body.get("patch")
@@ -426,7 +427,7 @@ def update_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
 
 
 def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
-    """Delete one item of ``owner``; the scenarios that used it lose its upload. ``ItemNotFound`` if unknown.
+    """Delete one item of ``owner``; the scenarios that used it lose its upload. ``ItemNotFoundError`` if unknown.
 
     Raise ``ValueError`` for the artifact item of an artifact that a scenario of ``owner`` made while the scenario
     exists: the next artifact copy would make the item again (``reef.storage.artifact_items``).
@@ -446,7 +447,7 @@ def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
 
 def touched_items(store: DataStore, owner: str, ids: Sequence[object]) -> list[StoredItem]:
     """The stored items of ``ids``, without content, each once, in the order given, from one read; ``ValueError``
-    for a bad ID, ``ItemNotFound`` if unknown."""
+    for a bad ID, ``ItemNotFoundError`` if unknown."""
     item_ids: list[str] = []
     for item_id in dict.fromkeys(ids):
         if not isinstance(item_id, str) or not item_id:
@@ -455,7 +456,7 @@ def touched_items(store: DataStore, owner: str, ids: Sequence[object]) -> list[S
     found = {item.item_id: item for item in store.read_many(owner, item_ids, content=False)}
     missing = [item_id for item_id in item_ids if item_id not in found]
     if missing:
-        raise ItemNotFound(f"{owner!r} stores no item {missing[0]!r}")
+        raise ItemNotFoundError(f"{owner!r} stores no item {missing[0]!r}")
     return [found[item_id] for item_id in item_ids]
 
 
@@ -476,7 +477,7 @@ __all__ = [
     "MAX_ITEMS_PER_CREATE",
     "SYNC_WAIT_SECONDS",
     "DataAccess",
-    "NoDataStore",
+    "DataStoreUnavailableError",
     "create_items",
     "create_task_directories",
     "create_task_items",

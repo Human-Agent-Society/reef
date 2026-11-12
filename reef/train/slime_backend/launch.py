@@ -24,10 +24,11 @@ from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arg
 from reef.execution.executor.config import role_executor_settings, select_executor
 from reef.execution.processes import http_readiness_command
 from reef.storage.job_data import JobDataKind
-from reef.train.algos.registry import loss_family_refs
-from reef.train.component import TrainingComponent, TrainingComponentFactory
+from reef.train.component import TrainingBackendFacts, TrainingComponent, TrainingComponentFactory
 from reef.train.deployment import TrainingDeployment
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.facts import SlimeFacts
+from reef.train.slime_backend.loss_families import loss_family_reference
+from reef.train.slime_backend.objectives import resolve_objective
 
 
 def require_ray_roles(config: dict[str, Any], *roles: str, backend: str) -> None:
@@ -213,7 +214,7 @@ class SlimeDeployment(TrainingDeployment):
         objective = next((name for name in objectives if name), None)
         return {
             "type": self.component_type,
-            "loss_family": "" if objective is None else resolve_slime_objective(objective).loss_family,
+            "loss_family": "" if objective is None else resolve_objective(objective).loss_family,
             "recipe": settings["recipe"],
             "ray_address": settings["ray_address"] or os.environ.get("RAY_ADDRESS", ""),
             "namespace": settings["ray_namespace"],
@@ -227,9 +228,24 @@ class SlimeDeployment(TrainingDeployment):
 
 
 class SlimeComponentFactory(TrainingComponentFactory):
-    """Build the Slime training component."""
+    """Build the Slime training component, and state its facts from the same config without Slime's parser."""
 
     kind = SlimeDeployment.component_type
+
+    def facts(
+        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
+    ) -> TrainingBackendFacts | None:
+        """The ``SlimeFacts`` of the config's training options, with their configuration references resolved.
+
+        The teacher's options state no fact, so the teacher's URL is not read. ``RuntimeConfigError`` for options
+        that state no facts, such as ones without ``hf-checkpoint``.
+        """
+        settings = config["settings"]
+        options = expand_option_references({"reef": dict(settings)}, settings.get("training_backend_options") or {})
+        try:
+            return SlimeFacts.from_arguments(native_arguments(options))
+        except ValueError as exc:
+            raise RuntimeConfigError(str(exc)) from exc
 
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         loss_family = config["loss_family"]
@@ -247,8 +263,9 @@ class SlimeComponentFactory(TrainingComponentFactory):
         return SlimeTrainingComponent(
             SlimeSettings(
                 arguments=tuple(slime_arguments(settings, loss_family=loss_family, environ=environ)),
-                # A job's driver is a new process, whose registry holds no family a recipe registered by name.
-                loss_family=loss_family_refs().get(loss_family, loss_family),
+                # A job's driver is a new process, which knows no family that a method registered: it imports
+                # the family's reference.
+                loss_family=loss_family_reference(loss_family) or loss_family,
                 recipe=config["recipe"],
                 execution=config["execution"],
                 ray_address=ray_address,

@@ -12,7 +12,7 @@ packages that do not depend on each other need it, and it carries no I/O.
 ``job_data`` and ``evaluation`` hold the values and candidate contracts shared
 by runtimes and training; ``weight_layout`` holds the values that
 ``reef.train`` and ``reef.inference`` both read; ``requirements`` validates training-request requirements
-and reads their release-chain records.
+and reads their snapshot-chain records.
 ``training_request`` validates TRAIN bodies at admission and holds the queued
 request carried by a job's data. ``reasoning`` splits a sampled reply into its
 reasoning and its answer for ``reef.inference.chat`` and ``reef.tinker.sampling``;
@@ -29,7 +29,7 @@ so storage locators can be shared without pulling in backend implementations, an
 ``tests/contributing/test_dependency_boundaries.py``.
 """
 
-from reef.core.errors import ReefError, UnknownScenario
+from reef.core.errors import ReefError, ScenarioNotFoundError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.core.snapshot import SnapshotRef
@@ -40,6 +40,6 @@ __all__ = [
     "ReportBase",
     "ReportValidationError",
     "RequestType",
+    "ScenarioNotFoundError",
     "SnapshotRef",
-    "UnknownScenario",
 ]

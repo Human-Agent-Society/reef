@@ -29,7 +29,9 @@ Implementation
   import from ``reef/__init__.py``. The contract it implements is
   ``reef/recipe/``.
 - Declare recipe-owned settings with ``config_field``. Do not parse those
-  settings again in ``reef/service/``.
+  settings again in ``reef/service/``. Do not add a loading method to the
+  recipe class: ``reef.recipe.loading.load_recipe`` builds the recipe from its
+  declarations.
 - Put the method's record-to-sample and sample-to-job stages in
   ``<method-package>/processor.py``, subclassing ``ReportSamples`` or
   ``JudgedSamples`` (``reef/record2sample/``) and ``Sample2Job``
@@ -39,15 +41,18 @@ Implementation
   ``SlimeObjective`` (``reef/train/slime_backend/objectives.py``) in
   ``<method-package>/slime/__init__.py``, or a ``TinkerObjective``
   (``reef/train/tinker_backend/objectives.py``) in its Tinker module. The
-  package's ``__init__.py`` refers to it with ``register_objective_ref``, so its
-  public half imports no backend. Name it in the recipe's ``default_parameters()``.
+  package's ``__init__.py`` registers it by reference with that backend's
+  ``register_objective``, so its public half imports none of the method's
+  backend code. Name it in the recipe's ``default_parameters()``.
 - A method with its own tensor objective adds a loss family in
-  ``<method-package>/slime/`` (spec in ``__init__.py``, hooks in
-  ``objective.py``) and names it in the objective's ``loss_family``;
+  ``<method-package>/slime/`` (spec in ``__init__.py`` under
+  ``@register_loss_family``, hooks in ``objective.py`` under ``@worker_hook``)
+  and names it in the objective's ``loss_family``;
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
-- Override ``build_components`` only when the method's releases bind
-  components beyond those of the recipe it extends.
+- Override ``build_components`` only when the method's snapshots bind
+  components beyond those of the recipe it extends. It reads the recipe's
+  configuration alone: a recipe has no runtime and no training component.
 
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
@@ -84,14 +89,16 @@ Implementation
   history instead of keeping copies of them.
 - Put a prompt longer than a sentence or two in a ``.md`` file beside the
   method.
-- Subclass ``HarnessEvolutionRecipe`` only when the method changes more than
-  the tree, such as the files a client pulls.
+- Subclass ``HarnessEvolutionRecipe`` only to change configuration, such as
+  the defaults of a deployment or the files a client pulls. A recipe builds
+  no backend, evaluator or method; a method takes what it needs from
+  ``job.services``.
 
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
 
-- Add method tests under ``tests/recipes/<name>/``. Run a step as the trainer
-  does with ``backend_step`` in ``tests/support/harness_service.py``, or call ``step``
+- Add method tests under ``tests/recipes/<name>/``. Run a job as the trainer
+  does with ``backend_step`` in ``tests/support/harness_service.py``, or call ``run``
   on a workspace from ``Workspace.create`` with a fake model binding.
 - Put runnable deployments under ``recipes/<name>/examples/``. The method's
   ``README.md`` says what it does, how it uses the workspace, and where it
@@ -119,8 +126,9 @@ Implementation
 - Own the job's parameters: parse them into your own typed value, refuse an
   unknown key with ``ValueError``, and declare them in
   ``TrainingComponent.parameters_schema(kind)``. Reef reads none of them. Own your
-  objectives and their registry too. Cut the data into optimizer steps
-  with ``reef.train.algos.schedule.schedule_job_data`` when it fits. Write each
+  objectives, their table and your step schedule too: the Slime and Tinker
+  backends each have their own (``objectives.py``, ``loss_families.py``,
+  ``schedule.py``, ``signals.py``) and share none. Write each
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
 - Implement ``import_start`` to load a published snapshot as the start of the
@@ -130,17 +138,32 @@ Implementation
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
 - Implement ``TrainingDeployment`` in the integration to describe process
-  preparation, and a ``RuntimeFactory`` that returns the
+  preparation, and a ``TrainingComponentFactory`` that returns the
   ``TrainingComponent``. Declare the component's ``artifact_format``; the
   ``inference`` section builds the serving from it, so the integration builds
   no serving runtime. A backend with its own serving returns its runtime
   config from ``trainer_serving_config``. In-process integrations can extend
-  ``InProcessTrainingDeployment``. Expose the definition through a
-  dotted reference or the ``reef.training_backends`` entry-point group; see
+  ``InProcessTrainingDeployment``. Expose the class through its
+  ``package.module:ClassName`` reference or the ``reef.training_backends``
+  entry-point group; see
   `Training backend deployment
   <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
-- Keep step signals in ``reef/train/algos/`` backend-neutral. Translate them
-  into framework payloads inside the integration.
+- Implement ``facts(config, model_path, environ)`` on the factory. It returns
+  the backend's ``TrainingBackendFacts`` from the same config, without
+  building or starting the component, and it imports no training framework or
+  service SDK. Define the facts type in the integration's own package, from
+  its own settings, and let the component answer the same members from a value
+  of it, so the two cannot differ. Share no facts code with another backend.
+  With the facts, ``reef serve --component inference`` builds the serving
+  runtime from ``facts.artifact_format`` and never builds the component, so
+  its environment does not need the framework. A factory that inherits
+  ``facts``, which returns ``None``, makes the inference service build the
+  component.
+  Add a test that compares the facts with the component for two configs, and
+  one that builds the facts without the framework. See `Facts without a
+  component <../developer-guide/executors.rst#facts-without-a-component>`__.
+- Keep the signal that an objective returns inside the integration
+  (``signals.py``), and translate it into framework payloads there.
 - Declare Python dependencies and source pins in ``pyproject.toml``. Add
   plugin entry points and package-data rules there when the framework loads
   Reef assets or hooks dynamically.
@@ -168,9 +191,15 @@ Use this playbook for a new inference provider or a runtime implementation that
 satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 ``reef/inference/interfaces.py`` before adding configuration.
 
-- For an external runtime, expose a factory as
-  ``package.module:factory_name`` and use that dotted value as the runtime
-  ``type``.
+- For an external runtime, subclass ``RuntimeFactory`` and use the reference
+  ``package.module:ClassName`` of the class as the runtime ``type``. Reef
+  makes the class with no arguments. A function or an instance is not
+  accepted.
+- Every setting that takes a name or a reference resolves it with
+  ``resolve_plugin_class`` in ``reef/core/plugins.py``, in one order: a
+  built-in name, then an installed entry point when the setting has an
+  entry-point group, then ``package.module:ClassName``. Do not write another
+  lookup; give the resolver your table of built-in names.
 - For a concrete inference backend, add its native implementation under
   ``reef/inference/<integration>/``. Keep native engine launch, request
   adaptation, weight loading, and framework imports inside that package.
@@ -178,18 +207,21 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   they must not import a concrete integration or ``reef.train``. Implement
   ``InferenceBackend`` from ``reef/inference/interfaces.py``, including
   ``load_weight_files``, so that the serving runtimes in
-  ``reef/inference/serving.py`` can load published snapshots. Expose an inference
-  service factory through a dotted reference or the
+  ``reef/inference/serving.py`` can load published snapshots. Implement
+  ``InferenceService`` with its ``from_config`` class method, and expose the
+  class through its ``package.module:ClassName`` reference or the
   ``reef.inference_backends`` entry-point group, so the inference component
-  can start the engines. Shared monitoring and engine recovery belong in
+  can start the engines. A bundled engine adds its service class and its
+  request handler class to ``BUILTIN_ENGINES`` in
+  ``reef/inference/deployment.py``. Shared monitoring and engine recovery belong in
   ``reef/inference/recovery.py``; adapter residency belongs in
   ``reef/inference/residency.py``. Shared contracts and version values belong in
   ``reef/inference/interfaces.py``.
-- For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
-  implement ``__call__``, decorate the class with ``@register_runtime_kind``,
-  and load the selected integration from service assembly. ``RuntimeFactory`` and
+- For a runtime that Reef bundles, subclass ``RuntimeFactory``, set its
+  ``kind``, implement ``__call__``, and add the kind with the reference of
+  the class to ``BUILTIN_FACTORIES``. ``RuntimeFactory`` and
   factory resolution live in ``reef.inference.registry``. Importing
-  ``reef.inference`` does not register integrations or re-export classes. A
+  ``reef.inference`` imports no integration and re-exports no class. A
   training component is not a runtime: its
   ``TrainingDeployment.component_type`` names a ``TrainingComponentFactory``
   from ``reef.train.component``.
@@ -197,12 +229,12 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   dataclass whose fields use ``reef.core.config.config_option``. The registry
   parses that selected schema with the shared CLI/YAML rules and runs the
   dataclass's validation before calling the factory. Keep schema imports
-  lightweight. Factories without a schema retain their mapping contract.
+  lightweight. A factory without a schema receives the section as a mapping.
   Opaque backend payloads must be declared as object fields and validated by
   the adapter; do not enumerate backend-native flags in the service layer.
 - Keep provider authentication and provider-native request handling in the
   adapter. Do not import ``reef.train`` from ``reef/inference/``.
-- Test registered and dotted resolution in
+- Test built-in name and reference resolution in
   ``tests/reef_service/test_runtime_registry.py``. Add request, recovery, and
   malformed-result contracts for every capability the runtime implements.
 - Add or update the stack that exercises the runtime under ``recipes/`` and
@@ -221,7 +253,7 @@ ownership, rank ordering and the Slime extension contract.
 Add a component or artifact type
 --------------------------------
 
-Artifacts own immutable bytes and release heads. A recipe's components own
+Artifacts own immutable bytes and snapshot heads. A recipe's components own
 admission, import layouts, kinds and client file trees. Runtimes own loading.
 Read `Scenario components <../developer-guide/components.rst>`__ and the
 release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
@@ -237,7 +269,10 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   request on its way to the engine: a client pulls the artifacts that shape
   its requests.
 - Declare the components in the owning recipe's ``build_components``; do not
-  make a component choose a method or evaluate a candidate.
+  make a component choose a method or evaluate a candidate. A fact that only
+  a runtime or a training component knows belongs in
+  ``reef.scenario.live_objects``, whose functions take the recipe and the
+  process's ``LiveObjects``.
 - Test component behavior in ``tests/artifact/test_scenario_components.py`` or
   ``tests/artifact/test_snapshot_components.py``. Test storage backends against
   the contracts in ``tests/artifact/test_reef_artifacts.py``.

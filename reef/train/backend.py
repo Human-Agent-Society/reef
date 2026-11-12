@@ -1,4 +1,4 @@
-"""The values of one harness step: a prepared step, and the committed snapshots that a step reads its head from."""
+"""The values of one harness job: a prepared job, and the committed snapshots that a job reads its head from."""
 
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ from reef.harness.tree.tree import normalized_path, require_text
 
 
 @dataclass(frozen=True)
-class PreparedStep:
+class PreparedHarnessJob:
     """One backend preparation, with or without a candidate to select.
 
     ``outcome`` is ``"candidate"`` exactly when ``candidate`` is given.
-    ``state`` and ``metrics`` are final for a skipped step. For a candidate
-    step they are the common preparation values that settlement may extend.
+    ``state`` and ``metrics`` are final for a skipped job. For a candidate
+    job they are the common preparation values that settlement may extend.
     """
 
     outcome: Literal["candidate", "skip"]
@@ -28,9 +28,9 @@ class PreparedStep:
 
     def __post_init__(self) -> None:
         if self.outcome not in {"candidate", "skip"}:
-            raise ValueError("prepared step outcome must be 'candidate' or 'skip'")
+            raise ValueError("prepared job outcome must be 'candidate' or 'skip'")
         if (self.outcome == "candidate") != (self.candidate is not None):
-            raise ValueError("a candidate step, and only a candidate step, carries a candidate")
+            raise ValueError("a candidate job, and only a candidate job, carries a candidate")
 
     @classmethod
     def with_candidate(
@@ -39,7 +39,7 @@ class PreparedStep:
         *,
         state: Mapping[str, Any],
         metrics: Mapping[str, Any] | None = None,
-    ) -> PreparedStep:
+    ) -> PreparedHarnessJob:
         return cls("candidate", state, metrics or {}, candidate)
 
     @classmethod
@@ -48,7 +48,7 @@ class PreparedStep:
         *,
         state: Mapping[str, Any],
         metrics: Mapping[str, Any] | None = None,
-    ) -> PreparedStep:
+    ) -> PreparedHarnessJob:
         return cls("skip", state, metrics or {})
 
 
@@ -59,7 +59,7 @@ class ArtifactTextFiles:
     Values: ``artifact_id`` is the non-empty opaque ID of the component artifact; ``files`` maps
     each tree path (``reef.harness.tree.normalized_path``) to its UTF-8 text. The mapping is
     immutable and excludes repository metadata.
-    Purpose: ``CommittedArtifacts`` makes it; a harness step builds its
+    Purpose: ``CommittedArtifacts`` makes it; a harness job builds its
     head from ``files``.
     """
 
@@ -93,7 +93,7 @@ class CommittedArtifacts(ABC):
 
     @abstractmethod
     def artifact(self, artifact_id: str, component: str) -> ArtifactTextFiles:
-        """Return a committed component artifact; raise ``ArtifactNotFound`` when its ID is unknown."""
+        """Return a committed component artifact; raise ``ArtifactNotFoundError`` when its ID is unknown."""
 
 
 @dataclass(frozen=True)
@@ -102,8 +102,8 @@ class ComponentArtifacts:
 
     Values: ``artifacts`` is the scenario's reader, and ``component`` names a
     component of the scenario, non-empty.
-    Purpose: ``Recipe.build_trainers`` makes one per component and hands it
-    to ``Recipe.build``; a harness trainer reads its head through it.
+    Purpose: the scenario factory's trainer builder makes one per component
+    for that component's trainer; a harness trainer reads its head through it.
     """
 
     artifacts: CommittedArtifacts
@@ -124,5 +124,5 @@ __all__ = [
     "ArtifactTextFiles",
     "CommittedArtifacts",
     "ComponentArtifacts",
-    "PreparedStep",
+    "PreparedHarnessJob",
 ]

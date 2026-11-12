@@ -1,6 +1,6 @@
 """The rules that read rollout scores.
 
-A harness recipe builds its publication policy from ``evolution.evaluation``
+The harness training component builds its publication policy from ``evolution.evaluation``
 (``reef.evaluation.harness.policy``). The policies decide by the rules here:
 ``compare_scores`` pairs two sides' rollouts and ``check_floor`` checks one
 side against a floor score.

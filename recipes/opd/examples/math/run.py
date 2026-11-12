@@ -321,7 +321,7 @@ class Campaign:
 
     def verify_update(self, step: int, rows: list[dict[str, Any]], history: list[dict[str, Any]]) -> None:
         result = self.client.get(
-            f"/reef/scenarios/{quote(self.args.scenario, safe='')}/commits?after_step={step - 1}&limit=1"
+            f"/reef/scenarios/{quote(self.args.scenario, safe='')}/commits?after_commit_number={step - 1}&limit=1"
         )
         commits = result["commits"]
         expected = {
@@ -330,7 +330,7 @@ class Campaign:
             for identifier in (row["receipt"], report_id(self.args.scenario, row["receipt"]))
         }
         if len(commits) != 1 or (
-            commits[0]["step"] != step
+            commits[0]["commit_number"] != step
             or commits[0]["operation"] != "training"
             or not commits[0]["activated"]
             or commits[0]["components"]["weights"] != history[step]["artifact_id"]

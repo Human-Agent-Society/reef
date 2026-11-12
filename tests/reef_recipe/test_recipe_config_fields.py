@@ -11,16 +11,20 @@ from dataclasses import KW_ONLY, dataclass
 
 import pytest
 import yaml
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support.records import memory_records
-from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, live_objects
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.trainers import recipe_trainer
 
 from reef.core.config import config_arguments
+from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import AlwaysActivate
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.recipe.loading import load_recipe
+from reef.service.deploy.training import training_recipe_config
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
 @dataclass(frozen=True)
@@ -117,23 +121,23 @@ def test_float_config_field_parses_negative_infinity_from_yaml_and_env() -> None
 def test_float_config_field_survives_service_config_uncast() -> None:
     # The old service layer int()-cast every recipe setting, silently
     # truncating floats; the config field's annotation now owns the cast.
-    config = ConfiguredRecipe.service_config({"temperature": 0.25}, model_path="/models/demo")
+    config = training_recipe_config(ConfiguredRecipe, {"temperature": 0.25}, model_path="/models/demo")
     assert config["data"]["temperature"] == 0.25
 
-    interpolated = ConfiguredRecipe.service_config({"temperature": "0.25"}, model_path="/models/demo")
+    interpolated = training_recipe_config(ConfiguredRecipe, {"temperature": "0.25"}, model_path="/models/demo")
     assert interpolated["data"]["temperature"] == "0.25"  # Translation leaves parsing to field resolution.
 
-    recipe = ConfiguredRecipe.from_environment({}, config=interpolated, **runtime_bindings())
+    recipe = load_recipe(ConfiguredRecipe, interpolated, {})
     assert recipe.temperature == 0.25
     assert isinstance(recipe.temperature, float)
 
 
 @pytest.mark.unit
-def test_from_environment_resolves_every_config_field_source() -> None:
-    recipe = ConfiguredRecipe.from_environment(
+def test_the_loader_resolves_every_config_field_source() -> None:
+    recipe = load_recipe(
+        ConfiguredRecipe,
+        {"data": {"batch_size": 2}},
         {"REEF_CONFIGURED_TEMPERATURE": "0.5", "REEF_CONFIGURED_STRICT": "1"},
-        config={"data": {"batch_size": 2}},
-        **runtime_bindings(),
     )
 
     assert (recipe.batch_size, recipe.temperature, recipe.strict, recipe.label) == (2, 0.5, True, "default")
@@ -142,7 +146,7 @@ def test_from_environment_resolves_every_config_field_source() -> None:
 @pytest.mark.unit
 def test_service_config_rejects_settings_no_config_field_consumes() -> None:
     with pytest.raises(RecipeConfigError) as excinfo:
-        ConfiguredRecipe.service_config({"group_size": 2, "batch_size": 1}, model_path="/models/demo")
+        training_recipe_config(ConfiguredRecipe, {"group_size": 2, "batch_size": 1}, model_path="/models/demo")
 
     message = str(excinfo.value)
     assert "ConfiguredRecipe does not consume reef.group_size" in message
@@ -170,11 +174,7 @@ def test_data_section_rejects_keys_no_config_field_consumes() -> None:
     with pytest.raises(
         RecipeConfigError, match=r"does not consume config key.*'group_size'.*known ConfiguredRecipe config fields"
     ):
-        ConfiguredRecipe.from_environment(
-            {},
-            config={"data": {"group_size": 2}},
-            **runtime_bindings(),
-        )
+        load_recipe(ConfiguredRecipe, {"data": {"group_size": 2}}, {})
 
 
 @pytest.mark.unit
@@ -190,7 +190,7 @@ def test_data_section_rejects_keys_no_config_field_consumes() -> None:
 )
 def test_service_config_names_the_setting_and_the_expected_type(settings, match) -> None:
     with pytest.raises(RecipeConfigError, match=match):
-        config = ConfiguredRecipe.service_config(settings, model_path="/models/demo")
+        config = training_recipe_config(ConfiguredRecipe, settings, model_path="/models/demo")
         resolve_config_field_values(ConfiguredRecipe, config["data"], {})
 
 
@@ -199,13 +199,13 @@ def test_invalid_field_values_surface_as_recipe_config_errors() -> None:
     # __post_init__ range checks (ValueError on direct construction) become
     # RecipeConfigError on the configuration path.
     with pytest.raises(RecipeConfigError, match="invalid ConfiguredRecipe configuration: training_mode must be"):
-        ConfiguredRecipe.from_environment({}, config={"data": {"training_mode": "never"}}, **runtime_bindings())
+        load_recipe(ConfiguredRecipe, {"data": {"training_mode": "never"}}, {})
 
 
 @pytest.mark.unit
 def test_the_recipe_refuses_max_staleness_which_the_record_stage_owns() -> None:
     with pytest.raises(RecipeConfigError, match=r"does not consume config key.*'max_staleness'"):
-        ConfiguredRecipe.from_environment({}, config={"data": {"max-staleness": 2}}, **runtime_bindings())
+        load_recipe(ConfiguredRecipe, {"data": {"max-staleness": 2}}, {})
 
 
 @pytest.mark.unit
@@ -214,15 +214,11 @@ def test_a_stage_setting_in_the_recipe_config_is_refused_with_its_pipeline_key()
     from reef.pipeline_context import PipelineContext
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
-        SAORecipe.from_environment({}, config={"data": {"batch_size": 4}}, **runtime_bindings())
+        load_recipe(SAORecipe, {"data": {"batch_size": 4}}, {})
     # The stage's own range check fails when the pipeline builds.
-    recipe = SAORecipe.from_environment(
-        {},
-        config={"pipeline": {"sample2job": {"config": {"buffer_size": -1}}}},
-        **runtime_bindings(),
-    )
-    with pytest.raises(RecipeConfigError, match="buffer_size must be None or a positive int"):
-        recipe.build_pipeline(PipelineContext("math"))
+    recipe = load_recipe(SAORecipe, {"pipeline": {"sample2job": {"config": {"buffer_size": -1}}}}, {})
+    with pytest.raises(PluginConfigError, match="buffer_size must be None or a positive int"):
+        recipe.stages().build(PipelineContext("math"))
 
 
 @pytest.mark.unit
@@ -238,11 +234,11 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
 
 @pytest.mark.unit
 def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
-    stages = PipelineConfig.from_setting(
+    stages = PipelineSettings.from_setting(
         {"sample2job": {"config": {"job_samples": 2, "buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
-    recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=stages)
-    trainer = recipe.build("scenario", memory_records("scenario"), root=STUB_ROOT)
+    recipe = StagedRecipe(pipeline_stages=stages)
+    trainer = recipe_trainer(recipe, live_objects(), "scenario", memory_records("scenario"), root=STUB_ROOT)
 
     assert isinstance(trainer.pipeline.record2sample, ThresholdSamples)
     assert isinstance(trainer.pipeline.sample2job, ThresholdJobData)
@@ -258,7 +254,7 @@ def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
 def test_the_default_recipe_sends_the_configured_job_parameters_with_every_job() -> None:
     config = {"job_parameters": {"scheduling": {"packing_length": 4096}, "save_interval": 50}}
     job_parameters = resolve_config_field_values(StagedRecipe, config, {})["job_parameters"]
-    recipe = StagedRecipe(**runtime_bindings(), job_parameters=job_parameters)
+    recipe = StagedRecipe(job_parameters=job_parameters)
 
     expected = {
         "scheduling": {"packing_length": 4096},
@@ -267,14 +263,14 @@ def test_the_default_recipe_sends_the_configured_job_parameters_with_every_job()
     }
     assert recipe.parameters_by_kind() == {"trajectory": expected, "task": expected}
     # Reef reads no parameter: the configured parameters win over the recipe's, key by key.
-    other = StagedRecipe(**runtime_bindings(), job_parameters={"objective": "other"})
+    other = StagedRecipe(job_parameters={"objective": "other"})
     assert other.parameters_by_kind()["trajectory"] == {"objective": "other"}
 
 
 @pytest.mark.unit
 def test_a_weight_recipe_without_job_samples_fails_its_build() -> None:
-    with pytest.raises(RecipeConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
-        StagedRecipe(**runtime_bindings()).build("scenario", memory_records("scenario"), root=STUB_ROOT)
+    with pytest.raises(PluginConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
+        recipe_trainer(StagedRecipe(), live_objects(), "scenario", memory_records("scenario"), root=STUB_ROOT)
 
 
 @pytest.mark.unit
@@ -286,8 +282,8 @@ def test_default_build_requires_a_sample2job_stage() -> None:
         def default_parameters(cls):
             return {kind: {"objective": "sft"} for kind in ("trajectory", "task")}
 
-    with pytest.raises(TypeError, match=r"declares no sample2job.*pipeline_spec\(\).*override build"):
-        NoSample2JobRecipe(**runtime_bindings()).build("scenario", memory_records("scenario"), root=STUB_ROOT)
+    with pytest.raises(TypeError, match=r"declares no sample2job.*pipeline_spec\(\)$"):
+        recipe_trainer(NoSample2JobRecipe(), live_objects(), "scenario", memory_records("scenario"), root=STUB_ROOT)
 
 
 @pytest.mark.unit

@@ -19,20 +19,20 @@ from tests.support.serving import wait_for_serving
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
+from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
 from reef.cli import main
 from reef.core.errors import RuntimeConfigError, UpstreamStatusError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
 from reef.inference.tinker import TinkerInferenceRuntime
+from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
 from reef.storage.sql_coordination import memory_coordination
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos.schedule import StepScheduling
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob, job_id_for
 from reef.train.jobs import JobLoopState
 from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
@@ -40,15 +40,14 @@ from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
-from reef.train.tinker_backend.config import TinkerConfig
+from reef.train.tinker_backend.config import TinkerSettings
 from reef.train.tinker_backend.launch import TinkerDeployment, component_factory
-from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
-from reef.train.tinker_backend.objectives import (
-    TinkerObjective,
-    register_tinker_objective,
-    unregister_tinker_objective,
-)
+from reef.train.tinker_backend.loss_families import resolve_loss_family
+from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow
+from reef.train.tinker_backend.objectives import TinkerObjective, register_objective, unregister_objective
 from reef.train.tinker_backend.preparation import prepare_tinker_job
+from reef.train.tinker_backend.schedule import StepScheduling
+from reef.train.tinker_backend.signals import TrainingSignal
 
 MODEL = "Qwen/Qwen3-8B"
 
@@ -142,17 +141,17 @@ POLICY = LearningRateSchedule("policy", 1e-5, warmup_steps=2)
 @pytest.fixture
 def objective():
     value = SampleObjective()
-    register_tinker_objective(value)
+    register_objective(value.name, value)
     yield value
-    unregister_tinker_objective(value.name)
+    unregister_objective(value.name)
 
 
 @pytest.fixture
 def second_objective():
     value = TttdLossObjective()
-    register_tinker_objective(value)
+    register_objective(value.name, value)
     yield value
-    unregister_tinker_objective(value.name)
+    unregister_objective(value.name)
 
 
 @pytest.fixture
@@ -162,7 +161,7 @@ def client():
 
 @pytest.fixture
 def config(tmp_path):
-    return TinkerConfig(state_dir=str(tmp_path / "state"))
+    return TinkerSettings(state_dir=str(tmp_path / "state"))
 
 
 @pytest.fixture
@@ -474,6 +473,55 @@ def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(co
         component.check_artifact(DirectoryFiles(release))
 
 
+def base_root(directory: Path, inputs: dict[str, str]) -> Artifact:
+    """A base root in the new directory ``directory``: the base file of ``inputs`` alone."""
+    directory.mkdir()
+    (directory / BASE_FILE).write_text(BaseRoot(inputs).to_text())
+    return Artifact.local(directory)
+
+
+def test_a_base_root_of_the_model_rank_and_service_is_admitted_and_samples_the_base_model(
+    component, client, inference, objective, tmp_path
+):
+    base = base_root(tmp_path / "base", {"model": MODEL, "lora_rank": "32"})
+    # Admission compares the inputs with the component's default start.
+    component.check_artifact(DirectoryFiles(base.local_path))
+    for name, inputs, message in (
+        ("rank", {"model": MODEL, "lora_rank": "8"}, "lora_rank: '8', not '32'"),
+        ("model", {"model": "org/other", "lora_rank": "32"}, "model: 'org/other', not"),
+        ("service", {"model": MODEL, "lora_rank": "32", "service": "http://spindle"}, "service: 'http://spindle'"),
+    ):
+        other = base_root(tmp_path / name, inputs)
+        with pytest.raises(ValueError, match=message):
+            component.check_artifact(DirectoryFiles(other.local_path))
+    UNTRAINED.write(base.local_path)
+    with pytest.raises(ValueError, match=r"holds base\.json alone"):
+        component.check_artifact(DirectoryFiles(base.local_path))
+    (base.local_path / MANIFEST).unlink()
+
+    # The runtime samples the base model for it, before and after a trained release.
+    first = inference.activate_checkpoint(base)
+    assert inference.served_model_name("s") == MODEL
+    assert inference.artifact_model(base) == PolicyModel(MODEL, None)
+    assert inference.serve_artifact(base, scenario="s").model_name == MODEL
+    (checkpoint,) = train(component, batch(), objective.name).checkpoints
+    trained = inference.activate_checkpoint(Artifact.local(Path(checkpoint.artifact_path)))
+    assert trained != first and inference.served_model_name("s") == "tinker://update-1/sampler"
+    again = inference.activate_checkpoint(base)
+    assert again not in (first, trained) and inference.served_model_name("s") == MODEL
+    assert inference.sampler_load(MODEL) == (None, again)
+    with pytest.raises(ValueError, match="stands for org/other on hosted Tinker, not for"):
+        inference.activate_checkpoint(base_root(tmp_path / "foreign", {"model": "org/other", "lora_rank": "32"}))
+    with pytest.raises(ValueError, match="on http://spindle, not for"):
+        inference.activate_checkpoint(
+            base_root(tmp_path / "elsewhere", {"model": MODEL, "lora_rank": "32", "service": "http://spindle"})
+        )
+    assert inference.served_model_name("s") == MODEL
+    # Training from a base root is not there yet: the component starts only from a checkpoint manifest.
+    with pytest.raises(ValueError, match=r"missing tinker-checkpoint\.json"):
+        component.import_start(base.local_path)
+
+
 def test_exclusive_state_dir_and_model_validation(component, config, inference, tmp_path):
     assert inference.served_weight_kind == "model_adapter", "a Tinker sampler serves a LoRA adapter"
     # Another process may use the state directory, as control does, but only one runs its jobs.
@@ -521,7 +569,7 @@ def test_a_method_whose_loss_has_no_kl_penalty_is_refused_before_training(
     assert client.calls == []
     # TTTD's loss trains the configured KL penalty.
     assert train(component, batch(), second_objective.name, kl_coef=0.1).state == "finished"
-    assert client.calls[-1][2] is resolve_tinker_loss("tttd")
+    assert client.calls[-1][2] is resolve_loss_family("tttd")
 
 
 def test_a_schedule_counts_optimizer_steps_across_jobs_and_restarts(config, client, objective):
@@ -656,8 +704,8 @@ def test_loss_alignment_mask_and_ttdd_centered_kl():
     inputs = TttdTinkerLoss().inputs(rows, [[-0.5, -0.8], [-0.7]], kl_coef=0.1)
     assert inputs[0]["advantages"] == pytest.approx([0, 1.99, 2.0])
     assert inputs[1]["advantages"] == pytest.approx([-0.99])
-    assert resolve_tinker_loss("tttd").needs_base_logprobs
-    assert isinstance(resolve_tinker_loss("tttd"), TttdTinkerLoss)
+    assert resolve_loss_family("tttd").needs_base_logprobs
+    assert isinstance(resolve_loss_family("tttd"), TttdTinkerLoss)
 
 
 @pytest.mark.parametrize(
@@ -860,8 +908,8 @@ def test_tinker_serves_its_releases_with_the_training_options_as_cli_text_gives_
 def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(tmp_path, objective):
     from dataclasses import dataclass
 
-    from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
     from tests.support.runtime_stubs import job_sized_stages
+    from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.core import AgentRecord, RequestType
@@ -881,15 +929,16 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
             return PipelineSpec(record2sample=ThresholdSamples, sample2job=ThresholdJobData)
 
     factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
-    settings = TinkerConfig(state_dir=str(tmp_path / "runtime"))
+    settings = TinkerSettings(state_dir=str(tmp_path / "runtime"))
 
     def build(client):
         component = TinkerTrainingComponent(MODEL, settings, client)
         component.start_jobs()
         inference = TinkerInferenceRuntime(client, base_model=MODEL)
         dispatcher = Dispatcher(
-            PolicyRecipe(component, runtime=inference, pipeline_stages=job_sized_stages(PolicyRecipe.pipeline_spec())),
+            PolicyRecipe(pipeline_stages=job_sized_stages(PolicyRecipe.pipeline_spec())),
             factory,
+            live=LiveObjects(runtime=inference, training_component=component),
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             coordination=memory_coordination(),
@@ -945,7 +994,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         wait_for_serving(first)
         assert inference.served_model_name("math") == "tinker://update-1/sampler"
         assert TinkerCheckpoint.read(Path(state.start)).state_path == "tinker://update-1/state"
-        step = scenario.scenario_step
+        step = scenario.commit_number
     finally:
         first.close()
         component.close()
@@ -954,7 +1003,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     second, component, inference = build(RemoteClient())
     try:
         scenario = second.get_or_create_scenario("math")
-        assert scenario.scenario_step == step
+        assert scenario.commit_number == step
         assert loop_state(scenario) == state
         # The creation is the scenario's root snapshot: its artifact_id is the root's release ID.
         base_artifact = scenario.snapshot_queries.artifact_for_version(base).artifact_id
@@ -962,7 +1011,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         assert scenario.repository.start_artifact.revision == base
         scenario.activate(base_artifact)
         scenario.train_from(base_artifact)
-        assert scenario.scenario_step == step + 2
+        assert scenario.commit_number == step + 2
         assert scenario.current_snapshot().revision == base
         wait_for_serving(second)
         assert inference.served_model_name("math") == UNTRAINED.sampler_path
@@ -984,17 +1033,19 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     from reef.dispatcher import Dispatcher
     from reef.service.app import create_app
     from reef.storage.sqlite import SQLiteScenarioStorage
-    from reef.train.pipeline import PipelineConfig
+    from reef.train.pipeline import PipelineSettings
 
     initial = tmp_path / "initial"
     initial.mkdir()
     UNTRAINED.write(initial)
     remote = RemoteClient()
     # A job and a batch size of the whole grid train it as one optimizer step.
-    component = TinkerTrainingComponent(MODEL, TinkerConfig(state_dir=str(tmp_path / "runtime"), batch_size=4), remote)
+    component = TinkerTrainingComponent(
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "runtime"), batch_size=4), remote
+    )
     component.start_jobs()
     inference = TinkerInferenceRuntime(remote, base_model=MODEL)
-    step_grid = PipelineConfig.from_setting(
+    step_grid = PipelineSettings.from_setting(
         {
             "record2sample": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
             "sample2job": {"config": {"job_samples": 4}},
@@ -1003,8 +1054,9 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
         environ={},
     )
     dispatcher = Dispatcher(
-        TTTDRecipe(component, runtime=inference, pipeline_stages=step_grid),
+        TTTDRecipe(pipeline_stages=step_grid),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=inference, training_component=component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -1048,7 +1100,7 @@ def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_lo
     data = JobData("sft", (sft_item("a"), sft_item("b")))
     step = prepare_tinker_job(data, "sft", {}, StepScheduling(), batch_size=2, kl_coef=0.0, score_centering=None)
 
-    loss = resolve_tinker_loss("sft")
+    loss = resolve_loss_family("sft")
     (rows,) = step.steps
     assert loss.loss_fn == "cross_entropy"
     # Position i predicts token i+1: the two prompt positions before the target weigh 0.

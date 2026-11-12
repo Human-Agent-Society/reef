@@ -16,7 +16,7 @@ from reef.inference.interfaces import InferenceHandler
 from reef.service import assembly
 from reef.service.app import get_dispatcher
 from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
@@ -32,7 +32,7 @@ class EchoHandler(InferenceHandler):
         return {"model": payload["model"]}
 
 
-def _settings(tmp_path: Path, **overrides) -> ServiceConfig:
+def _settings(tmp_path: Path, **overrides) -> ServiceSettings:
     values = {
         "recipe": "recipe",
         "agent_record_dir": str(tmp_path / "records"),
@@ -41,7 +41,7 @@ def _settings(tmp_path: Path, **overrides) -> ServiceConfig:
         "artifact_backend": {"module": MEMORY_BACKEND, "config": {"label": "memory"}},
     }
     values.update(overrides)
-    return ServiceConfig(**values)
+    return ServiceSettings(**values)
 
 
 @pytest.fixture
@@ -128,7 +128,7 @@ def test_service_config_reads_the_artifact_backend_from_the_storage_section() ->
 )
 def test_service_config_refuses_an_unusable_artifact_backend(overrides, message) -> None:
     with pytest.raises(ValueError, match=message):
-        ServiceConfig(recipe="recipe", **overrides)
+        ServiceSettings(recipe="recipe", **overrides)
 
 
 @pytest.mark.unit

@@ -165,8 +165,8 @@ Candidate selection
 A harness trainer's decision about which candidate tree its step keeps. A
 ``CandidateEvaluator`` measures the candidate, a ``CandidateSelector`` makes
 the select-or-reject decision, and a ``CandidateEvaluationPlugin`` implements
-both. A harness recipe builds it for each scenario from its publication
-policy. Selection does not decide what serves; the activation rule does.
+both. The harness training component builds it for each job from the
+deployment's publication policy. Selection does not decide what serves; the activation rule does.
 
 Activation rule
 ---------------
@@ -354,8 +354,8 @@ Method
 
 The learning algorithm itself. A recipe is the object that binds one method to a
 scenario; ``HarnessEvolutionRecipe`` is one mechanism running many possible
-methods. Each is a ``Method`` whose ``step`` edits the harness tree in a
-step's workspace, with a scorer when its evaluation runs tasks.
+methods. Each is a ``Method`` whose ``run`` edits the harness tree in a
+job's workspace, with a scorer when its evaluation runs tasks.
 
 Adapter
 -------

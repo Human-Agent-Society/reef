@@ -1,6 +1,6 @@
-"""The harness training component: one harness step per training job, its starts, and its state across jobs.
+"""The harness training component: each training job as one run of the method, its starts, and its state across jobs.
 
-Each job runs on the component's own job thread over the pi recipe of ``tests.support.harness_steps``, whose fake
+Each job runs on the component's own job thread over the pi recipe of ``tests.support.harness_jobs``, whose fake
 binary scores rules that hold the marker higher.
 """
 
@@ -11,20 +11,20 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
-from tests.support.harness_steps import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_backend, harness_recipe
+from tests.support.harness_jobs import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_backend, harness_recipe
 from tests.support.job_data import job_data_ref
+from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.train.component import JobStatus, TrainingJob
-from reef.train.harness_backend.backend import StepProgress
+from reef.train.harness_backend.backend import JobProgress
 from reef.train.harness_backend.component import (
     PROGRESS_FILE,
     HarnessTrainingComponent,
     ProgressFile,
-    read_step_progress,
+    read_job_progress,
 )
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 
@@ -32,7 +32,8 @@ MARKER = TreePatch(changed_rules("marker rules\n"))
 
 
 def component_of(tmp_path: Path, method) -> HarnessTrainingComponent:
-    component = harness_recipe(tmp_path, method).harness_component
+    _, live = harness_recipe(tmp_path, method)
+    component = live.harness_component
     assert isinstance(component, HarnessTrainingComponent)
     return component
 
@@ -81,9 +82,9 @@ def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(
         status = ended(component, "one")
         assert status.state == "finished" and status.metrics == {}
         (checkpoint,) = status.checkpoints
-        # The step's metrics are the checkpoint's: the job's end carries none of its own.
+        # The job's metrics are the checkpoint's: the job's end carries none of its own.
         assert checkpoint.metrics["selected"] is True
-        # The tree's checksum names the head that the step ran on.
+        # The tree's checksum names the head that the job ran on.
         assert checkpoint.metrics["head_checksum"] == PI_SEED.checksum()
         assert "head_release_id" not in checkpoint.metrics
         assert checkpoint.path == checkpoint.artifact_path
@@ -108,7 +109,7 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
         (checkpoint,) = ended(component, "one").checkpoints
     finally:
         component.close()
-    # The job loop of every component asks the component for the parts; the activation rule reads them: the step
+    # The job loop of every component asks the component for the parts; the activation rule reads them: the job
     # rewrote the rules of the seed tree.
     loop = JobLoop(component, scenario="demo", scenario_component=COMPONENT)
     # The parts are those that changed from the job's own start, wherever the training start is.
@@ -158,7 +159,7 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
         status = ended(component, "one")
         assert status.state == "failed" and status.error == "RuntimeError: the method failed"
         assert status.metrics["skipped"] == "step failed" and status.metrics["error"] == status.error
-        # The failed step counts, so the next one claims the next step record; the harness state stays.
+        # The failed job counts, so the next one claims the next job record; the harness state stays.
         steps, state = component.state_after("one")
         assert steps == 1 and state == component.state_after(None)[1]
         # A job that never settled changed nothing: the state after it is the state after the job it names.
@@ -201,13 +202,13 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_the_progress_file_holds_the_running_steps_progress_until_it_ends(tmp_path: Path) -> None:
     backend, _ = harness_backend(tmp_path, lambda workspace, services: None)
-    progress = StepProgress(request_id="ask-1", phase="proposing", started_at=1.0, step_record=str(tmp_path / "1"))
+    progress = JobProgress(request_id="ask-1", phase="proposing", started_at=1.0, job_record=str(tmp_path / "1"))
     path = tmp_path / PROGRESS_FILE
     with ProgressFile(backend, path, interval_seconds=0.01):
-        assert read_step_progress(path) is None
+        assert read_job_progress(path) is None
         backend.progress = progress
         deadline = time.monotonic() + 5
-        while read_step_progress(path) is None and time.monotonic() < deadline:
+        while read_job_progress(path) is None and time.monotonic() < deadline:
             time.sleep(0.01)
-        assert read_step_progress(path) == progress
-    assert read_step_progress(path) is None
+        assert read_job_progress(path) == progress
+    assert read_job_progress(path) is None
