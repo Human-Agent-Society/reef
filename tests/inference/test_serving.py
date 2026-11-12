@@ -9,13 +9,25 @@ from pathlib import Path
 import pytest
 from tests.support.runtime_stubs import RunningEngines
 
-from reef.artifact import REFERENCE_FILE, DownloadedSnapshot, HuggingFaceRevision, HuggingFaceSource
+from reef.artifact import (
+    BASE_FILE,
+    REFERENCE_FILE,
+    BaseRoot,
+    DownloadedSnapshot,
+    HuggingFaceRevision,
+    HuggingFaceSource,
+)
 from reef.artifact.artifact import Artifact, SnapshotRef
 from reef.core.errors import ReefError
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.inference.deployment import InferenceService
 from reef.inference.interfaces import InferenceBackend, InferenceHandler, RuntimeContractError
-from reef.inference.residency import AdapterCapacityExhausted, AdapterResidencyError, adapter_name, parse_adapter_name
+from reef.inference.residency import (
+    AdapterCapacityExhaustedError,
+    AdapterResidencyError,
+    adapter_name,
+    parse_adapter_name,
+)
 from reef.inference.serving import AdapterServingRuntime, FullWeightServingRuntime
 
 
@@ -75,10 +87,6 @@ class ServiceEngines(RunningEngines):
         super().__init__(backend)
         self.service = service
 
-    @property
-    def watched(self) -> bool:
-        return True
-
     def check_health(self) -> None:
         self.service.check_health()
 
@@ -100,10 +108,12 @@ class Handler(InferenceHandler):
 class Service(InferenceService):
     """The service that owns the engines; only ``close`` is reached."""
 
-    connection_protocol = "test-engines-v1"
-
     def __init__(self) -> None:
         self.closed = 0
+
+    @classmethod
+    def from_config(cls, config):
+        raise AssertionError("unused")
 
     def start(self, resources):
         raise AssertionError("unused")
@@ -134,7 +144,14 @@ def saved_full_weights(path: Path) -> Path:
     return path
 
 
-def release(path: Path, artifact_id: str) -> Artifact:
+def saved_base_root(path: Path, model: str = "Qwen/Qwen3-8B") -> Path:
+    """A base root: the base file alone, which names the default start of ``model``."""
+    path.mkdir(parents=True)
+    (path / BASE_FILE).write_text(BaseRoot({"model": model, "lora_rank": "16"}).to_text())
+    return path
+
+
+def published_snapshot(path: Path, artifact_id: str) -> Artifact:
     return Artifact(SnapshotRef(artifact_id, None), None, artifact_id=artifact_id, local_path=path)
 
 
@@ -160,7 +177,7 @@ def test_the_engines_start_serving_the_base_model_under_a_fresh_version(serving,
 
 def test_each_artifact_loads_under_a_new_version_and_the_same_artifact_loads_nothing(serving, engines, tmp_path):
     checkpoint = saved_adapter(tmp_path / "job-1")
-    version = serving.activate_checkpoint(release(checkpoint, "c1"), scenario="math")
+    version = serving.activate_checkpoint(published_snapshot(checkpoint, "c1"), scenario="math")
     assert engines.events[-4:] == [
         "pause",
         ("recover", 0),
@@ -170,56 +187,93 @@ def test_each_artifact_loads_under_a_new_version_and_the_same_artifact_loads_not
     assert serving.serving_adapter_runtime_load_id("math") == version
     # Repeating the same artifact does not reload the adapter.
     calls = len(engines.events)
-    assert serving.activate_checkpoint(release(checkpoint, "c1"), scenario="math") == version
+    assert serving.activate_checkpoint(published_snapshot(checkpoint, "c1"), scenario="math") == version
     assert len(engines.events) == calls
-    newer = serving.activate_checkpoint(release(saved_adapter(tmp_path / "job-2"), "c2"), scenario="math")
+    newer = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "job-2"), "c2"), scenario="math")
     assert newer != version and serving.serving_adapter_runtime_load_id("math") == newer
 
 
-def test_scenarios_serve_their_own_adapters_and_a_restart_loads_each_release_again(engines, tmp_path):
+def test_scenarios_serve_their_own_adapters_and_a_restart_loads_each_snapshot_again(engines, tmp_path):
     serving = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=2))
-    math = serving.activate_checkpoint(release(saved_adapter(tmp_path / "math"), "m"), scenario="math")
-    code = serving.activate_checkpoint(release(saved_adapter(tmp_path / "code"), "c"), scenario="code")
+    math = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "math"), "m"), scenario="math")
+    code = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "code"), "c"), scenario="code")
     assert (serving.serving_adapter_runtime_load_id("math"), serving.serving_adapter_runtime_load_id("code")) == (
         math,
         code,
     )
     assert serving.adapter_residency_status()["counters"]["loads"] == 2
     restarted = opened(AdapterServingRuntime(RunningEngines(Engines()), Handler(), adapter_capacity=2))
-    again = restarted.activate_checkpoint(release(tmp_path / "math", "m"), scenario="math")
+    again = restarted.activate_checkpoint(published_snapshot(tmp_path / "math", "m"), scenario="math")
     # A new incarnation never reuses a version for other weights.
     assert again.split(":")[0] != math.split(":")[0]
 
 
-def test_an_activation_loads_another_release_and_the_default_start_loads_as_any_adapter(serving, tmp_path):
-    first = serving.activate_checkpoint(release(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
-    older = serving.activate_checkpoint(release(saved_adapter(tmp_path / "older"), "o"), scenario="math")
+def test_an_activation_loads_another_snapshot_and_the_default_start_loads_as_any_adapter(serving, tmp_path):
+    first = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
+    older = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "older"), "o"), scenario="math")
     assert older != first and serving.serving_adapter_runtime_load_id("math") == older
-    # A root snapshot made from the default start holds the untrained adapter, which loads under a version of its own.
-    base = serving.activate_checkpoint(release(saved_adapter(tmp_path / "untrained"), "base"), scenario="math")
+    # A root snapshot of an older Reef holds the untrained adapter, which loads under a version of its own.
+    base = serving.activate_checkpoint(
+        published_snapshot(saved_adapter(tmp_path / "untrained"), "base"), scenario="math"
+    )
     assert base not in (first, older, serving.base_version)
     assert serving.serving_adapter_runtime_load_id("math") == base
 
 
+def test_a_base_root_serves_the_base_model_and_loads_no_adapter(engines, tmp_path):
+    serving = opened(
+        AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=2, model_path="Qwen/Qwen3-8B")
+    )
+    base = published_snapshot(saved_base_root(tmp_path / "base"), "base")
+    calls = len(engines.events)
+    # Before any adapter: the engines serve the base model already, and nothing changes in them.
+    assert serving.activate_checkpoint(base, scenario="math") == serving.base_version
+    assert engines.events[calls:] == []
+    assert serving.served_artifact("base", "math").model_name == "Qwen/Qwen3-8B"
+
+    trained = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
+    other = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "code"), "c1"), scenario="code")
+    route = serving.served_artifact("j1", "math")
+    calls = len(engines.events)
+    # After an adapter: the scenario serves no adapter again. The requests that still name the adapter finish on
+    # it, so nothing unloads until its route stops.
+    assert serving.activate_checkpoint(base, scenario="math") == serving.base_version
+    assert engines.events[calls:] == []
+    assert serving.serving_adapter_runtime_load_id("math") is None
+    assert serving.served_model_name("math") == "Qwen/Qwen3-8B"
+    assert serving.serving_adapter_runtime_load_id("code") == other
+    serving.stop_serving(route)
+    assert engines.events[-1] == ("unload", adapter_name("math", trained))
+    # The adapter loads again under a new version when the scenario selects it again.
+    again = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "job-1b"), "j1"), scenario="math")
+    assert again not in (trained, serving.base_version) and serving.served_model_name("math") != "Qwen/Qwen3-8B"
+
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / BASE_FILE).write_text("{}")
+    with pytest.raises(ReefError, match="no readable base file"):
+        serving.activate_checkpoint(published_snapshot(tmp_path / "broken", "broken"), scenario="math")
+    assert serving.serving_adapter_runtime_load_id("math") == again
+
+
 def test_only_a_saved_adapter_of_a_named_scenario_is_served(serving, tmp_path):
     with pytest.raises(ReefError, match="named scenario"):
-        serving.activate_checkpoint(release(saved_adapter(tmp_path / "a"), "a"))
+        serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "a"), "a"))
     manifest_only = tmp_path / "manifest-only"
     manifest_only.mkdir()
     (manifest_only / "tinker-checkpoint.json").write_text("{}")
     with pytest.raises(ReefError, match="holds no PEFT adapter"):
-        serving.activate_checkpoint(release(manifest_only, "m"), scenario="math")
+        serving.activate_checkpoint(published_snapshot(manifest_only, "m"), scenario="math")
     assert serving.serving_adapter_runtime_load_id("math") is None
 
 
 def test_a_scenario_replaces_its_own_adapter_but_never_evicts_another_scenarios(engines, tmp_path):
     serving = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=1))
-    first = serving.activate_checkpoint(release(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
+    first = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
     # Generation is paused during the load, so the scenario's current adapter makes room for its next one.
-    second = serving.activate_checkpoint(release(saved_adapter(tmp_path / "m2"), "m2"), scenario="math")
+    second = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "m2"), "m2"), scenario="math")
     assert ("unload", adapter_name("math", first)) in engines.events
-    with pytest.raises(AdapterCapacityExhausted, match="raise --max-loaded-loras"):
-        serving.activate_checkpoint(release(saved_adapter(tmp_path / "c1"), "c1"), scenario="code")
+    with pytest.raises(AdapterCapacityExhaustedError, match="raise --max-loaded-loras"):
+        serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "c1"), "c1"), scenario="code")
     assert engines.events[-1] == "resume"
     assert serving.serving_adapter_runtime_load_id("math") == second
     assert serving.serving_adapter_runtime_load_id("code") is None
@@ -228,7 +282,7 @@ def test_a_scenario_replaces_its_own_adapter_but_never_evicts_another_scenarios(
 def test_engines_that_report_another_version_after_an_adapter_load_fail_the_activation(serving, engines, tmp_path):
     engines.misreport = "stale:1"
     with pytest.raises(AdapterResidencyError, match="could not load") as raised:
-        serving.activate_checkpoint(release(saved_adapter(tmp_path / "a"), "a"), scenario="math")
+        serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "a"), "a"), scenario="math")
     assert isinstance(raised.value.__cause__, RuntimeContractError)
     assert "after loading" in str(raised.value.__cause__)
     # The engines resume, the failed load is dropped, and the scenario serves nothing.
@@ -239,16 +293,16 @@ def test_engines_that_report_another_version_after_an_adapter_load_fail_the_acti
 
 def test_a_failed_load_that_took_the_scenarios_own_slot_leaves_it_serving_no_adapter(engines, tmp_path):
     serving = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=1))
-    first = serving.activate_checkpoint(release(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
+    first = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
     engines.misreport = "stale:1"
     with pytest.raises(AdapterResidencyError, match="could not load"):
-        serving.activate_checkpoint(release(saved_adapter(tmp_path / "m2"), "m2"), scenario="math")
+        serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "m2"), "m2"), scenario="math")
     # The new adapter evicted the first one, so requests sample the base model rather than name a gone adapter.
     assert ("unload", adapter_name("math", first)) in engines.events
     assert serving.serving_adapter_runtime_load_id("math") is None
     # The first snapshot is not served any more, so activating it again loads it under a new version.
     engines.misreport = None
-    again = serving.activate_checkpoint(release(tmp_path / "m1", "m1"), scenario="math")
+    again = serving.activate_checkpoint(published_snapshot(tmp_path / "m1", "m1"), scenario="math")
     assert again != first and serving.serving_adapter_runtime_load_id("math") == again
 
 
@@ -266,14 +320,37 @@ def test_full_weights_load_under_a_new_version_and_the_same_artifact_loads_nothi
     assert not serving.per_scenario_adapters and not serving.shared_by_training_scenarios
     assert serving.served_weight_kind == "model"
     weights = saved_full_weights(tmp_path / "step-1")
-    version = serving.activate_checkpoint(release(weights, "w1"))
+    version = serving.activate_checkpoint(published_snapshot(weights, "w1"))
     assert version != initial
     assert engines.events[-4:] == ["pause", ("recover", 0), ("load", "full", None, version, weights), "resume"]
     calls = len(engines.events)
-    assert serving.activate_checkpoint(release(weights, "w1")) == version
+    assert serving.activate_checkpoint(published_snapshot(weights, "w1")) == version
     assert len(engines.events) == calls
-    rolled_back = serving.activate_checkpoint(release(saved_full_weights(tmp_path / "step-0"), "w0"))
+    rolled_back = serving.activate_checkpoint(published_snapshot(saved_full_weights(tmp_path / "step-0"), "w0"))
     assert rolled_back not in (initial, version)
+
+
+def test_a_base_root_loads_the_base_models_directory_as_full_weights(engines, tmp_path):
+    model = saved_full_weights(tmp_path / "model")
+    serving = opened(FullWeightServingRuntime(RunningEngines(engines), Handler(), model_path=str(model)))
+    trained = serving.activate_checkpoint(published_snapshot(saved_full_weights(tmp_path / "step-1"), "w1"))
+    base = published_snapshot(saved_base_root(tmp_path / "base", str(model)), "base")
+    version = serving.activate_checkpoint(base)
+    assert version not in (trained, serving.base_version)
+    assert engines.events[-4:] == ["pause", ("recover", 0), ("load", "full", None, version, model), "resume"]
+    calls = len(engines.events)
+    assert serving.activate_checkpoint(base) == version
+    assert len(engines.events) == calls
+    # Recovery loads the base model again under the same version.
+    engines.dead = 1
+    serving.recover_engines()
+    assert engines.loads()[-1] == ("load", "full", None, version, model)
+
+    # A model path that is no directory on this host cannot be loaded again: the activation fails and changes nothing.
+    hub = opened(FullWeightServingRuntime(RunningEngines(Engines()), Handler(), model_path="Qwen/Qwen3-8B"))
+    with pytest.raises(ReefError, match="is no directory on this host"):
+        hub.activate_checkpoint(base)
+    assert hub.served_artifact_id is None
 
 
 @pytest.mark.parametrize("adapter", [False, True])
@@ -298,7 +375,7 @@ def test_weight_load_reuse_follows_artifact_identity_across_storage_snapshots(en
         serving.shutdown()
 
 
-def test_a_release_that_refers_to_a_revision_loads_the_revisions_snapshot(engines, tmp_path, monkeypatch):
+def test_a_snapshot_that_refers_to_a_revision_loads_the_revisions_snapshot(engines, tmp_path, monkeypatch):
     revision = HuggingFaceRevision("org/model", "0123456789abcdef0123456789abcdef01234567")
     reference = tmp_path / "reference"
     reference.mkdir()
@@ -312,12 +389,12 @@ def test_a_release_that_refers_to_a_revision_loads_the_revisions_snapshot(engine
 
     monkeypatch.setattr("reef.inference.serving.download_huggingface_snapshot", download)
     serving = opened(FullWeightServingRuntime(RunningEngines(engines), Handler()))
-    version = serving.activate_checkpoint(release(reference, "hf"))
+    version = serving.activate_checkpoint(published_snapshot(reference, "hf"))
     assert engines.events[-2] == ("load", "full", None, version, snapshot)
     assert downloaded == [HuggingFaceSource(revision.repo, revision.commit)]
     (reference / REFERENCE_FILE).write_text("{}")
     with pytest.raises(ReefError, match="no readable reference"):
-        serving.activate_checkpoint(release(reference, "bad"))
+        serving.activate_checkpoint(published_snapshot(reference, "bad"))
 
 
 def test_engines_that_report_another_version_after_a_full_load_fail_it_and_keep_the_served_version(engines, tmp_path):
@@ -326,27 +403,27 @@ def test_engines_that_report_another_version_after_a_full_load_fail_it_and_keep_
     engines.misreport = "stale:1"
     weights = saved_full_weights(tmp_path / "step-1")
     with pytest.raises(RuntimeContractError, match=r"report \['stale:1'\] after loading"):
-        serving.activate_checkpoint(release(weights, "w1"))
+        serving.activate_checkpoint(published_snapshot(weights, "w1"))
     assert engines.events[-1] == "resume"
     # The snapshot is not recorded as served: a retry loads it again under a new version.
     engines.misreport = None
-    retried = serving.activate_checkpoint(release(weights, "w1"))
+    retried = serving.activate_checkpoint(published_snapshot(weights, "w1"))
     assert len(engines.loads()) == 2 and retried not in (initial, "stale:1")
 
 
 def test_each_full_weight_load_first_replaces_the_dead_engines_while_they_are_paused(engines, tmp_path):
     serving = opened(FullWeightServingRuntime(RunningEngines(engines), Handler()))
     engines.dead = 1
-    serving.activate_checkpoint(release(saved_full_weights(tmp_path / "w1"), "c1"))
+    serving.activate_checkpoint(published_snapshot(saved_full_weights(tmp_path / "w1"), "c1"))
     order = [event if isinstance(event, str) else event[0] for event in engines.events[2:]]
     assert order == ["pause", "recover", "load", "resume"]
 
 
 def test_a_replaced_engine_restarts_every_engine_and_reloads_each_scenarios_adapter(engines, tmp_path):
     serving = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=3))
-    math = serving.activate_checkpoint(release(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
+    math = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
     engines.dead = 1
-    code = serving.activate_checkpoint(release(saved_adapter(tmp_path / "c1"), "c1"), scenario="code")
+    code = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "c1"), "c1"), scenario="code")
     loads = [(adapter, version) for _, _, adapter, version, _ in engines.loads()]
     # The restart loads math's current adapter again before code's new one.
     assert loads == [
@@ -368,8 +445,8 @@ def test_a_restart_that_cannot_load_one_scenarios_adapter_still_loads_the_others
 
     engines = FailingMath()
     serving = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=3))
-    serving.activate_checkpoint(release(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
-    code = serving.activate_checkpoint(release(saved_adapter(tmp_path / "c1"), "c1"), scenario="code")
+    serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
+    code = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "c1"), "c1"), scenario="code")
     with pytest.raises(AdapterResidencyError, match=r"scenarios \['math'\]"):
         serving.restart_engines()
     assert serving.serving_adapter_runtime_load_id("math") is None
@@ -377,7 +454,7 @@ def test_a_restart_that_cannot_load_one_scenarios_adapter_still_loads_the_others
 
 
 def test_a_load_without_dead_engines_restarts_nothing(serving, engines, tmp_path):
-    serving.activate_checkpoint(release(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
+    serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "m1"), "m1"), scenario="math")
     assert ("recover", 0) in engines.events
     assert "abort" not in engines.events
 
@@ -427,8 +504,8 @@ def test_a_failed_health_check_restarts_the_engines_and_loads_each_scenarios_ada
         AdapterServingRuntime(ServiceEngines(engines, service), Handler(), adapter_capacity=2, health_interval_s=0.01)
     )
     try:
-        math = serving.activate_checkpoint(release(saved_adapter(tmp_path / "math"), "m"), scenario="math")
-        code = serving.activate_checkpoint(release(saved_adapter(tmp_path / "code"), "c"), scenario="code")
+        math = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "math"), "m"), scenario="math")
+        code = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "code"), "c"), scenario="code")
         loaded = len(engines.loads())
         service.restart()
         assert engines.recovered.wait(timeout=10)
@@ -447,7 +524,7 @@ def test_a_failed_health_check_loads_the_served_full_weights_again_under_their_v
     serving = opened(FullWeightServingRuntime(ServiceEngines(engines, service), Handler(), health_interval_s=0.01))
     try:
         weights = saved_full_weights(tmp_path / "step-1")
-        version = serving.activate_checkpoint(release(weights, "w1"))
+        version = serving.activate_checkpoint(published_snapshot(weights, "w1"))
         calls = len(engines.events)
         service.restart()
         assert engines.recovered.wait(timeout=10)
@@ -459,7 +536,7 @@ def test_a_failed_health_check_loads_the_served_full_weights_again_under_their_v
 
 def test_recovery_that_replaces_no_engine_loads_nothing(engines, tmp_path):
     serving = opened(FullWeightServingRuntime(RunningEngines(engines), Handler()))
-    serving.activate_checkpoint(release(saved_full_weights(tmp_path / "step-1"), "w1"))
+    serving.activate_checkpoint(published_snapshot(saved_full_weights(tmp_path / "step-1"), "w1"))
     calls = len(engines.events)
     serving.recover_engines()
     assert engines.events[calls:] == ["pause", ("recover", 0), "resume"]
@@ -468,7 +545,7 @@ def test_recovery_that_replaces_no_engine_loads_nothing(engines, tmp_path):
 def test_a_restarted_runtime_takes_over_the_adapter_the_engines_kept_and_stops_a_replaced_one(engines, tmp_path):
     first = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=2))
     checkpoint = saved_adapter(tmp_path / "math")
-    artifact = Artifact(SnapshotRef("release-m", None), None, local_path=checkpoint, artifact_id="artifact-m")
+    artifact = Artifact(SnapshotRef("snapshot-m", None), None, local_path=checkpoint, artifact_id="artifact-m")
     version = first.activate_checkpoint(artifact, scenario="math")
     served = first.served_artifact("artifact-m", "math")
     assert served is not None and served.model_name == adapter_name("math", version)
@@ -482,7 +559,7 @@ def test_a_restarted_runtime_takes_over_the_adapter_the_engines_kept_and_stops_a
     assert restarted.served_model_name("math") == served.model_name
 
     # A newer snapshot replaces it; when its stop is due, the engines unload the old adapter.
-    restarted.activate_checkpoint(release(saved_adapter(tmp_path / "newer"), "n"), scenario="math")
+    restarted.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "newer"), "n"), scenario="math")
     restarted.stop_serving(served)
     assert ("unload", served.model_name) in engines.events
     # The current adapter never stops.
@@ -493,7 +570,7 @@ def test_a_restarted_runtime_takes_over_the_adapter_the_engines_kept_and_stops_a
 def test_a_value_the_engines_did_not_keep_loads_again(tmp_path):
     first = opened(AdapterServingRuntime(RunningEngines(Engines()), Handler(), adapter_capacity=2))
     artifact = Artifact(
-        SnapshotRef("release-m", None), None, local_path=saved_adapter(tmp_path / "m"), artifact_id="artifact-m"
+        SnapshotRef("snapshot-m", None), None, local_path=saved_adapter(tmp_path / "m"), artifact_id="artifact-m"
     )
     first.activate_checkpoint(artifact, scenario="math")
     served = first.served_artifact("artifact-m", "math")
@@ -509,6 +586,6 @@ def test_a_runtime_that_control_did_not_open_changes_no_engine(engines, tmp_path
     serving = AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=1)
     assert engines.events == []
     with pytest.raises(ReefError, match="not open"):
-        serving.activate_checkpoint(release(saved_adapter(tmp_path / "math"), "m"), scenario="math")
+        serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "math"), "m"), scenario="math")
     serving.shutdown()
     assert engines.events == []

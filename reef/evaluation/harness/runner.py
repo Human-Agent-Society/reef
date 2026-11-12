@@ -22,7 +22,7 @@ from threading import Lock
 
 from reef.core.evaluation import RolloutScore
 from reef.evaluation.harness.scoring import FailureObservation, ScoredRun, TaskScorer
-from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec
 from reef.execution.executor.config import (
     ExecutorSelection,
     ExecutorSettings,
@@ -121,7 +121,7 @@ class TaskEvaluationWorker:
         error scores 0; any other nonzero exit still scores and is observed
         beside the score. ``record_dir`` receives the trajectory files before
         the run root is removed, unless it is ``None``; a copy that fails is
-        not a run failure and propagates, so the step stops instead of
+        not a run failure and propagates, so the job stops instead of
         scoring a result that a disk error shaped.
         """
         token = RUN_OWNER_LEASE.set(self.owner_lease)
@@ -336,11 +336,10 @@ def evaluation_selection(
         raise ValueError(
             "declare GPU needs through execution.evolution.resources.gpus_per_worker, not executor.options.num_gpus"
         )
-    configured_cpus = settings.options.get("num_cpus", requirements.cpus_per_worker)
-    if settings.resources.cpus_per_worker is not None and configured_cpus != requirements.cpus_per_worker:
-        raise ValueError("executor.options.num_cpus conflicts with execution.evolution.resources.cpus_per_worker")
-    # Keep the older Ray profiles, which request CPUs through options.num_cpus.
-    requirements = replace(requirements, cpus_per_worker=configured_cpus)
+    if settings.options.get("num_cpus", requirements.cpus_per_worker) != requirements.cpus_per_worker:
+        raise ValueError(
+            "declare CPU needs through execution.evolution.resources.cpus_per_worker, not executor.options.num_cpus"
+        )
     runtime_env = settings.options.get("runtime_env", {})
     if not isinstance(runtime_env, dict):
         raise ValueError("evolution executor runtime_env must be an object")
@@ -355,7 +354,7 @@ def evaluation_selection(
 
 def evaluation_executor_config(
     selection: ExecutorSelection, requirements: ExecutionRequirements, worker: WorkerSpec
-) -> ExecutorConfig:
+) -> ExecutorLaunch:
     """The executor configuration of the run pool: one copy of ``worker`` per worker slot."""
     backend = Executor.get_class(selection.settings.backend)
     options = dict(selection.settings.options)
@@ -377,7 +376,7 @@ def evaluation_executor_config(
             replace(worker, options={"cuda_visible_devices": ",".join(devices)})
             for devices in local_gpu_assignments(requirements)
         )
-    return ExecutorConfig(backend=backend, options=options, workers=workers)
+    return ExecutorLaunch(backend=backend, options=options, workers=workers)
 
 
 __all__ = [

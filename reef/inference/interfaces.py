@@ -25,8 +25,9 @@ from threading import Lock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import InferenceUnavailable, ReefError
+from reef.core.errors import InferenceUnavailableError, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
+from reef.core.plugins import Plugin
 from reef.core.served_models import ServedArtifact
 from reef.core.values import JsonValue
 from reef.core.weight_layout import WeightFiles
@@ -106,10 +107,10 @@ class InferenceAdmissionController:
         self._active = 0
 
     async def acquire(self) -> InferenceAdmissionHandle:
-        """Count one active request; ``InferenceUnavailable`` once admission is closed."""
+        """Count one active request; ``InferenceUnavailableError`` once admission is closed."""
         with self._lock:
             if not self._open:
-                raise InferenceUnavailable("the inference runtime is shutting down")
+                raise InferenceUnavailableError("the inference runtime is shutting down")
             self._active += 1
             return InferenceAdmissionHandle(self)
 
@@ -172,28 +173,23 @@ class InferenceArtifact:
     """The selected component identity and request-time requirements for inference.
 
     ``artifact_id`` is a nonempty component ID. ``local_path`` is None or a
-    Path supplied by local evaluation. ``require_token_runtime_load_ids`` is
-    a bool: true requires engine stamps for each generated token; false
-    permits a fixed local model's stamp. This value contains no storage locator.
+    Path supplied by local evaluation. This value contains no storage locator.
     Serving and evaluation construct it; handlers read its fields without I/O.
     """
 
     artifact_id: str
     local_path: Path | None = None
-    require_token_runtime_load_ids: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.artifact_id, str) or not self.artifact_id:
             raise ValueError("inference requires a nonempty artifact_id")
         if self.local_path is not None and not isinstance(self.local_path, Path):
             raise TypeError("inference local_path must be a Path or None")
-        if not isinstance(self.require_token_runtime_load_ids, bool):
-            raise TypeError("require_token_runtime_load_ids must be a bool")
 
     @classmethod
     def from_artifact(cls, artifact: Artifact) -> InferenceArtifact:
-        """Copy identity and available path; only unpublished local artifacts permit unstamped tokens."""
-        return cls(artifact.artifact_id, artifact.local_path, not artifact.ref.local)
+        """Copy the artifact's identity and its available path."""
+        return cls(artifact.artifact_id, artifact.local_path)
 
 
 #: The state of the engine behind a route (RFC #1269): ``warm`` answers now, ``starting`` runs but does not answer
@@ -265,7 +261,7 @@ class StartupSteps:
         return {"steps": [step.to_json() for step in self.steps], "estimate_seconds": self.estimate_seconds}
 
 
-class InferenceHandler(ABC):
+class InferenceHandler(Plugin, ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
     @classmethod
@@ -699,21 +695,17 @@ class InferenceEngine(ABC):
     is built from (``ReefSGLangEngine``, ``ReefVLLMEngine``). The methods are
     the vocabulary those callers already use by name; engine launch and the
     engine's own transports stay on the implementation. Results that only
-    report the engine's answer are returned as ``object``. ``get_runtime_load_id``
-    returns ``None`` on a node that is not the engine's node zero.
+    report the engine's answer are returned as ``object``.
     """
 
     @abstractmethod
     def get_url(self) -> str: ...
 
     @abstractmethod
-    def health_generate(self, timeout: float = 5) -> bool: ...
-
-    @abstractmethod
     def shutdown(self) -> None: ...
 
     @abstractmethod
-    def get_runtime_load_id(self) -> str | None: ...
+    def get_runtime_load_id(self) -> str: ...
 
     @abstractmethod
     def set_runtime_load_id(self, runtime_load_id: str) -> object: ...

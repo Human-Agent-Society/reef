@@ -20,20 +20,19 @@ import pytest
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
-from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
+from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import Artifact, ModelDirectory
+from reef.artifact import Artifact, DirectoryFiles
+from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.snapshot import RootSource
 from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import ExecutorFuture, base
 from reef.storage.durable_files import write_json
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import JobStatus, ScenarioRoot, TrainingJob
 from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
 from reef.train.slime_backend import component as slime_component
@@ -56,10 +55,12 @@ from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, Tr
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage, validate_slime_args
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     CheckpointStorage,
-    RetentionConfig,
+    RetentionSettings,
     _allocated_bytes,
     retention_options,
 )
+from reef.train.slime_backend.schedule import next_steps
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData, trajectories
 
 #: A policy objective over the suite's ``pg`` family, named by dotted reference like a cookbook method's.
@@ -162,6 +163,7 @@ def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
         "num_steps_per_rollout": 1,
         "attention_dropout": 0.0,
         "hidden_dropout": 0.0,
+        "hf_checkpoint": str(tmp_path / "model"),
         "save_hf": str(tmp_path / "hf" / "{rollout_id}"),
         "start_rollout_id": 0,
         "critic_save": None,
@@ -187,9 +189,10 @@ def batch_for(step: int, *, rewards: tuple[float, ...] = (1.0, 1.0)) -> JobData:
 
 
 def submitted_data(data: JobData) -> dict[str, Any]:
-    """The data of a job file that ``LocalJobComponent.submit`` wrote: the job data reference with its local path."""
+    """The data of a job file that ``LocalJobComponent.submit`` wrote: the job data reference with its local path and
+    the local paths of its tasks."""
     ref = job_data_ref(data)
-    return {**ref.to_dict(), "path": str(ref.path)}
+    return {**ref.to_dict(), "path": str(ref.path), "task_paths": [str(path) for path in ref.task_paths]}
 
 
 def parameters(objective: str, schedule: LearningRateSchedule | None = None) -> dict[str, Any]:
@@ -527,12 +530,21 @@ def test_a_queued_job_whose_start_the_workers_left_fails_when_it_runs(tmp_path, 
 
 
 @pytest.mark.unit
-def test_the_default_start_is_the_startup_model_and_the_base_start_names_the_startup_weights(tmp_path, stacks) -> None:
+def test_the_default_start_is_a_base_root_and_the_base_start_names_the_startup_weights(tmp_path, stacks) -> None:
     model = tmp_path / "model"
     model.mkdir()
     stack = stacks(tmp_path, hf_checkpoint=str(model))
-    base = stack.component.default_start()
-    assert (base.model_files, base.inputs) == (ModelDirectory(model.resolve()), {"model": str(model.resolve())})
+    inputs = {"model": str(model.resolve())}
+    default = stack.component.facts.default_start()
+    # The root holds the base file alone: no copy of the model and no weight file.
+    assert (dict(default.files), dict(default.inputs)) == ({BASE_FILE: BaseRoot(inputs).to_text()}, inputs)
+    root_dir = tmp_path / "root"
+    root_dir.mkdir()
+    default.write(root_dir)
+    stack.component.check_artifact(DirectoryFiles(root_dir))
+    root = ScenarioRoot(Artifact.local(root_dir), RootSource("default", inputs=default.inputs))
+    # The workers make the startup weights from the model, so a job from the base root starts at the base start.
+    assert stack.component.root_start(root) == stack.component.base_start
     assert SlimeStart.read(Path(stack.component.base_start)) == SlimeStart(None, None, {}, None)
     # The first job of a trainer starts from the startup weights, which the workers hold.
     stack.component.submit(
@@ -634,12 +646,18 @@ def test_the_release_format_names_full_weights_or_the_lora_adapter_in_the_engine
     tmp_path, stacks
 ) -> None:
     assert stacks(tmp_path / "full").component.artifact_format == ArtifactFormat("full")
-    lora = stacks(tmp_path / "lora", lora=True, megatron_lora_rank=8, megatron_lora_target_modules=None)
+    lora = stacks(
+        tmp_path / "lora", lora=True, megatron_lora_rank=8, megatron_lora_alpha=8, megatron_lora_target_modules=None
+    )
     assert lora.component.artifact_format == ArtifactFormat(
         "adapter", 8, ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     )
     attention = stacks(
-        tmp_path / "attention", lora=True, megatron_lora_rank=4, megatron_lora_target_modules=["linear_qkv"]
+        tmp_path / "attention",
+        lora=True,
+        megatron_lora_rank=4,
+        megatron_lora_alpha=4,
+        megatron_lora_target_modules=["linear_qkv"],
     )
     assert attention.component.artifact_format == ArtifactFormat("adapter", 4, ("q_proj", "k_proj", "v_proj"))
 
@@ -944,7 +962,7 @@ def test_checkpoint_storage_records_each_rollout_and_refuses_a_job_it_cannot_hol
     pair_bytes = max(hf_bytes + _allocated_bytes(source_megatron / "iter_0000000"), 8 * hf_bytes)
     template = str(root / "hf" / "{rollout_id}")
     storage = CheckpointStorage(
-        RetentionConfig(max_storage_bytes=pair_bytes, min_free_space_bytes=0),
+        RetentionSettings(max_storage_bytes=pair_bytes, min_free_space_bytes=0),
         hf_template=template,
         megatron_root=megatron_root,
         source_hf=source_hf,
@@ -978,7 +996,7 @@ def test_storage_preflight_resolves_the_paths_and_refuses_a_storage_it_cannot_fi
         no_save_optim=False,
     )
     monkeypatch.setattr(CheckpointStorage, "validate_capacity", lambda self, **kwargs: {"blocked": False})
-    storage = prepare_checkpoint_storage(args, RetentionConfig())
+    storage = prepare_checkpoint_storage(args, RetentionSettings())
     assert args.save_hf == str(tmp_path / "checkpoints/hf/{rollout_id}") == storage.hf_template
     # The critic's weights and optimizer survive restarts beside the actor's.
     assert args.critic_save == str(tmp_path / "checkpoints/megatron-critic")
@@ -988,7 +1006,7 @@ def test_storage_preflight_resolves_the_paths_and_refuses_a_storage_it_cannot_fi
         lambda self, **kwargs: {"blocked": True, "reasons": ["the filesystem free-space floor"]},
     )
     with pytest.raises(RuntimeError, match=r"storage preflight.*free-space floor"):
-        prepare_checkpoint_storage(args, RetentionConfig())
+        prepare_checkpoint_storage(args, RetentionSettings())
 
 
 # -- Closing
@@ -1231,7 +1249,7 @@ def test_the_component_starts_its_workers_on_the_training_gpus_without_rollout_e
     try:
         # Reef's retention options never reach Slime's parser.
         assert build_calls["arguments"] == ["--lr=1e-06"]
-        assert build_calls["retention"] == RetentionConfig(policy="best_reward", max_storage_bytes=100 * 1024**3)
+        assert build_calls["retention"] == RetentionSettings(policy="best_reward", max_storage_bytes=100 * 1024**3)
         assert build_calls["resources"] == {
             "ray_address": "ray://head:10001",
             "namespace": "test",
@@ -1373,7 +1391,7 @@ def test_the_workers_runtime_env_carries_the_cuda_defaults_and_this_processs_pyt
 @pytest.mark.unit
 def test_retention_options_are_parsed_with_units() -> None:
     retention, remaining = retention_options(["--reef-checkpoint-min-free-space=10GB", "--loss-type", "sft_loss"])
-    assert retention == RetentionConfig(min_free_space_bytes=10 * 1000**3)
+    assert retention == RetentionSettings(min_free_space_bytes=10 * 1000**3)
     assert remaining == ["--loss-type", "sft_loss"]
     for size in ("100", "0GB"):
         with pytest.raises(SystemExit):

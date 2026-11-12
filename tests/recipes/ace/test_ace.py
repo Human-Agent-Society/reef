@@ -11,10 +11,17 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_jobs import (
+    PI_SEED,
+    TreeArtifacts,
+    build_harness_backend,
+    configured_component,
+    job_services,
+    with_harness_component,
+)
 from tests.support.harness_methods import QueueChat
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import PI_SEED, TreeArtifacts, build_harness_backend, runtime, step_services
+from tests.support.trajectories import recorded_trajectory
 
 from recipes.ace import ACE, ACESettings
 from reef.core.job_data import TrajectorySample
@@ -23,10 +30,12 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe import load_recipe_config
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
-from reef.train.harness_backend import StepContext, Workspace
+from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
+from reef.train.harness_backend import MethodJob, Workspace
+from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.harness_backend.state import HarnessState
-from reef.train.harness_backend.workspace import StepOutput
+from reef.train.harness_backend.workspace import JobOutput
 from reef.train.types import JobData
 
 PI = get_adapter("pi")
@@ -74,7 +83,7 @@ def playbook_state(*bullets: tuple[str, str, int, int]) -> dict[str, str]:
 
 def ace_step(
     tmp_path: Path, chat: QueueChat, settings: ACESettings, *samples: TrajectorySample, state: dict[str, str]
-) -> tuple[Workspace, StepOutput]:
+) -> tuple[Workspace, JobOutput]:
     """One ACE step on a workspace over the pi seed, with ``chat`` as the served model, and what it wrote to ``output/``."""
     workspace = Workspace.create(
         tmp_path / "step",
@@ -88,8 +97,8 @@ def ace_step(
         samples=samples,
         state_files=state,
     )
-    services = step_services(workspace, ModelBindings(served=chat))
-    ACE(settings).step(StepContext(workspace, services))
+    services = job_services(workspace, ModelBindings(served=chat))
+    ACE(settings).run(MethodJob(workspace, services))
     return workspace, workspace.read_output()
 
 
@@ -101,15 +110,14 @@ def test_two_steps_grow_the_playbook_that_pi_serves_with_no_run(tmp_path: Path) 
         curation(add("Common mistakes to avoid", "Do not report a fix before the tests pass.")),
     )
     recipe = HarnessEvolutionRecipe(
-        method=ACE(ACESettings(model="ace")),
         evolution=EvolutionSettings(state_dir=str(tmp_path / "harness")),
         evaluation=EvaluationSettings(policy="none"),
         seed=PI_SEED,
         models={"ace": chat},
-        runtime=runtime(),
     )
+    live = with_harness_component(recipe, ACE(ACESettings(model="ace")), score=None)
     releases = TreeArtifacts(recipe.seed)
-    backend = build_harness_backend(recipe, "demo", releases)
+    backend = build_harness_backend(recipe, live, "demo", releases)
     # The first trace has no score and no feedback: ACE needs no correct answer.
     first = backend_step(
         backend,
@@ -231,7 +239,9 @@ def test_a_reply_that_is_not_the_asked_json_skips_its_trace(tmp_path: Path) -> N
 def test_the_example_serves_ace_on_pi_with_no_evaluation(monkeypatch: pytest.MonkeyPatch) -> None:
     # reef serve runs the example from the repository root, where its paths start.
     monkeypatch.chdir(EXAMPLE.parents[3])
-    recipe = HarnessEvolutionRecipe.from_environment({}, config=load_recipe_config(EXAMPLE), runtime=runtime())
-    assert isinstance(recipe.method, ACE) and recipe.method.settings == ACESettings(max_bullets=100, prune_margin=2)
-    assert (recipe.evolution.adapter, recipe.evaluation.policy, recipe.scorer) == ("pi", "none", None)
+    recipe = load_recipe(HarnessEvolutionRecipe, load_recipe_config(EXAMPLE), {})
+    component = configured_component(recipe)
+    assert isinstance(component.method, ACE)
+    assert component.method.settings == ACESettings(max_bullets=100, prune_margin=2)
+    assert (recipe.evolution.adapter, recipe.evaluation.policy, component.scorer) == ("pi", "none", None)
     assert set(recipe.seed.files) == {"rules.md"}

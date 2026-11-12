@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.training_deployment import LocalFacts
 
 from reef.core.config import config_arguments, config_option, parse_config_values
 from reef.core.errors import RuntimeConfigError
@@ -20,6 +21,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe, RecipeConfigError, WeightTrainingRecipe, config_field
 from reef.recipe.config_fields import resolve_config_field_values
+from reef.recipe.loading import load_recipe
 from reef.service.deploy import orchestrator
 from reef.service.deploy.cli import _apply_overrides, _parse_overrides, build_serve_parser
 from reef.service.deploy.config_utils import DeployConfigError, interpolate_environment
@@ -73,7 +75,7 @@ def extension(monkeypatch):
     module = ModuleType("reef_config_extension")
     module.Training = ExtensionRecipe
     module.Serving = ExtensionServingRecipe
-    module.runtime = ExtensionRuntimeFactory()
+    module.Runtime = ExtensionRuntimeFactory
     monkeypatch.setitem(sys.modules, module.__name__, module)
     return module
 
@@ -106,10 +108,10 @@ def resolve_deployment(config, argv=()):
 def test_extension_yaml_cli_and_runtime_values_are_equivalent(extension, field, value, cli):
     base = {"reef": {"recipe": "reef_config_extension:Training"}}
     yaml_config = resolve_deployment({"reef": {**base["reef"], field: value}})
-    cli_config = resolve_deployment(base, [f"--{field}={cli}"])
+    cli_config = resolve_deployment(base, [f"--recipe.config.{field}={cli}"])
     yaml_values = resolve_config_field_values(ExtensionRecipe, {field: yaml_config["reef"][field]}, {})
     cli_values = resolve_config_field_values(ExtensionRecipe, {field: cli_config["reef"][field]}, {})
-    backend = extension.runtime.parse_config({field: value}, {})
+    backend = extension.Runtime().parse_config({field: value}, {})
     assert yaml_values[field] == cli_values[field] == backend[field]
     assert type(yaml_values[field]) is type(cli_values[field]) is type(backend[field])
     restored = yaml.safe_load(yaml.safe_dump(cli_config))
@@ -120,26 +122,34 @@ def test_extension_yaml_cli_and_runtime_values_are_equivalent(extension, field, 
 def test_cli_overrides_yaml_then_environment_then_defaults(extension, monkeypatch):
     monkeypatch.setenv("REEF_EXTENSION_COUNT", "8")
     config = {"reef": {"recipe": "reef_config_extension:Training", "count": "${MISSING_COUNT:?}"}}
-    combined = resolve_deployment(config, ["--count", "2"])
+    combined = resolve_deployment(config, ["--recipe.config.count", "2"])
     env = {"REEF_EXTENSION_COUNT": "8"}
     assert resolve_config_field_values(ExtensionRecipe, {"count": combined["reef"]["count"]}, env)["count"] == 2
     assert resolve_config_field_values(ExtensionRecipe, {"count": "6"}, env)["count"] == 6
     assert resolve_config_field_values(ExtensionRecipe, {}, env)["count"] == 8
     assert resolve_config_field_values(ExtensionRecipe, {}, {})["count"] == 4
-    assert extension.runtime.parse_config({}, env)["count"] == 8
-    assert extension.runtime.parse_config({"count": 0}, env)["count"] == 0
+    assert extension.Runtime().parse_config({}, env)["count"] == 8
+    assert extension.Runtime().parse_config({"count": 0}, env)["count"] == 0
 
 
-def test_last_alias_wins_and_boolean_can_be_disabled(extension):
+def test_last_occurrence_wins_and_boolean_can_be_disabled(extension):
     config = resolve_deployment(
         {"reef": {"recipe": "reef_config_extension:Training", "count": 9}},
-        ["--count", "1", "--reef.count", "2", "--count", "3", "--no-enabled"],
+        ["--recipe.config.count", "1", "--recipe.config.count", "3", "--no-recipe.config.enabled"],
     )
     assert config["reef"]["count"] == 3
     assert config["reef"]["enabled"] is False
 
 
-@pytest.mark.parametrize("argv", [["--label"], ["--count"], ["--no-enabled=true"], ["--no-enabled", "true"]])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--recipe.config.label"],
+        ["--recipe.config.count"],
+        ["--no-recipe.config.enabled=true"],
+        ["--no-recipe.config.enabled", "true"],
+    ],
+)
 def test_component_flags_validate_arity_after_discovery(extension, argv):
     with pytest.raises(ValueError, match="value"):
         resolve_deployment({"reef": {"recipe": "reef_config_extension:Training"}}, argv)
@@ -150,14 +160,14 @@ def test_recipe_and_runtime_reject_the_same_invalid_values(extension, field, val
     with pytest.raises(RecipeConfigError, match=field):
         resolve_config_field_values(ExtensionRecipe, {field: value}, {})
     with pytest.raises(RuntimeConfigError, match=field):
-        extension.runtime.parse_config({field: value}, {})
+        extension.Runtime().parse_config({field: value}, {})
 
 
 def test_recipe_and_runtime_errors_do_not_echo_values(extension):
     secret = "private-invalid-number"
     for resolve in (
         lambda: resolve_config_field_values(ExtensionRecipe, {"count": secret}, {}),
-        lambda: extension.runtime.parse_config({"count": secret}, {}),
+        lambda: extension.Runtime().parse_config({"count": secret}, {}),
     ):
         with pytest.raises((RecipeConfigError, RuntimeConfigError)) as caught:
             resolve()
@@ -166,14 +176,14 @@ def test_recipe_and_runtime_errors_do_not_echo_values(extension):
 
 def test_runtime_definition_is_loaded_from_selected_dotted_factory(extension):
     config = resolve_deployment(
-        {"reef": {"recipe": "reef_config_extension:Serving", "runtime": {"type": "reef_config_extension:runtime"}}},
-        ["--reef.data.label", "001", "--reef.runtime.label", "true", "--no-reef.runtime.enabled"],
+        {"reef": {"recipe": "reef_config_extension:Serving", "runtime": {"type": "reef_config_extension:Runtime"}}},
+        ["--recipe.config.label", "001", "--recipe.runtime.label", "true", "--no-recipe.runtime.enabled"],
     )
     runtime = RuntimeRegistry().build(config["reef"]["runtime"], model_path="model", environ={})
     assert runtime.parsed_config["label"] == "true"
     assert runtime.parsed_config["enabled"] is False
-    assert runtime.parsed_config["type"] == "reef_config_extension:runtime"
-    recipe = ExtensionServingRecipe.from_environment({}, config=config["reef"], **runtime_bindings(runtime))
+    assert runtime.parsed_config["type"] == "reef_config_extension:Runtime"
+    recipe = load_recipe(ExtensionServingRecipe, config["reef"], {})
     assert recipe.label == "001"
 
 
@@ -181,7 +191,7 @@ def test_unknown_declared_recipe_and_runtime_fields_are_rejected(extension):
     with pytest.raises(RecipeConfigError, match=r"reef\.typo"):
         resolve_deployment({"reef": {"recipe": "reef_config_extension:Training", "typo": 4}})
     with pytest.raises(RuntimeConfigError, match=r"unknown config fields.*typo"):
-        RuntimeRegistry().build({"type": "reef_config_extension:runtime", "typo": 1}, model_path="model")
+        RuntimeRegistry().build({"type": "reef_config_extension:Runtime", "typo": 1}, model_path="model")
 
 
 def test_executor_aliases_preserve_profile_and_parse_resources(extension):
@@ -204,21 +214,11 @@ def test_component_help_has_namespaced_fields_without_destination_collisions(ext
     config = {"reef": {"recipe": "reef_config_extension:Training"}}
     parser = build_serve_parser(config=config)
     help_text = parser.format_help()
-    assert "--label" in help_text and "Label kept verbatim" in help_text
+    assert "--recipe.config.label" in help_text and "Label kept verbatim" in help_text
     assert "--execution.training.backend" in help_text
     args = vars(parser.parse_args(["--execution.training.backend", "ray", "--execution.rollout.backend", "custom:X"]))
     assert args["execution.training.backend"] == "ray"
     assert args["execution.rollout.backend"] == "custom:X"
-
-
-def test_component_field_cannot_shadow_public_cli_option(extension):
-    @dataclass(frozen=True)
-    class ConflictingRecipe(WeightTrainingRecipe):
-        port: int = config_field(1)
-
-    extension.Conflicting = ConflictingRecipe
-    with pytest.raises(ValueError, match=r"conflicts.*--port"):
-        component_config_arguments({"reef": {"recipe": "reef_config_extension:Conflicting"}})
 
 
 def test_mutable_component_defaults_are_independent():
@@ -246,7 +246,7 @@ def test_launch_rejects_invalid_extension_before_model_download(extension, tmp_p
     monkeypatch.setattr(orchestrator, "resolve_model_paths", forbidden)
     monkeypatch.setattr(orchestrator._Stack, "start", forbidden)
     with pytest.raises(DeployConfigError, match="count"):
-        orchestrator._run_orchestrator(str(path), _parse_overrides(["--count", "invalid"]))
+        orchestrator._run_orchestrator(str(path), _parse_overrides(["--recipe.config.count", "invalid"]))
 
 
 def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
@@ -267,12 +267,12 @@ def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
     )
     result = subprocess.run([sys.executable, "-c", script, str(path)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert "--reef.data.label" in result.stdout and "Lightweight label" in result.stdout
+    assert "--recipe.config.label" in result.stdout and "Lightweight label" in result.stdout
 
 
 def test_training_recipe_resolves_fields_once_before_connecting(extension, monkeypatch):
     from reef.service import assembly
-    from reef.service.deploy.service_config import ServiceConfig
+    from reef.service.deploy.service_config import ServiceSettings
 
     resolved = []
     original = assembly.resolve_config_field_values
@@ -289,14 +289,15 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
 
     monkeypatch.setattr(assembly, "resolve_config_field_values", resolve)
     monkeypatch.setattr(assembly, "connect_training_component", connect)
-    settings = ServiceConfig(
+    monkeypatch.setattr(assembly, "training_backend_facts", lambda config, *, model_path: LocalFacts())
+    settings = ServiceSettings(
         recipe="reef_config_extension:Training",
         model_path="model",
         ray_address="local",
         training_backend_options={"global-batch-size": 1},
         recipe_settings={"count": "2", "label": "run-a"},
     )
-    recipe = assembly._training_recipe(ExtensionRecipe, settings, {})
+    recipe, _ = assembly._training_recipe(ExtensionRecipe, settings, {})
     assert recipe.count == 2 and recipe.label == "run-a"
     assert len(resolved) == 1
 
@@ -317,10 +318,9 @@ def test_training_and_serving_runtimes_share_typed_fields_without_allocating_res
     from reef.inference.registry import runtime_factory_for
     from reef.train.component import training_component_factory_for
 
-    factory: ConfiguredFactory | None = (
+    factory: ConfiguredFactory = (
         training_component_factory_for(runtime_type) if ":" in runtime_type else runtime_factory_for(runtime_type)
     )
-    assert factory is not None
     parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5", **required}, {})
     assert parsed["inference_timeout_s"] == 5.5
     # The staleness window is the record-to-record stage's setting; a runtime refuses it.
@@ -343,7 +343,9 @@ def test_optional_extension_null_and_string_null_are_distinct():
 
 def test_switching_recipe_uses_only_the_final_selected_schema(extension):
     config = {"reef": {"recipe": "missing_recipe:Missing"}}
-    combined = resolve_deployment(config, ["--reef.recipe", "reef_config_extension:Training", "--label", "001"])
+    combined = resolve_deployment(
+        config, ["--recipe.implementation", "reef_config_extension:Training", "--recipe.config.label", "001"]
+    )
     assert combined["reef"]["label"] == "001"
     assert "missing_recipe" not in sys.modules
 

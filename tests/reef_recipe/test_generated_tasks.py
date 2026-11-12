@@ -10,7 +10,7 @@ from typing import Any, Self
 
 import pytest
 import sqlalchemy.exc
-from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.runtime_stubs import StubFacts, StubTrainingComponent
 from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
@@ -19,7 +19,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.job_data import JobOutcome, TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import HarborTask, write_harbor_task
+from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.training_request import TrainingRequest
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.inference.http import InferenceProxyRuntime
@@ -30,6 +30,7 @@ from reef.recipe.generated_tasks import GeneratedTaskJobData, GeneratedTaskRecip
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
+    GeneratorState,
     HeldOutTask,
     RejectedTask,
     RolledOutTask,
@@ -42,12 +43,15 @@ from reef.recipe.generated_tasks.processor import (
     GeneratedTaskSettings,
     GenerationJob,
     GenerationOutcome,
+    StoredGeneratorState,
     train_task_names,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
+from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.sample2job import Sample2JobSettings
+from reef.scenario.live_objects import LiveObjects, check_recipe_objects
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
@@ -215,8 +219,10 @@ class ScriptedGenerator(TaskGenerator):
         self.result_generations: list[int] = []
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
-        cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ)})
+    def from_config(
+        cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
+    ) -> Self:
+        cls.built.append({"config": dict(config), "scenario": scenario, "environ": dict(environ), "state": state})
         return cls()
 
     async def generate(self, request: TaskGenerationRequest) -> tuple[HarborTask, ...]:
@@ -338,7 +344,7 @@ class CommittingPipeline(TrainingPipeline):
         step = len(self.session.history())
         commit = CommitRecord(
             scenario="tasks",
-            step=step + 1,
+            commit_number=step + 1,
             snapshot=SnapshotRef(f"release:{step + 1}", "base"),
             checkpoint=True,
             algorithm_state={},
@@ -347,7 +353,7 @@ class CommittingPipeline(TrainingPipeline):
             consumed_ids=consumed,
             recorded_at=1000.0 + step,
         )
-        self.session.commit_step(expected_step=step, commit=commit)
+        self.session.append_commit(expected_commit_number=step, commit=commit)
         return consumed
 
 
@@ -529,7 +535,7 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
         sourced("eval-task", "eval-source", port=9101),
     )
     store.begin_generation(generation=100, source_record_ids=())
-    store.save_candidates(
+    store.write_candidates(
         generation=100, directories=tuple(write_harbor_task(task, tmp_path / "earlier") for task in earlier)
     )
     store.publish_task(generation=100, index=0, split="train")
@@ -634,11 +640,11 @@ def test_a_restart_hands_out_the_saved_tasks_that_did_not_train_without_generati
     session.tasks.open("generated-tasks").write_document(
         key="rollout/harbor-00000-000", document=TaskRolloutResult("harbor-00000-000", (1.0, 0.0)).document()
     )
-    session.commit_step(
-        expected_step=0,
+    session.append_commit(
+        expected_commit_number=0,
         commit=CommitRecord(
             scenario="tasks",
-            step=1,
+            commit_number=1,
             snapshot=SnapshotRef("release:1", "base"),
             checkpoint=True,
             algorithm_state={},
@@ -928,9 +934,15 @@ def test_rounds_need_a_description_the_generator_service_and_task_storage() -> N
 
 
 def training_recipe(**fields: Any) -> GeneratedTaskRecipe:
+    return GeneratedTaskRecipe(**{"job_parameters": {"rollout": ROLLOUT}, **fields})
+
+
+def training_live(component: TrainingComponent | None = None) -> LiveObjects:
+    """The live objects that ``training_recipe`` runs on: a proxy runtime and ``component``, a stub by default."""
     runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
-    return GeneratedTaskRecipe(
-        StubTrainingComponent(), runtime=runtime, **{"job_parameters": {"rollout": ROLLOUT}, **fields}
+    training_component = StubTrainingComponent() if component is None else component
+    return LiveObjects(
+        runtime=runtime, training_component=training_component, training_facts=StubFacts(training_component)
     )
 
 
@@ -939,8 +951,9 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     assert GeneratedTaskRecipe.default_parameters() == {}, "the deployment names the objective"
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
     recipe = training_recipe()
+    check_recipe_objects(recipe, training_live())
     assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"
-    built = recipe.build_pipeline(PipelineContext("one"))
+    built = recipe.stages().build(PipelineContext("one"))
     assert (
         isinstance(built.record2sample, GeneratedTaskSamples) and built.record2sample.worker is None
     ), "no round runs"
@@ -952,28 +965,26 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
 @pytest.mark.parametrize("job_parameters", [None, {}, {"rollout": 4}])
 def test_the_recipe_refuses_jobs_without_the_rollout_job_parameter(job_parameters: Any) -> None:
     with pytest.raises(RecipeConfigError, match=r"needs the rollout parameter as an object"):
-        training_recipe(job_parameters=job_parameters)
+        check_recipe_objects(training_recipe(job_parameters=job_parameters), training_live())
 
 
 def test_the_recipe_refuses_a_training_component_that_runs_no_task_jobs() -> None:
     class TrajectoryOnly(StubTrainingComponent):
         check_task_jobs = TrainingComponent.check_task_jobs
 
-    runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
     with pytest.raises(RecipeConfigError, match="the stub training component trains no task jobs"):
-        GeneratedTaskRecipe(TrajectoryOnly(), runtime=runtime, job_parameters={"rollout": ROLLOUT})
+        check_recipe_objects(training_recipe(), training_live(TrajectoryOnly()))
 
 
 def generated_pipeline_recipe(environ: Mapping[str, str], pipeline: Mapping[str, Any]) -> WeightTrainingRecipe:
-    return GeneratedTaskRecipe.from_environment(
-        environ,
-        config={
+    return load_recipe(
+        GeneratedTaskRecipe,
+        {
             "data": {"job_parameters": {"rollout": ROLLOUT}},
             "model": {"path": "Qwen/Qwen3-8B"},
             "pipeline": pipeline,
         },
-        runtime=InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000"),
-        training_component=StubTrainingComponent(),
+        environ,
     )
 
 
@@ -1002,14 +1013,42 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     )
     ScriptedGenerator.built.clear()
     session, samples = scenario_session(tmp_path, "one")
-    built = recipe.build_pipeline(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
+    built = recipe.stages().build(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
     assert isinstance(built.record2sample, GeneratedTaskSamples)
     assert isinstance(built.record2sample.task_generator, ScriptedGenerator)
-    assert ScriptedGenerator.built == [{"config": {"count": 3}, "scenario": "one", "environ": environ}]
-    assert built.record2sample.task_store is not None
+    [generator_arguments] = ScriptedGenerator.built
+    state = generator_arguments.pop("state")
+    assert generator_arguments == {"config": {"count": 3}, "scenario": "one", "environ": environ}
+    store = built.record2sample.task_store
+    assert store is not None
     batches = built.sample2job
     assert isinstance(batches, GeneratedTaskJobData) and batches.buffer_size == 2
+
+    # The generator's state is in the stage's task store, apart from the stage's own documents.
+    assert isinstance(state, StoredGeneratorState)
+    store.write_document(key="delivered/0", document="the stage's document")
+    state.write("cursor", "1")
+    state.write("cursor", "2")
+    state.write("open/00000", "open")
+    assert (state.read("cursor"), state.read("delivered/0")) == ("2", None)
+    assert state.keys() == ("cursor", "open/00000") and state.keys("open/") == ("open/00000",)
+    state.remove("open/00000")
+    state.remove("open/00000")
+    assert store.state_document_keys() == ("cursor",) and store.documents() == {"delivered/0": "the stage's document"}
+    directory = write_harbor_task(task_for("t-parent", "r", 1), tmp_path / "written")
+    assert read_harbor_task(state.files(state.save_files(directory))) == read_harbor_task(directory)
+    assert store.generations() == (), "the generator's saved files are no candidates"
     built.close()
+
+
+def test_a_generator_without_the_task_storage_of_a_scenario_session_is_refused() -> None:
+    generator = {"module": f"{MODULE}:ScriptedGenerator"}
+    record2sample = {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {"generator": generator}}
+    recipe = generated_pipeline_recipe({}, {"record2sample": record2sample})
+    ScriptedGenerator.built.clear()
+    with pytest.raises(PluginConfigError, match="generator needs the task storage of a scenario session"):
+        recipe.stages().build(PipelineContext("one"))
+    assert ScriptedGenerator.built == []
 
 
 @pytest.mark.parametrize(
@@ -1043,15 +1082,15 @@ def test_a_generator_setting_that_names_no_usable_generator_is_refused(generator
             }
         },
     )
-    with pytest.raises(RecipeConfigError, match=message):
-        recipe.build_pipeline(PipelineContext("one"))
+    with pytest.raises(PluginConfigError, match=message):
+        recipe.stages().build(PipelineContext("one"))
 
 
 def test_the_rollout_settings_of_a_task_job_are_no_sample2job_config() -> None:
     sample2job = {"module": "reef.recipe.generated_tasks:GeneratedTaskJobData", "config": {"rollouts_per_task": 4}}
     recipe = generated_pipeline_recipe({}, {"sample2job": sample2job})
-    with pytest.raises(RecipeConfigError, match="unknown config fields: rollouts_per_task"):
-        recipe.build_pipeline(PipelineContext("one"))
+    with pytest.raises(PluginConfigError, match="unknown config fields: rollouts_per_task"):
+        recipe.stages().build(PipelineContext("one"))
 
 
 class ConfiglessSamples(Record2Sample):
@@ -1066,8 +1105,8 @@ class ConfiglessSamples(Record2Sample):
 
 def test_a_stage_without_from_config_cannot_be_named_in_the_pipeline_section() -> None:
     recipe = generated_pipeline_recipe({}, {"record2sample": {"module": f"{MODULE}:ConfiglessSamples"}})
-    with pytest.raises(RecipeConfigError, match="ConfiglessSamples cannot be built from a deployment file"):
-        recipe.build_pipeline(PipelineContext("one"))
+    with pytest.raises(PluginConfigError, match="ConfiglessSamples cannot be built from a deployment file"):
+        recipe.stages().build(PipelineContext("one"))
 
 
 def fail_first_result_saves(

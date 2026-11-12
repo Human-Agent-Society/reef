@@ -1,9 +1,9 @@
-"""The deployment's coding agent in a harness step, and ``AgentMethod``, a method that is a folder of prompts.
+"""The deployment's coding agent in a harness job, and ``AgentMethod``, a method that is a folder of prompts.
 
 The agent is a stand-in for pi: a script that reads its prompt and rules,
 calls the gateway's tools and model route, edits the workspace and writes
 what it saw to ``output/notes.json``. The gateway relays its model call to a
-local stand-in upstream. Tasks run the fake pi of ``harness_steps``.
+local stand-in upstream. Tasks run the fake pi of ``harness_jobs``.
 """
 
 from __future__ import annotations
@@ -17,16 +17,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from tests.support.harness_jobs import TreeArtifacts, build_harness_backend, harness_recipe
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import TreeArtifacts, build_harness_backend, harness_recipe
 
+from reef.core.errors import ConfigError
 from reef.core.plugins import PluginConfigError
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.modal import ModalExecutor
-from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailableError
 from reef.execution.sandbox.remote import deployment_owner
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.recipe.errors import RecipeConfigError
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.state import HarnessState
@@ -127,14 +127,14 @@ def agent_backend(tmp_path: Path, upstream: Upstream, mode: str = ""):
     binary.chmod(0o755)
     binary.with_name("mode").write_text(mode)
     method = AgentMethod.from_config({"prompts": str(method_folder(tmp_path)), "model": "proposer"})
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path,
         method,
         agent=AgentSettings("pi", LocalExecutor(), 60.0, str(binary)),
         models={"proposer": ModelBinding(base_url=upstream.base_url, model="proposer-model", api_key="k")},
     )
     releases = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, "demo", releases)
+    return build_harness_backend(recipe, live, "demo", releases)
 
 
 def test_the_agent_edits_the_workspace_through_its_tools_and_its_notes_become_the_steps(
@@ -146,24 +146,24 @@ def test_the_agent_edits_the_workspace_through_its_tools_and_its_notes_become_th
     seen = notes["seen"]
     assert first.artifact is not None and first.metrics["method_summary"] == "Added the marker to the rules."
     assert notes["agent"]["exit_code"] == 0 and "dropped" not in json.dumps(notes["agent"])
-    # Reef's protocol rules come before the method's own, with the step and the history filled in.
+    # Reef's protocol rules come before the method's own, with the job and the history filled in.
     assert seen["prompt"] == "Step 1: improve the rules. The history is at ../../history.\n"
-    assert "Reef runs you in step 1" in seen["rules"] and seen["rules"].endswith("Prefer small edits.\n")
+    assert "Reef runs you in job 1" in seen["rules"] and seen["rules"].endswith("Prefer small edits.\n")
     assert seen["skill"] and seen["tools"] == ["check", "evaluate"]
-    assert seen["outside"][0] == 400 and "outside the step's workspace" in seen["outside"][1]["error"]
+    assert seen["outside"][0] == 400 and "outside the job's workspace" in seen["outside"][1]["error"]
     assert seen["check"] == [200, {"passed": True, "problems": []}]
     (task_run,) = seen["evaluate"][1]["runs"]
     assert (
         seen["evaluate"][0] == 200 and task_run["score"] == 1.0 and task_run["directory"].startswith("../../history/")
     )
-    # The model call went to the method's binding, metered and recorded with the step.
+    # The model call went to the method's binding, metered and recorded with the job.
     assert seen["model"][0] == 200 and upstream.requests[0]["body"]["model"] == "proposer-model"
-    step_dir = Path(first.metrics["step_record"])
-    calls = json.loads((step_dir / "calls.json").read_text())
+    job_dir = Path(first.metrics["step_record"])
+    calls = json.loads((job_dir / "calls.json").read_text())
     assert [call["source"] for call in calls] == ["agent"] and calls[0]["model"] == "proposer-model"
-    assert (step_dir / "output" / "agent-session.jsonl").is_file()
+    assert (job_dir / "output" / "agent-session.jsonl").is_file()
     assert HarnessState.from_json(first.state).method_files == {"memory.md": "tried the marker\n"}
-    # The next step continues from state/, with the resume prompt.
+    # The next job continues from state/, with the resume prompt.
     second = backend_step(backend, JobData("demo:2", ()), first.state)
     assert second.metrics["method_notes"]["seen"]["prompt"] == "Step 2: continue from state/.\n"
 
@@ -184,7 +184,7 @@ def test_a_method_folder_needs_a_start_prompt(tmp_path: Path) -> None:
 
 def test_a_method_that_runs_an_agent_needs_evolution_agent(tmp_path: Path) -> None:
     method = AgentMethod.from_config({"prompts": str(method_folder(tmp_path))})
-    with pytest.raises(RecipeConfigError, match=r"AgentMethod runs a coding agent: set evolution\.agent"):
+    with pytest.raises(ConfigError, match=r"AgentMethod runs a coding agent: set evolution\.agent"):
         harness_recipe(tmp_path, method)
 
 
@@ -198,9 +198,6 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     assert claude is not None and (claude.adapter, claude.binary) == ("claude", "/opt/claude")
     unset = agent_settings({}, {"REEF_AGENT_SANDBOX": "none"}, state_dir=state_dir)
     assert unset is not None and isinstance(unset.executor, LocalExecutor)
-    # The variable's old name would be ignored, and the agent run with another isolation: it is refused.
-    with pytest.raises(ValueError, match="set REEF_AGENT_SANDBOX instead"):
-        agent_settings({}, {"REEF_PROPOSER_SANDBOX": "none"}, state_dir=state_dir)
     with pytest.raises(ValueError, match="one of 'bwrap', 'e2b', 'modal', 'none'"):
         agent_settings({"sandbox": "docker"}, {}, state_dir=state_dir)
     with pytest.raises(ValueError, match="positive number"):
@@ -231,7 +228,7 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     monkeypatch.undo()
 
     def unavailable(self) -> None:
-        raise SandboxUnavailable("no bwrap here")
+        raise SandboxUnavailableError("no bwrap here")
 
     monkeypatch.setattr(SandboxExecutor, "preflight", unavailable)
     # Unset on a host that cannot isolate: the agent is off and the served model answers in text.

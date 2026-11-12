@@ -9,13 +9,17 @@ The modules follow these responsibilities:
   archival coordination. It keeps each scenario's settings through the
   injected storage. It asks its ``admission.ScenarioAdmission`` before it
   creates or loads a scenario; the dispatcher unloads an idle scenario to free a load slot.
+- ``live_objects`` holds the runtime, the training components, the data store
+  and the served endpoint that one process builds for the recipe
+  (``LiveObjects``), and the functions that need both a recipe and one of
+  those objects. A recipe is configuration and holds none of them.
 - ``factory`` writes a new scenario's root snapshot (the recipe's default
   start, or an artifact item), opens storage, reconciles committed state, synchronizes and
   activates the checkpoint, builds the trainer, and replays retained records.
   It returns a complete ``Scenario`` and closes owned resources on failure.
 - ``committer`` orders commits, activations, new training starts, retries, and artifact publication
   around store settlement. Trainer state is exposed only after settlement.
-- ``releases`` queries releases, artifact content, and committed training metadata.
+- ``snapshots`` queries snapshots, artifact content, and committed training metadata.
   It shares the committer's publication lock. Writers take the operation lock
   before the publication lock; readers never take the operation lock, so long
   training preparation does not block serving. ``history`` pages retained
@@ -34,12 +38,12 @@ remain in this package.
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import Scenario, SnapshotNotRestorable
+from reef.scenario.scenario import Scenario, SnapshotNotRestorableError
 
 __all__ = [
     "Scenario",
     "ScenarioBinding",
     "ScenarioCommitter",
     "ScenarioRegistry",
-    "SnapshotNotRestorable",
+    "SnapshotNotRestorableError",
 ]

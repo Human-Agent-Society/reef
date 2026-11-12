@@ -90,12 +90,12 @@ def test_model_is_resolved_once_and_shared_with_the_children(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "extra,match",
     [
-        (["--tensor-parallel-size", "0"], "must be positive"),
-        (["--tensor-parallel-size", "oops"], "tensor_parallel_size"),
-        (["--inference-backend", "unknown"], "supports"),
-        (["--upstream-url", "http://localhost:8000"], "cannot be combined"),
-        (["--upstream-model", "remote"], "cannot be combined"),
-        (["--port", "0"], "valid --reef.port"),
+        (["--inference.tensor-parallel-size", "0"], "must be positive"),
+        (["--inference.tensor-parallel-size", "oops"], "tensor_parallel_size"),
+        (["--inference.backend", "unknown"], "supports"),
+        (["--inference.upstream-url", "http://localhost:8000"], "cannot be combined"),
+        (["--inference.upstream-model", "remote"], "cannot be combined"),
+        (["--reef.port", "0"], "valid --reef.port"),
     ],
 )
 def test_local_invalid_settings_fail_before_downloads(monkeypatch, capsys, extra, match):
@@ -260,7 +260,7 @@ def test_managed_lifecycle_with_cpu_engine_standin(tmp_path, mode):
 
 def test_backend_definition_controls_launch_without_backend_specific_code(monkeypatch):
     from reef.service.deploy.inference import INFERENCE_COMMANDS, InferenceCommand, prepare_inference
-    from reef.service.deploy.service_config import ServiceConfig
+    from reef.service.deploy.service_config import ServiceSettings
 
     monkeypatch.setitem(
         INFERENCE_COMMANDS,
@@ -279,7 +279,7 @@ def test_backend_definition_controls_launch_without_backend_specific_code(monkey
         ),
     )
     config = {"reef": {"model_path": "org/model"}}
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe",
         model_path="org/model",
         inference_backend="example",
@@ -303,10 +303,10 @@ def test_backend_definition_controls_launch_without_backend_specific_code(monkey
 
 def test_vllm_backend_launches_the_openai_server_with_native_options():
     from reef.service.deploy.inference import prepare_inference
-    from reef.service.deploy.service_config import ServiceConfig
+    from reef.service.deploy.service_config import ServiceSettings
 
     config = {"reef": {"model_path": "org/model"}}
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe",
         model_path="org/model",
         inference_backend="vllm",

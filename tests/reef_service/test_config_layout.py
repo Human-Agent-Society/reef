@@ -58,7 +58,7 @@ def test_request_handler_configuration_is_independent_of_native_backend_selectio
         {
             "inference": {
                 "backend": "sglang",
-                "handler-factory": "example.handlers.InitialHandler",
+                "handler-factory": "example.handlers:InitialHandler",
                 "handler-config": {"tool_call_parser": "qwen25"},
                 "options": {"mem-fraction-static": 0.8},
             },
@@ -67,7 +67,7 @@ def test_request_handler_configuration_is_independent_of_native_backend_selectio
     overrides = _parse_overrides(
         [
             "--inference.handler-factory",
-            "example.handlers.SelectedHandler",
+            "example.handlers:SelectedHandler",
             "--inference.handler-config",
             '{"tool_call_parser": "qwen3"}',
         ]
@@ -77,7 +77,7 @@ def test_request_handler_configuration_is_independent_of_native_backend_selectio
 
     assert settings.inference_backend == "sglang"
     assert settings.inference_options == {"mem-fraction-static": 0.8}
-    assert settings.inference_handler_factory == "example.handlers.SelectedHandler"
+    assert settings.inference_handler_factory == "example.handlers:SelectedHandler"
     assert settings.inference_handler_config == {"tool_call_parser": "qwen3"}
 
 

@@ -15,11 +15,12 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from weakref import WeakKeyDictionary
 
-from tests.support.harness_steps import head_of
+from tests.support.harness_jobs import head_of
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 
@@ -32,6 +33,7 @@ from reef.evaluation.harness import ComparePolicy
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
 from reef.storage.sql_coordination import memory_coordination
 from reef.train.component import ScenarioRoot
@@ -60,11 +62,13 @@ def seed_root(recipe: HarnessEvolutionRecipe) -> ScenarioRoot:
 def harness_dispatcher(
     tmp_path: Path,
     recipe: Recipe,
+    live: LiveObjects,
     *,
     hold_local_cycles: bool = False,
     training_manager: TrainingManager | None = None,
 ) -> Dispatcher:
-    """A dispatcher over ``recipe`` with a seeded repository, a durable commit history and a data store.
+    """A dispatcher over ``recipe`` and its ``live`` objects, with a seeded repository, a durable commit history
+    and a data store.
 
     A test that prepares and commits each step itself sets ``hold_local_cycles``, so no local cycle commits the
     same step a second time. ``training_manager`` decides what the scenarios in ``auto`` mode train.
@@ -73,10 +77,10 @@ def harness_dispatcher(
     return Dispatcher(
         recipe,
         harness_repository(tmp_path),
+        live=replace(live, data_store=storage.data),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage,
         record_storage=storage.inner,
-        data_store=storage.data,
         hold_local_cycles=hold_local_cycles,
         coordination=memory_coordination(),
         training_manager=training_manager,
@@ -212,8 +216,8 @@ def catalog(scenario: Scenario) -> list[dict[str, Any]]:
     return rows
 
 
-#: Each backend's scenario step: the steps ``backend_step`` ran on it.
-SCENARIO_STEPS: WeakKeyDictionary[HarnessBackend, int] = WeakKeyDictionary()
+#: Each backend's commit number: the number of steps that ``backend_step`` ran on it.
+COMMIT_NUMBERS: WeakKeyDictionary[HarnessBackend, int] = WeakKeyDictionary()
 
 
 def backend_step(
@@ -222,28 +226,28 @@ def backend_step(
     state: Mapping[str, Any],
     policy: CandidateEvaluationPlugin | None = None,
     *,
-    scenario_step: int | None = None,
+    commit_number: int | None = None,
 ) -> TrainingCommit:
     """One step of ``backend`` on its ``head_of`` head as a job runs it, decided by ``policy`` (a win-count
     comparison by default).
 
     The steps of one backend number 1, 2, ... as a scenario numbers its commits: a step that raised keeps its
-    number for its retry. ``scenario_step`` sets the scenario step the step follows instead, as a retry after a
+    number for its retry. ``commit_number`` sets the commit number that the step follows instead, as a retry after a
     lost commit or a resumed scenario sees it. A failure aborts the step.
     """
-    scenario_step = SCENARIO_STEPS.get(backend, 0) if scenario_step is None else scenario_step
-    prepared = backend.prepare_step(data, state, scenario_step, head=head_of(backend))
+    commit_number = COMMIT_NUMBERS.get(backend, 0) if commit_number is None else commit_number
+    prepared = backend.prepare_job(data, state, commit_number, head=head_of(backend))
     if prepared.candidate is None:
         result = TrainingCommit(prepared.state, prepared.metrics)
     else:
         selection = ComparePolicy(backend) if policy is None else policy
         try:
             decision = selection.decide(prepared.candidate, selection.evaluate(prepared.candidate))
-            result = backend.settle_step(prepared, decision)
+            result = backend.settle_job(prepared, decision)
         except BaseException:
-            backend.abort_step(prepared)
+            backend.abort_job(prepared)
             raise
-    SCENARIO_STEPS[backend] = scenario_step + 1
+    COMMIT_NUMBERS[backend] = commit_number + 1
     return result
 
 

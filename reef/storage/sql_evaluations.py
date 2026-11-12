@@ -29,7 +29,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import RowMapping
 
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyEvaluation
-from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflictError, EvaluationStore, StoredEvaluation
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
 
 
@@ -159,7 +159,7 @@ class SQLEvaluationStore(EvaluationStore):
                 .one_or_none()
             )
             if row is None or row["state"] not in sources:
-                raise EvaluationStateConflict(f"evaluation {evaluation_id!r} is not {' or '.join(sources)}")
+                raise EvaluationStateConflictError(f"evaluation {evaluation_id!r} is not {' or '.join(sources)}")
             moved = {"state": state, "finished_at": finished_at, "result_json": result_json, "error": error}
             # Check the moved row before it is written, so the table never holds an invalid evaluation.
             stored = stored_evaluation({**row, **moved})
@@ -168,7 +168,7 @@ class SQLEvaluationStore(EvaluationStore):
             )
         return stored
 
-    def get(self, evaluation_id: str) -> StoredEvaluation | None:
+    def read(self, evaluation_id: str) -> StoredEvaluation | None:
         table = self.table.table
         with self.database._transaction(write=False) as connection:
             row = (

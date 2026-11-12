@@ -24,9 +24,9 @@ from typing import Any, ClassVar, Self
 from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramLaunchError,
-    ProgramTimeout,
+    ProgramTimeoutError,
     SandboxProgram,
-    SandboxUnavailable,
+    SandboxUnavailableError,
 )
 from reef.execution.sandbox.remote import (
     SANDBOX_MARGIN_S,
@@ -78,15 +78,15 @@ class ModalExecutor(RemoteExecutor):
 
     def __post_init__(self) -> None:
         if not isinstance(self.app_name, str) or not self.app_name:
-            raise SandboxUnavailable("modal_app must be a non-empty string")
+            raise SandboxUnavailableError("modal_app must be a non-empty string")
         if self.cpu is not None and (
             isinstance(self.cpu, bool) or not isinstance(self.cpu, int | float) or self.cpu <= 0
         ):
-            raise SandboxUnavailable("modal_cpu must be a positive number")
+            raise SandboxUnavailableError("modal_cpu must be a positive number")
         if self.memory_mb is not None and (
             isinstance(self.memory_mb, bool) or not isinstance(self.memory_mb, int) or self.memory_mb <= 0
         ):
-            raise SandboxUnavailable("modal_memory_mb must be a positive int")
+            raise SandboxUnavailableError("modal_memory_mb must be a positive int")
 
     @classmethod
     def from_config(cls, section: Mapping[str, object], environ: Mapping[str, str]) -> Self:
@@ -94,13 +94,13 @@ class ModalExecutor(RemoteExecutor):
         app_name = section.get("modal_app", DEFAULT_APP)
         image = section.get("modal_image", "")
         if not isinstance(app_name, str) or not isinstance(image, str):
-            raise SandboxUnavailable("modal_app and modal_image must be strings")
+            raise SandboxUnavailableError("modal_app and modal_image must be strings")
         cpu = section.get("modal_cpu")
         if cpu is not None and (isinstance(cpu, bool) or not isinstance(cpu, int | float)):
-            raise SandboxUnavailable("modal_cpu must be a positive number")
+            raise SandboxUnavailableError("modal_cpu must be a positive number")
         memory_mb = section.get("modal_memory_mb")
         if memory_mb is not None and (isinstance(memory_mb, bool) or not isinstance(memory_mb, int)):
-            raise SandboxUnavailable("modal_memory_mb must be a positive int")
+            raise SandboxUnavailableError("modal_memory_mb must be a positive int")
         return cls(
             app_name=app_name.strip(),
             image=image.strip(),
@@ -152,11 +152,11 @@ class ModalExecutor(RemoteExecutor):
             import modal
             from modal.config import config
         except ImportError as exc:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "a Modal sandbox needs the modal package: pip install 'reef-infra[modal]'"
             ) from exc
         if not (config.get("token_id") and config.get("token_secret")):
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "a Modal sandbox needs credentials: set MODAL_TOKEN_ID and MODAL_TOKEN_SECRET, or run `modal setup`"
             )
         if self.validated or not (self.image or self.npm_package):
@@ -167,13 +167,13 @@ class ModalExecutor(RemoteExecutor):
             session = replace(self, owner="", forward_ports=(), timeout_s=60).open()
             session.run(probe_command(self.binary))
         except (modal.exception.Error, ProgramLaunchError) as exc:
-            raise SandboxUnavailable(f"Modal startup check failed: {exc}") from exc
+            raise SandboxUnavailableError(f"Modal startup check failed: {exc}") from exc
         finally:
             if session is not None:
                 try:
                     session.close()
                 except ProgramLaunchError as exc:
-                    raise SandboxUnavailable("Modal startup probe could not be cleaned up") from exc
+                    raise SandboxUnavailableError("Modal startup probe could not be cleaned up") from exc
         object.__setattr__(self, "validated", True)
 
     def open(self) -> ModalSession:
@@ -253,11 +253,14 @@ class ModalSession(RemoteSession):
         writable_paths: Sequence[Path] = (),
         readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
-        """Run one process in the jail; ``timeout`` stops its whole tree, and Modal's own limit backs it up."""
+        """Run one process in the jail, with an empty standard input; ``timeout`` stops its whole tree, and Modal's
+        own limit backs it up."""
         command, envs = remote_command(argv, {**env, **self.env}, root)
         command = protected_command(command, envs, root, workspace, writable_paths, readonly_paths)
         seconds = max(math.ceil(timeout), 1)
-        limited = f"timeout --kill-after={KILL_AFTER_S} {seconds} /bin/sh -c {shlex.quote(command)}"
+        # Modal keeps the standard input of a process open. A program that reads it to its end, as pi does, would
+        # wait for the life of the sandbox, so the process gets an empty one, as the local executor gives.
+        limited = f"timeout --kill-after={KILL_AFTER_S} {seconds} /bin/sh -c {shlex.quote(command)} < /dev/null"
         cwd = f"{remote_root(root)}/{workspace.relative_to(root).as_posix()}"
         finished = False
         try:
@@ -269,11 +272,11 @@ class ModalSession(RemoteSession):
             process.wait()
             status = process.returncode
             if status in TIMEOUT_STATUSES and time.monotonic() - started >= timeout:
-                raise ProgramTimeout(f"the process ran past its {timeout:g} s limit in the Modal sandbox")
+                raise ProgramTimeoutError(f"the process ran past its {timeout:g} s limit in the Modal sandbox")
             outcome = ProcessOutcome(status, process.stdout.read(), process.stderr.read())
             finished = True
             return outcome
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             raise
         except Exception as exc:
             raise ProgramLaunchError(f"the Modal sandbox could not run the process: {exc}") from exc

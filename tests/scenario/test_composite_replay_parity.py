@@ -12,15 +12,12 @@ train the same and keep the same rows.
 
 from __future__ import annotations
 
-from collections.abc import Hashable
-from dataclasses import dataclass
+from collections.abc import Hashable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._threshold_processor import ThresholdSamples, threshold_pipeline
-from tests.support._trajectories import policy_trajectory
 from tests.support.component_trainers import (
     HARNESS,
     WEIGHTS,
@@ -30,8 +27,11 @@ from tests.support.component_trainers import (
     _TwoTrainerRecipe,
     finish_job,
 )
+from tests.support.records import report, token_inference
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
+from tests.support.threshold_processor import ThresholdSamples, threshold_pipeline
+from tests.support.trajectories import policy_trajectory
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import InMemoryRepositoryBackend
@@ -41,10 +41,12 @@ from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.sample2job import Sample2Job
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.sql_coordination import memory_coordination
 from reef.train import ComponentTrainer, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
+from reef.train.trainer_builder import TrainerBuilder
 from reef.train.types import JobData, Sample
 
 
@@ -146,12 +148,17 @@ def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
     )
 
 
-@dataclass(frozen=True)
-class _Recipe(_TwoTrainerRecipe):
-    pipelines: tuple[tuple[str, Any], ...] = ()
+class _PipelineTrainers(TrainerBuilder):
+    """Builds one trainer for each of ``backends``, whose jobs run on the trainer's own thread, over the component's
+    pipeline of ``pipelines``."""
+
+    def __init__(self, backends: Mapping[str, ComponentJobs], pipelines: Mapping[str, Any]) -> None:
+        self.backends = backends
+        self.pipelines = pipelines
 
     def build_trainers(
         self,
+        specs,
         scenario,
         records,
         *,
@@ -163,7 +170,7 @@ class _Recipe(_TwoTrainerRecipe):
         samples=None,
         root=None,
     ):
-        pipelines = dict(self.pipelines)
+        pipelines = self.pipelines
         # Each trainer reads the stored samples of its component, so a rebuilt trainer finds the samples made live.
         return tuple(
             ComponentTrainer(
@@ -184,7 +191,7 @@ class _Recipe(_TwoTrainerRecipe):
         )
 
 
-def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
+def composite_dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
     initial = tmp_path / "initial"
     for component in (WEIGHTS, HARNESS):
         (initial / component).mkdir(parents=True, exist_ok=True)
@@ -192,49 +199,28 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
     backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     storage = data_storage(tmp_path / "records")
     return Dispatcher(
-        _Recipe(backends=backends, pipelines=tuple(pipelines.items())),
+        _TwoTrainerRecipe(backends=backends),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(data_store=storage.data),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage,
         record_storage=storage.inner,
-        data_store=storage.data,
         # Loading a scenario wakes its workers: held, they leave every step to the test.
         hold_local_cycles=True,
         coordination=memory_coordination(),
+        trainer_builder=_PipelineTrainers(backends, pipelines),
     )
 
 
-def _turn(record_id: str, session: str, key: int, **extra: Any) -> AgentRecord:
-    payload = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2], "session": session, "key": key}
-    payload.update(extra)
-    return AgentRecord.create(
-        scenario="agent", request_type=RequestType.INFERENCE, payload=payload, agent_record_id=record_id
-    )
+def turn(record_id: str, session: str, key: int, **extra: Any) -> AgentRecord:
+    return token_inference(record_id, scenario="agent", session=session, key=key, **extra)
 
 
-def _inference(record_id: str) -> AgentRecord:
-    payload = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
-    return AgentRecord.create(
-        scenario="agent", request_type=RequestType.INFERENCE, payload=payload, agent_record_id=record_id
-    )
+agent_inference = partial(token_inference, scenario="agent")
+agent_report = partial(report, scenario="agent")
 
 
-def _report(record_id: str, reference: str, metadata: dict[str, Any] | None = None, feedback: str = "") -> AgentRecord:
-    payload: dict[str, Any] = {"score": 1.0, "references": [reference]}
-    if metadata is not None:
-        payload["metadata"] = metadata
-    if feedback:
-        payload["feedback"] = feedback
-    return AgentRecord.create(
-        scenario="agent",
-        request_type=RequestType.REPORT,
-        payload=payload,
-        agent_record_id=record_id,
-        references=(reference,),
-    )
-
-
-def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
+def step(scenario, component: str) -> list[tuple[str, ...]] | None:
     # The samples service makes the samples of the rows appended since the last step, as its worker would.
     make_samples(scenario)
     result = scenario.next_commit(component)
@@ -247,41 +233,46 @@ def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
     return sources
 
 
-def _append(scenario, records) -> None:
+def append_records(scenario, records) -> None:
     for record in records:
         scenario.records.append(record)
 
 
-def _step_nine() -> tuple[AgentRecord, ...]:
+def step_nine() -> tuple[AgentRecord, ...]:
     """The two reported rows of step 9, a complete group that trains."""
     return (
-        _inference("iA"),
-        _report("rA", "iA", {"step": 9, "slot": 0}),
-        _inference("iB"),
-        _report("rB", "iB", {"step": 9, "slot": 1}),
+        agent_inference("iA"),
+        agent_report("rA", "iA", metadata={"step": 9, "slot": 0}),
+        agent_inference("iB"),
+        agent_report("rB", "iB", metadata={"step": 9, "slot": 1}),
     )
 
 
-def _stored(scenario) -> list[str]:
+def stored_ids(scenario) -> list[str]:
     return sorted(record.agent_record_id for record in scenario.records.replay("agent"))
 
 
-def _retry_after_a_sibling_commit(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(
+def retry_after_a_sibling_commit(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
+    dispatcher = composite_dispatcher(
         tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: session_pipeline}
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
-        for record in (_turn("X", "u", 1), _turn("X2", "u", 2), _turn("A", "s", 1, declined=True), _report("rA", "A")):
+        for record in (
+            turn("X", "u", 1),
+            turn("X2", "u", 2),
+            turn("A", "s", 1, declined=True),
+            agent_report("rA", "A"),
+        ):
             scenario.records.append(record)
-        assert _step(scenario, HARNESS) == [("X",)]
-        for record in (_turn("A-retry", "s", 1), _turn("B", "s", 2)):
+        assert step(scenario, HARNESS) == [("X",)]
+        for record in (turn("A-retry", "s", 1), turn("B", "s", 2)):
             scenario.records.append(record)
-        assert _step(scenario, HARNESS) is None  # A-retry retired as a retry, A judged unusable
-        assert _step(scenario, WEIGHTS) == [("A", "rA")]
+        assert step(scenario, HARNESS) is None  # A-retry retired as a retry, A judged unusable
+        assert step(scenario, WEIGHTS) == [("A", "rA")]
         if reload:
             scenario = dispatcher.registry.reload("agent")
-        return _step(scenario, HARNESS), _stored(scenario)
+        return step(scenario, HARNESS), stored_ids(scenario)
     finally:
         dispatcher.close()
 
@@ -291,36 +282,38 @@ def test_a_retry_a_session_processor_retired_stays_retired_after_a_reload(tmp_pa
     """The harness retires A-retry as a retry of A and judges A unusable, with no commit to record either; the
     weights trainer then trains A. Rebuilt from its last commit, the harness reads A-retry again: it trains nothing,
     as live, and never trains the client's retry."""
-    live = _retry_after_a_sibling_commit(tmp_path / "live", reload=False)
-    rebuilt = _retry_after_a_sibling_commit(tmp_path / "rebuilt", reload=True)
+    live = retry_after_a_sibling_commit(tmp_path / "live", reload=False)
+    rebuilt = retry_after_a_sibling_commit(tmp_path / "rebuilt", reload=True)
     assert live[0] is None and rebuilt == live
 
 
-def _discarded_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: step_pipeline})
+def discarded_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
+    dispatcher = composite_dispatcher(
+        tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: step_pipeline}
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
-        _append(scenario, _step_nine())
-        assert _step(scenario, HARNESS) == [("iA", "rA"), ("iB", "rB")]
+        append_records(scenario, step_nine())
+        assert step(scenario, HARNESS) == [("iA", "rA"), ("iB", "rB")]
         # The rows of step 0 arrive after the first commit, so no commit records their discard.
-        _append(
+        append_records(
             scenario,
             (
-                _inference("i1"),
-                _report("r1", "i1", {"step": 0, "slot": 0}),
-                _inference("i2"),
-                _report("r2", "i2", {"step": 0, "slot": 1}, feedback="mixed"),
+                agent_inference("i1"),
+                agent_report("r1", "i1", metadata={"step": 0, "slot": 0}),
+                agent_inference("i2"),
+                agent_report("r2", "i2", metadata={"step": 0, "slot": 1}, feedback="mixed"),
             ),
         )
-        assert _step(scenario, HARNESS) is None  # step 0 discarded
+        assert step(scenario, HARNESS) is None  # step 0 discarded
         for _ in range(3):
-            _step(scenario, WEIGHTS)
+            step(scenario, WEIGHTS)
         if reload:
             scenario = dispatcher.registry.reload("agent")
-        assert _step(scenario, HARNESS) is None
-        trained = _step(scenario, WEIGHTS)
+        assert step(scenario, HARNESS) is None
+        trained = step(scenario, WEIGHTS)
         metrics = scenario.trainer_for(HARNESS).pipeline.operational_metrics()
-        return trained, metrics["waiting_reports"], _stored(scenario)
+        return trained, metrics["waiting_reports"], stored_ids(scenario)
     finally:
         dispatcher.close()
 
@@ -330,29 +323,29 @@ def test_a_step_a_reported_processor_discarded_stays_discarded_after_a_reload(tm
     """The harness discards step 0 and releases its rows with no commit to record it; the weights trainer trains
     r1. Rebuilt, the harness discards step 0 again as it was: no report waits in a step that can never complete,
     and every row stays stored."""
-    live = _discarded_step(tmp_path / "live", reload=False)
-    rebuilt = _discarded_step(tmp_path / "rebuilt", reload=True)
+    live = discarded_step(tmp_path / "live", reload=False)
+    rebuilt = discarded_step(tmp_path / "rebuilt", reload=True)
     stored = sorted(["iA", "rA", "iB", "rB", "i1", "r1", "i2", "r2"])
     assert live == ([("i2", "r2")], 0, stored) and rebuilt == live
 
 
-def _another_roles_report(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(tmp_path, {WEIGHTS: session_pipeline, HARNESS: step_pipeline})
+def another_roles_report(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
+    dispatcher = composite_dispatcher(tmp_path, {WEIGHTS: session_pipeline, HARNESS: step_pipeline})
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
-        _append(scenario, _step_nine())
-        assert _step(scenario, HARNESS) == [("iA", "rA"), ("iB", "rB")]
+        append_records(scenario, step_nine())
+        assert step(scenario, HARNESS) == [("iA", "rA"), ("iB", "rB")]
         # These rows arrive after the first commit, so no commit records the snapshot of r3 and i3.
-        _append(scenario, (_turn("i3", "s", 1), _report("r3", "i3"), _turn("X", "u", 1), _turn("X2", "u", 2)))
-        assert _step(scenario, HARNESS) is None  # r3 is another role's: released with i3
-        assert _step(scenario, WEIGHTS) == [("X",)]
+        append_records(scenario, (turn("i3", "s", 1), agent_report("r3", "i3"), turn("X", "u", 1), turn("X2", "u", 2)))
+        assert step(scenario, HARNESS) is None  # r3 is another role's: released with i3
+        assert step(scenario, WEIGHTS) == [("X",)]
         if reload:
             scenario = dispatcher.registry.reload("agent")
-        assert _step(scenario, HARNESS) is None
-        scenario.records.append(_turn("i3b", "s", 2))
-        trained = _step(scenario, WEIGHTS)
+        assert step(scenario, HARNESS) is None
+        scenario.records.append(turn("i3b", "s", 2))
+        trained = step(scenario, WEIGHTS)
         released = scenario.trainer_for(HARNESS).pipeline.record2sample.releasable_record_ids()
-        return trained, "i3" in released, _stored(scenario)
+        return trained, "i3" in released, stored_ids(scenario)
     finally:
         dispatcher.close()
 
@@ -362,39 +355,41 @@ def test_an_inference_released_with_another_roles_report_stays_released_after_a_
     """The harness artifacts r3 and i3 with it (exclusive sources, a report of another role) with no commit to
     record it. Rebuilt, the harness does not read i3 as an inference waiting for a report: it releases it again,
     as live."""
-    live = _another_roles_report(tmp_path / "live", reload=False)
-    rebuilt = _another_roles_report(tmp_path / "rebuilt", reload=True)
+    live = another_roles_report(tmp_path / "live", reload=False)
+    rebuilt = another_roles_report(tmp_path / "rebuilt", reload=True)
     assert live[0] == [("i3",)] and live[1] is True and rebuilt == live
 
 
-def _retry_at_a_discarded_step(tmp_path: Path, point: str, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: step_pipeline})
+def retry_at_a_discarded_step(tmp_path: Path, point: str, reload: bool) -> tuple[Any, ...]:
+    dispatcher = composite_dispatcher(
+        tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: step_pipeline}
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         records = [
-            _inference("i1"),
-            _report("r1", "i1", {"step": 0, "slot": 0}),
-            _inference("i2"),
-            _report("r2", "i2", {"step": 0, "slot": 1}, feedback="mixed"),
+            agent_inference("i1"),
+            agent_report("r1", "i1", metadata={"step": 0, "slot": 0}),
+            agent_inference("i2"),
+            agent_report("r2", "i2", metadata={"step": 0, "slot": 1}, feedback="mixed"),
         ]
         for record in records:
             scenario.records.append(record)
-        first = _step(scenario, HARNESS)
+        first = step(scenario, HARNESS)
         if point == "trained":
             # The weights trainer trains the discarded rows before the rebuild.
             for _ in range(3):
-                _step(scenario, WEIGHTS)
+                step(scenario, WEIGHTS)
         if reload:
             scenario = dispatcher.registry.reload("agent")
         # The client retries step 0 at both slots, clean this time.
         for record in (
-            _inference("iX"),
-            _report("rX", "iX", {"step": 0, "slot": 0}),
-            _inference("iY"),
-            _report("rY", "iY", {"step": 0, "slot": 1}),
+            agent_inference("iX"),
+            agent_report("rX", "iX", metadata={"step": 0, "slot": 0}),
+            agent_inference("iY"),
+            agent_report("rY", "iY", metadata={"step": 0, "slot": 1}),
         ):
             scenario.records.append(record)
-        return first, _step(scenario, HARNESS)
+        return first, step(scenario, HARNESS)
     finally:
         dispatcher.close()
 
@@ -407,12 +402,12 @@ def test_a_retry_at_a_step_a_reported_processor_discarded_stays_terminal_after_a
     """Live, every later report of a discarded group key is terminal. A rebuilt harness reads the discarded step's
     rows again, whether or not the weights trainer trained them, finds step 0 discarded, and never trains the
     client's retry of it."""
-    live = _retry_at_a_discarded_step(tmp_path / "live", point, reload=False)
-    rebuilt = _retry_at_a_discarded_step(tmp_path / "rebuilt", point, reload=True)
+    live = retry_at_a_discarded_step(tmp_path / "live", point, reload=False)
+    rebuilt = retry_at_a_discarded_step(tmp_path / "rebuilt", point, reload=True)
     assert live[1] is None and rebuilt == live
 
 
-def _tttd_inference(record_id: str, release: str) -> AgentRecord:
+def tttd_inference(record_id: str, release: str) -> AgentRecord:
     return AgentRecord.create(
         scenario="agent",
         request_type=RequestType.INFERENCE,
@@ -422,7 +417,7 @@ def _tttd_inference(record_id: str, release: str) -> AgentRecord:
     )
 
 
-def _tttd_report(record_id: str, reference: str, rollout: int, score: float) -> AgentRecord:
+def tttd_report(record_id: str, reference: str, rollout: int, score: float) -> AgentRecord:
     metadata = {
         "algorithm": "ttt-discover",
         "comparison_set": "tttd-step-0-group-0",
@@ -441,30 +436,32 @@ def _tttd_report(record_id: str, reference: str, rollout: int, score: float) -> 
     )
 
 
-def _tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: tttd_pipeline})
+def tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
+    dispatcher = composite_dispatcher(
+        tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: tttd_pipeline}
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         # Step 0 spans two snapshots: TTTD fails it.
         for record in (
-            _tttd_inference("i0", "rel-1"),
-            _tttd_report("r0", "i0", 0, 1.0),
-            _tttd_inference("i1", "rel-2"),
-            _tttd_report("r1", "i1", 1, 0.0),
+            tttd_inference("i0", "rel-1"),
+            tttd_report("r0", "i0", 0, 1.0),
+            tttd_inference("i1", "rel-2"),
+            tttd_report("r1", "i1", 1, 0.0),
         ):
             scenario.records.append(record)
-        first = _step(scenario, HARNESS)
+        first = step(scenario, HARNESS)
         if reload:
             scenario = dispatcher.registry.reload("agent")
         # The controller samples step 0 again, on one snapshot.
         for record in (
-            _tttd_inference("j0", "rel-2"),
-            _tttd_report("s0", "j0", 0, 1.0),
-            _tttd_inference("j1", "rel-2"),
-            _tttd_report("s1", "j1", 1, 0.0),
+            tttd_inference("j0", "rel-2"),
+            tttd_report("s0", "j0", 0, 1.0),
+            tttd_inference("j1", "rel-2"),
+            tttd_report("s1", "j1", 1, 0.0),
         ):
             scenario.records.append(record)
-        resampled = _step(scenario, HARNESS)
+        resampled = step(scenario, HARNESS)
         return first, scenario.trainer_for(HARNESS).pipeline_status()["failed_steps"], resampled
     finally:
         dispatcher.close()
@@ -474,7 +471,7 @@ def _tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
 def test_a_tttd_step_failed_on_two_releases_stays_failed_after_a_reload(tmp_path: Path) -> None:
     """A rebuilt TTTD harness reads step 0 again, reports it failed with its snapshots, and never trains a resample
     of it."""
-    live = _tttd_failed_step(tmp_path / "live", reload=False)
-    rebuilt = _tttd_failed_step(tmp_path / "rebuilt", reload=True)
+    live = tttd_failed_step(tmp_path / "live", reload=False)
+    rebuilt = tttd_failed_step(tmp_path / "rebuilt", reload=True)
     assert live[1] == [{"step": 0, "reason": "mixed_artifact_ids", "artifact_ids": ["rel-1", "rel-2"]}]
     assert live[2] is None and rebuilt == live

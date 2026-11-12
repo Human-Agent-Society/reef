@@ -1,4 +1,4 @@
-"""The publication policies of harness evolution: how a candidate is evaluated, and when the step keeps it.
+"""The publication policies of harness evolution: how a candidate is evaluated, and when the job keeps it.
 
 A kept candidate becomes a new artifact; the scenario's activation rule then
 decides whether it serves. ``evolution.evaluation.policy`` names one policy:
@@ -46,9 +46,9 @@ class TaskScorePolicy(CandidateEvaluationPlugin, ABC):
 
     Values: ``evaluator`` scores the candidate; ``sides`` are the sides each
     evaluation scores, a non-empty subset of ``EVALUATION_SIDES`` in its order.
-    Purpose: the harness recipe builds one per scenario from
+    Purpose: the harness training component builds one per job from
     ``evolution.evaluation``; the trainer calls ``evaluate`` and then
-    ``decide`` on each step's candidate. ``decide`` reads each side's
+    ``decide`` on each job's candidate. ``decide`` reads each side's
     ``RolloutScores`` JSON, ``candidate_scores`` and ``current_scores``.
     """
 
@@ -162,7 +162,7 @@ class FloorPolicy(TaskScorePolicy):
 class NoEvaluationPolicy(CandidateEvaluationPlugin):
     """Keep every candidate that passed validation, without running a run.
 
-    Purpose: the harness recipe builds it for ``policy: none``; its
+    Purpose: the harness training component builds it for ``policy: none``; its
     evaluation result holds no scores.
     """
 

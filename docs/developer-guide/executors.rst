@@ -28,7 +28,7 @@ from their owning modules.
        C --> W[Framework workers: Slime, Tinker]
        C -- saved checkpoint --> T
        T -- evaluate, select --> E[Candidate evaluation]
-       T -- publish release --> R[Artifact repository]
+       T -- publish snapshot --> R[Artifact repository]
        R -- activate, restore --> I[InferenceRuntime]
        I --> S[Serving engines or provider]
 
@@ -56,7 +56,7 @@ model. Reef reads none of the parameters. The component contract is:
    The parts of the scenario component that the checkpoint changed from
    ``start``, which the scenario's activation rule reads. The default is
    none; the harness component diffs the trees.
-``import_start(release)``
+``import_start(artifact_dir)``
    Copy a published snapshot into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
    when the component cannot start from those weights.
@@ -130,6 +130,59 @@ job runs, including the jobs that a restart left. After a restart,
 
 `Tinker integration <../reference/python-api.rst#tinker-integration>`__ in
 the Python API describes the Tinker component.
+
+Facts without a component
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A service that does not run a training component still needs some answers
+about it, and a new scenario needs its root before any job runs. A backend
+states both from its configuration as a
+``reef.train.component.TrainingBackendFacts`` value.
+``TrainingComponentFactory.facts(config, model_path, environ)`` returns it from
+the config that ``__call__`` builds the component from, and
+``training_backend_facts(config, model_path=...)`` calls it. Every factory
+defines ``facts``; it is abstract. Stating the facts builds no component,
+starts nothing, calls no service and imports no training framework or SDK. The
+members are:
+
+``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs``
+   The component's members of the same names.
+``default_start_inputs``
+   The ``inputs`` of the default start: the model and the settings that
+   decide its content.
+``default_start()``
+   The content of a new scenario's root, as a ``DefaultStart``: a few small
+   text files and ``default_start_inputs``. It holds no weight file. A backend
+   that trains a base model writes a base root (``base.json``,
+   ``reef.artifact.base_root``) or a reference to the base model's commit
+   (``hf-reference.json``).
+``parameters_schema(kind)``
+   The JSON Schema of a job's parameters, or ``None``.
+``check_root_start(root)``
+   Raise ``ValueError`` for a scenario root that the component's
+   ``root_start`` refuses. It reads the root's files and writes nothing.
+
+The component holds a value of the same type and answers these members from
+it, so the facts and the component give the same answers. The Slime component
+also refuses to start when its options, as written, state other facts than
+Slime's parser read from them.
+
+Everything else stays a call to the component, because it needs the training
+service, its files or its framework: ``root_start`` and ``import_start``
+(they write a start), ``check_artifact``, ``check_task_jobs``, ``check_job``,
+``changed_parts`` and the jobs.
+
+The facts are the one place that states the default start. A
+``TrainingComponent`` has no ``default_start`` method, and Reef asks no
+component for a root. The component has two duties toward the start:
+
+- ``default_start_inputs`` returns the same inputs as the facts.
+- ``root_start(root)`` accepts a root that holds the files of
+  ``facts.default_start()`` and returns the start of a job at the base model.
+  The default ``root_start`` calls ``import_start`` on the root's files.
+
+The harness component has no factory; ``HarnessFacts.from_settings`` makes its
+facts from the ``HarnessSettings``.
 
 Decide what a scenario trains
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -214,44 +267,16 @@ Engine supervision
 ------------------
 
 ``reef.inference.recovery.InferenceControl`` pauses, resumes and recovers the
-engines of one inference service. The engine integration implements its two
-hooks:
-
-- ``InferenceEngineGroup`` pauses, resumes, replaces dead engines and retires
-  engines.
-- ``InferenceMonitor`` is the background health monitor.
+engines of one inference service. The engine integration implements its hook,
+``InferenceEngineGroup``, which pauses, resumes, replaces dead engines and
+retires engines.
 
 ``InferenceControl`` records the pause intent before the engine barrier, so a
-partial pause failure still fences replacement engines. Recovery stops
-monitoring and replaces dead engines. It pauses them again when generation
-was paused. A failed recovery keeps generation paused. Only ``resume`` lets
-the engines serve again. Each engine actor implements
-``reef.inference.interfaces.InferenceEngine``, the per-engine vocabulary that
-the group and the backend call by name.
-
-Engine health monitoring
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-``reef.inference.recovery.EngineHealthMonitor`` owns probe scheduling.
-``pause()`` disables new checks. It waits for the active probe or retirement
-to finish before the owner can replace or terminate engines. The monitor
-discards a late probe failure after the pause begins. A drain timeout leaves
-checks disabled, raises to the owner and prevents the engine operation.
-Shutdown keeps the monitor, so the owner can retry the drain. Deployment
-health checks report an internal monitoring failure, and the failure
-prevents monitoring from resuming.
-
-The SGLang adapter supplies ``EngineHealthChecks`` snapshots with one target per
-logical engine, including every node that must retire together. Both health and
-graceful-shutdown RPC waits are bounded. Retirement uses captured actor handles
-and clears a slot only if it still contains the captured actor. A stale probe
-cannot kill or erase a replacement engine. The adapter attempts every node even
-when a kill fails, then reports the failure.
-
-The engine configuration sets the probe interval, timeout and first wait. The
-shared monitor imports no Ray, Slime or model framework. Other backends supply
-bounded probe/retirement targets and serialize lifecycle operations in their
-owning controller.
+partial pause failure still fences replacement engines. Recovery replaces dead
+engines. It pauses them again when generation was paused. A failed recovery
+keeps generation paused. Only ``resume`` lets the engines serve again. Each
+engine actor implements ``reef.inference.interfaces.InferenceEngine``, the
+per-engine vocabulary that the group and the backend call by name.
 
 Independent SGLang backend
 --------------------------
@@ -271,9 +296,8 @@ Engines load published weights from files. The engine control worker's
 through ``load_lora_adapter_from_disk``. The plugin name ``reef`` is
 preserved.
 
-CPU tests cover native launch bindings, multi-node rendezvous, shared placement,
-external engine validation and ownership, response parsing, LoRA requirements and
-recovery.
+CPU tests cover native launch bindings, shared placement, response parsing,
+LoRA requirements and recovery.
 Actual GPU execution and backend combinations still require acceptance testing.
 
 Slime integration
@@ -322,8 +346,10 @@ the start's weights and objective state. The Tinker component does the same.
 Every driver loads Slime's latest checkpoint. A job therefore starts from
 the component's latest checkpoint; the start of the startup weights names the
 untrained weights, until the first rollout is saved. A scenario trains on Slime
-only when its root snapshot holds the default start of the configured inputs
-(``root_start``). The component checks the start
+only when its root snapshot came from the default start of the configured
+inputs (``root_start``). The default start is a base root. The workers make the
+startup weights from the model when they start, so ``root_start`` reads the
+root's source and none of its files. The component checks the start
 when Reef submits the job, and the driver again when the job runs: a queued
 job whose start an earlier job moved past fails. ``import_start`` refuses
 every snapshot, so a Slime scenario refuses ``train-from``. Because the jobs
@@ -377,13 +403,13 @@ Built-in executors
    Existing multi-worker Ray placement context or explicit cluster/Ray actor
    options select ``ray``.
 
-A Python class or ``package.module:ExecutorSubclass`` / ``package.module.Class``
-selects a custom executor. CPU-only execution does not import Ray, Slime,
+A Python class or the reference ``package.module:ExecutorSubclass``
+selects a custom executor. The dot form ``package.module.Class`` is not accepted. CPU-only execution does not import Ray, Slime,
 Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
 
 .. code:: python
 
-   from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec, resolve
+   from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec, resolve
 
    class Counter:
        def __init__(self, rank):
@@ -395,7 +421,7 @@ Torch or SGLang. Only declared local GPU requirements probe CUDA capacity.
            return self.rank, self.value
 
    if __name__ == "__main__":  # required for spawn
-       executor = Executor.create(ExecutorConfig(
+       executor = Executor.create(ExecutorLaunch(
            workers=tuple(WorkerSpec(Counter, args=(rank,)) for rank in range(2)),
        ))  # auto -> mp
        try:
@@ -447,7 +473,7 @@ Implement ``_init_executor``, ``rpc``, ``collective_rpc``, ``check_health`` and
 gets a future back can subclass ``SubmittingExecutor`` instead. It then
 implements only ``_submit`` and ``_submit_all``. The bundled ``uni``, ``mp``
 and ``ray`` executors and ``DelegatingExecutor`` are built that way.
-Backend-specific launch configuration belongs in ``ExecutorConfig.options``.
+Backend-specific launch configuration belongs in ``ExecutorLaunch.options``.
 GPU tensors, optimizer state, NCCL collectives and KV transfers remain the
 model backend's responsibility. Changing executors does not resize a live
 topology or reshard checkpoints.
@@ -483,7 +509,7 @@ placement, rank-zero rendezvous and the memory-saver environment. RPC goes
 through the shared ``RayExecutor``.
 
 ``--reef-executor-backend`` in ``training.options`` selects another worker
-executor. The executor receives these values in ``ExecutorConfig.options``:
+executor. The executor receives these values in ``ExecutorLaunch.options``:
 
 - ``args``, the parsed Slime arguments.
 - The node and GPU counts, and the placement group ``pg``.
@@ -638,12 +664,12 @@ does not import or initialize Ray to probe it. It does not count GPUs, change
 TP/PP, or retry a failed backend with another backend. Resource requests must
 describe the intended scheduling. Standalone SGLang commands still control
 their own model parallelism. ``auto`` is also the default
-``ExecutorConfig.backend`` for the low-level worker factory. A service
+``ExecutorLaunch.backend`` for the low-level worker factory. A service
 controller is not a model rank. Slime's specialized Ray requirement and
 service resource reservations stay specific to each component; they do not
 implement vLLM's TP/PP launcher.
 
-Each selector accepts a built-in name, import path, inline ``backend/options``
+Each selector accepts a built-in name, a ``package.module:ClassName`` reference, an inline ``backend/options``
 object, or a named profile under ``executors``. Explicit Slime command-line
 flags override the corresponding role selection; they also accept profile
 names. Profiles for training and rollout carry domain-launcher options, not
@@ -732,8 +758,7 @@ Failure policy is fail-stop, not automatic restart/replay. A startup failure
 cancels peer readiness waits and joins launch tasks before Reef closes the
 executors it already created. A late launch therefore cannot escape cleanup.
 Shutdown attempts every dependent before its dependencies, even if an RPC
-fails. An individual executor does not delete borrowed external engines or
-shared Slime placement groups. The HTTP service closes its training component
+fails. An individual executor does not delete shared Slime placement groups. The HTTP service closes its training component
 and inference runtime after the dispatcher stops every scenario worker.
 
 Verification

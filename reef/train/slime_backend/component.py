@@ -52,14 +52,12 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.repository import DefaultStart, ModelDirectory
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
 from reef.core.job_data import TaskSample
-from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor import resolve
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataKind, read_job_data
-from reef.train.algos.schedule import StepScheduling
+from reef.storage.job_data import JobDataKind
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.learning_rate import (
     LearningRateScheduleState,
@@ -78,6 +76,7 @@ from reef.train.slime_backend.checkpoints import (
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings, save_root
 from reef.train.slime_backend.distill import DistillAlgorithm
+from reef.train.slime_backend.facts import SLIME_COMPONENT, SlimeFacts
 from reef.train.slime_backend.harbor_rollouts import (
     TaskJobSource,
     check_rollout_can_train,
@@ -87,8 +86,8 @@ from reef.train.slime_backend.harbor_rollouts import (
     task_job_metrics,
 )
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
-from reef.train.slime_backend.objectives import resolve_slime_objective
-from reef.train.slime_backend.parameters import SlimeJobParameters, slime_parameters_schema
+from reef.train.slime_backend.objectives import resolve_objective
+from reef.train.slime_backend.parameters import SlimeJobParameters
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
@@ -110,6 +109,7 @@ from reef.train.slime_backend.rollout_group import (
     serving_exists,
     serving_session,
 )
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 from reef.train.task_rollouts import HarborSettings, task_name
 
@@ -159,10 +159,12 @@ class SlimeJobs(LocalJobComponent):
     holds the jobs (see ``LocalJobComponent``) and ``reef-starts/rollout_<id>/``
     the start of each saved rollout: its ``start.json`` and, with LoRA, the
     published snapshot in ``release/adapter/``; ``reef-starts/base/`` is the
-    start of the untrained weights. ``SlimeTrainingComponent`` (the component
+    start of the startup weights, which holds its ``start.json`` alone. ``SlimeTrainingComponent`` (the component
     Reef calls) and ``SlimeJobRunner`` (the driver that trains a job) are the
     two subclasses, over the same directories. A subclass names the rollout
-    whose weights the next job continues, ``held_rollout_id``.
+    whose weights the next job continues, ``held_rollout_id``. ``facts`` are the ``SlimeFacts`` of ``args``: the
+    artifact format, the default start's inputs, the parameters schema and the root start check are its answers.
+    The name is ``SLIME_COMPONENT``, as the facts' is; a driver reads it before it reads any LoRA argument.
     """
 
     def __init__(self, args: SlimeArguments, *, lora: bool) -> None:
@@ -171,7 +173,7 @@ class SlimeJobs(LocalJobComponent):
         root = self.root_of(args)
         self.root = root
         self.starts_root = root / "reef-starts"
-        # The start of the startup weights, the untrained checkpoint that the default start holds.
+        # The start of the startup weights, which the workers make from the model when they start.
         self.base_start_dir = self.starts_root / "base"
         if not (self.base_start_dir / START_STATE).exists():
             SlimeStart(None, None, {}, None).write(self.base_start_dir)
@@ -188,52 +190,23 @@ class SlimeJobs(LocalJobComponent):
         """The rollout whose weights the next job continues, or ``None`` for the untrained weights."""
 
     @property
+    def facts(self) -> SlimeFacts:
+        """The facts of the arguments that the workers started with."""
+        return SlimeFacts.from_parsed(self.args, lora=self.lora)
+
+    @property
     def name(self) -> str:
-        return "slime"
+        return SLIME_COMPONENT
 
     @property
     def artifact_format(self) -> ArtifactFormat:
         """Full weights (the rollout's Hugging Face export), or with LoRA the PEFT adapter of the workers' rank."""
-        if not self.lora:
-            return ArtifactFormat("full")
-        from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
-
-        return ArtifactFormat(
-            "adapter", int(self.args.megatron_lora_rank), tuple(sglang_lora_target_modules(self.args))
-        )
+        return self.facts.artifact_format
 
     @property
     def default_start_inputs(self) -> dict[str, str]:
         """The configuration that decides the startup weights: the model, and with LoRA the adapter's settings."""
-        model = Path(self.args.hf_checkpoint).expanduser().resolve()
-        if not self.lora:
-            return {"model": str(model)}
-        from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
-
-        return {
-            "model": str(model),
-            "lora_rank": str(self.args.megatron_lora_rank),
-            "lora_alpha": str(self.args.megatron_lora_alpha),
-            "lora_target_modules": ",".join(sorted(sglang_lora_target_modules(self.args))),
-        }
-
-    def default_start(self) -> DefaultStart:
-        """The startup weights as a snapshot: the model directory, or with LoRA an adapter whose weights are zero.
-
-        Full-weight artifacts are Hugging Face checkpoints, so the default start
-        is ``hf_checkpoint`` itself. LoRA artifacts hold the adapter in
-        ``adapter/``, so the default start holds the untrained adapter there:
-        every LoRA weight is zero, so it serves the startup weights unchanged.
-        """
-        inputs = self.default_start_inputs
-        if not self.lora:
-            return DefaultStart(model_files=ModelDirectory(Path(inputs["model"])), inputs=inputs)
-        from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_untrained_lora_adapter
-
-        artifact_dir = self.base_start_dir / "release"
-        if not (artifact_dir / ADAPTER_DIR).is_dir():
-            save_untrained_lora_adapter(self.args, artifact_dir / ADAPTER_DIR)
-        return DefaultStart(model_files=ModelDirectory(artifact_dir), inputs=inputs)
+        return dict(self.facts.default_start_inputs)
 
     @property
     def base_start(self) -> str:
@@ -241,22 +214,14 @@ class SlimeJobs(LocalJobComponent):
         return str(self.base_start_dir)
 
     def root_start(self, root: ScenarioRoot) -> str:
-        """The startup weights, when ``root`` holds the default start of this configuration; else ``ValueError``.
+        """The startup weights, when ``root`` came from the default start of this configuration; else ``ValueError``.
 
         Slime's workers load ``hf_checkpoint`` when they start and cannot load a snapshot, so they train a scenario
-        only when its root came from the same configured inputs.
+        only when its root came from the same configured inputs. The method reads the root's source and none of its
+        files: a base root (``SlimeFacts.default_start``) and a root that an older Reef wrote with the model's
+        files or an untrained adapter start the same job.
         """
-        configured = self.default_start_inputs
-        if root.source.kind != "default" or dict(root.source.inputs) != configured:
-            started = (
-                f"the item {root.source.item!r}"
-                if root.source.kind == "item"
-                else f"the inputs {dict(root.source.inputs)!r}"
-            )
-            raise ValueError(
-                f"Slime trains the weights that it starts with, from the inputs {configured!r}, but the scenario's root "
-                f"release came from {started}; create the scenario again with this configuration"
-            )
+        self.facts.check_root_start(root)
         return self.base_start
 
     def import_start(self, artifact_dir: Path) -> str:
@@ -266,7 +231,7 @@ class SlimeJobs(LocalJobComponent):
         )
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
-        return slime_parameters_schema(kind)
+        return self.facts.parameters_schema(kind)
 
     def check_job(self, job: TrainingJob) -> None:
         parameters = SlimeJobParameters.from_parameters(job.parameters)
@@ -279,14 +244,14 @@ class SlimeJobs(LocalJobComponent):
         elif dataset_family and job.kind != "task":
             raise ValueError(f"the {SLIME_NATIVE_FAMILY!r} loss family trains only dataset jobs and task jobs")
         if job.kind == "task":
-            tasks = [item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)]
+            tasks = [item for item in job.read_data().samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
                 raise ValueError("the tasks of one job need distinct names: each name groups its task's samples")
         elif parameters.harbor is not None:
             raise ValueError("the harbor parameter applies only to a job of tasks")
-        loss_family = resolve_slime_objective(parameters.objective).loss_family
+        loss_family = resolve_objective(parameters.objective).loss_family
         try:
             resolve_loss_family(loss_family)
         except UnknownLossFamilyError as exc:
@@ -314,7 +279,7 @@ class SlimeJobs(LocalJobComponent):
         job_parameters = SlimeJobParameters.from_parameters(parameters)
         if job_parameters.harbor is None:
             raise ValueError("a task job needs the harbor parameter as an object")
-        family = resolve_slime_objective(job_parameters.objective).loss_family
+        family = resolve_objective(job_parameters.objective).loss_family
         if family != SLIME_NATIVE_FAMILY:
             raise ValueError(
                 f"a task job's objective needs the {SLIME_NATIVE_FAMILY!r} loss family, not {family!r}; "
@@ -468,7 +433,7 @@ class SlimeJobRunner(SlimeJobs):
         if started is None or started["rollout_id"] != self.loaded_rollout_id:
             held = SlimeStart.read(Path(saved[-1].path)) if saved else start
             self.check_held_weights(held.rollout_id, job.start)
-        data = read_job_data(job.data_dir, job.data_id)
+        data = job.read_data()
         rollout_metrics: dict[str, Any] = {}
         # A trajectory that serving recorded carries no tokens: the component renders it with the trained model's
         # chat template, and the actor computes its log-probabilities with the weights of this job's start.
@@ -648,7 +613,7 @@ class SlimeJobRunner(SlimeJobs):
         done = self.resume_slime_loop(job, directory)
         tasks = tuple(
             (task_name(item), str(item.task_path.resolve()))
-            for item in read_job_data(job.data_dir, job.data_id).samples
+            for item in job.read_data().samples
             if isinstance(item, TaskSample)
         )
         source = TaskJobSource(
@@ -849,7 +814,7 @@ class SlimeSettings:
         if not isinstance(self.execution, Mapping) or set(self.execution) - {"execution", "executors"}:
             raise ValueError("SlimeSettings.execution holds only the execution and executors sections")
         if isinstance(self.train_timeout_s, bool) or not isinstance(self.train_timeout_s, int | float):
-            raise TypeError("SlimeSettings.train_timeout_s must be a number")
+            raise ValueError("SlimeSettings.train_timeout_s must be a number")
         if not self.train_timeout_s > 0:
             raise ValueError("SlimeSettings.train_timeout_s must be positive")
 
@@ -859,7 +824,9 @@ class SlimeTrainingComponent(SlimeJobs):
 
     ``settings`` are the deployment's Slime settings. Building the component
     parses the Slime arguments once, without starting anything, so a
-    malformed option fails at deployment, and checks the checkpoint storage.
+    malformed option fails at deployment, and checks the checkpoint storage. It refuses to start when the options
+    as written state other facts than the parsed arguments (``SlimeFacts``): then a service that reads the facts
+    without the component would describe other snapshots than the workers save.
     ``run`` writes the settings to the job's ``driver.json`` and starts
     ``python -m reef.train.slime_backend.driver`` on the job's directory,
     with its output in ``driver.log``; the driver records the job's
@@ -881,7 +848,14 @@ class SlimeTrainingComponent(SlimeJobs):
         # Imported here: the LoRA module loads Megatron's LoRA stack.
         from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
 
-        super().__init__(args, lora=megatron_lora_enabled(args))
+        lora = megatron_lora_enabled(args)
+        written, parsed = SlimeFacts.from_arguments(settings.arguments), SlimeFacts.from_parsed(args, lora=lora)
+        if written != parsed:
+            raise RuntimeError(
+                f"Slime's options as written state {written}, but Slime parsed {parsed}: write --hf-checkpoint and "
+                "the --megatron-lora-* options with their full names"
+            )
+        super().__init__(args, lora=lora)
 
     @property
     def held_rollout_id(self) -> int | None:

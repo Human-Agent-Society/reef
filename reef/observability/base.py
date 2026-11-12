@@ -14,13 +14,14 @@ class TrainingExperimentContext:
     """The training starts and run position known before one training commit.
 
     ``source_artifacts`` is an immutable, nonempty component-to-artifact-ID
-    mapping. It names each trainer's start before the step. The committer
+    mapping. It names each trainer's start before the commit. ``commit_number``
+    is the number that the commit takes in the scenario's commit history. The committer
     makes the context; experiment trackers use it to associate metrics.
     """
 
     scenario: str
     recipe: str
-    step: int
+    commit_number: int
     source_artifacts: ArtifactSelection
     run_segment: int = 0
     run_step: int = 0
@@ -59,7 +60,7 @@ class TrainingExperimentEvent:
 class TrainFromExperimentEvent:
     """A committed new training start, which ends one training-curve segment and opens the next.
 
-    ``step`` is the step of the ``"train_from"`` commit, which numbers the
+    ``commit_number`` is the commit number of the ``"train_from"`` commit, which numbers the
     next segment, and ``run_segment`` is the segment it ends.
     ``start_artifacts`` is the complete ``ArtifactSelection`` of training starts
     after the change. Only the selected component changes. ``component`` names
@@ -70,7 +71,7 @@ class TrainFromExperimentEvent:
 
     scenario: str
     recipe: str
-    step: int
+    commit_number: int
     run_segment: int
     start_artifacts: ArtifactSelection
     component: str | None = None

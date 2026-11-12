@@ -23,7 +23,6 @@ classifiers = [
 # `pip install reef-infra` must support the base `recipe` configuration on CPU.
 dependencies = [
     "aiohttp>=3.14",  # web.RequestKey
-    "alembic>=1.13,<2",
     "huggingface_hub",
     # Harbor's environment contract backs reef.execution.sandbox; task directory rollouts, the task player and the
     # generator service play Harbor tasks with reef-eval.
@@ -37,9 +36,9 @@ dependencies = [
 
 [project.optional-dependencies]
 # Python-side inference adapters; install native SGLang in its GPU environment.
-sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
+sglang = ["requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 # Python-side vLLM adapter; install native vLLM in its GPU environment.
-vllm = ["httpx", "requests", "ray[default]", "psutil>=5.9"]
+vllm = ["requests", "ray[default]", "psutil>=5.9"]
 tinker = [
     "tinker==0.38.0",
     # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
@@ -182,8 +181,6 @@ ignore = [
     "E402",
     # E501: line too long - black handles wrapping; long strings and URLs stay readable
     "E501",
-    # N818: existing public exception names omit an Error suffix; renaming them would break callers
-    "N818",
     # UP046/UP047: PEP 695 type parameter syntax; the codebase declares TypeVars, and mypy reads both forms
     "UP046",
     "UP047",
@@ -193,6 +190,10 @@ ignore = [
 # derivation. Other Greek symbols (theta, pi, epsilon, lambda, delta) are not
 # flagged; these three only trip RUF002/003 because they have ASCII lookalikes.
 allowed-confusables = ["α", "γ", "−"]
+
+[tool.ruff.lint.flake8-bugbear]
+# section_field and reader_field return a dataclasses.field, as config_field does.
+extend-immutable-calls = ["reef.recipe.config_fields.section_field", "reef.recipe.config_fields.reader_field"]
 
 [tool.ruff.lint.per-file-ignores]
 # Test code: perf lint and strict class/branch shape rules add churn, not safety.

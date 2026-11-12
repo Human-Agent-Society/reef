@@ -1,8 +1,8 @@
 """Worker sizing is generic; only component capability checks know the role."""
 
 import pytest
-from tests.support._strategies import resolve_task_scorer
-from tests.support.harness_steps import evolution_config
+from tests.support.harness_jobs import configured_component, evolution_config
+from tests.support.strategies import resolve_task_scorer
 
 from reef.evaluation.harness import evaluation_selection
 from reef.evaluation.harness.runner import evaluation_executor_config
@@ -11,6 +11,8 @@ from reef.execution.executor.config import executor_settings, select_executor
 from reef.execution.executor.requirements import ExecutionRequirements
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.execution import service_executor_config
 
 
@@ -26,10 +28,11 @@ def test_generic_sizing_drives_real_recipe(workers, backend):
         },
         **evolution_config(),
     }
-    recipe = HarnessEvolutionRecipe.from_environment(
-        {}, config=config, runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy")
-    )
-    selected, needs = evaluation_selection(recipe.scorer, recipe.worker_executor)
+    recipe = load_recipe(HarnessEvolutionRecipe, config, {})
+    live = LiveObjects(runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"))
+    scorer = configured_component(recipe, live).scorer
+    assert scorer is not None
+    selected, needs = evaluation_selection(scorer, recipe.worker_executor)
     assert selected.settings.backend == backend
     assert needs.workers == int(workers)
     assert needs.cpus_per_worker == 2

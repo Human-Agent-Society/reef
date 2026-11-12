@@ -29,7 +29,7 @@ class TinkerCheckpoint:
     all the parameters, which Spindle's full-parameter training saves. ``state_path`` (the weights and optimizer state
     that a later job restores) and ``sampler_path`` (the weights that the service's sampler serves; for a LoRA, the
     adapter that a serving runtime downloads to load into its own engines) are ``tinker://`` paths. ``service`` is the base URL of
-    the Tinker-compatible service that holds every path (``TinkerConfig.base_url``), or ``None`` for Thinking
+    the Tinker-compatible service that holds every path (``TinkerSettings.base_url``), or ``None`` for Thinking
     Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
     writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole snapshot, and reads them
     back to start a job. The serving side reads the same manifest as a ``TinkerArtifact``.
@@ -110,12 +110,14 @@ class TinkerCheckpoint:
 
 @dataclass(frozen=True)
 class FreshStart:
-    """The start of a new model of all the parameters of ``base_model``, with the base model's own weights.
+    """The start of a new model of ``base_model``, whose outputs are the base model's.
 
-    Values: ``base_model`` is non-empty. The start has no training state: no optimizer state, no learning-rate
-    schedule progress, and an empty objective state, as a ``TinkerCheckpoint`` of the untrained base would have; it
-    names no sampler, so its rollouts sample the base model. Purpose: the full-parameter training component starts a
-    job from it when the job starts from the base; ``TinkerClient.train`` creates the model on the service.
+    Values: ``base_model`` is non-empty. The new model is what the client trains: all the parameters with the base
+    model's own weights, or an untrained LoRA of the client's rank and seed. The start has no training state: no
+    optimizer state, no learning-rate schedule progress, and an empty objective state, as a ``TinkerCheckpoint`` of
+    the untrained base would have; it names no sampler, so its rollouts sample the base model. Purpose: a Tinker
+    component starts a job from it when the job starts from the backend's default start; ``TinkerClient.train``
+    creates the model on the service.
     """
 
     base_model: str

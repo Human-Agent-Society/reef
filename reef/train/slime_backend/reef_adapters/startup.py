@@ -16,8 +16,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.train.algos.registry import loss_family_refs
-from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
+from reef.train.slime_backend.loss_families import UnknownLossFamilyError, loss_family_reference, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
 from reef.train.slime_backend.reef_adapters.preflight import (
@@ -27,7 +26,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
 )
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     MEGATRON_TRACKER,
-    RetentionConfig,
+    RetentionSettings,
     retention_options,
 )
 
@@ -36,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 def prepare_slime_arguments(
     arguments: Sequence[str], *, loss_family: str, recipe: str, execution: Mapping[str, Any]
-) -> tuple[SlimeArguments, object | None, RetentionConfig]:
+) -> tuple[SlimeArguments, object | None, RetentionSettings]:
     """Return the workers' Slime arguments, the startup loss family's driver config and the checkpoint retention.
 
     ``arguments`` are the native Slime arguments with Reef's retention
@@ -171,8 +170,8 @@ def apply_unsaved_optimizer_resume(args: SlimeArguments) -> None:
 
 
 def stamp_loss_family_reference(args: SlimeArguments, reference: str) -> None:
-    """Carry a dotted family reference to the workers, whose registry starts empty."""
-    dotted = reference if ":" in reference else loss_family_refs().get(reference)
+    """Carry a dotted family reference to the workers, which start without the driver's registrations."""
+    dotted = reference if ":" in reference else loss_family_reference(reference)
     if dotted is not None:
         args.loss_family_ref = dotted
 

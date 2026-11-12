@@ -305,7 +305,7 @@ def test_cli_overrides_satisfy_required_environment_references(tmp_path: Path, m
         "inference:\n  upstream-url: ${REEF_TEST_URL:?}\n  upstream-model: ${REEF_TEST_MODEL:?}\n",
     )
 
-    overrides = {"inference.upstream-url": "http://127.0.0.1:8000/v1", "upstream-model": "provider/model"}
+    overrides = {"inference.upstream-url": "http://127.0.0.1:8000/v1", "inference.upstream-model": "provider/model"}
     assert orchestrator._run_orchestrator(str(path), overrides) == 0
     for key in ("config", "child_config"):
         assert captured[key]["reef"]["upstream_url"] == "http://127.0.0.1:8000/v1"

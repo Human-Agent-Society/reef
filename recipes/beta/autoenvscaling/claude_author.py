@@ -10,7 +10,7 @@ route with 404.
 The author supplies the token through the existing executor environment. The sandbox launcher includes environment
 values in bubblewrap's command arguments. Claude Code removes the token from its Bash, hook and MCP subprocesses
 (``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The author redacts its log and error messages and the retained run files.
-It refuses a check of a task that holds the token and admits no such task (:class:`CredentialHeld`).
+It refuses a check of a task that holds the token and admits no such task (:class:`CredentialHeldError`).
 """
 
 from __future__ import annotations
@@ -46,11 +46,16 @@ from recipes.beta.autoenvscaling.author import (
     workspace_reply,
     write_inputs,
 )
-from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, CredentialHeld, clean_run, scrubbed
+from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, CredentialHeldError, clean_run, scrubbed
 from recipes.beta.autoenvscaling.check_gateway import CheckGateway
 from recipes.beta.autoenvscaling.sources import SessionSource
 from reef.execution.sandbox.environment import execute
-from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout, SandboxUnavailable
+from reef.execution.sandbox.process import (
+    ProgramExecutor,
+    ProgramLaunchError,
+    ProgramTimeoutError,
+    SandboxUnavailableError,
+)
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
@@ -212,7 +217,7 @@ class ClaudeCodeAuthor(VariantAuthor):
         """Claude Code's task from ``source``, or with ``variant`` a variant of its parent; ``tags`` go unused,
         since Reef records none of its model calls.
 
-        Raises :class:`CredentialHeld` when the task holds the token: the task is not admitted.
+        Raises :class:`CredentialHeldError` when the task holds the token: the task is not admitted.
         """
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
@@ -236,7 +241,7 @@ class ClaudeCodeAuthor(VariantAuthor):
         finally:
             is_held = clean_run(work_dir, self.claude_token)
         if is_held:
-            raise CredentialHeld("the agent's task held the run's Claude Code token, so it is not admitted")
+            raise CredentialHeldError("the agent's task held the run's Claude Code token, so it is not admitted")
         # The transcript's path names the file as renamed.
         transcript = scrubbed(transcript, self.claude_token)
         return AuthoredTask(reply=workspace_reply(task_dir), record_ids=(), transcript=transcript)
@@ -335,11 +340,11 @@ class ClaudeCodeAuthor(VariantAuthor):
                 writable_paths=state,
                 readonly_paths=tuple(work_dir / PurePosixPath(relative) for relative in files),
             )
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             # The sandbox copied the workspace back: the task stands as the agent left it.
             logger.info("AutoEnvScaling Claude Code timed out after %.0f s", time.monotonic() - started)
             return transcript_path(work_dir, "")
-        except (ProgramLaunchError, SandboxUnavailable) as exc:
+        except (ProgramLaunchError, SandboxUnavailableError) as exc:
             if stop.is_set():
                 raise AuthorError("the agent's run was stopped") from None
             raise AuthorError(f"Claude Code could not run: {scrubbed(str(exc), self.claude_token)}") from None

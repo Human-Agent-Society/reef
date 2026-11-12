@@ -13,15 +13,14 @@ import json
 from pathlib import Path
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import DefaultStart
 from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, HuggingFaceRevisionFiles, read_reference
-from reef.core.weight_layout import ArtifactFormat
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
-from reef.train.tinker_backend.component import TinkerBaseFiles, TinkerJobComponent
-from reef.train.tinker_backend.config import SpindleFullConfig
+from reef.train.tinker_backend.component import TinkerJobComponent
+from reef.train.tinker_backend.config import SpindleFullSettings
+from reef.train.tinker_backend.facts import SpindleFullFacts
 from reef.train.tinker_backend.spindle_export import CheckpointExporter
 
 
@@ -31,9 +30,9 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
     The engine's ``model`` is the base's repo, which is ``base_model``, and its weights are the base's revision.
     Its artifacts are full weights (kind ``model``):
 
-    - the base: a reference to the base revision (``REFERENCE_FILE``), which ``base/`` holds; a job from it starts a
-      new model with the base's own weights (``FreshStart``). ``base/`` is written on first use: before the training
-      process runs jobs, or when a new scenario's root snapshot holds the default start (``prepared_base``);
+    - the base: a reference to the base revision (``REFERENCE_FILE``), which is the default start
+      (``SpindleFullFacts.default_start``) and which ``base/`` holds (``base_start``); a job from it starts a new
+      model with the base's own weights (``FreshStart``);
     - a saved checkpoint: a manifest of all the parameters (``lora_rank`` null) of the base model on the
       configured service, whose ``state_path`` a job restores, beside a reference to the commit of
       ``config.release_repo`` that holds the checkpoint's weights, which ``exporter`` made.
@@ -49,52 +48,36 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
     weights: ``train-from`` starts it fresh, and Spindle's sampler serves it as the base model.
     """
 
+    facts: SpindleFullFacts
+
     def __init__(
         self,
         base_model: str,
-        config: SpindleFullConfig,
+        config: SpindleFullSettings,
         client: TinkerClient,
         exporter: CheckpointExporter,
         *,
         sampler: TinkerSampler | None = None,
     ) -> None:
-        self._revision = config.base_revision
+        # The facts refuse a base model that is not the repo of the base.
+        facts = SpindleFullFacts.of(base_model, config)
+        self._revision = facts.base
         self._exporter = exporter
-        if base_model != self._revision.repo:
-            raise ValueError(f"the base model {base_model} is not the repo of the base {self._revision.uri}")
         #: The content ID of the base's files, read from the Hub at the first import.
         self.base_checksum: str | None = None
-        super().__init__(base_model, config, client, sampler=sampler, score_centering=config.score_centering_settings)
-
-    @property
-    def name(self) -> str:
-        return "spindle_full"
-
-    @property
-    def artifact_format(self) -> ArtifactFormat:
-        """Full weights: each snapshot refers to a commit on the Hub that holds them."""
-        return ArtifactFormat("full")
+        super().__init__(
+            base_model,
+            config,
+            client,
+            facts=facts,
+            sampler=sampler,
+            score_centering=config.score_centering_settings,
+        )
 
     def complete_artifact(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
         """Export the checkpoint's weights to the snapshot repo, and refer to the commit beside the manifest."""
         revision = self._exporter.export(checkpoint.state_path, self._revision)
         (directory / REFERENCE_FILE).write_text(json.dumps(revision.to_dict()) + "\n", encoding="utf-8")
-
-    def prepare_base(self) -> None:
-        """Write the reference to the configured base when ``base/`` holds no reference or another one.
-
-        The base start is a function of ``base`` alone, so it follows the configuration. A scenario whose root snapshot
-        refers to another base cannot train: ``import_start`` refuses that reference.
-        """
-        if read_reference(self._base) != self._revision:
-            self._base.mkdir(parents=True, exist_ok=True)
-            (self._base / REFERENCE_FILE).write_text(json.dumps(self._revision.to_dict()) + "\n", encoding="utf-8")
-
-    def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
-        checkpoint.check_compatible(self._model, service=self._config.base_url)
-        if checkpoint.lora_rank is not None:
-            raise ValueError(f"the Tinker checkpoint is a rank {checkpoint.lora_rank} LoRA, not all the parameters")
-        return checkpoint
 
     def start_at(self, directory: Path) -> TinkerCheckpoint | FreshStart:
         """A manifest that ``validated`` takes, whatever it refers to; else a reference to the base, which starts
@@ -106,11 +89,6 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
             named = "no Tinker checkpoint manifest" if revision is None else f"a reference to {revision.uri}"
             raise ValueError(f"the start {directory} holds {named}, not the base {self._revision.uri}")
         return FreshStart(self._model)
-
-    def default_start(self) -> DefaultStart:
-        """The base's release: the reference to the base revision."""
-        inputs = {"model": self._revision.uri, "service": str(self._config.base_url)}
-        return DefaultStart(model_files=TinkerBaseFiles(self), inputs=inputs)
 
     def check_artifact(self, files: ArtifactFiles) -> None:
         """A full-parameter manifest of this component's model and service whose state resolves, or the base's files."""
@@ -130,12 +108,11 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     def import_start(self, artifact_dir: Path) -> str:
         """A manifest's start, else the base start: every artifact of this component without a manifest has the base's
-        files, since its base holds them and ``check_artifact`` admits no other."""
+        files, since its base holds them and ``check_artifact`` admits no other. The base start follows the
+        configuration; a root that refers to another base is refused."""
         if (artifact_dir / MANIFEST).exists():
             return self.import_manifest(artifact_dir)
-        revision = read_reference(artifact_dir)
-        if revision is not None and revision != self._revision:
-            raise ValueError(f"the {self.name} training component starts only from its base {self._revision.uri}")
+        self.facts.check_base_files(artifact_dir)
         return self.base_start
 
     def base_files_id(self) -> str:

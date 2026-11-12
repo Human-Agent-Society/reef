@@ -8,6 +8,8 @@ from typing import Any
 
 from reef.dispatcher.errors import TrainingErrors, error_text
 from reef.recipe.base import Recipe
+from reef.recipe.composite import CompositeRecipe
+from reef.scenario.live_objects import LiveObjects, weight_component_name
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.train.jobs import JobLoopState
@@ -16,10 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 class TrainingStatus:
-    """Build the training status from the registry and the recorded errors."""
+    """Build the training status from the registry and the recorded errors; ``live`` holds the runtime that the
+    serving status asks."""
 
-    def __init__(self, recipe: Recipe, registry: ScenarioRegistry, errors: TrainingErrors) -> None:
+    def __init__(self, recipe: Recipe, live: LiveObjects, registry: ScenarioRegistry, errors: TrainingErrors) -> None:
         self.recipe = recipe
+        self.live = live
         self.registry = registry
         self.errors = errors
 
@@ -98,7 +102,7 @@ class TrainingStatus:
         if runtime is not None and runtime.per_scenario_adapters:
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(current.name)
         if len(current.trainers) > 1:
-            # Each component's trainer commits on its own; report each one beside the scenario-wide step.
+            # Each component's trainer commits on its own; report each one beside the scenario-wide commit number.
             components: dict[str, Any] = {}
             for component_trainer in current.trainers:
                 last = current.last_commit_for(component_trainer.component)
@@ -110,11 +114,11 @@ class TrainingStatus:
                         if component_trainer.trainer is stepping_trainer
                         else component_trainer.trainer.pipeline_status()
                     ),
-                    "last_committed_step": (
+                    "last_training_commit": (
                         None
                         if last is None
                         else {
-                            "step": last.step,
+                            "commit_number": last.commit_number,
                             "recorded_at": last.recorded_at,
                             "metrics": None if last.metrics is None else dict(last.metrics),
                         }
@@ -132,9 +136,22 @@ class TrainingStatus:
         return errors
 
     def serving_status(self) -> dict[str, Any]:
-        """Runtime-wide serving state for the deployment's recipe."""
+        """The adapter residency that the runtime of the recipe's weights reports, under the recipe's name.
+
+        The reader asks the runtime (``InferenceRuntime.adapter_residency_status``). A weight recipe's block is
+        ``{"adapters": residency}``; a composite's holds that block under the name of its weight component. The
+        result is empty for a recipe that trains no weights and for a runtime that reports no residency. A
+        runtime that raises gives ``{"error": text}``.
+        """
+        component = weight_component_name(self.recipe)
+        runtime = self.live.runtime
+        if component is None or runtime is None:
+            return {}
         try:
-            status = self.recipe.serving_status()
+            residency = runtime.adapter_residency_status()
         except Exception as exc:
-            status = {"error": error_text(exc)}
-        return {} if status is None else {self.recipe.name: status}
+            return {self.recipe.name: {"error": error_text(exc)}}
+        if residency is None:
+            return {}
+        status: dict[str, Any] = {"adapters": residency}
+        return {self.recipe.name: {component: status} if isinstance(self.recipe, CompositeRecipe) else status}

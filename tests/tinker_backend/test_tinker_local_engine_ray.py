@@ -2,7 +2,7 @@
 
 The component (``python -m reef.inference.remote``) runs in its own process
 with its own Ray session that declares two pretend GPUs, and starts the stub
-engine (``tests.support._stub_engine``). The test process is the control
+engine (``tests.support.stub_engine``). The test process is the control
 plane: it builds Tinker's training component and the serving runtime of its
 adapters as the HTTP service does and drives one
 TTTD step through the Dispatcher, then restarts. The Tinker SDK and the
@@ -28,6 +28,7 @@ import pytest
 
 from reef.dispatcher import Dispatcher
 from reef.inference.serving import AdapterServingRuntime
+from reef.scenario.live_objects import LiveObjects
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -36,7 +37,7 @@ from reef.train.jobs import JobLoopState
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL = "Qwen/Qwen3-8B"
 REAL = os.environ.get("REEF_TEST_TINKER_REAL") == "1" and bool(os.environ.get("TINKER_API_KEY"))
-ENGINE = "tests.support._stub_engine:create_inference"
+ENGINE = "tests.support.stub_engine:StubEngineService"
 TOKENS = {"REEF_REMOTE_CONTROL_TOKEN": "control-secret", "REEF_REMOTE_INFERENCE_TOKEN": "inference-secret"}
 SCENARIO = "erdos"
 
@@ -118,6 +119,7 @@ FAKE_SDK = textwrap.dedent(
         def __init__(self, **kwargs): _log({"event": "session", "keys": sorted(kwargs)})
         def create_sampling_client(self, base_model=None, model_path=None): return _Sampler()
         def create_rest_client(self): return _Rest()
+        def get_server_capabilities(self): return SimpleNamespace(supported_models=[])
         def create_lora_training_client(self, base_model, rank, seed):
             _log({"event": "initialize", "base_model": base_model, "rank": rank}); return _Trainer("seed")
         def create_training_client_from_state_with_optimizer(self, path):
@@ -228,7 +230,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     from reef.dispatcher import Dispatcher
     from reef.storage.sql_coordination import open_coordination
     from reef.storage.sqlite import SQLiteScenarioStorage
-    from reef.train.pipeline import PipelineConfig
+    from reef.train.pipeline import PipelineSettings
 
     if not REAL:
         monkeypatch.syspath_prepend(str(write_fake_sdk(tmp_path, MODEL)))
@@ -247,7 +249,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
             "model-path": MODEL,
             "backend": ENGINE,
             "num-gpus": 2,
-            "handler-factory": "reef.inference.sglang.chat.SGLangInferenceHandler",
+            "handler-factory": "reef.inference.sglang.chat:SGLangInferenceHandler",
             "remote": {"url": url},
         },
         "training": {
@@ -269,13 +271,12 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     try:
         dispatcher = Dispatcher(
             TTTDRecipe(
-                component,
-                runtime=inference,
-                pipeline_stages=PipelineConfig.from_setting(
+                pipeline_stages=PipelineSettings.from_setting(
                     raw["pipeline"], spec=TTTDRecipe.pipeline_spec(), environ={}
                 ),
             ),
             repository,
+            live=LiveObjects(runtime=inference, training_component=component, training_facts=component.facts),
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
             # A file, as a deployment keeps it: a restarted control plane reads what the engines serve.
@@ -338,15 +339,17 @@ def served_adapters(tmp_path) -> list[Path]:
     return [path for path in (tmp_path / "remote-work").iterdir() if path.is_dir()]
 
 
-def wait_for_serving(dispatcher: Dispatcher, inference: AdapterServingRuntime) -> None:
-    """Wait for the selected adapter and this runtime's recovery of it."""
+def wait_for_serving(dispatcher: Dispatcher, inference: AdapterServingRuntime, *, adapter: bool = True) -> None:
+    """Wait for the selected artifact: with ``adapter``, also for this runtime's recovery of its adapter. A base
+    root has no adapter."""
     deadline = time.monotonic() + (1500 if REAL else 120)
     while time.monotonic() < deadline:
         item = dispatcher.coordination.served_models.current_request(SCENARIO)
         selected = dispatcher.get_or_create_scenario(SCENARIO).artifact_selection().to_dict()
         if item is not None and item.payload.get("selection") == selected:
             # A restart can read the prior worker's completed request before recovering its adapter.
-            if item.state == "finished" and inference.serving_adapter_runtime_load_id(SCENARIO) is not None:
+            recovered = inference.serving_adapter_runtime_load_id(SCENARIO) is not None
+            if item.state == "finished" and (recovered or not adapter):
                 return
             assert item.state != "failed", item.error
         time.sleep(0.05)
@@ -358,7 +361,8 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
     from reef.artifact import InMemoryRepositoryBackend
 
     pytest.importorskip("ray")  # the component process starts its own Ray session
-    # The default start is the component's untrained adapter artifact, which the component writes when it starts.
+    # The default start is a base root, which control writes from the backend's facts: the engines serve the base
+    # model for it and load no adapter.
     repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     for key in list(os.environ):
         if key.startswith(("REEF_", "RAY_")) and key != "REEF_TEST_TINKER_REAL":
@@ -366,10 +370,11 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
     with inference_component(tmp_path) as (url, control):
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
             dispatcher.get_or_create_scenario(SCENARIO)
-            wait_for_serving(dispatcher, inference)
-            initial = inference.serving_adapter_runtime_load_id(SCENARIO)
-            assert initial is not None
-            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [initial] * 2
+            wait_for_serving(dispatcher, inference, adapter=False)
+            assert inference.serving_adapter_runtime_load_id(SCENARIO) is None
+            assert inference.served_model_name(SCENARIO) == MODEL
+            assert served_adapters(tmp_path) == []
+            initial = inference.base_version
             assert inference.base_url == url
             train_one_step(dispatcher, inference)
             wait_for_serving(dispatcher, inference)
@@ -383,9 +388,9 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
             assert start.parent.parent == tmp_path / "tinker" / "jobs"
             if not REAL:
                 events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+                # The first job makes a new LoRA of the model on the service; nothing saved an untrained adapter.
                 assert [event["event"] for event in events if event["event"] in ("initialize", "restore")] == [
-                    "initialize",
-                    "restore",
+                    "initialize"
                 ]
                 # Serving downloads the adapter after training, in a session of its own.
                 assert [event["rows"] for event in events if event["event"] == "forward_backward"][-1] == 4

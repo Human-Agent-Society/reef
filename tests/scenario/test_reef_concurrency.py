@@ -1,6 +1,6 @@
 """Concurrency protocol tests for scenario commits (issue #78, phase 1).
 
-The version pointer (serving head + scenario_step) must move under one
+The version pointer (serving head + commit_number) must move under one
 concurrency protocol: per-scenario latches serialize the commit flow, and
 every serving-head move is fenced with the head the writer observed.
 """
@@ -12,11 +12,12 @@ import time
 from pathlib import Path
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.records import report, token_inference
+from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 
-from reef.artifact import Artifact, ArtifactConflict, InMemoryRepositoryBackend, Repository, SnapshotRef
-from reef.core import AgentRecord, RequestType
+from reef.artifact import Artifact, ArtifactConflictError, InMemoryRepositoryBackend, Repository, SnapshotRef
+from reef.core import AgentRecord
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -46,27 +47,7 @@ def sft_inference(agent_record_id: str, artifact_id: str) -> AgentRecord:
     it. The tests set ``max_staleness`` to their job count instead: every
     record stays within the window of every later artifact.
     """
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload={
-            "tokens": [1, 2],
-            "loss_mask": [0, 1],
-            "rollout_log_probs": [-0.2],
-            "artifact_id": artifact_id,
-        },
-        agent_record_id=agent_record_id,
-    )
-
-
-def sft_report(agent_record_id: str, reference: str) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.REPORT,
-        payload={"score": 1.0, "references": [reference]},
-        agent_record_id=agent_record_id,
-        references=(reference,),
-    )
+    return token_inference(agent_record_id, artifact_id=artifact_id)
 
 
 def run_workers(thread_count: int, worker) -> list[Exception]:
@@ -123,7 +104,7 @@ def test_activate_requires_the_observed_head(tmp_path) -> None:
 
     stale = SnapshotRef(revision="stale", parent_revision=None)
     advanced = SnapshotRef(revision="live:proc:w1:1", parent_revision=head.revision)
-    with pytest.raises(ArtifactConflict, match="active artifact moved"):
+    with pytest.raises(ArtifactConflictError, match="active artifact moved"):
         repository.activate(advanced, expected=stale)
 
     assert repository.current_artifact == head
@@ -139,11 +120,9 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
     pairs_per_thread = 4
     thread_count = 4
     dispatcher = Dispatcher(
-        TestPolicyRecipe(
-            **runtime_bindings(component),
-            max_staleness=pairs_per_thread * thread_count,
-        ),
+        TestPolicyRecipe(max_staleness=pairs_per_thread * thread_count),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -155,7 +134,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
         for offset in range(pairs_per_thread):
             index = seed * pairs_per_thread + offset
             dispatcher.accept_record(sft_inference(f"i{index}", base_artifact_id))
-            dispatcher.accept_record(sft_report(f"r{index}", f"i{index}"))
+            dispatcher.accept_record(report(f"r{index}", f"i{index}"))
 
     errors = run_workers(thread_count, worker)
 
@@ -166,7 +145,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
     assert component.train_calls == total
     assert len({job.job_id for job in component.submitted}) == total
     assert scenario.trainer.state["jobs"] == []
-    assert scenario.scenario_step == COMMITS_PER_JOB * total
+    assert scenario.commit_number == COMMITS_PER_JOB * total
     # Each job published one saved checkpoint; the head is the last one.
     head = Path(dispatcher.current_artifact("math").materialize().local_path)
     assert (head / "model.txt").read_text() == f"w{total}"
@@ -178,13 +157,14 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
 
     Accepts can wake the training worker while it is committing pending result
     P. The worker must finish that trainer and version-chain commit before preparing
-    another batch; otherwise P could be recorded as two scenario steps.
+    another batch; otherwise P could be recorded as two commits.
     """
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     component = CountingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component), max_staleness=4),
+        TestPolicyRecipe(max_staleness=4),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -202,14 +182,14 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
 
     def worker(seed: int) -> None:
         dispatcher.accept_record(sft_inference(f"i{seed}", base_artifact_id))
-        dispatcher.accept_record(sft_report(f"r{seed}", f"i{seed}"))
+        dispatcher.accept_record(report(f"r{seed}", f"i{seed}"))
 
     errors = run_workers(4, worker)
 
     assert errors == []
     wait_for_jobs(dispatcher, 4)
     assert component.train_calls == 4
-    assert scenario.scenario_step == COMMITS_PER_JOB * 4
+    assert scenario.commit_number == COMMITS_PER_JOB * 4
 
 
 @pytest.mark.unit
@@ -237,7 +217,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
     assert errors == []
     total = commits_per_thread * thread_count
     scenario = dispatcher.get_or_create_scenario("chat")
-    assert scenario.scenario_step == total
+    assert scenario.commit_number == total
 
     backend = scenario.repository.backend
     assert backend.current() == scenario.repository.current_artifact

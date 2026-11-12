@@ -18,7 +18,12 @@ import reef.execution.sandbox.modal as modal_sandbox
 import reef.execution.sandbox.remote as remote
 from reef.execution.sandbox.config import build_executor, remote_executor
 from reef.execution.sandbox.modal import ModalExecutor, ModalSession
-from reef.execution.sandbox.process import ProgramLaunchError, ProgramTimeout, SandboxProgram, SandboxUnavailable
+from reef.execution.sandbox.process import (
+    ProgramLaunchError,
+    ProgramTimeoutError,
+    SandboxProgram,
+    SandboxUnavailableError,
+)
 from reef.execution.sandbox.remote import REMOTE_BASE, TUNNEL_PORT_BASE, deployment_owner
 
 
@@ -96,7 +101,7 @@ def test_the_settings_take_the_modal_options_and_refuse_the_local_sandboxs() -> 
         ({"modal_app": ""}, "modal_app must be a non-empty string"),
         ({"env_from": ["MISSING"]}, "requires environment variable 'MISSING'"),
     ]:
-        with pytest.raises(SandboxUnavailable, match=message):
+        with pytest.raises(SandboxUnavailableError, match=message):
             ModalExecutor.from_config(section, {})
 
 
@@ -111,7 +116,7 @@ def test_the_factory_builds_each_provider_from_its_own_options(monkeypatch) -> N
     )
     assert isinstance(chosen, ModalExecutor) and (chosen.image, chosen.timeout_s) == ("img", 90)
     assert chosen.owner == deployment_owner(Path("/x"))
-    with pytest.raises(SandboxUnavailable, match="unknown cloud sandbox 'docker'"):
+    with pytest.raises(SandboxUnavailableError, match="unknown cloud sandbox 'docker'"):
         remote_executor("docker", {}, {})
     with pytest.raises(Exception, match="use one of 'local', 'sandbox', 'e2b', 'modal'"):
         build_executor({"executor": "docker"})
@@ -123,9 +128,9 @@ def test_a_program_runs_from_the_named_image_or_one_built_from_its_npm_package()
     assert isinstance(bound, ModalExecutor) and (bound.npm_package, bound.binary, binary) == ("pi@1.0.0", "pi", "pi")
     named, _ = ModalExecutor(image="registry/pi:1").for_program(Program(npm_package=""))
     assert isinstance(named, ModalExecutor) and (named.image, named.npm_package) == ("registry/pi:1", "")
-    with pytest.raises(SandboxUnavailable, match="requires an explicit modal_image"):
+    with pytest.raises(SandboxUnavailableError, match="requires an explicit modal_image"):
         ModalExecutor().for_program(Program(npm_package=""))
-    with pytest.raises(SandboxUnavailable, match="manages its own containers"):
+    with pytest.raises(SandboxUnavailableError, match="manages its own containers"):
         ModalExecutor().for_program(Program(self_isolating=True))
 
 
@@ -234,7 +239,9 @@ def test_a_process_runs_in_the_jail_under_its_limit_with_the_deployments_environ
     ((args, options),) = sandbox.commands
     command = shlex.split(args[-1])
     assert command[:4] == ["timeout", f"--kill-after={modal_sandbox.KILL_AFTER_S}", "30", "/bin/sh"]
-    jailed = command[-1]
+    # The process reads an empty standard input: Modal would keep it open.
+    jailed, *redirect = command[-3:]
+    assert redirect == ["<", "/dev/null"]
     assert jailed.startswith("exec bwrap") and f"{REMOTE_BASE}/run/workspace/out.txt" in jailed
     assert options["workdir"] == f"{REMOTE_BASE}/run/workspace"
     assert options["env"] == {"CALLER": "1", "DEPLOYMENT": "yes"}
@@ -250,7 +257,7 @@ def test_a_process_past_its_limit_is_a_timeout_and_a_failed_command_is_a_launch_
     monkeypatch.setattr(session, "push", lambda path: None)
     pulled: list[Path] = []
     monkeypatch.setattr(session, "pull", lambda path, relative="": pulled.append(path))
-    with pytest.raises(ProgramTimeout, match="past its 30 s limit"):
+    with pytest.raises(ProgramTimeoutError, match="past its 30 s limit"):
         session.launch(["pi"], root=root, workspace=root / "workspace", env={}, timeout=30)
     assert pulled == [root], "what the process wrote before its limit still comes back"
     with pytest.raises(ProgramLaunchError, match="exited with 2: no such file"):

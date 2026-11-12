@@ -27,12 +27,20 @@ from typing import Any, Literal, Self, get_args
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCallSummary, require_integer
-from reef.core.job_data import JobData
+from reef.core.job_data import JobData, TaskFiles, TaskSample
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
-from reef.storage.job_data import JOB_DATA_PREFIX, JOB_FILE, JobDataRef, job_data_key, job_data_kind, write_job_data
+from reef.storage.job_data import (
+    JOB_DATA_PREFIX,
+    JOB_FILE,
+    JobDataRef,
+    job_data_key,
+    job_data_kind,
+    job_task_files,
+    write_job_data,
+)
 from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.task_collections import TaskCollection, check_names
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
@@ -49,15 +57,15 @@ RECORD_SOURCES = ("inference", "evaluation")
 MAX_QUERY_LIMIT = 1000
 
 
-class ItemConflict(ReefError):
+class ItemConflictError(ReefError):
     """An item ID that the owner already stores with other content."""
 
 
-class ItemNotFound(ReefError):
+class ItemNotFoundError(ReefError):
     """An item ID that the owner does not store."""
 
 
-class ScenarioArchived(ReefError):
+class ScenarioArchivedError(ReefError):
     """A write of record items for a generation of their scenario that is no longer current."""
 
 
@@ -290,7 +298,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
 
     The patch may not change a key of ``FIXED_KEYS``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
-    that scenario's record store keeps the record. An evaluation call stays in no scenario. Only ``DataStore.remove_scenario`` removes that use.
+    that scenario's record store keeps the record. An evaluation call stays in no scenario. Only ``DataStore.delete_scenario`` removes that use.
     The patched ``benchmarks`` must pass ``check_benchmarks``.
     """
     if not isinstance(patch, Mapping):
@@ -435,9 +443,8 @@ class DataStore(Plugin, ABC):
     Operations:
 
     * ``create(owner, items)`` stores each item, all or none. An item whose ID the owner stores with the same
-      digest is unchanged; with another digest it is an ``ItemConflict``, and nothing is stored. Bad metadata or
-      content is a ``ValueError``, and nothing is stored. New artifact items omit the obsolete ``content_id``.
-      A retry of an older artifact compares all other content fields and preserves the stored content and digest.
+      digest is unchanged; with another digest it is an ``ItemConflictError``, and nothing is stored. Bad metadata or
+      content is a ``ValueError``, and nothing is stored.
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
@@ -464,21 +471,21 @@ class DataStore(Plugin, ABC):
     * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``. A durable reader of record items keeps one cursor for each: a
       ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
-      (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items, without content.
+      (``patched_metadata``). An unknown ID is an ``ItemNotFoundError``. It returns the updated items, without content.
     * ``replace_task(owner, item_id, directory)`` copies the task directory ``directory``, named ``item_id``, into
       the owner's task file partition and gives the task item ``item_id`` its digest. The item keeps its ID,
       sequence and metadata. When the digest changes, each use of the item gets a new use sequence, so a trainer
       reads the task again; the same files change nothing. It returns the item without content. An unknown ID is an
-      ``ItemNotFound``; an item of another kind, or a directory of another name, is a ``ValueError``, and nothing
+      ``ItemNotFoundError``; an item of another kind, or a directory of another name, is a ``ValueError``, and nothing
       changes. The files of the old digest stay, so a reader that opened them can go on.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
-    * ``remove_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
+    * ``delete_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
       the record items that it made, and returns their number. It also ends the scenario's generation. The archive
       of a scenario calls it, so that a new scenario with that name uses nothing. The items stay.
     * ``scenario_generation(owner, scenario)`` returns the current generation of ``scenario``: an opaque string,
       new when the scenario has none. A writer of the scenario's records reads it when it opens the scenario, and
       gives it to ``create``. ``create(owner, items, generation=...)`` stores record items of one origin scenario
-      only while that generation is current; else it raises ``ScenarioArchived`` and stores nothing.
+      only while that generation is current; else it raises ``ScenarioArchivedError`` and stores nothing.
     * ``prune_records(max_bytes)`` deletes the oldest record items of the source ``inference``, across owners, until
       those items hold at most ``max_bytes``, and returns their number. Each deleted item adds to the ``RecordLoss``
       of its origin scenario. It deletes no evaluation call and does not count its bytes. A store counts the bytes that it keeps for a record item: its row and the trajectory nodes that
@@ -494,8 +501,8 @@ class DataStore(Plugin, ABC):
       ``key`` in their metadata (``ItemGroup``). It returns the groups whose ``first_sequence`` is below ``before``,
       when given, newest first, at most ``limit``.
     * ``collections(owner)`` returns the ``TaskCollection`` values of ``owner``, in name order.
-      ``put_collection(owner, collection)`` stores ``collection``, in place of the one with its name if there is one.
-      ``remove_collection(owner, name)`` removes it and returns True, or returns False for an unknown name. No
+      ``write_collection(owner, collection)`` stores ``collection``, in place of the one with its name if there is one.
+      ``delete_collection(owner, name)`` removes it and returns True, or returns False for an unknown name. No
       collection operation changes an item. The store keeps each collection as it is given; the service checks that
       the collections of an owner name each other without a cycle (``reef.service.collections``).
     * ``maintain()`` does the store's periodic work: it deletes the job data directories that no job used for
@@ -514,7 +521,7 @@ class DataStore(Plugin, ABC):
 
     A subclass sets ``job_directories`` and ``job_directory_ttl_seconds``, and keeps the time of the last use of each
     directory, by its key:
-    ``record_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
+    ``write_job_directory_use(key, time)``, ``job_directories_unused_since(time)`` and
     ``delete_job_directory_record(key)``.
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
@@ -546,9 +553,12 @@ class DataStore(Plugin, ABC):
         """
 
     @abstractmethod
-    def create(
-        self, owner: str, items: Sequence[NewItem], *, generation: str | None = None
-    ) -> tuple[StoredItem, ...]: ...
+    def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
+        """Store each new item and give it its sequence, all or none.
+
+        The store checks each ID that the owner holds: the same digest leaves the item unchanged, and another
+        digest is an ``ItemConflictError``. It never replaces an item.
+        """
 
     @abstractmethod
     def scenario_generation(self, owner: str, scenario: str) -> str: ...
@@ -638,7 +648,7 @@ class DataStore(Plugin, ABC):
     def delete(self, owner: str, item_id: str) -> bool: ...
 
     @abstractmethod
-    def remove_scenario(self, owner: str, scenario: str) -> int: ...
+    def delete_scenario(self, owner: str, scenario: str) -> int: ...
 
     @abstractmethod
     def task_path(self, item: StoredItem) -> Path: ...
@@ -650,10 +660,10 @@ class DataStore(Plugin, ABC):
     def collections(self, owner: str) -> tuple[TaskCollection, ...]: ...
 
     @abstractmethod
-    def put_collection(self, owner: str, collection: TaskCollection) -> None: ...
+    def write_collection(self, owner: str, collection: TaskCollection) -> None: ...
 
     @abstractmethod
-    def remove_collection(self, owner: str, name: str) -> bool: ...
+    def delete_collection(self, owner: str, name: str) -> bool: ...
 
     def groups(
         self,
@@ -689,11 +699,13 @@ class DataStore(Plugin, ABC):
 
     #: The segment store of the job data directories.
     job_directories: SegmentStore
+    #: The task file store, which keeps the directory of each task that a job data directory names.
+    task_files: TaskFileStore
     #: How long the store keeps a job data directory that no job used, in seconds.
     job_directory_ttl_seconds: float
 
     @abstractmethod
-    def record_job_directory_use(self, key: str, time: float) -> None: ...
+    def write_job_directory_use(self, key: str, time: float) -> None: ...
 
     @abstractmethod
     def job_directories_unused_since(self, time: float) -> tuple[str, ...]: ...
@@ -704,16 +716,26 @@ class DataStore(Plugin, ABC):
     def write_job_directory(self, data: JobData) -> JobDataRef:
         key = job_data_key(data)
         name = f"{JOB_DATA_PREFIX}/{key}"
-        uri = self.job_directories.find_directory(name)
+        uri = self.job_directories.read_directory_uri(name)
         if uri is None:
             with tempfile.TemporaryDirectory() as staging:
                 directory = Path(staging) / key
                 write_job_data(data, directory)
-                uri = self.job_directories.put_directory(name, directory)
-        self.record_job_directory_use(key, time.time())
-        return JobDataRef(
-            uri, self.job_directories.open_directory(uri), data.data_id, len(data.samples), job_data_kind(data)
-        )
+                uri = self.job_directories.write_directory(name, directory)
+        self.write_job_directory_use(key, time.time())
+        path = self.job_directories.open_directory(uri)
+        # The samples hold the directories that the task file store gave when it made them.
+        task_paths = tuple(sample.task_path for sample in data.samples if isinstance(sample, TaskSample))
+        return JobDataRef(uri, path, data.data_id, len(data.samples), job_data_kind(data), task_paths)
+
+    def item_task_files(self, item: StoredItem) -> TaskFiles:
+        """The name in the task file store of the directory of the task item ``item``, which ``task_path`` returns."""
+        return TaskFiles(task_partition(item.owner), item.digest)
+
+    def job_task_paths(self, directory: Path) -> tuple[Path, ...]:
+        """The local directory of each task of the job data directory ``directory``, in job order, from the task file
+        store. ``TaskStoreError`` for a task whose files the store does not hold."""
+        return tuple(self.task_files.path(files.partition, files.digest) for files in job_task_files(directory))
 
     def open_job_directory(self, value: Mapping[str, Any]) -> JobDataRef:
         uri = value.get("uri")
@@ -721,8 +743,8 @@ class DataStore(Plugin, ABC):
             raise ValueError("a job data reference has a uri")
         path = self.job_directories.open_directory(uri)
         header = json.loads((path / JOB_FILE).read_text(encoding="utf-8"))
-        self.record_job_directory_use(header["key"], time.time())
-        return JobDataRef.from_dict(value, path)
+        self.write_job_directory_use(header["key"], time.time())
+        return JobDataRef.from_dict(value, path, self.job_task_paths(path))
 
     def delete_unused_job_directories(self, time: float) -> int:
         unused = self.job_directories_unused_since(time)
@@ -820,15 +842,6 @@ def generation_origin(
     return origins.pop()
 
 
-def item_digest_matches(item: StoredItem, digest: str) -> bool:
-    """Whether the stored ``item`` has the content of a create with ``digest``.
-
-    A stored item in an older format matches the current content that it maps to
-    (``ItemKindRules.matches_stored``), so a retry never rewrites an immutable item.
-    """
-    return item.digest == digest or ITEM_KIND_RULES[item.metadata["kind"]].matches_stored(item.content, digest)
-
-
 def replaced_task_digest(owner: str, item: StoredItem, directory: Path, task_files: TaskFileStore) -> str:
     """The digest of the task directory ``directory`` that ``replace_task`` gives the stored ``item``, after it copied
     the directory into the owner's task file partition. Raise ``ValueError`` unless ``item`` is a task item and
@@ -845,8 +858,7 @@ def prepared_items(
 ) -> list[tuple[NewItem, dict[str, Any], str]]:
     """Check a ``create`` call and return each item with its created metadata and digest.
 
-    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``), in the current format
-    (``ItemKindRules.current_content``). A task directory is copied into the
+    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``). A task directory is copied into the
     owner's task file partition, so its digest names stored files. The copy happens before the store checks for
     conflicts; files are kept by digest, so a refused call leaves at most an unused copy. Raise ``ValueError`` for
     an invalid owner, ID, metadata or content, or for an ID given twice.
@@ -861,7 +873,6 @@ def prepared_items(
         seen.add(item.item_id)
         metadata = created_metadata(owner, item.metadata)
         rules = ITEM_KIND_RULES[metadata["kind"]]
-        item = NewItem(item.item_id, rules.current_content(item.content), item.metadata)
         prepared.append((item, metadata, rules.stored_digest(owner, item.item_id, item.content, metadata, task_files)))
     return prepared
 
@@ -918,7 +929,7 @@ class MemoryDataStore(DataStore):
             raise PluginConfigError(f"MemoryDataStore takes no config, got {', '.join(sorted(map(str, config)))}")
         return cls(task_files, job_directory_ttl_seconds)
 
-    def record_job_directory_use(self, key: str, time: float) -> None:
+    def write_job_directory_use(self, key: str, time: float) -> None:
         self.job_directory_uses[key] = time
 
     def job_directories_unused_since(self, time: float) -> tuple[str, ...]:
@@ -931,12 +942,12 @@ class MemoryDataStore(DataStore):
         prepared = prepared_items(owner, items, self.task_files)
         origin = generation_origin(prepared, generation)
         if origin is not None and self.generations.get((owner, origin)) != generation:
-            raise ScenarioArchived(f"generation {generation!r} of {origin!r} is no longer current")
+            raise ScenarioArchivedError(f"generation {generation!r} of {origin!r} is no longer current")
         stored = self.items.setdefault(owner, {})
         for entry in prepared:
             existing = stored.get(entry[0].item_id)
-            if existing is not None and not item_digest_matches(existing, entry[2]):
-                raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
+            if existing is not None and existing.digest != entry[2]:
+                raise ItemConflictError(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
         result: list[StoredItem] = []
         for item, metadata, digest in prepared:
             existing = stored.get(item.item_id)
@@ -1112,7 +1123,7 @@ class MemoryDataStore(DataStore):
         stored = self.items.get(owner, {})
         missing = [item_id for item_id in item_ids if item_id not in stored]
         if missing:
-            raise ItemNotFound(f"{owner!r} stores no item {missing[0]!r}")
+            raise ItemNotFoundError(f"{owner!r} stores no item {missing[0]!r}")
         updated = [
             StoredItem(
                 stored[item_id].sequence,
@@ -1134,7 +1145,7 @@ class MemoryDataStore(DataStore):
         stored = self.items.get(owner, {})
         item = stored.get(item_id)
         if item is None:
-            raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+            raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
         digest = replaced_task_digest(owner, item, directory, self.task_files)
         if digest != item.digest:
             item = replace(item, digest=digest)
@@ -1148,7 +1159,7 @@ class MemoryDataStore(DataStore):
         self.write_uses(owner, item_id, {})
         return self.items.get(owner, {}).pop(item_id, None) is not None
 
-    def remove_scenario(self, owner: str, scenario: str) -> int:
+    def delete_scenario(self, owner: str, scenario: str) -> int:
         check_owner(owner)
         stored = self.items.get(owner, {})
         used = [item for item in stored.values() if scenario in item.scenarios]
@@ -1225,11 +1236,11 @@ class MemoryDataStore(DataStore):
         stored = self.stored_collections.get(owner, {})
         return tuple(stored[name] for name in sorted(stored))
 
-    def put_collection(self, owner: str, collection: TaskCollection) -> None:
+    def write_collection(self, owner: str, collection: TaskCollection) -> None:
         check_owner(owner)
         self.stored_collections.setdefault(owner, {})[collection.name] = collection
 
-    def remove_collection(self, owner: str, name: str) -> bool:
+    def delete_collection(self, owner: str, name: str) -> bool:
         check_owner(owner)
         return self.stored_collections.get(owner, {}).pop(name, None) is not None
 

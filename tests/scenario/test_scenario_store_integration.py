@@ -12,21 +12,20 @@ import pytest
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordRetention, RecordStore
-from reef.storage.samples import TrainerSamples, TrainingState
+from reef.storage.samples import TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore, TaskStorage
-from reef.train.backend import ComponentArtifacts
-from reef.train.component import ScenarioRoot
 from reef.train.trainer import Trainer
+from reef.train.trainer_builder import TrainerBuilder
 from reef.train.types import TrainingCommit
 
 
@@ -66,9 +65,9 @@ class OpaqueStore(ScenarioStore):
     def training_run_position(self) -> tuple[int, int]:
         return self._inner.training_run_position()
 
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
+    def append_commit(self, *, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
         self._events.append(("commit", self.scenario))
-        return self._inner.commit_step(expected_step=expected_step, commit=commit)
+        return self._inner.append_commit(expected_commit_number=expected_commit_number, commit=commit)
 
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
         self._events.append(("recover", self.scenario))
@@ -125,20 +124,22 @@ class OpaqueStorage(ScenarioStorage):
         self._inner.close()
 
 
-class FailingRecipe(Recipe):
-    def build(
+class FailingTrainers(TrainerBuilder):
+    def build_trainers(
         self,
-        scenario: str,
-        records: RecordStore,
+        specs,
+        scenario,
+        records,
         *,
-        algorithm_state: Mapping[str, Any] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
-        raise RuntimeError("injected recipe failure")
+        components,
+        algorithm_states,
+        experiment_logger=None,
+        task_storage=None,
+        artifacts=None,
+        samples=None,
+        root=None,
+    ):
+        raise RuntimeError("injected trainers failure")
 
 
 class IncompleteRecords(RecordStore):
@@ -194,9 +195,9 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
         assert scenario.store.durable
         scenario.records.append(trace("first"))
         scenario.commit(TrainingCommit(state={}))
-        assert scenario.scenario_step == 1
+        assert scenario.commit_number == 1
         assert ("commit", "math") in factory.events
-        assert [row["step"] for row in dispatcher.read_commits("math")["commits"]] == [1]
+        assert [row["commit_number"] for row in dispatcher.read_commits("math")["commits"]] == [1]
         stored = dispatcher.read_record("math", "first")
         assert stored is not None
         assert stored["payload"] == {"text": "first"}
@@ -215,9 +216,9 @@ def test_injected_store_commits_reads_history_and_recovers(tmp_path: Path) -> No
     try:
         recovered = reopened.get_or_create_scenario("math")
         assert recovered is not None
-        assert recovered.scenario_step == 1
-        assert recovered.records.get("math", "first") is not None
-        assert [row["step"] for row in reopened.read_commits("math")["commits"]] == [1]
+        assert recovered.commit_number == 1
+        assert recovered.records.read("math", "first") is not None
+        assert [row["commit_number"] for row in reopened.read_commits("math")["commits"]] == [1]
         assert ("recover", "math") in reopened_factory.events
     finally:
         reopened.close()
@@ -229,8 +230,8 @@ def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(
     dispatcher = Dispatcher(
         Recipe(),
         backend_factory(tmp_path),
+        live=LiveObjects(data_store=data),
         scenario_storage=factory,
-        data_store=data,
         coordination=memory_coordination(),
     )
     try:
@@ -266,12 +267,15 @@ def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(
     assert factory.events[-1] == ("close_storage", "")
 
 
-@pytest.mark.parametrize("failure_point", ("recovery", "recipe"))
+@pytest.mark.parametrize("failure_point", ("recovery", "trainers"))
 def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point: str) -> None:
     factory = OpaqueStorage(tmp_path / "private-store", fail_recovery=failure_point == "recovery")
-    recipe = FailingRecipe() if failure_point == "recipe" else Recipe()
     dispatcher = Dispatcher(
-        recipe, backend_factory(tmp_path), scenario_storage=factory, coordination=memory_coordination()
+        Recipe(),
+        backend_factory(tmp_path),
+        scenario_storage=factory,
+        coordination=memory_coordination(),
+        trainer_builder=FailingTrainers() if failure_point == "trainers" else None,
     )
     try:
         with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):

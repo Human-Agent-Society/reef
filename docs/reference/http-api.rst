@@ -135,7 +135,7 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/artifacts``                                                                         | import a directory as a new artifact              |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/restore``                                                                           | restore the complete selection at an earlier step |
+| ``POST /reef/scenarios/{scenario}/restore``                                                                           | restore the selection of an earlier commit        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/train-from``                                                                        | set the artifact a trainer starts its next job or |
 |                                                                                                                       | step from                                         |
@@ -220,7 +220,7 @@ Headers
 +-----------------------------------+---------------------------------------------------------+
 | Header                            | Required for                                            |
 +===================================+=========================================================+
-| ``x-reef-scenario``               | inference, report, harness manifest, releases and       |
+| ``x-reef-scenario``               | inference, report, harness manifest, artifacts and      |
 |                                   | import. Names the workload a record belongs to.         |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
@@ -233,7 +233,7 @@ Headers
 |                                   | artifact, use ``?artifact_id=``.                        |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-tag-<name>``             | optional on inference: context stored under             |
-|                                   | ``metadata.tags``; see `Client release tags`_ below.    |
+|                                   | ``metadata.tags``; see `Client artifact tags`_ below.   |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
 |                                   | runs itself. It is served like any other call, but no   |
@@ -293,7 +293,7 @@ request. These checks precede Scenario creation and provider execution:
 * A missing Scenario or model, an unknown target, a private router entrypoint
   as ``model``, a repeated ``x-reef-*`` header, a client-supplied
   ``x-reef-routing-*``, ``x-reef-sr-decision`` or ``x-selected-model`` header,
-  and a nonempty ``x-reef-artifact-id`` or legacy ``x-reef-release-id`` return 400.
+  and a nonempty ``x-reef-artifact-id`` return 400.
 * A disabled target returns 503.
 * A managed deployment returns 408 when the request body does not finish
   uploading within 30 seconds.
@@ -496,7 +496,7 @@ Batch imports and resume
 ``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each
 record uses the same three-field envelope as ``POST /reef/records``. The batch
 must contain 1 to 1000 records and fit within the 10 MiB request-body limit.
-All records share the request's scenario, release and tag headers. Put an
+All records share the request's scenario and tag headers. Put an
 inference before reports that reference it, including within the same batch.
 
 Reef validates the entire batch and persists it in one database transaction.
@@ -831,7 +831,7 @@ The data service makes an item for each artifact that a scenario lists
 (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
 ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``.
 Its ``source_uri`` comes from the artifact backend: a backend
-that keeps releases where other deployments can read them, such as an object
+that keeps snapshots where other deployments can read them, such as an object
 store, gives the URI of the snapshot's directory. The built-in ``git_lfs``
 backend gives none, so its items have a null ``source_uri``.
 
@@ -1498,8 +1498,8 @@ A request is not a record: it waits in the deployment's training request queue
 until a training commit consumes it, and the commit keeps it in its
 ``training_request`` metrics. It takes the user's ``text``,
 originating ``session`` and ``artifact_id``. These fields identify the session
-and release the request came from. The backend operates on the current
-committed state; it does not restore the originating release. The API
+and artifact the request came from. The backend operates on the current
+committed state; it does not restore the originating artifact. The API
 requires no inference receipts or score. ``samples`` names the samples that
 the request's job trains (see `Choose the samples that train
 <#choose-the-samples-that-train>`__). ``train_from`` names the artifact that
@@ -1621,7 +1621,7 @@ rules still determine whether the result becomes served.
 requests also report ``pending_requests`` (accepted requests that
 no commit consumed yet, read from the queue).
 Committed step metrics include ``training_request`` with the request
-id, text, session, release id and ``requires``; the snapshots row of a step
+id, text, session, artifact id and ``requires``; the snapshots row of a step
 that answered a request carries, for example:
 
 .. code:: json
@@ -1651,7 +1651,7 @@ Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after capacity eviction; reusing the id with
 different content returns HTTP 409. Without it, each submission gets a fresh
 id. Empty text, text longer than 4000 characters, missing or non-string
-session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
+session/artifact fields, or a request to an ``auto`` scenario returns HTTP 400.
 Text that carries a credential shaped literal or an instruction override
 phrasing is refused with HTTP 400 and a reason that names the rule, never
 the text; nothing is stored. The scenario must exist: an unknown scenario
@@ -2178,7 +2178,7 @@ or its failure, does not change it.
   retries are part of this state.
 * ``ready``: startup succeeded and inference published the route.
 * ``failed``: startup ended with an error. ``error`` gives a safe message:
-  the message of a runtime's ``StartupFailed`` (RFC #1299), such as an engine
+  the message of a runtime's ``StartupFailedError`` (RFC #1299), such as an engine
   argument that the model refuses, else a fixed text. The service logs hold the
   diagnostic details. Control retries a failed startup by itself: 60 seconds
   after the failure, and then after a wait that doubles at each failed retry,
@@ -2659,15 +2659,12 @@ field and checks it. An artifact without a setting is served with the
 deployment's model.
 
 You can change a setting at any time. The runtime applies it when inference
-next serves the scenario. A release that runs keeps its engine.
+next serves the scenario. An artifact that runs keeps its engine.
 
 An artifact that training makes names its training starts in its own metadata,
 ``training_starts``: the artifact ID of its training start, then that start's
 own training starts. A runtime uses them, so that a training artifact is served
 as its start is, unless it has its own setting.
-
-Items that RFC #1233 made can have ``serving_profile`` in their metadata. Reef
-ignores it, and a metadata patch can remove it.
 
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
@@ -2737,6 +2734,19 @@ component makes. The training backend and its configuration decide it:
 |                             | harness artifact stores                        | layout fails     |
 |                             |                                                | validation       |
 +-----------------------------+------------------------------------------------+------------------+
+
+A weight component of the Slime or the Tinker backend also takes a base root:
+a directory that holds ``base.json`` alone. The file names a deployment's
+default start by its inputs, for example
+``{"format": "reef-base-root-1", "inputs": {"model": "/models/qwen", "lora_rank": "8"}}``,
+and the artifact stands for the base model with no adapter (`Artifact imports
+<python-api.rst#artifact-imports>`__). Reef accepts it only when the inputs
+equal the inputs of this deployment's default start, which the ``source`` of
+a scenario's ``creation`` row shows. Another base model, rank or service
+answers HTTP 400 and names each input that differs. Serving such an artifact
+serves the base model, and training from it starts at the base model. A new
+scenario of these backends starts from a base root that Reef writes
+(`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
 
 A component without a layout, such as the records of a trainer that serves
 nothing, takes no import.
@@ -2956,9 +2966,9 @@ Restore a scenario selection
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 To restore every component's active artifact together, send
-``POST /reef/scenarios/{scenario}/restore`` with ``{"step": 12}``.
-The step names an existing operation. Reef restores the active selection
-as it stood after that step. Use ``{"step": 0}`` for the starting artifacts.
+``POST /reef/scenarios/{scenario}/restore`` with ``{"commit_number": 12}``.
+The commit number names an existing operation. Reef restores the active selection
+as it stood after that commit. Use ``{"commit_number": 0}`` for the starting artifacts.
 
 The answer is ``{scenario, components}``, where ``components`` maps every
 component name to its restored ``artifact_id``. A changed selection appends
@@ -2968,8 +2978,8 @@ split unchanged.
 Restoring the current selection is a no-op. Poll `Startup status`_ before
 using the restored inference artifact.
 
-The body must contain only a non-negative integer ``step``. An invalid or
-unknown step, or a step whose selection cannot be reconstructed from the
+The body must contain only a non-negative integer ``commit_number``. An invalid or
+unknown commit number, or one whose selection cannot be reconstructed from the
 retained history, returns HTTP 400; an unknown scenario returns 404. A pending
 training commit returns 409. Artifact validation and runtime capabilities
 still apply.
@@ -3057,7 +3067,7 @@ The page shows why the step ran (the request, or a failure in the job data),
 ``method_summary``, the patch against the artifact the step ran on,
 the evaluation's numbers, ``method_notes`` and ``requires``. It also links
 the parent step and later training or sync operations. The selected artifact's
-page retains the legacy ``Active release`` label. A step that made an artifact that was never activated
+page reads ``Active selection``. A step that made an artifact that was never activated
 (``activated: false``) reads ``Waiting for activation``. The row itself is in
 a ``<script type="application/json">`` block at the end of the page. A step
 outside the catalog, or one that is not a number of at most nine digits, is
@@ -3175,10 +3185,10 @@ a training job runs or an update is being published.
      "preload_errors": {},
      "scenarios": {
        "hello-reef": {
-         "scenario_step": 3,
+         "commit_number": 3,
          "artifact_head_sync": {"state": "synchronized", "error": null},
-         "last_committed_step": {
-           "step": 3,
+         "last_training_commit": {
+           "commit_number": 3,
            "recorded_at": 1756400000.0,
            "metrics": {"selected": false, "selection": {"reason": "candidate lost"}}
          },
@@ -3230,24 +3240,25 @@ model.
 A scenario whose recipe runs one trainer per recipe component adds a
 ``components`` object. For each recipe component, it holds the component's
 own ``job_data_ready``, ``training_mode``, ``processor`` status and
-``last_committed_step``. The scenario-wide ``job_data_ready``, ``training_mode``
+``last_training_commit``. The scenario-wide ``job_data_ready``, ``training_mode``
 and ``processor`` describe the first trainer that trains, else the first
-trainer. The scenario-wide ``last_committed_step`` is the latest commit of
+trainer. The scenario-wide ``last_training_commit`` is the latest training commit of
 any recipe component.
 
 Every row of ``GET /reef/scenarios/{scenario}/artifacts`` names the
 ``component`` whose artifact it is.
 
-``last_committed_step`` reports the latest durable training step number,
-commit time, and its recipe-owned metrics; it is ``null`` before the first
+``last_training_commit`` reports the commit number of the latest durable training commit,
+its commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
 step that skipped or rejected its candidate. An activation, a train-from, an
-import or a sync advances ``scenario_step`` without replacing the latest
-training outcome.
+import or a sync advances ``commit_number`` without replacing the latest
+training outcome. ``commit_number`` is the number of the scenario's newest commit.
 
-``serving`` is runtime-wide but recipe-shaped, keyed by recipe name. A runtime
-that serves per-scenario adapters reports the engines' shared adapter
-residency there, under ``adapters``.
+``serving`` is runtime-wide and keyed by recipe name. The runtime of a
+weight-training recipe that serves per-scenario adapters reports the engines'
+shared adapter residency there, under ``adapters``. For a composite recipe,
+``adapters`` is under the name of the weight component.
 
 Status codes
 ------------
@@ -3264,9 +3275,11 @@ Status codes
 |        | Authorization header is sent; the two harness pages also    |
 |        | read ``?key=`` (see Request page)                           |
 +--------+-------------------------------------------------------------+
-| 403    | never issued by Reef: an unaccepted token is 401, and       |
+| 403    | a routed request for an unconfigured Scenario or a pin to a |
+|        | target outside it (see Routed external-model requests), or  |
+|        | an engine's own 403; an unaccepted token is 401, and        |
 |        | per-scenario authorization belongs to the gateway in front  |
-|        | of Reef.                                                    |
+|        | of Reef                                                     |
 +--------+-------------------------------------------------------------+
 | 404    | unknown scenario (on inference, on ``POST /reef/train``,    |
 |        | or with implicit creation off), a scenario that serves no   |
@@ -3280,8 +3293,15 @@ Status codes
 |        | or an engine that answered under another model name or      |
 |        | aborted the request on both attempts                        |
 +--------+-------------------------------------------------------------+
-| 502    | the engine failed or could not be reached; the body carries |
-|        | the engine's status and message                             |
+| 4xx    | an engine's own 4xx, with its message, such as for a prompt |
+|        | that fills the model's context window: an engine's 400,     |
+|        | 401, 403, 404, 408, 409, 422 or 429 passes through as sent, |
+|        | and any other engine 4xx becomes 400                        |
++--------+-------------------------------------------------------------+
+| 502    | the engine failed with a 5xx, answered with no JSON object, |
+|        | or could not be reached; the body carries the engine's      |
+|        | status and message for a 5xx, and the engine's URL and the  |
+|        | connection error for an engine that could not be reached    |
 +--------+-------------------------------------------------------------+
 | 503    | the artifact store is unreachable, no loaded scenario is    |
 |        | idle at ``reef.max_loaded_scenarios`` (with                 |
@@ -3315,8 +3335,7 @@ requests may use GET, POST or DELETE with Authorization, Content-Type and
 x-reef-scenario headers. Cookies are not enabled through CORS.
 
 CORS headers also cover errors and streamed responses, exposing
-``x-reef-agent-record-id``, ``x-reef-artifact-id`` and ``x-reef-artifact-version``
-to the browser. Clients without an Origin header keep their existing behavior.
+``x-reef-agent-record-id`` and ``x-reef-artifact-id`` to the browser. Clients without an Origin header keep their existing behavior.
 A browser can also require local network permission or HTTPS. An origin that
 Reef allows does not override browser policy.
 
@@ -3343,15 +3362,15 @@ and the stored ``payload``. A missing body returns 404: it may have expired or
 never been retained. Reading never reactivates records or changes retention.
 
 ``GET /reef/scenarios/{scenario}/operations`` returns ``{scenario,
-operations, next_after_step}``, oldest first. ``after_step`` defaults to 0;
-``limit`` defaults to 50 and accepts 1–100. ``next_after_step`` is null at
+operations, next_after_commit_number}``, oldest first. ``after_commit_number`` defaults to 0;
+``limit`` defaults to 50 and accepts 1–100. ``next_after_commit_number`` is null at
 the end. ``/commits`` remains an alias with the array named ``commits``.
 
 Repeat ``record_id`` to filter operations whose ``consumed_ids`` contain any
 requested ID (at most 100 IDs of 1–256 characters). This tests exact set
 membership, not whether a record was eligible for training.
 
-Each row exposes ``step``, ``operation``, ``operation_verified``,
+Each row exposes ``commit_number``, ``operation``, ``operation_verified``,
 ``recorded_at``, ``components``, ``component``, ``activated``,
 ``consumed_ids`` and ``metrics``. ``components`` maps component names to
 artifact IDs associated with the operation. ``component`` identifies the

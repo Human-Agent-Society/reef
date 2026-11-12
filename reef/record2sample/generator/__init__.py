@@ -25,12 +25,12 @@ proposal earns, stays with the method's task generator (``recipes/beta/spade`` i
 """
 
 from reef.record2sample.generator.client import (
-    DuplicateTask,
+    DuplicateTaskError,
     Generator,
     GeneratorError,
     HttpGenerator,
     ProposedTask,
-    TaskNameConflict,
+    TaskNameConflictError,
     WrittenTask,
 )
 from reef.record2sample.generator.designer import (
@@ -47,9 +47,8 @@ from reef.record2sample.generator.designer import (
 )
 from reef.record2sample.generator.harbor import (
     GeneratedHarborTask,
-    HarborRuns,
     OracleResult,
-    OracleUnavailable,
+    OracleUnavailableError,
     content_hash,
     harbor_task,
     oracle_check,
@@ -73,7 +72,7 @@ __all__ = [
     "DesignerError",
     "DesignerReplyError",
     "DesignerRequest",
-    "DuplicateTask",
+    "DuplicateTaskError",
     "GeneratedHarborTask",
     "Generator",
     "GeneratorError",
@@ -81,18 +80,17 @@ __all__ = [
     "GeneratorService",
     "HarborChecks",
     "HarborReply",
-    "HarborRuns",
     "HttpGenerator",
     "JobRunner",
     "OracleResult",
-    "OracleUnavailable",
+    "OracleUnavailableError",
     "ProposedTask",
     "ReadinessProbe",
     "ReefDesigner",
     "ReefGeneratorRollouts",
     "TaskChecks",
     "TaskGenerationRequest",
-    "TaskNameConflict",
+    "TaskNameConflictError",
     "WrittenTask",
     "content_hash",
     "designer_messages",

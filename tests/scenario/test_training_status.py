@@ -19,28 +19,24 @@ from types import SimpleNamespace
 from typing import Literal
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._threshold_processor import ThresholdJobData
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.samples import made_task
+from tests.support.threshold_processor import ThresholdJobData
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.job_data import JobOutcome
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
-from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
-from reef.recipe import Recipe
+from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import NoSamples
-from reef.storage.job_data import read_job_data
-from reef.storage.records import RecordStore
-from reef.storage.samples import TrainerSamples, stage_item_id
+from reef.scenario.live_objects import LiveObjects
+from reef.storage.samples import stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import TaskStorage
-from reef.train.backend import ComponentArtifacts
-from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -56,7 +52,7 @@ def scenario_double(
     job_data_ready: bool = False,
     pipeline_status: dict | None = None,
     runtime=None,
-    last_committed_step: dict | None = None,
+    last_training_commit: dict | None = None,
     job_loop=None,
     state: dict | None = None,
 ) -> SimpleNamespace:
@@ -81,7 +77,7 @@ def scenario_double(
         trainers=(SimpleNamespace(component=None, trainer=trainer),),
         trainer_for=lambda component: trainer,
         runtime=runtime,
-        commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
+        commit_status={"commit_number": 0, "last_training_commit": last_training_commit},
         artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
         served_artifact_id=lambda: "base",
         close=lambda: None,
@@ -121,15 +117,15 @@ def test_status_exposes_the_ready_state() -> None:
     assert dispatcher.build_training_status()["scenarios"]["s"]["job_data_ready"] is True
 
 
-def test_status_exposes_the_last_committed_step_outcome() -> None:
+def test_status_exposes_the_last_training_commit() -> None:
     committed = {
-        "step": 3,
+        "commit_number": 3,
         "recorded_at": 1_756_400_000.0,
         "metrics": {"skipped": "no proposal", "selection": {"reason": "candidate lost"}},
     }
-    dispatcher = bound_dispatcher(scenario_double(last_committed_step=committed))
+    dispatcher = bound_dispatcher(scenario_double(last_training_commit=committed))
 
-    assert dispatcher.build_training_status()["scenarios"]["s"]["last_committed_step"] == committed
+    assert dispatcher.build_training_status()["scenarios"]["s"]["last_training_commit"] == committed
 
 
 def test_status_names_the_served_artifact_and_the_inference_admission() -> None:
@@ -190,6 +186,56 @@ def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer()
     status = dispatcher.build_training_status()["scenarios"]["s"]
     assert status["training_jobs"] == []
     assert status["finished_jobs"] == 3
+
+
+class ResidencyRuntime(StubInferenceRuntime):
+    """A runtime that reports ``residency`` as its adapter residency, or raises ``failure`` when it is asked."""
+
+    def __init__(self, residency: Mapping[str, int] | None = None, failure: Exception | None = None) -> None:
+        super().__init__()
+        self.residency = residency
+        self.failure = failure
+
+    def adapter_residency_status(self) -> Mapping[str, int] | None:
+        if self.failure is not None:
+            raise self.failure
+        return self.residency
+
+
+def serving_status(recipe: Recipe, live: LiveObjects, tmp_path: Path) -> Mapping[str, object]:
+    """The ``serving`` block of the status that a dispatcher of ``recipe`` and ``live`` builds."""
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
+        scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
+    )
+    try:
+        return dispatcher.build_training_status()["serving"]
+    finally:
+        dispatcher.close()
+
+
+def test_status_reports_the_adapter_residency_that_the_runtime_of_the_weights_reports(tmp_path: Path) -> None:
+    residency = {"resident": 1, "capacity": 2}
+    weights = TestPolicyRecipe()
+    resident = live_objects(runtime=ResidencyRuntime(residency))
+
+    assert serving_status(weights, resident, tmp_path) == {"test_policy": {"adapters": residency}}
+    # A composite holds the block under the name of its weight component.
+    composite = CompositeRecipe(components={"records": Recipe(), "policy": weights})
+    assert serving_status(composite, resident, tmp_path) == {"composite": {"policy": {"adapters": residency}}}
+    # A runtime that reports no residency, and a recipe that trains no weights, add nothing.
+    assert serving_status(TestPolicyRecipe(), live_objects(), tmp_path) == {}
+    assert serving_status(Recipe(), LiveObjects(runtime=ResidencyRuntime(residency)), tmp_path) == {}
+    no_weights = CompositeRecipe(components={"records": Recipe(), "other": Recipe()})
+    assert serving_status(no_weights, LiveObjects(), tmp_path) == {}
+    # A runtime that cannot answer leaves the rest of the status readable.
+    failing = live_objects(runtime=ResidencyRuntime(failure=RuntimeError("engines are down")))
+    assert serving_status(TestPolicyRecipe(), failing, tmp_path) == {
+        "test_policy": {"error": "RuntimeError: engines are down"}
+    }
 
 
 def test_status_of_a_trainer_without_a_job_loop_has_no_job_fields() -> None:
@@ -312,25 +358,35 @@ class BackgroundStepRecipe(TestPolicyRecipe):
             sample2job=ThresholdJobData(context, None, 1),
         )
 
-    def build(
+
+class BackgroundStepTrainers(OneTrainerBuilder):
+    """Builds the weight trainer of ``recipe``, which trains the task of a ``BackgroundStep``."""
+
+    def __init__(self, recipe: BackgroundStepRecipe) -> None:
+        self.recipe = recipe
+
+    def build_trainer(
         self,
-        scenario: str,
-        records: RecordStore,
+        spec,
+        scenario,
+        records,
         *,
-        algorithm_state: Mapping[str, object] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
+    ):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: self.background_pipeline(context),
-            job_loop=JobLoop(self.training_component, scenario=scenario),
+            pipeline_factory=self.recipe.background_pipeline,
+            # The jobs' data goes to the deployment's data store, whose task file store keeps the step's task.
+            job_loop=JobLoop(spec.job_component, scenario=scenario, data_store=spec.data_store),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            samples=samples,
             root=root,
         )
 
@@ -340,13 +396,15 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
     initial = tmp_path / "initial"
     initial.mkdir()
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    recipe = BackgroundStepRecipe(**runtime_bindings(component))
+    recipe = BackgroundStepRecipe()
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
+        trainer_builder=BackgroundStepTrainers(recipe),
     )
     return dispatcher, recipe, component
 
@@ -358,7 +416,7 @@ def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
     while not component.submitted and time.monotonic() < deadline:
         time.sleep(0.01)
     [job] = component.submitted
-    assert [sample.task_path.name for sample in read_job_data(job.data_dir).samples] == [
+    assert [sample.task_path.name for sample in job.read_data().samples] == [
         stage_item_id("generated", "generated-task")
     ]
 

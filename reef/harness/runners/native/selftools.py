@@ -20,7 +20,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import Format
 from reef.harness.runners.native import ToolModule, ToolRunner
 from reef.harness.runners.native.artifact_client import ArtifactClient
-from reef.harness.runners.native.enforce import ToolFailed
+from reef.harness.runners.native.enforce import ToolFailedError
 from reef.harness.runners.native.graph import SEED_GRAPH
 from reef.harness.tree import HarnessTree, TreePatch
 
@@ -85,13 +85,13 @@ class HostTool(ToolModule):
 
 
 def patch_argument(value: Any) -> TreePatch:
-    """The ``patch`` argument as a non-empty ``TreePatch``; ToolFailed naming the problem otherwise."""
+    """The ``patch`` argument as a non-empty ``TreePatch``; ToolFailedError naming the problem otherwise."""
     try:
         patch = TreePatch.from_json(value)
     except (TypeError, ValueError) as exc:
-        raise ToolFailed(f"patch: {exc}") from exc
+        raise ToolFailedError(f"patch: {exc}") from exc
     if not patch.changes:
-        raise ToolFailed("patch must change at least one path")
+        raise ToolFailedError("patch must change at least one path")
     return patch
 
 
@@ -107,7 +107,7 @@ class SelfTools(ToolRunner):
             return self.inspect(args, workdir)
         if self._action == "try":
             return self.try_(args, workdir)
-        raise ToolFailed(f"unknown self tool action {self._action!r}")
+        raise ToolFailedError(f"unknown self tool action {self._action!r}")
 
     def inspect(self, args: dict[str, Any], workdir: str) -> Any:
         what = str(args.get("what", ""))
@@ -125,7 +125,7 @@ class SelfTools(ToolRunner):
             return self.results()
         if what == "status":
             return self._state.status()
-        raise ToolFailed(f"what must be one of tree, graph, results, status; got {what!r}")
+        raise ToolFailedError(f"what must be one of tree, graph, results, status; got {what!r}")
 
     def results(self) -> dict[str, Any]:
         rows = list(reversed(self._state.client.artifacts()))[:RESULT_ROWS]
@@ -155,7 +155,7 @@ class SelfTools(ToolRunner):
         for path in patch.changes:
             location = get_adapter("native").layout.locate(path)
             if location is not None and location.part.review:
-                raise ToolFailed(f"{path} is reviewed code: a person activates it")
+                raise ToolFailedError(f"{path} is reviewed code: a person activates it")
         return self._state.try_patch(patch, secrets.token_hex(4))
 
 

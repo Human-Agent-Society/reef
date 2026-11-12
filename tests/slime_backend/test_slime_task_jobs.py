@@ -22,7 +22,7 @@ from reef.train.component import TrainingJob
 from reef.train.slime_backend import rollout_group as rollout_group_module
 from reef.train.slime_backend.dataset import DATASET_FILE
 from reef.train.slime_backend.harbor_rollouts import TASK_ROLLOUTS_FILE, TaskJobSource
-from reef.train.slime_backend.objectives import SlimeObjective, register_slime_objective, unregister_slime_objective
+from reef.train.slime_backend.objectives import SlimeObjective, register_objective, unregister_objective
 from reef.train.slime_backend.rollout_group import SlimeRolloutGroup
 
 OBJECTIVE = "slime_dataset"
@@ -276,7 +276,7 @@ def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path) -> No
             def prepare(self, data, state):
                 raise AssertionError("a refused job prepares nothing")
 
-        register_slime_objective(Elsewhere())
+        register_objective(Elsewhere.name, Elsewhere())
         try:
             with pytest.raises(ValueError, match="no loss family 'only-on-another-backend'"):
                 stack.component.submit(
@@ -290,7 +290,7 @@ def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path) -> No
                     )
                 )
         finally:
-            unregister_slime_objective("elsewhere")
+            unregister_objective("elsewhere")
     finally:
         stack.component.close()
 

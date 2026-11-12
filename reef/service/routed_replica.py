@@ -19,14 +19,16 @@ from aiohttp.typedefs import Handler
 from reef.core.records_types import AgentRecord
 from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
+from reef.recipe.deployment import harness_adapter
+from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError
-from reef.service.deploy.routing.renderer import MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.inference_service import ServedModelsCache
 from reef.service.lifecycle import PendingWrites
 from reef.service.routed_inference import InferenceRetryPolicy, RoutedInference, RoutedRecords, RoutedScenario
 from reef.service.routes.routed_chat import serve_routed_chat
-from reef.service.routing import RoutingAdapter, RoutingRequestError, is_router_config_hash
+from reef.service.routing import RoutingAdapter, RoutingRequestError, RoutingSnapshot, is_router_config_hash
 from reef.service.routing_preview import PreviewSettings, RoutingPreviewClient
 from reef.service.wire import SCENARIO_HEADER
 from reef.storage.scenario import ScenarioStorage
@@ -124,22 +126,26 @@ class ReplicaRouter:
 
 def add_replica_routing(
     app: web.Application,
-    settings: ServiceConfig,
+    settings: ServiceSettings,
     recipe: Recipe,
+    live: LiveObjects,
     records: ReplicaRecords,
     environ: Mapping[str, str] | None = None,
 ) -> None:
     """Serve the Scenarios of ``settings.routing_manifest`` through their router on ``app``, and add ``/readyz``.
 
+    ``recipe`` is the deployment's recipe and ``live`` the objects of this process.
+
     Raise ``ValueError`` when the deployment cannot route: no service token, a recipe other than the base record-only
-    Recipe, an invalid manifest, or a missing router token or provider credential.
+    Recipe, a process with a training component, an invalid manifest or one that does not name its router image (Reef builds an image only for a managed
+    deployment), or a missing router token or provider credential.
     """
     if settings.routing_manifest is None:
         raise ValueError("replica routing requires reef.routing_manifest")
     environment = os.environ if environ is None else environ
     if not settings.tokens:
         raise ValueError("routing requires a service token")
-    if type(recipe) is not Recipe or recipe.training_component is not None:
+    if type(recipe) is not Recipe or live.training_component is not None:
         raise ValueError("routing requires the base record-only Recipe")
     for name in (MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV):
         if not environment.get(name):
@@ -147,8 +153,11 @@ def add_replica_routing(
     policy = settings.routing_deployment
     if settings.port == policy.sr_management_port:
         raise ValueError("reef.port must differ from routing sr_management_port")
-    routing = RoutingAdapter.from_manifest(
-        settings.routing_manifest, router_config_hash=None, environ=environment, timeout_s=settings.inference_timeout_s
+    snapshot = RoutingSnapshot.load(settings.routing_manifest)
+    if snapshot.semantic_router_image is None:
+        raise ValueError(EXTERNAL_IMAGE_MESSAGE)
+    routing = RoutingAdapter.from_snapshot(
+        snapshot, router_config_hash=None, credential_environment=environment, timeout_s=settings.inference_timeout_s
     )
     preview = RoutingPreviewClient(
         PreviewSettings(
@@ -169,7 +178,7 @@ def add_replica_routing(
         preview,
         RouterManagementClient(policy.sr_management_port, environment[MANAGEMENT_TOKEN_ENV]),
     )
-    for_codex = recipe.harness_adapter == "codex"
+    for_codex = harness_adapter(recipe) == "codex"
 
     @web.middleware
     async def route_manifest_scenarios(request: web.Request, handler: Handler) -> web.StreamResponse:

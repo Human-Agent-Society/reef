@@ -11,7 +11,6 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
-from tests.support.runtime_stubs import runtime_bindings
 
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TokenizerChatTemplate, render_trajectory, rendered_job_data
@@ -20,17 +19,18 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.recipe.loading import build_recipe, load_recipe
+from reef.recipe.registry import recipe_class_for
 from reef.recipe.sft import SFTJobData, SFTRecipe, SFTSamples, SFTSettings
 from reef.sample2job import DistillJobData
 from reef.storage.data import NewItem
 from reef.train import PipelineContext
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.objectives import SftObjective, resolve_slime_objective
+from reef.train.slime_backend.objectives import SftObjective, resolve_objective
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.slime_backend.sft import SftAlgorithm
 
 GENERATION_PROMPT = 900
@@ -336,16 +336,15 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
                 "sample2job": {"config": {"buffer_size": 256}},
             }
         },
-        **runtime_bindings(),
     )
 
     assert isinstance(recipe, SFTRecipe)
     assert recipe.name == "sft"
     assert recipe.report_type is TeacherContextReport
     assert SFTRecipe.default_parameters() == {"trajectory": {"objective": "sft"}}
-    assert resolve_slime_objective("sft").loss_family == "sft"
+    assert resolve_objective("sft").loss_family == "sft"
     assert SftObjective.rollout_unit == "sample"
-    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
+    pipeline = recipe.stages().build(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SFTSamples)
     assert (pipeline.record2sample.target, pipeline.record2sample.max_tokens) == ("response", 8)
     assert isinstance(pipeline.sample2job, DistillJobData)
@@ -355,15 +354,15 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
 @pytest.mark.unit
 def test_sft_recipe_builds_without_stage_config_and_rejects_removed_keys_and_objective_options() -> None:
     def sft_recipe(config: Mapping[str, Any]) -> SFTRecipe:
-        recipe = SFTRecipe.from_environment({}, config=config, **runtime_bindings())
+        recipe = load_recipe(SFTRecipe, config, {})
         assert isinstance(recipe, SFTRecipe)
         return recipe
 
     context = PipelineContext("science", TeacherContextReport)
-    assert sft_recipe({}).build_pipeline(context).record2sample.target == "demonstration"
+    assert sft_recipe({}).stages().build(context).record2sample.target == "demonstration"
     removed = {"pipeline": {"record2sample": {"config": {"tokenizer_path": "/models/served"}}}}
-    with pytest.raises(RecipeConfigError, match="unknown config fields: tokenizer_path"):
-        sft_recipe(removed).build_pipeline(context)
+    with pytest.raises(PluginConfigError, match="unknown config fields: tokenizer_path"):
+        sft_recipe(removed).stages().build(context)
     with pytest.raises(RecipeConfigError, match=r"training\.options"):
         sft_recipe({"optimization": {"label_smoothing": 0.1}})
 
@@ -379,7 +378,7 @@ def test_objective_trains_every_batch_without_advantages_and_allows_several_epoc
     assert signal.metrics == {"steps": 3, "samples": 1}
     SftObjective().validate_scheduling(StepScheduling(epochs=3))
     # Another recipe selects the objective for a job by its name.
-    assert isinstance(resolve_slime_objective("sft"), SftObjective)
+    assert isinstance(resolve_objective("sft"), SftObjective)
 
 
 @pytest.mark.unit
@@ -545,6 +544,6 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
 
 
 def test_sft_configures_trajectory_jobs_and_trains_imported_tasks_only_by_request() -> None:
-    recipe = SFTRecipe(**runtime_bindings(), job_parameters={"save_interval": 50})
+    recipe = SFTRecipe(job_parameters={"save_interval": 50})
     assert recipe.parameters_by_kind() == {"trajectory": {"objective": "sft", "save_interval": 50}}
     assert SFTJobData.accepts_trajectories and SFTJobData.accepts_imported_tasks

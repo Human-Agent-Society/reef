@@ -19,11 +19,19 @@ from types import ModuleType
 
 import pytest
 import yaml
-from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
+from tests.support.harness_jobs import (
+    COMPONENT,
+    TreeArtifacts,
+    configured_component,
+    configured_live,
+    harness_backend,
+    harness_component,
+)
 from tests.support.harness_service import backend_step, seed_root
-from tests.support.harness_steps import COMPONENT, TreeArtifacts, harness_backend
 from tests.support.records import memory_records
+from tests.support.trainers import recipe_trainer
+from tests.support.trajectories import recorded_trajectory
 
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.activation import AlwaysActivate
@@ -33,13 +41,13 @@ from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, Mo
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, validate_patch
-from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.recipe.registry import build_named_recipe
-from reef.service.assembly import _serving_recipe, _upstream_runtime
+from reef.recipe.loading import load_recipe
+from reef.scenario.live_objects import LiveObjects, harness_models
+from reef.service.assembly import _load_deployment, _upstream_runtime, load_named_recipe
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteScenarioDatabase
@@ -202,11 +210,7 @@ def test_materializer_preserves_executor_profiles_and_recipe_selection(monkeypat
     assert json.loads((tmp_path / "work/tasks.json").read_text()) == tasks
     # Boot the real recipe; a retained selector without its profile would fail here.
     monkeypatch.chdir(serve_file_base(filename))
-    recipe = HarnessEvolutionRecipe.from_environment(
-        {},
-        config=recipe_config_from_file_layout(settings),
-        runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"),
-    )
+    recipe = load_recipe(HarnessEvolutionRecipe, recipe_config_from_file_layout(settings), {})
     assert recipe.worker_executor.backend == "mp"
     assert recipe.worker_executor.workers == 2
     assert recipe.worker_executor.resources.cpus_per_worker == 2
@@ -239,8 +243,11 @@ def write_recipe_file(path: Path, config: dict, evolution: dict) -> None:
     )
 
 
-def boot_serve_file(tmp_path: Path, monkeypatch, filename: str, **evolution) -> HarnessEvolutionRecipe:
-    """The recipe a serve file boots, through reef's config loader and the service's upstream runtime.
+def boot_serve_file(
+    tmp_path: Path, monkeypatch, filename: str, **evolution
+) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
+    """The recipe a serve file boots, through reef's config loader, and its live objects: the service's upstream
+    runtime and the harness training component that the service builds for the recipe.
 
     Its state goes under ``tmp_path``; ``evolution`` sets further ``evolution`` keys.
     """
@@ -251,12 +258,11 @@ def boot_serve_file(tmp_path: Path, monkeypatch, filename: str, **evolution) -> 
     write_recipe_file(materialized, config, {**config["evolution"], **state, **evolution})
     monkeypatch.chdir(serve_file_base(filename))
     service = service_config_from_mapping(config)
-    return HarnessEvolutionRecipe.from_environment(
-        {}, config=load_recipe_config(materialized), runtime=_upstream_runtime(service)
-    )
+    recipe = load_recipe(HarnessEvolutionRecipe, load_recipe_config(materialized), {})
+    return recipe, configured_live(recipe, LiveObjects(runtime=_upstream_runtime(service)))
 
 
-def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monkeypatch, evolution) -> None:
+def test_the_serve_file_boots_the_recipe_through_the_loader(tmp_path, monkeypatch, evolution) -> None:
     """The run.sh contract, hermetic: interpolate serve.yaml through reef's config loader, materialize the recipe
     sections as a named config, and boot the recipe (seed validation included) with a fake binary."""
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
@@ -269,25 +275,28 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
         "qwen3-8b",
     )
     # serve.yaml names no binary; this run has no pi on PATH.
-    built = boot_serve_file(tmp_path, monkeypatch, "serve.yaml", binary=str(tmp_path / "fake-pi"))
+    built, live = boot_serve_file(tmp_path, monkeypatch, "serve.yaml", binary=str(tmp_path / "fake-pi"))
     assert built.evolution.adapter == "pi" and built.evolution.binary == str(tmp_path / "fake-pi")
     tasks = built.configured_tasks()
     assert len(tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in tasks)
     assert (built.training_mode, built.evaluation.policy) == ("auto", "compare")
-    assert type(built.method).__name__ == "RulesMethod" and type(built.scorer).__name__ == "AnswerScorer"
+    component = harness_component(live)
+    assert type(component.method).__name__ == "RulesMethod" and type(component.scorer).__name__ == "AnswerScorer"
     # The seed is the starter rules and carries no provider; the binding comes from the runtime.
     assert built.seed == PI_SEED and set(PI_SEED.files) == {"rules.md"}
     assert not any("upstream" in text or "8000" in text for text in PI_SEED.files.values())
-    binding = built.model_binding()
+    binding = harness_models(built, live).served()
     assert (binding.base_url, binding.model, binding.api_key, binding.api) == (
         "http://127.0.0.1:8000",
         "qwen3-8b",
         "dummy",
         "openai",
     )
-    assert list(built.model_bindings()) == ["served"]
-    trainer = built.build("demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built))
+    assert list(harness_models(built, live).bindings()) == ["served"]
+    trainer = recipe_trainer(
+        built, live, "demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built)
+    )
     assert isinstance(trainer, Trainer)
     # serve.yaml sets no job_samples, so each report is one step.
     assert trainer.job_samples == 1
@@ -297,14 +306,16 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
 def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, monkeypatch) -> None:
     """The run.sh native contract, hermetic: the native serve file materializes like serve.yaml and boots with
     the loop's own tools, hook and graph as the seed directory holds them."""
-    built = boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml")
+    built, live = boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml")
     assert built.evolution.adapter == "native" and built.evolution.binary is None
-    assert type(built.method).__name__ == "NativeMethod" and type(built.scorer).__name__ == "NativeAnswerScorer"
+    component = harness_component(live)
+    assert type(component.method).__name__ == "NativeMethod"
+    assert type(component.scorer).__name__ == "NativeAnswerScorer"
     # The same three tasks as the pi variant, so the two runs are comparable.
     pi_tasks = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["evaluation"]["tasks"]
     assert built.configured_tasks() == tuple(pi_tasks)
     assert built.training_mode == "auto"
-    with closing(built.build_pipeline(PipelineContext("demo"))) as pipeline:
+    with closing(built.stages().build(PipelineContext("demo"))) as pipeline:
         assert pipeline.sample2job.job_samples == 1, "the file sets no job_samples, so each report is one step"
     assert built.seed == NATIVE_SEED
     assert {
@@ -321,7 +332,7 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
     assert not any("upstream" in text for text in NATIVE_SEED.files.values())
     empty = tmp_path / "empty-seed"
     empty.mkdir()
-    emptied = boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml", seed=str(empty))
+    emptied, _ = boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml", seed=str(empty))
     assert emptied.default_start().files == {}
 
 
@@ -348,22 +359,30 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert config["run_dir"].startswith("tutorials/evolve-your-harness/")
     service = service_config_from_mapping(config)
     monkeypatch.delenv("REEF_UPSTREAM_MODEL")  # Recipe construction uses the resolved runtime, not the environment.
-    built = build_named_recipe(
+    built, runtime = load_named_recipe(
         "deployment",
         {**os.environ, "REEF_RECIPE_CONFIG_DIR": str(EXAMPLE_DIR / "configs")},
         default_runtime=_upstream_runtime(service),
     )
+    live = LiveObjects(runtime=runtime)
     assert isinstance(built, HarnessEvolutionRecipe) and built.evolution.adapter == "pi"
     # The preset file's top-level activation section reaches the recipe.
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
     assert service.upstream_model == model_id
-    assert built.model_binding().model == model_id
-    assert built.training_mode == "auto" and type(built.method).__name__ == "RulesMethod"
+    assert harness_models(built, live).served().model == model_id
+    assert built.training_mode == "auto"
+    assert type(configured_component(built, live, os.environ).method).__name__ == "RulesMethod"
     records = memory_records("demo")
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
-    trainer = replace(built, evolution=local).build(
-        "demo", records, artifacts=artifacts_for(built), root=seed_root(built)
+    local_recipe = replace(built, evolution=local)
+    trainer = recipe_trainer(
+        local_recipe,
+        configured_live(local_recipe, live, os.environ),
+        "demo",
+        records,
+        artifacts=artifacts_for(built),
+        root=seed_root(built),
     )
     assert trainer.pipeline.training_mode == "auto"
     # Each report is one job's data: the deployment sets no job_samples, and the default is 1.
@@ -387,7 +406,7 @@ def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> Non
         assert "activation" not in load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")
     # The recipe that reef serve builds from the deployment, whose top-level activation section it reads.
     service = service_config_from_mapping(config)
-    built = _serving_recipe(service.recipe, service, dict(os.environ))
+    built, _ = _load_deployment(service.recipe, service, dict(os.environ))
     assert isinstance(built, HarnessEvolutionRecipe)
     rule = built.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
@@ -580,7 +599,7 @@ def session_events(session: str, release: str, stages, tool: str | None = None) 
 
 
 def write_commits(directory: Path, *commits: dict) -> None:
-    """Replace the commits of one scenario database with stored records at steps 1, 2, ...
+    """Replace the commits of one scenario database with stored records at commit numbers 1, 2, ...
 
     Each of ``commits`` gives the fields that differ from a complete record.
     """
@@ -589,7 +608,7 @@ def write_commits(directory: Path, *commits: dict) -> None:
         training = commit.get("operation", "training") == "training"
         base = CommitRecord(
             scenario="x",
-            step=commit["step"],
+            commit_number=commit["commit_number"],
             snapshot=SnapshotRef("storage:base", None),
             checkpoint=training,
             algorithm_state={} if training else None,
@@ -604,8 +623,8 @@ def write_commits(directory: Path, *commits: dict) -> None:
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("DELETE FROM scenario_commit")
         connection.executemany(
-            "INSERT INTO scenario_commit (step, commit_json) VALUES (?, ?)",
-            [(step, json.dumps(commit)) for step, commit in enumerate(stored, start=1)],
+            "INSERT INTO scenario_commit (commit_number, commit_json) VALUES (?, ?)",
+            [(commit_number, json.dumps(commit)) for commit_number, commit in enumerate(stored, start=1)],
         )
 
 
@@ -617,7 +636,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     (native / "sessions" / "s2").mkdir(parents=True)
     (work / "agent-record").mkdir()
     commit = {
-        "step": 1,
+        "commit_number": 1,
         "recorded_at": 1050.0,
         "operation": "training",
         "snapshot": {"revision": "r2", "parent_revision": "r1"},
@@ -645,7 +664,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     (native / "sessions" / "serve.jsonl").write_text("".join(json.dumps(event) + "\n" for event in mounts))
 
     data = replay.collect(work)
-    assert [(release["step"], release["kind"], release["artifact_id"]) for release in data["releases"]] == [
+    assert [(release["commit_number"], release["kind"], release["artifact_id"]) for release in data["releases"]] == [
         (0, "seed", "seed"),
         (1, "published", "r2"),
     ]
@@ -693,14 +712,16 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     activation = {
         "recorded_at": 1060.0,
         "operation": "activate",
-        "step": 2,
+        "commit_number": 2,
         "snapshot": {"revision": "r1", "parent_revision": None},
         "metrics": None,
         "algorithm_state": None,
     }
     write_commits(work / "agent-record", commit, activation)
     with_activation = replay.collect(work)
-    assert [(release["kind"], release["step"], release["artifact_id"]) for release in with_activation["releases"]] == [
+    assert [
+        (release["kind"], release["commit_number"], release["artifact_id"]) for release in with_activation["releases"]
+    ] == [
         ("seed", 0, "seed"),
         ("published", 1, "r2"),
         ("activate", 2, "r1"),
@@ -728,7 +749,7 @@ def test_replay_uses_component_ids_from_current_commits_and_native_events(
     session = sessions / "current"
     session.mkdir(parents=True)
     commit = {
-        "step": 1,
+        "commit_number": 1,
         "recorded_at": 1050.0,
         "operation": "training",
         "snapshot": {"revision": "storage:new", "parent_revision": "storage:seed"},
@@ -736,7 +757,7 @@ def test_replay_uses_component_ids_from_current_commits_and_native_events(
         "metrics": {"selected": True, "patch": {"rules.md": "updated\n"}},
     }
     activation = {
-        "step": 2,
+        "commit_number": 2,
         "recorded_at": 1060.0,
         "operation": "activate",
         # An activation that carries the manifest names the component it changed.

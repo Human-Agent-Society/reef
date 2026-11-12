@@ -22,9 +22,9 @@ from typing import Any, ClassVar, Self
 from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramLaunchError,
-    ProgramTimeout,
+    ProgramTimeoutError,
     SandboxProgram,
-    SandboxUnavailable,
+    SandboxUnavailableError,
 )
 from reef.execution.sandbox.remote import (
     SANDBOX_MARGIN_S,
@@ -92,11 +92,11 @@ class E2BExecutor(RemoteExecutor):
         check_options("E2B", section, cls.provider_options)
         key_name = section.get("e2b_api_key_env", "E2B_API_KEY")
         if not isinstance(key_name, str) or not key_name.isidentifier():
-            raise SandboxUnavailable("e2b_api_key_env must name an environment variable")
+            raise SandboxUnavailableError("e2b_api_key_env must name an environment variable")
         api_key = section.get("e2b_api_key") or environ.get(key_name, "")
         template = section.get("e2b_template", "")
         if not isinstance(api_key, str) or not isinstance(template, str):
-            raise SandboxUnavailable("e2b_api_key and e2b_template must be strings")
+            raise SandboxUnavailableError("e2b_api_key and e2b_template must be strings")
         return cls(
             api_key=api_key.strip(),
             template=template.strip(),
@@ -132,13 +132,15 @@ class E2BExecutor(RemoteExecutor):
 
     def preflight(self) -> None:
         if not self.api_key:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "an E2B sandbox needs an API key: set E2B_API_KEY or the selected sandbox's e2b_api_key"
             )
         try:
             import e2b
         except ImportError as exc:
-            raise SandboxUnavailable("an E2B sandbox needs the e2b package: pip install 'reef-infra[e2b]'") from exc
+            raise SandboxUnavailableError(
+                "an E2B sandbox needs the e2b package: pip install 'reef-infra[e2b]'"
+            ) from exc
         if not self.template or self.validated:
             return
         # Probing must not reap a running deployment's sandboxes or require its HTTP server to be listening yet.
@@ -147,13 +149,13 @@ class E2BExecutor(RemoteExecutor):
             session = replace(self, owner="", forward_ports=(), timeout_s=60).open()
             session.sandbox.commands.run(probe_command(self.binary), timeout=30)
         except (e2b.SandboxException, ProgramLaunchError) as exc:
-            raise SandboxUnavailable(f"E2B startup check failed: {exc}") from exc
+            raise SandboxUnavailableError(f"E2B startup check failed: {exc}") from exc
         finally:
             if session is not None:
                 try:
                     session.close()
                 except ProgramLaunchError as exc:
-                    raise SandboxUnavailable("E2B startup probe could not be cleaned up") from exc
+                    raise SandboxUnavailableError("E2B startup probe could not be cleaned up") from exc
         object.__setattr__(self, "validated", True)
 
     def open(self) -> E2BSession:
@@ -296,7 +298,7 @@ class E2BSession(RemoteSession):
             finished = True
             return ProcessOutcome(exc.exit_code, exc.stdout, exc.stderr)
         except TimeoutException as exc:
-            raise ProgramTimeout(f"the process ran past its {timeout:g} s limit in the E2B sandbox") from exc
+            raise ProgramTimeoutError(f"the process ran past its {timeout:g} s limit in the E2B sandbox") from exc
         except Exception as exc:
             raise ProgramLaunchError(f"the E2B sandbox could not run the process: {exc}") from exc
         finally:

@@ -15,6 +15,8 @@ from typing import Any
 
 import requests
 
+from reef.core.errors import InternalError
+
 logger = logging.getLogger(__name__)
 
 #: Startup attempts for one engine while other processes keep holding its probed ports.
@@ -27,7 +29,7 @@ PORT_RELEASE_SECONDS = 30.0
 PORT_RECHECK_SECONDS = 1.0
 
 
-class PortConflictError(RuntimeError):
+class PortConflictError(InternalError, RuntimeError):
     """Another process listens on the port of an engine's server."""
 
 
@@ -157,13 +159,11 @@ def retire_engines(engines: Sequence[Any], *, timeout: float = 30) -> None:
 class EngineGroup(ABC):
     """Engine actors that serve on port ranges probed on their own hosts.
 
-    Each slot holds one actor. An engine spans ``nodes_per_engine`` consecutive
-    slots, and its first slot is its root. Only the root waits for readiness.
+    Each slot holds the one actor of one engine.
     """
 
     #: One actor per slot; ``None`` marks a slot that has no actor yet.
     all_engines: list[Any]
-    nodes_per_engine: int
     #: The host and the port range that each slot's latest ``init`` received; the server port comes first.
     port_ranges: dict[int, tuple[str, range]]
 
@@ -187,13 +187,13 @@ class EngineStartup:
     """Wait for engines to start, and relaunch an engine whose ports another process holds.
 
     A probe reserves nothing, so another process on the host can bind a probed
-    port before the engine does. When a root's ``init`` fails, the startup stops
-    every rank of that engine and checks each rank's port range on its host. A
-    port counts as held only if it stays held for ``port_release_seconds``,
-    because the engine's own processes can still be exiting. If another process
-    holds a port, or the root's ``init`` raised :class:`PortConflictError`, all
-    ranks start again on new ranges, at most ``PORT_CONFLICT_ATTEMPTS`` times per
-    engine. The startup raises any other failure unchanged.
+    port before the engine does. When an engine's ``init`` fails, the startup
+    stops that engine and checks its port range on its host. A port counts as
+    held only if it stays held for ``port_release_seconds``, because the
+    engine's own processes can still be exiting. If another process holds a
+    port, or the ``init`` raised :class:`PortConflictError`, the engine starts
+    again on a new range, at most ``PORT_CONFLICT_ATTEMPTS`` times per engine.
+    The startup raises any other failure unchanged.
     """
 
     def __init__(
@@ -222,17 +222,13 @@ class EngineStartup:
             try:
                 ray.get(ready[0])
             except ray.exceptions.RayTaskError as error:
-                # Other ranks return once their process starts, so their failures are not port conflicts.
-                if slot % group.nodes_per_engine:
-                    raise
-                ranks = list(range(slot, slot + group.nodes_per_engine))
                 # Stop the engine first: its own sockets must not count as held.
-                ray.get([group.all_engines[rank].shutdown.remote() for rank in ranks])
+                ray.get(group.all_engines[slot].shutdown.remote())
+                host, ports = group.port_ranges[slot]
                 if isinstance(error, PortConflictError):
-                    host, ports = group.port_ranges[slot]
                     held_addresses = [f"{host}:{ports.start}"]
                 else:
-                    held_addresses = self.held_addresses(group, ranks)
+                    held_addresses = self.held_addresses(group, slot)
                 if not held_addresses:
                     raise
                 attempt = attempts.get((group, slot), 1)
@@ -248,38 +244,29 @@ class EngineStartup:
                     attempt + 1,
                     PORT_CONFLICT_ATTEMPTS,
                 )
-                self.pending = {
-                    ref: owner for ref, owner in self.pending.items() if owner[0] is not group or owner[1] not in ranks
-                }
-                for rank in ranks:
-                    host, ports = group.port_ranges[rank]
-                    # Skip whole ranges at random so two stacks that collided pick different ranges.
-                    skipped = len(ports) * self.random_source.randrange(1, PORT_CONFLICT_SPREAD)
-                    self.cursors[host] = max(self.cursors.get(host, 0), ports.stop) + skipped
-                for rank, ref in group.init_engines(ranks, self.cursors).items():
-                    self.pending[ref] = (group, rank)
+                # Skip whole ranges at random so two stacks that collided pick different ranges.
+                skipped = len(ports) * self.random_source.randrange(1, PORT_CONFLICT_SPREAD)
+                self.cursors[host] = max(self.cursors.get(host, 0), ports.stop) + skipped
+                self.pending[group.init_engines([slot], self.cursors)[slot]] = (group, slot)
 
-    def held_addresses(self, group: EngineGroup, ranks: list[int]) -> list[str]:
-        """The ``host:port`` pairs of ``ranks`` that stay held for ``port_release_seconds``.
+    def held_addresses(self, group: EngineGroup, slot: int) -> list[str]:
+        """The ``host:port`` pairs of the engine in ``slot`` that stay held for ``port_release_seconds``.
 
         A stopped engine's own processes can hold a socket until they finish
         exiting. Another process that uses the port holds it for its whole life.
         """
         import ray
 
-        held_ports = {rank: list(group.port_ranges[rank][1]) for rank in ranks}
+        host, ports = group.port_ranges[slot]
+        held_ports = list(ports)
         deadline = time.monotonic() + self.port_release_seconds
         while True:
             # Check again only the ports that are still held, so a released port never counts.
-            checks = [
-                group.all_engines[rank].ports_in_use.remote(group.port_ranges[rank][0], held_ports[rank])
-                for rank in ranks
-            ]
-            held_ports = dict(zip(ranks, ray.get(checks), strict=True))
-            if not any(held_ports.values()) or time.monotonic() >= deadline:
+            held_ports = ray.get(group.all_engines[slot].ports_in_use.remote(host, held_ports))
+            if not held_ports or time.monotonic() >= deadline:
                 break
             time.sleep(PORT_RECHECK_SECONDS)
-        return [f"{group.port_ranges[rank][0]}:{port}" for rank in ranks for port in held_ports[rank]]
+        return [f"{host}:{port}" for port in held_ports]
 
 
 class RayHealthProbe:

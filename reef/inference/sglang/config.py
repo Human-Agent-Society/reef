@@ -6,53 +6,34 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from reef.execution.executor import Executor
-from reef.inference.engine_control import EngineConfig
+from reef.inference.engine_control import EngineSettings
 from reef.inference.sglang.lora_schema import adapter_scoped_prefix_cache_supported
 
 
 @dataclass(frozen=True)
-class SGLangGroupConfig:
-    worker_type: str
-    num_gpus: int
-    gpus_per_engine: int
-    options: dict[str, Any] = field(default_factory=dict)
+class SGLangSettings(EngineSettings):
+    """One model served by identical single-node SGLang engines on the reserved inference GPUs.
 
-    def __post_init__(self) -> None:
-        if self.worker_type not in {"regular", "prefill", "decode", "encoder", "placeholder"}:
-            raise ValueError(f"unknown SGLang worker type: {self.worker_type}")
-        if (
-            self.num_gpus <= 0
-            or self.gpus_per_engine <= 0
-            or (self.worker_type != "placeholder" and self.num_gpus % self.gpus_per_engine)
-        ):
-            raise ValueError("SGLang groups require a positive, whole number of engines")
+    Values: the three GPU counts are positive, ``num_gpus`` is a multiple of
+    ``gpus_per_engine``, and ``gpus_per_engine`` is at most ``gpus_per_node``.
+    ``options`` holds SGLang ``ServerArgs`` fields by their underscore names;
+    construction sets ``incremental_streaming_output`` to true and gives
+    ``disable_radix_cache`` a value. ``router_port`` is the port the router
+    binds, or ``None`` for a probed one. ``pause_mode`` is ``in_place`` or
+    ``retract``. Both timeouts are positive seconds.
+    Purpose: the serving assembly writes the value (``serving_engine_config``);
+    the engine group, the engines and the worker read it.
+    """
 
-
-@dataclass(frozen=True)
-class SGLangModelConfig:
-    name: str
-    groups: tuple[SGLangGroupConfig, ...]
-    update_weights: bool = True
-
-
-@dataclass(frozen=True)
-class SGLangConfig(EngineConfig):
     model_path: str
     num_gpus: int
     gpus_per_engine: int
     gpus_per_node: int
     options: dict[str, Any] = field(default_factory=dict)
-    models: tuple[SGLangModelConfig, ...] = ()
-    external_engines: tuple[dict[str, Any], ...] = ()
-    router_host: str | None = None
     router_port: int | None = None
     router_options: dict[str, Any] = field(default_factory=dict)
     env_vars: dict[str, str] = field(default_factory=dict)
     pause_mode: str = "in_place"
-    health_enabled: bool = False
-    health_interval: float = 30
-    health_timeout: float = 30
-    health_first_wait: float = 60
     request_timeout: float = 600
     startup_timeout: float = 14400
     executor: str | type[Executor] = "reef.inference.sglang.executor:SGLangExecutor"
@@ -71,23 +52,12 @@ class SGLangConfig(EngineConfig):
         object.__setattr__(self, "options", options)
         if min(self.num_gpus, self.gpus_per_engine, self.gpus_per_node) <= 0:
             raise ValueError("SGLang GPU capacities must be positive")
+        if self.num_gpus % self.gpus_per_engine:
+            raise ValueError("SGLang inference requires a whole number of engines")
+        if self.gpus_per_engine > self.gpus_per_node:
+            raise ValueError("an SGLang engine must fit on one node")
         if self.request_timeout <= 0 or self.startup_timeout <= 0:
             raise ValueError("SGLang timeouts must be positive")
-        if self.external_engines:
-            return
-        groups = [group for model in self.resolved_models for group in model.groups]
-        if not self.external_engines and sum(group.num_gpus for group in groups) != self.num_gpus:
-            raise ValueError("SGLang model groups must match the reserved inference GPUs")
-        for group in groups:
-            if group.options.get("incremental_streaming_output", True) is not True:
-                raise ValueError("Reef SGLang inference requires incremental_streaming_output=true in every group")
-            self._require_safe_prefix_sharing({**options, **group.options})
-            if self.pause_mode == "retract" and group.worker_type in {"prefill", "decode"}:
-                # The pinned SGLang scheduler cannot retract disaggregated requests.
-                raise ValueError("retracting publication requires regular SGLang engines, not PD disaggregation")
-            width = group.gpus_per_engine
-            if width > self.gpus_per_node and width % self.gpus_per_node:
-                raise ValueError("a multi-node SGLang engine must use whole nodes")
 
     def _prefix_sharing_is_safe(self, options: dict[str, Any]) -> bool:
         """Whether no radix-cache entry can outlive the weights that built it.
@@ -117,7 +87,5 @@ class SGLangConfig(EngineConfig):
             )
 
     @property
-    def resolved_models(self) -> tuple[SGLangModelConfig, ...]:
-        return self.models or (
-            SGLangModelConfig("default", (SGLangGroupConfig("regular", self.num_gpus, self.gpus_per_engine),)),
-        )
+    def engine_count(self) -> int:
+        return self.num_gpus // self.gpus_per_engine

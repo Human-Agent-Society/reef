@@ -33,14 +33,12 @@ class RecordProgress:
 
 
 def read_consumed_ids(value: Mapping[str, object], *, context: str) -> frozenset[str]:
-    """Normalize old progress into the current consumption-only contract."""
-    consumed: set[str] = set()
-    for key in ("compacted_ids", "consumed_ids"):
-        ids = value.get(key, [] if key == "compacted_ids" else None)
-        if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
-            raise ValueError(f"{context} record_progress.{key} must be a list of strings")
-        consumed.update(ids)
-    return frozenset(consumed)
+    """The ``consumed_ids`` of the stored ``record_progress`` mapping ``value``; ``ValueError`` unless it is a list
+    of strings."""
+    ids = value.get("consumed_ids")
+    if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
+        raise ValueError(f"{context} record_progress.consumed_ids must be a list of strings")
+    return frozenset(ids)
 
 
 def parse_record_progress(value: object, *, context: str) -> RecordProgress:
@@ -63,7 +61,7 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
     )
 
 
-RECORD_KIND = "reef-commit/8"
+RECORD_KIND = "reef-commit/9"
 #: The ``snapshot`` of a record read from storage until ``CommitSnapshots`` locates it: a record with a
 #: ``selection`` stores no storage location.
 UNLOCATED_SNAPSHOT = SnapshotRef("unlocated:", None)
@@ -92,16 +90,17 @@ CommitOperation = Literal["training", "activate", "restore", "train_from", "impo
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
-    """One committed step of a scenario: a training step, an activation, a new training start, an import, a sync,
+    """One commit of a scenario: a training step, an activation, a new training start, an import, a sync,
     or a change of the artifacts served beside the active selection.
 
-    Values: ``scenario`` is a non-empty name and ``step`` a positive int.
-    ``snapshot`` is where the record's release is stored, for use in this process. ``to_dict`` stores it only for a
+    Values: ``scenario`` is a non-empty name and ``commit_number`` a positive int,
+    the position of the commit in the scenario's commit history.
+    ``snapshot`` is where the record's snapshot is stored, for use in this process. ``to_dict`` stores it only for a
     record without a ``selection``. A record that ``from_dict`` reads without one holds ``UNLOCATED_SNAPSHOT`` until
     ``CommitSnapshots`` locates it.
     ``recorded_at`` is the time of the commit in seconds. ``operation`` is a
     ``CommitOperation``. ``operation_verified`` is false only for a commit
-    read from release metadata that names no operation. ``component`` is
+    read from snapshot metadata that names no operation. ``component`` is
     ``None`` or a non-empty name, and ``components`` is ``None`` or a
     mapping of non-empty component names to non-empty artifact ids
     (``SnapshotComponents.artifact_ids``).
@@ -182,7 +181,7 @@ class CommitRecord:
     """
 
     scenario: str
-    step: int
+    commit_number: int
     snapshot: SnapshotRef
     checkpoint: bool
     algorithm_state: Mapping[str, Any] | None
@@ -216,8 +215,8 @@ class CommitRecord:
             raise CommitHistoryError("a materialized selection requires its component artifact IDs")
         if not isinstance(self.scenario, str) or not self.scenario:
             raise CommitHistoryError("commit record scenario must be a non-empty string")
-        if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 1:
-            raise CommitHistoryError("commit record step must be a positive integer")
+        if not isinstance(self.commit_number, int) or isinstance(self.commit_number, bool) or self.commit_number < 1:
+            raise CommitHistoryError("commit record commit_number must be a positive integer")
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
             raise CommitHistoryError("commit record component must be a non-empty string or null")
         if self.components is not None and (
@@ -355,7 +354,7 @@ class CommitRecord:
         value = {
             "record": RECORD_KIND,
             "scenario": self.scenario,
-            "step": self.step,
+            "commit_number": self.commit_number,
             "checkpoint": self.checkpoint,
             "algorithm_state": self.algorithm_state,
             "record_progress": record_progress,
@@ -392,8 +391,8 @@ class CommitRecord:
         scenario = value.get("scenario")
         if not isinstance(scenario, str) or not scenario:
             raise CommitHistoryError("commit record requires scenario")
-        step = value.get("step")
-        if not isinstance(step, int):
+        commit_number = value.get("commit_number")
+        if not isinstance(commit_number, int):
             raise CommitHistoryError("commit record step must be an integer")
         raw_ref = value.get("snapshot")
         if not isinstance(raw_ref, Mapping) and (raw_ref is not None or value.get("selection") is None):
@@ -424,7 +423,7 @@ class CommitRecord:
         return cls(
             activated=value.get("activated", False),
             scenario=scenario,
-            step=step,
+            commit_number=commit_number,
             snapshot=snapshot,
             checkpoint=checkpoint,
             algorithm_state=algorithm_state,
@@ -448,14 +447,14 @@ class CommitRecord:
         return self.to_dict() == other.to_dict()
 
     def __repr__(self) -> str:
-        return f"CommitRecord(scenario={self.scenario!r}, step={self.step}, release={self.snapshot.revision!r})"
+        return f"CommitRecord(scenario={self.scenario!r}, commit_number={self.commit_number}, snapshot={self.snapshot.revision!r})"
 
 
 class CommitSnapshots(ABC):
     """Finds the storage snapshot of each record read from a commit history.
 
     Purpose: storage holds no storage location, so the scenario factory gives a store this interface.
-    ``locate(records)`` takes a commit history in step order. It returns the same records in the same order, each
+    ``locate(records)`` takes a commit history in commit number order. It returns the same records in the same order, each
     with its ``snapshot``, and leaves a record that holds a snapshot as it is. It raises ``CommitHistoryError`` when
     a record's artifact IDs do not name a snapshot.
     """
@@ -470,7 +469,7 @@ def encode_commit(record: CommitRecord) -> str:
 
 
 def active_record(records: Sequence[CommitRecord]) -> CommitRecord | None:
-    """The newest record of ``records``, a commit history in step order, that activates a snapshot; ``None`` when
+    """The newest record of ``records``, a commit history in commit number order, that activates a snapshot; ``None`` when
     no record does (the creation artifact is active)."""
     return next((record for record in reversed(records) if record.activates), None)
 
@@ -488,7 +487,7 @@ def active_snapshot(records: Sequence[CommitRecord], fallback: SnapshotRef) -> S
 
 
 SCENARIO_METADATA_KEY = "scenario_commit_record"
-SCENARIO_METADATA_KIND = "reef-scenario/7"
+SCENARIO_METADATA_KIND = "reef-scenario/8"
 
 
 def scenario_metadata_for(
@@ -496,7 +495,7 @@ def scenario_metadata_for(
     name: str,
     source: RootSource,
     start_artifact: SnapshotRef | None = None,
-    scenario_step: int = 0,
+    commit_number: int = 0,
     algorithm_state: Mapping[str, Any] | None = None,
     record_progress: RecordProgress | None = None,
     metrics: Mapping[str, Any] | None = None,
@@ -505,7 +504,7 @@ def scenario_metadata_for(
     active_artifact: SnapshotRef | None = None,
     active_selection: ArtifactSelection | None = None,
 ) -> dict[str, object]:
-    """The scenario metadata of a registration (step zero) or of the artifact a training step made.
+    """The scenario metadata of a registration (commit number zero) or of the artifact a training step made.
 
     ``source`` is where the scenario's root snapshot came from. ``start_artifact`` is the root snapshot. The root
     snapshot carries the registration itself, so a registration names no ``start_artifact`` and every later step
@@ -513,16 +512,16 @@ def scenario_metadata_for(
     the artifact that serves after the step. A recovery without the commit history reads it to find the active
     artifact.
     """
-    if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
-        raise ValueError("scenario_step must be non-negative")
-    if (start_artifact is None) != (scenario_step == 0):
-        raise ValueError("scenario metadata names its start_artifact exactly after step zero")
-    if active_artifact is not None and scenario_step == 0:
+    if not isinstance(commit_number, int) or isinstance(commit_number, bool) or commit_number < 0:
+        raise ValueError("commit_number must be non-negative")
+    if (start_artifact is None) != (commit_number == 0):
+        raise ValueError("scenario metadata names its start_artifact exactly after commit number zero")
+    if active_artifact is not None and commit_number == 0:
         raise ValueError("a registration's own artifact serves; it names no active_artifact")
     metadata: dict[str, object] = {
         "format": SCENARIO_METADATA_KIND,
         "scenario": name,
-        "scenario_step": scenario_step,
+        "commit_number": commit_number,
         "source": source.to_dict(),
         "operation": "training",
     }
@@ -559,9 +558,9 @@ def parse_scenario_metadata(
     value: Mapping[str, Any], *, checkpoint_head: SnapshotRef, components: Mapping[str, str] | None = None
 ) -> tuple[str, SnapshotRef, RootSource, CommitRecord | None]:
     """Read the metadata ``value`` that the snapshot ``checkpoint_head`` carries: the scenario name, the root snapshot,
-    the root's source, and the checkpoint commit (``None`` at step zero, which has no commit).
+    the root's source, and the checkpoint commit (``None`` at commit number zero, which has no commit).
 
-    At step zero ``checkpoint_head`` is the root snapshot. ``components`` is the manifest of ``checkpoint_head``,
+    At commit number zero ``checkpoint_head`` is the root snapshot. ``components`` is the manifest of ``checkpoint_head``,
     read from the same snapshot metadata, so a commit rebuilt from it carries what a recorded one does. Raise
     ``ValueError`` for metadata of another format, or a malformed value.
     """
@@ -574,9 +573,9 @@ def parse_scenario_metadata(
     if not isinstance(scenario, str) or not scenario:
         raise ValueError("scenario metadata requires scenario")
     source = RootSource.from_dict(value.get("source"))
-    scenario_step = value.get("scenario_step", 0)
-    if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
-        raise ValueError("scenario metadata scenario_step must be non-negative")
+    commit_number = value.get("commit_number", 0)
+    if not isinstance(commit_number, int) or isinstance(commit_number, bool) or commit_number < 0:
+        raise ValueError("scenario metadata commit_number must be non-negative")
     algorithm_state = value.get("algorithm_state")
     if algorithm_state is not None and not isinstance(algorithm_state, Mapping):
         raise ValueError("scenario metadata algorithm_state must be an object")
@@ -597,21 +596,21 @@ def parse_scenario_metadata(
     if component is not None and (not isinstance(component, str) or not component):
         raise ValueError("scenario metadata component must be a non-empty string or null")
     raw_start = value.get("start_artifact")
-    if scenario_step == 0:
+    if commit_number == 0:
         if raw_start is not None:
             raise ValueError("a registration's scenario metadata names no start_artifact: it is the root snapshot")
         return scenario, checkpoint_head, source, None
     if not isinstance(raw_start, Mapping):
-        raise ValueError("scenario metadata after step zero requires start_artifact")
+        raise ValueError("scenario metadata after commit number zero requires start_artifact")
     try:
         start_artifact = decode_snapshot_ref(raw_start)
     except ValueError as exc:
         raise ValueError(f"invalid scenario metadata start_artifact: {exc}") from exc
     if record_progress is None:
-        raise ValueError("scenario metadata requires record_progress after step zero")
+        raise ValueError("scenario metadata requires record_progress after commit number zero")
     commit = CommitRecord(
         scenario=scenario,
-        step=scenario_step,
+        commit_number=commit_number,
         snapshot=checkpoint_head,
         checkpoint=True,
         algorithm_state=algorithm_state,

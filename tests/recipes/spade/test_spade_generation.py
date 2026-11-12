@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
 
 import pytest
 
@@ -12,9 +12,8 @@ from recipes.beta.spade.generation import (
     GenerationRecord,
     ProposalRecord,
     TaskMeasure,
+    generation_report,
     mean_reward,
-    recorded_generations,
-    write_generation_report,
 )
 
 
@@ -132,7 +131,7 @@ def test_mean_reward_is_the_mean_of_the_rewards_that_ran_and_zero_without_any() 
     assert mean_reward((1.0, 0.0)) == 0.5 and mean_reward(()) == 0.0
 
 
-def test_a_generation_report_keeps_the_proposals_the_measures_and_the_experience(tmp_path: Path) -> None:
+def test_a_generation_report_keeps_the_proposals_the_measures_and_the_experience() -> None:
     measure = TaskMeasure(
         name="harbor-00002-000",
         skill=None,
@@ -149,20 +148,17 @@ def test_a_generation_report_keeps_the_proposals_the_measures_and_the_experience
         ),
         measures=(measure,),
     )
-    path = write_generation_report(tmp_path / "state", generation)
-    assert path == tmp_path / "state" / "generation-00002.json"
-    assert recorded_generations(tmp_path / "state") == (2,) and recorded_generations(tmp_path / "none") == ()
-    assert load_experience(path) == generation.experience == (measure.record,)
-    (tmp_path / "state" / "generation-x.json").write_text("{}")
-    assert recorded_generations(tmp_path / "state") == (2,)
+    report = generation_report(generation)
+    document = json.loads(report)
+    assert document["generation"] == 2 and document["tasks"][0]["regret"] == 0.5
+    assert [proposal["refusal"] for proposal in document["proposals"]] == ["", "reply refused: no json"]
+    assert load_experience(report) == generation.experience == (measure.record,)
 
 
-def test_load_experience_refuses_a_file_that_is_not_a_report(tmp_path: Path) -> None:
-    (tmp_path / "x.json").write_text("{}")
+def test_load_experience_refuses_a_document_that_is_not_a_report() -> None:
     with pytest.raises(GenerationError, match="holds no experience"):
-        load_experience(tmp_path / "x.json")
+        load_experience("{}")
     with pytest.raises(GenerationError, match="is not a generation report"):
-        load_experience(tmp_path / "missing.json")
-    (tmp_path / "y.json").write_text('{"experience": [{"name": "t"}]}')
+        load_experience("not json")
     with pytest.raises(GenerationError, match="cannot take"):
-        load_experience(tmp_path / "y.json")
+        load_experience('{"experience": [{"name": "t"}]}')

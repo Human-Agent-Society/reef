@@ -9,8 +9,8 @@ import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.served_models import ScheduledStop
@@ -18,13 +18,13 @@ from reef.dispatcher import Dispatcher, serving
 from reef.dispatcher.serving import ServingWorker
 from reef.inference.interfaces import FixedEngineClients, InferenceHandler
 from reef.inference.null import NullInferenceRuntime
-from reef.inference.startup import StartupFailed, StartupStopped, redeploying, report_startup, stopping
+from reef.inference.startup import StartupFailedError, StartupStoppedError, redeploying, report_startup, stopping
 from reef.service.app import create_app
 from reef.service.inference_service import build_inference_app
 from reef.storage.served_models import REDEPLOY, SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.work_queue import WorkLeaseLost
+from reef.storage.work_queue import WorkLeaseLostError
 
 STATUS = "/reef/scenarios/math/inference/status"
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hello"}]}
@@ -74,20 +74,22 @@ class Answer(InferenceHandler):
 @pytest.fixture
 def startup(tmp_path):
     runtime = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = memory_coordination()
     storage = SQLiteScenarioStorage(tmp_path / "records")
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=storage,
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     inference = build_inference_app(coordination.served_models, storage, FixedEngineClients(Answer()), tokens=None)
     try:
@@ -221,7 +223,7 @@ def test_an_inference_worker_resumes_expired_startup_and_keeps_completed_work_re
             completed = control.coordination.served_models.current_request("math")
             assert completed.id == abandoned.id and completed.attempt_count == 2
             assert completed.result and control.coordination.served_models.read_scenario("math")
-            with pytest.raises(WorkLeaseLost):
+            with pytest.raises(WorkLeaseLostError):
                 control.coordination.served_models.complete_request(
                     abandoned, "previous-process", {}, serving_config={}, stop_delay_seconds=0
                 )
@@ -239,8 +241,9 @@ def test_a_standby_recovers_completed_selections_after_the_owner_stops(startup, 
     runtime.release.set()
     assert worker.run_once()
     replacement = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "replacement"), replacement))
-    standby = ServingWorker(recipe, worker.backends, control.coordination, worker_id="standby")
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "replacement"), replacement)
+    standby = ServingWorker(recipe, live, worker.backends, control.coordination, worker_id="standby")
 
     async def run() -> None:
         async with TestClient(TestServer(inference_app)) as client:
@@ -280,8 +283,9 @@ def test_a_fresh_owner_opens_the_runtime_before_cleanup(startup, tmp_path):
     )
     worker.stop()
     replacement = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "replacement"), replacement))
-    standby = ServingWorker(recipe, worker.backends, control.coordination, worker_id="standby")
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "replacement"), replacement)
+    standby = ServingWorker(recipe, live, worker.backends, control.coordination, worker_id="standby")
     try:
         assert standby.run_once()
         assert replacement.opens == 1 and replacement.stops == [served]
@@ -330,11 +334,13 @@ def test_an_owner_retries_recovery_before_opening_its_runtime(startup, monkeypat
 @pytest.mark.unit
 def test_an_offline_training_runtime_has_no_startup_request(tmp_path):
     runtime = NullInferenceRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     coordination = memory_coordination()
     control = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
@@ -392,12 +398,12 @@ class StoppableRuntime(PausedRuntime):
         try:
             while not self.release.wait(0.02):
                 if stopping():
-                    raise StartupStopped
+                    raise StartupStoppedError
         finally:
             with self.lock:
                 self.running -= 1
         if self.fail_start:
-            raise StartupFailed("--language-model-only does not support this model")
+            raise StartupFailedError("--language-model-only does not support this model")
         return StubInferenceRuntime.activate_checkpoint(self, artifact, scenario=scenario)
 
 
@@ -406,19 +412,21 @@ def stoppable(tmp_path, monkeypatch, request):
     monkeypatch.setattr(serving, "REPLACED_CHECK_SECONDS", 0.05)
     runtime = StoppableRuntime(getattr(request, "param", 1))
     training = StubTrainingComponent(tmp_path / "checkpoints", shares_scenarios=True)
-    recipe = TestPolicyRecipe(**runtime_bindings(training, runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(training, runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = memory_coordination()
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     try:
         yield control, worker, runtime
@@ -443,7 +451,7 @@ def test_a_redeploy_stops_the_held_start_and_the_next_control_round_keeps_it(sto
     # The held start stops within seconds, not when the engine would have started.
     held.join(5)
     assert not held.is_alive()
-    stopped = control.coordination.work_queue.get(SERVING_QUEUE, first.id)
+    stopped = control.coordination.work_queue.read(SERVING_QUEUE, first.id)
     assert (stopped.state, stopped.error) == ("failed", serving.REPLACED)
     # A control round compares the payloads without the redeploy number, so it keeps the redeploy request.
     control.publisher.run_once()
@@ -530,19 +538,21 @@ def test_a_redeploy_of_a_scenario_that_serves_nothing_starts_no_engine(startup):
 def deployment(tmp_path, runtime):
     """Control and an inference worker on the record and coordination files of ``tmp_path``, as one start of the
     service has them."""
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = open_coordination("sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None)
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     return control, worker
 

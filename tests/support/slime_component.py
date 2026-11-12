@@ -13,7 +13,7 @@ import pytest
 from reef.train.component import JobStatus, TrainingComponent
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import TrainingBatchProcessor
-from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
+from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionSettings
 
 
 class FakeTrainGroup:
@@ -102,7 +102,7 @@ def checkpoint_storage(
     source = root / "source-hf"
     source.mkdir(parents=True, exist_ok=True)
     return CheckpointStorage(
-        RetentionConfig(max_storage_bytes=1 << 30, min_free_space_bytes=0),
+        RetentionSettings(max_storage_bytes=1 << 30, min_free_space_bytes=0),
         hf_template=str(root / "hf" / "{rollout_id}"),
         megatron_root=root / "megatron",
         critic_root=critic_root,

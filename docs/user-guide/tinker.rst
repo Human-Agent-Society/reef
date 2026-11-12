@@ -62,18 +62,27 @@ per request, ``max_tokens`` or ``max_completion_tokens``, ``temperature``,
 ``chat_template_kwargs.enable_thinking``. Unknown options, tool calls,
 multimodal messages, and Anthropic routes fail explicitly.
 
+A request without ``max_tokens`` or ``max_completion_tokens`` may reply up to
+the rest of the model's context window, or 1024 tokens when the service states
+no window for the model. A prompt that fills the window gets a ``400`` whose
+message starts with ``context_length_exceeded``. A thinking model's reasoning
+comes in the message's ``reasoning_content``, and its answer in ``content``.
+
 Streaming is buffered: the complete sampled response is emitted as valid
-OpenAI SSE events. It does not provide token-by-token latency. Prompt IDs come
-from the tokenizer's chat template.
+OpenAI SSE events. It does not provide token-by-token latency. A streamed
+answer carries only ``content``, so a streaming client gets no reasoning.
+Prompt IDs come from the tokenizer's chat template.
 
 Serving returns and records no training tensors. The training component
 renders each recorded call with the base model's tokenizer and
 ``training.options.chat_template_kwargs``, which must equal the chat template
 arguments of serving, for example ``{enable_thinking: false}``. It computes
 the rollout log probabilities with a forward pass at the job's start, before
-the first optimizer step. A sample that cannot render does not train, and the
-job metric ``unrenderable_samples`` counts it. A task job's own rollouts keep
-the sampled IDs and log probabilities that Tinker returns.
+the first optimizer step. A sample that cannot render, or whose tokens after
+the first are more than the model's context window, does not train, and the
+job metric ``unrenderable_samples`` counts it: Tinker refuses a whole
+optimizer step for one such sample. A task job's own rollouts keep the sampled
+IDs and log probabilities that Tinker returns.
 
 Reef's normal ``WeightTrainingRecipe`` drives the integration. The backend is
 one training component (``reef.train.tinker_backend``) and one inference
@@ -83,6 +92,14 @@ checkpoint carries a ``tinker-checkpoint.json`` manifest that names its
 remote training state and sampler. The inference side serves the sampler that
 a snapshot names. Each job starts from the scenario's last saved checkpoint,
 which ``state-dir`` keeps across restarts.
+
+A new scenario starts from a base root: a ``base.json`` file that names the
+model, the LoRA rank and the service. Control writes it from the
+configuration and calls no Tinker service for it. Serving it samples the base
+model. The first job from it makes a new LoRA from ``seed``. With
+``seed: null``, the training service saves one untrained adapter when the
+first such job runs, keeps its manifest in ``<state-dir>/base/``, and starts
+every such job from it.
 
 ``training.options.batch-size`` (default 1) is the batch size: the samples in
 one optimizer step. ``pipeline.sample2job.config.job_samples`` is the job size:
@@ -100,10 +117,9 @@ per-sample inputs that function reads. The built-in ``importance_sampling``
 family places the trajectory advantage on every response token the loss mask
 selects. The built-in ``sft`` family trains Tinker's ``cross_entropy`` on the
 same tokens, so the `SFT recipe <recipes/sft.rst>`__ runs on Tinker; its
-samples need no rollout log probabilities. A method registers its own ``TinkerLoss`` with
-``register_loss_family_ref(name, "package.module:CLASS", backend="tinker")``,
-next to its Slime reference; the class is imported when the family is first
-resolved. Its ``loss_fn`` names the Tinker built-in it trains with and
+samples need no rollout log probabilities. A method gives its own ``TinkerLoss`` a ``loss_family`` name and decorates the class with
+``@register_loss_family`` (``reef.train.tinker_backend.loss_families``), in the module of
+its ``TinkerObjective``; the class is imported when a job first names that objective. Its ``loss_fn`` names the Tinker built-in it trains with and
 ``inputs`` shapes that function's ``loss_fn_inputs``. A ``TinkerCustomLoss``
 instead computes the loss on the Reef host from the token log probabilities
 Tinker returns, through ``forward_backward_custom``; that path needs torch
@@ -367,7 +383,8 @@ Prerequisites:
 
 The default start is a reference to the base revision (`Import an artifact
 <operate.rst#import-an-artifact>`__), which a new scenario's root snapshot
-holds; a job from it starts a new model with the base's own weights.
+holds. Control writes it from the configuration. A job from it starts a new
+model with the base's own weights.
 
 Every snapshot refers to its weights on Hugging Face. When Spindle saves a
 checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint

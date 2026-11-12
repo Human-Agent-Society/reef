@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,17 +17,17 @@ from reef.core.job_data import JobData, TaskSample, TrajectorySample, trajectori
 from reef.core.trajectories import trajectory_reward
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob
-from reef.train.task_rollouts import ChatEndpoint, TaskJobRollouts, run_train_tasks
+from reef.train.task_rollouts import ChatEndpoint, RolloutTokens, TaskJobRollouts, run_train_tasks
 from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
-from reef.train.tinker_backend.config import TinkerConfig
+from reef.train.tinker_backend.config import TinkerSettings
 from reef.train.tinker_backend.objectives import TinkerObjective
 from reef.train.tinker_backend.parameters import rollout_settings
 from reef.train.tinker_backend.rollout import SamplerChat
+from reef.train.tinker_backend.signals import TrainingSignal
 
 MODEL = "Qwen/Qwen3-8B"
 ROLLOUT = {"rollouts_per_task": 2, "concurrency": 2}
@@ -41,7 +42,7 @@ class Sampler(TinkerSampler):
     def render(self, messages, *, template_kwargs):
         return [1, 2, 3]
 
-    def decode(self, tokens):
+    def decode(self, tokens, *, skip_special_tokens=True):
         return "done"
 
     def sample(self, sampler_path, prompt, params, *, topk_logprobs):
@@ -116,11 +117,111 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
         {"task": "sort", "scores": [0.0, 0.0]},
         {"task": "broken", "scores": ["failed", "failed"]},
     ]
+    assert rollouts.metrics()["removed_rollouts"] == 2, "a rollout whose sandbox failed gives no sample"
     training = rollouts.samples[0].training
     assert (training["tokens"], training["rollout_log_probs"]) == ([1, 2, 3, 7, 8], [-0.1, -0.2])
     # Every call sampled the job's start, so the sample names it as the policy that produced its tokens.
     assert training["artifact_id"] == "tinker://start"
     assert trajectory_reward(rollouts.samples[0]) == 1.0
+
+
+class ScaffoldSampler(Sampler):
+    """Renders each message one token per character, an assistant message as its two sampled tokens, and ends each
+    prompt with the scaffold 99, which the history of the next prompt drops."""
+
+    def render(self, messages, *, template_kwargs):
+        rendered = [
+            [7, 8] if message["role"] == "assistant" else [ord(c) for c in message["content"]] for message in messages
+        ]
+        return [token for tokens in rendered for token in tokens] + [99]
+
+
+class TwoCallLab(AgentLab):
+    """Calls the model twice, the second time with the first call in its history. The second rollout of ``half``
+    rewrites its first message, so that rollout does not assemble."""
+
+    def __init__(self, rewards: dict[str, float]) -> None:
+        super().__init__(rewards)
+        self.runs: dict[str, int] = {}
+
+    async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
+        self.runs[task_path.name] = self.runs.get(task_path.name, 0) + 1
+        first = f"solve {task_path.name}"
+        rewritten = "rewritten task" if task_path.name == "half" and self.runs["half"] == 2 else first
+        for messages in (
+            [{"role": "user", "content": first}],
+            [
+                {"role": "user", "content": rewritten},
+                {"role": "assistant", "content": "done"},
+                {"role": "user", "content": "go on"},
+            ],
+        ):
+            request = urllib.request.Request(
+                f"{agent['kwargs']['api_base']}/chat/completions",
+                data=json.dumps({"model": "m", "messages": messages}).encode(),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                response.read()
+        return RolloutRow(rewards={"reward": self.rewards[task_path.name]})
+
+
+@pytest.mark.unit
+def test_a_rollout_counts_its_response_tokens_and_the_tokens_that_train(tmp_path):
+    tasks = (harbor_task(tmp_path, "add"), harbor_task(tmp_path, "half"))
+
+    rollouts = run_train_tasks(
+        tasks,
+        rollout_settings({"rollout": {"rollouts_per_task": 2, "concurrency": 1}}),
+        SamplerChat(ScaffoldSampler(), None, model=MODEL, runtime_load_id="tinker:base", topk_logprobs=0),
+        model=MODEL,
+        work_dir=tmp_path / "work",
+        start="tinker://start",
+        lab=TwoCallLab({"add": 1.0, "half": 0.0}),
+    )
+
+    # Each rollout sampled two calls of two tokens. Both calls of an "add" rollout train although the second prompt
+    # dropped the first prompt's scaffold. "half" has one sample, so its group does not train, and one rollout that
+    # does not assemble.
+    assert [sample.group_id for sample in rollouts.samples] == ["add", "add"]
+    assert rollouts.tokens == (
+        RolloutTokens("add", 4, 4, assembled=True),
+        RolloutTokens("add", 4, 4, assembled=True),
+        RolloutTokens("half", 4, 0, assembled=True),
+        RolloutTokens("half", 4, 0, assembled=False),
+    )
+    metrics = rollouts.metrics()
+    assert metrics["rollout_tokens"] == {
+        "add": [{"response_tokens": 4, "trained_tokens": 4}] * 2,
+        "half": [{"response_tokens": 4, "trained_tokens": 0}] * 2,
+    }
+    assert (metrics["rollout_response_tokens"], metrics["rollout_trained_tokens"]) == (16, 8)
+    assert (metrics["rollout_samples"], metrics["removed_rollouts"]) == (2, 1)
+
+
+@pytest.mark.unit
+def test_a_sample_longer_than_max_tokens_is_left_out_before_its_group_forms(tmp_path):
+    rollouts = run_train_tasks(
+        (harbor_task(tmp_path, "add"),),
+        rollout_settings({"rollout": {"rollouts_per_task": 2, "concurrency": 1}}),
+        SamplerChat(ScaffoldSampler(), None, model=MODEL, runtime_load_id="tinker:base", topk_logprobs=0),
+        model=MODEL,
+        work_dir=tmp_path / "work",
+        start="tinker://start",
+        lab=TwoCallLab({"add": 1.0}),
+        max_tokens=1,
+    )
+
+    # Both samples are longer than the bound, so the group has none to compare and no token counts as trained.
+    assert rollouts.samples == ()
+    assert rollouts.tokens == (RolloutTokens("add", 4, 0, assembled=True),) * 2
+    metrics = rollouts.metrics()
+    assert (metrics["rollout_samples"], metrics["rollout_trained_tokens"], metrics["unrenderable_samples"]) == (
+        0,
+        0,
+        2,
+    )
 
 
 @pytest.mark.unit
@@ -215,7 +316,8 @@ def grouped(tmp_path: Path) -> TaskJobRollouts:
         return TrajectorySample(trajectory, group_id=name)
 
     scores = RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
-    return TaskJobRollouts((sample("add", 1.0), sample("add", 0.0)), scores)
+    tokens = (RolloutTokens("add", 2, 2, assembled=True), RolloutTokens("add", 2, 2, assembled=True))
+    return TaskJobRollouts((sample("add", 1.0), sample("add", 0.0)), scores, tokens)
 
 
 class RewardObjective(TinkerObjective):
@@ -234,7 +336,7 @@ TASK_OBJECTIVE = f"{__name__}:RewardObjective"
 @pytest.mark.unit
 def test_a_task_job_of_two_tasks_with_one_name_is_refused(tmp_path):
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
     )
     component.start_jobs()
     try:
@@ -266,7 +368,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
     monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
     client = Client()
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), client, sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), client, sampler=Sampler()
     )
     component.start_jobs()
     try:
@@ -282,7 +384,8 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
         component.submit(job)
         status = finished(component, "job-0")
         assert status.state == "finished" and len(status.checkpoints) == 1
-        assert calls == [(("add",), "tinker://base/sampler")] and client.trained == [2]
+        # The job starts from the default start, a new LoRA, so its rollouts sample the base model.
+        assert calls == [(("add",), None)] and client.trained == [2]
         assert status.metrics["rollout_rewards"] == {"add": [1.0, 0.0]}
         # The rollouts are kept: running the job again trains them without new rollouts.
         kept = json.loads((component.job_directory("job-0") / ROLLOUTS_FILE).read_text())
@@ -297,11 +400,46 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
 
 
 @pytest.mark.unit
+def test_a_task_job_reports_its_rollout_tokens_and_a_resumed_job_keeps_them(tmp_path, monkeypatch):
+    counted = replace(
+        grouped(tmp_path),
+        tokens=(RolloutTokens("add", 2, 2, assembled=True), RolloutTokens("add", 3, 2, assembled=True)),
+    )
+    monkeypatch.setattr(component_module, "run_train_tasks", lambda tasks, settings, chat, **options: counted)
+    component = TinkerTrainingComponent(
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+    )
+    component.start_jobs()
+    try:
+        parameters = {"objective": TASK_OBJECTIVE, "rollout": ROLLOUT, "batch_size": 2}
+        job = TrainingJob(
+            "job-0",
+            "tinker",
+            component.base_start,
+            job_data_ref(JobData("d", (harbor_task(tmp_path, "add"),))),
+            parameters,
+            scenario="s",
+        )
+        component.submit(job)
+        status = finished(component, "job-0")
+        assert status.state == "finished"
+        assert status.metrics["rollout_tokens"] == {
+            "add": [{"response_tokens": 2, "trained_tokens": 2}, {"response_tokens": 3, "trained_tokens": 2}]
+        }
+        assert (status.metrics["rollout_response_tokens"], status.metrics["rollout_trained_tokens"]) == (5, 4)
+        assert status.metrics["removed_rollouts"] == 0
+        settings = component.job_parameters(parameters).rollout
+        assert component.task_rollouts(job, component.job_directory("job-0"), component._base, settings) == counted
+    finally:
+        component.close()
+
+
+@pytest.mark.unit
 def test_a_task_job_is_checked_at_submit(tmp_path):
     task = harbor_task(tmp_path, "add")
     method = {"objective": TASK_OBJECTIVE}
     trajectory = grouped(tmp_path).samples[0]
-    without_sampler = TinkerTrainingComponent(MODEL, TinkerConfig(state_dir=str(tmp_path / "a")), Client())
+    without_sampler = TinkerTrainingComponent(MODEL, TinkerSettings(state_dir=str(tmp_path / "a")), Client())
     without_sampler.start_jobs()
     try:
         with pytest.raises(ValueError, match="no sampler"):
@@ -318,7 +456,7 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
     finally:
         without_sampler.close()
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "b")), Client(), sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "b")), Client(), sampler=Sampler()
     )
     component.start_jobs()
     try:
@@ -369,7 +507,7 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
 
     monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=sampler
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=sampler
     )
     component.start_jobs()
     try:
@@ -388,15 +526,16 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
     finally:
         component.close()
 
-    # Two timed-out warm-up samples and the one that answered, all of one token on the start's sampler.
-    assert sampler.requests == [("tinker://base/sampler", {"max_tokens": 1})] * 3
+    # Two timed-out warm-up samples and the one that answered, all of one token on the start's sampler: the base
+    # model, since the job starts from the default start.
+    assert sampler.requests == [(None, {"max_tokens": 1})] * 3
     assert rolled_out_after == [3]
 
 
 @pytest.mark.unit
 def test_a_task_job_without_an_objective_is_refused(tmp_path):
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
     )
     try:
         with pytest.raises(ValueError, match="needs the objective parameter"):
@@ -410,7 +549,7 @@ def test_a_task_job_without_an_objective_is_refused(tmp_path):
 def test_a_sampler_that_never_answers_fails_the_warm_up_at_its_deadline(tmp_path, monkeypatch):
     monkeypatch.setattr(component_module, "SAMPLER_WARM_TIMEOUT_S", 0.0)
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=ColdSampler(cold=5)
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=ColdSampler(cold=5)
     )
     try:
         with pytest.raises(TimeoutError, match="starting"):

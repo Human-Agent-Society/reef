@@ -13,8 +13,10 @@ to the teacher's serving endpoint and produces no student training sample.
 
 ## Run
 
-Use a Linux host with Docker Compose, the [pinned Semantic Router image](../README.md#1-build-the-semantic-router-image)
-and the [Reef Slime GPU environment](../../../docker/README.md). The small profile
+Use a Linux host with Docker Compose and Buildx, and the
+[Reef Slime GPU environment](../../../docker/README.md). The first routing start
+builds the [pinned Semantic Router image](../README.md#1-the-semantic-router-image);
+later starts reuse it. The small profile
 uses eight GPUs: four single-GPU student serving replicas, two GPUs for the teacher,
 and two for the student trainer. The native service and routing frontend must be
 able to reach each other on loopback.
@@ -37,13 +39,14 @@ bash tutorials/semantic-router/opd/serve-native.sh
 
 Keep the native service running. In a second shell on the same host, activate the
 Reef environment, export the same `REEF_TOKEN`, and wait for
-`curl -fsS http://127.0.0.1:8900/healthz` to succeed. Set `SR_IMAGE` to the
-reference of your locally built image, including its repository digest:
+`curl -fsS http://127.0.0.1:8900/healthz` to succeed, then run:
 
 ```bash
-export SR_IMAGE='reef-semantic-router@sha256:<digest>'
 bash tutorials/semantic-router/opd/run.sh /work/opd-routing-data/deepmath.jsonl
 ```
+
+To use an image you already have instead of the built one, set `SR_IMAGE` to its
+repository digest (`repository@sha256:...`) or local image ID (`sha256:...`).
 
 ## What to check
 

@@ -5,16 +5,15 @@ from __future__ import annotations
 
 import os
 import threading
-import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._trajectories import policy_trajectory
 from tests.support.job_data import job_data_ref
+from tests.support.polling import wait_until
+from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import DefaultStart
 from reef.core.job_data import JobData
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import write_json
@@ -58,8 +57,9 @@ class GatedComponent(LocalJobComponent):
     def concurrent_jobs(self) -> bool:
         return self.concurrent
 
-    def default_start(self) -> DefaultStart:
-        return DefaultStart()
+    @property
+    def default_start_inputs(self) -> dict[str, str]:
+        return {}
 
     def root_start(self, root: ScenarioRoot) -> str:
         return "gated:base"
@@ -93,16 +93,8 @@ def training_job(job_id: str, **parameters: bool) -> TrainingJob:
     return TrainingJob(job_id, "gated", "gated:base", job_data_ref(data), parameters, scenario="s")
 
 
-def wait_until(condition: Callable[[], bool]) -> None:
-    deadline = time.monotonic() + WAIT_SECONDS
-    while not condition():
-        if time.monotonic() > deadline:
-            raise TimeoutError("the condition did not hold in time")
-        time.sleep(0.01)
-
-
 def wait_ended(component: LocalJobComponent, job_id: str) -> None:
-    wait_until(lambda: component.status(job_id).state != "running")
+    wait_until(lambda: component.status(job_id).state != "running", timeout_seconds=WAIT_SECONDS)
 
 
 @pytest.fixture
@@ -247,7 +239,7 @@ def test_a_component_with_concurrent_jobs_runs_its_jobs_at_the_same_time(tmp_pat
     component.submit(training_job("a"))
     component.submit(training_job("b"))
     # Both runs begin while the gate holds each before its first checkpoint.
-    wait_until(lambda: sorted(component.runs) == ["a", "b"])
+    wait_until(lambda: sorted(component.runs) == ["a", "b"], timeout_seconds=WAIT_SECONDS)
     assert (component.status("a").state, component.status("b").state) == ("running", "running")
     component.gate.set()
     wait_ended(component, "a")
@@ -344,7 +336,7 @@ def test_close_mid_job_leaves_it_to_resume_and_refuses_new_jobs(tmp_path, make_c
 
     closer = threading.Thread(target=component.close)
     closer.start()
-    wait_until(lambda: component.stopping(directory))
+    wait_until(lambda: component.stopping(directory), timeout_seconds=WAIT_SECONDS)
     component.gate.set()
     closer.join(WAIT_SECONDS)
 

@@ -13,20 +13,26 @@ import pytest
 
 from reef.artifact import (
     Artifact,
-    ArtifactConflict,
-    ArtifactNotFound,
+    ArtifactConflictError,
+    ArtifactNotFoundError,
     ArtifactSourceError,
     DefaultStart,
     GitLFSRepositoryBackend,
     GitLFSRepositoryBackendFactory,
     InMemoryRepositoryBackend,
-    ModelDirectory,
     RepositoryBackend,
     RepositoryBackendContext,
 )
+from reef.artifact.composite import link_or_copy
 from reef.artifact.git_client import GitClient
 from reef.artifact.git_lfs import HUB_REFS, same_file, token_config
 from reef.core.plugins import PluginConfigError
+
+
+def link_model_files(snapshot: Path, directory: Path) -> None:
+    """Put the model files of ``snapshot`` into ``directory`` as hard links where the file system allows, as an
+    import of a local model directory stores them."""
+    shutil.copytree(snapshot, directory, dirs_exist_ok=True, copy_function=link_or_copy)
 
 
 def root_tree(directory: Path, files: dict[str, str] | None = None) -> Artifact:
@@ -146,7 +152,7 @@ def test_artifact_id_binding_is_immutable_and_scoped_to_its_scenario(
     assert resolved.artifact_id == candidate.artifact_id
     assert resolved.local_path is not None
     assert (resolved.local_path / "rules.md").read_text() == "updated"
-    with pytest.raises(ArtifactNotFound):
+    with pytest.raises(ArtifactNotFoundError):
         other.resolve_artifact(candidate.artifact_id)
     changed = root_tree(tmp_path / "changed", {"rules.md": "different"})
     conflicting = Artifact(
@@ -156,7 +162,7 @@ def test_artifact_id_binding_is_immutable_and_scoped_to_its_scenario(
         metadata=candidate.metadata,
         artifact_id=candidate.artifact_id,
     )
-    with pytest.raises(ArtifactConflict, match="already names different"):
+    with pytest.raises(ArtifactConflictError, match="already names different"):
         backend.publish(conflicting, expected_parent=repeated)
     assert backend.current() == repeated
     assert (backend.resolve_artifact(candidate.artifact_id).local_path / "rules.md").read_text() == "updated"
@@ -372,13 +378,10 @@ def test_git_lfs_repository_registers_publishes_and_materializes(
     (snapshot / "config.json").write_text("{}")
 
     backend_factory = GitLFSRepositoryBackend.factory(remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
-    start = DefaultStart(
-        model_files=ModelDirectory(snapshot), inputs={"model": "org/model", "version": "upstream-sha"}
-    )
 
     def default_root(name: str) -> Artifact:
         (tmp_path / name).mkdir()
-        start.write(tmp_path / name)
+        link_model_files(snapshot, tmp_path / name)
         return Artifact.local(tmp_path / name)
 
     backend = backend_factory("math")
@@ -423,7 +426,7 @@ def test_git_lfs_repository_registers_publishes_and_materializes(
         copies = tuple(executor.map(fresh.materialize, (published,) * 8))
     assert all(copy.local_path.joinpath("adapter.safetensors").read_text() == "trained" for copy in copies)
 
-    with pytest.raises(ArtifactConflict):
+    with pytest.raises(ArtifactConflictError):
         backend.publish(Artifact.local(candidate), expected_parent=math)
 
 
@@ -517,34 +520,24 @@ def test_archiving_a_scenario_renames_its_ref_and_drops_its_work_clone(
 
 
 @pytest.mark.unit
-def test_a_default_start_writes_the_model_under_its_component_beside_its_files(tmp_path: Path) -> None:
-    snapshot = tmp_path / "models--org--model" / "snapshots" / "upstream-sha"
-    snapshot.mkdir(parents=True)
-    (snapshot / "config.json").write_text("{}")
-    (snapshot / "model.safetensors").write_text("weights")
+def test_a_default_start_writes_its_text_files_and_refuses_other_values(tmp_path: Path) -> None:
     start = DefaultStart(
-        files={"harness/AGENTS.md": "seed rules\n"},
-        model_files=ModelDirectory(snapshot),
-        model_component="weights",
+        files={"harness/AGENTS.md": "seed rules\n", "weights/base.json": "{}\n"},
         inputs={"weights.model": "org/model"},
     )
     tree = tmp_path / "root"
     tree.mkdir()
     start.write(tree)
 
-    assert (tree / "weights" / "config.json").read_text() == "{}"
-    assert (tree / "weights" / "model.safetensors").samefile(snapshot / "model.safetensors")
     assert (tree / "harness" / "AGENTS.md").read_text() == "seed rules\n"
-    assert not (tree / "config.json").exists()
-    with pytest.raises(ValueError, match="directory name"):
-        DefaultStart(model_files=ModelDirectory(snapshot), model_component="../x")
-
-
-def test_a_model_directory_exists_and_a_model_component_needs_model_files(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="does not exist"):
-        ModelDirectory(tmp_path / "missing")
-    with pytest.raises(ValueError, match="requires model_files"):
-        DefaultStart(model_component="weights")
+    assert (tree / "weights" / "base.json").read_text() == "{}\n"
+    assert sorted(path.name for path in tree.iterdir()) == ["harness", "weights"]
+    with pytest.raises(ValueError, match="relative path inside the snapshot"):
+        DefaultStart(files={"../x": "text"})
+    with pytest.raises(ValueError, match="must hold text"):
+        DefaultStart(files={"model.safetensors": b"weights"})
+    with pytest.raises(ValueError, match="non-empty string"):
+        DefaultStart(inputs={"model": ""})
 
 
 @pytest.mark.integration
@@ -647,9 +640,9 @@ def test_the_work_tree_never_writes_through_a_link(tmp_path: Path, fake_git_lfs:
     backend = GitLFSRepositoryBackend.factory(remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")(
         "agent"
     )
-    start = DefaultStart(files={"AGENTS.md": "seed\n"}, model_files=ModelDirectory(snapshot))
     (tmp_path / "root").mkdir()
-    start.write(tmp_path / "root")
+    link_model_files(snapshot, tmp_path / "root")
+    (tmp_path / "root" / "AGENTS.md").write_text("seed\n")
     head = backend.register(Artifact.local(tmp_path / "root"), metadata={})
     # The registration rewrote .gitattributes in the work tree, not the Hugging Face blob behind the snapshot.
     assert (blobs / "attributes").read_text() == "*.bin filter=lfs\n"

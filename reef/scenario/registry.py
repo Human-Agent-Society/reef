@@ -30,17 +30,20 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
 )
 from reef.core.activation import ActivationRule
-from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
+from reef.core.errors import ReefError, ScenarioCapacityFullError, ScenarioNotFoundError
 from reef.evaluation.activation import EvaluatedActivation, activation_setting, scenario_activation_reference
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
+from reef.recipe.deployment import harness_adapter
 from reef.recipe.errors import RecipeConfigError
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ItemStart, ScenarioFactory
+from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.served_models import ServedModels
+from reef.train.trainer_builder import TrainerBuilder
 from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
@@ -105,6 +108,7 @@ class ScenarioRegistry:
         recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
+        live: LiveObjects | None = None,
         local_artifact_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
@@ -113,6 +117,7 @@ class ScenarioRegistry:
         lifecycle: ScenarioLifecycle,
         served_models: ServedModels | None = None,
         training_requests: TrainingRequestQueue | None = None,
+        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         self._storage = scenario_storage
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
@@ -121,12 +126,14 @@ class ScenarioRegistry:
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
+            live=live,
             local_artifact_dir=local_artifact_dir,
             scenario_storage=scenario_storage,
             experiment_reports=self.experiment_reports,
             experiment_tracker=tracker,
             served_models=served_models,
             training_requests=training_requests,
+            trainer_builder=trainer_builder,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe
@@ -257,9 +264,9 @@ class ScenarioRegistry:
         return current
 
     def require(self, scenario: str) -> Scenario:
-        """Resolve an existing scenario; raise UnknownScenario if not found."""
+        """Resolve an existing scenario; raise ScenarioNotFoundError if not found."""
         if not self.has(scenario):
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         return self._resolve(scenario, None, True)
 
     def list(self) -> tuple[dict[str, Any], ...]:
@@ -273,7 +280,7 @@ class ScenarioRegistry:
             registered = self._backend_factory.list_registrations()
         with self._lock:
             loaded = dict(self._scenarios)
-        adapter = self._recipe.harness_adapter
+        adapter = harness_adapter(self._recipe)
         rows = []
         for name in sorted(set(registered) | set(loaded)):
             current = loaded.get(name)
@@ -492,9 +499,8 @@ class ScenarioRegistry:
         """Select the training mode, the activation rule, the serving config and ``serves`` that are stored for
         the scenario on a newly built instance.
 
-        A mode the recipe no longer supports, or that Reef no longer has (such as
-        ``hybrid``), keeps the recipe's default, so the scenario still loads and
-        a person can select another mode. A scenario
+        A mode the recipe does not implement keeps the recipe's default, so the
+        scenario still loads and a person can select another mode. A scenario
         whose rule is ``evaluated`` without ``artifact_evaluation`` loads with a
         warning: it activates no new artifact. A serving config that the runtime
         now refuses loads with a warning: the scenario serves with the
@@ -506,7 +512,7 @@ class ScenarioRegistry:
             if settings.training_mode is not None and instance.training_mode != settings.training_mode:
                 try:
                     instance.set_training_mode(settings.training_mode)
-                except (ValueError, NotImplementedError) as exc:
+                except NotImplementedError as exc:
                     logger.warning(
                         "Scenario %r keeps its default training mode: the stored mode %r is not supported (%s)",
                         instance.name,
@@ -595,7 +601,7 @@ class ScenarioRegistry:
 
         Admission tells how many loaded scenarios must unload first. This
         method unloads idle candidates until there are enough. If there are
-        too few, it raises ``ScenarioCapacityFull``.
+        too few, it raises ``ScenarioCapacityFullError``.
 
         Lock order: the lock of ``scenario``, then the admission lock. The
         lifecycle's ``unload_if_idle`` only tries the locks of other scenarios
@@ -621,7 +627,7 @@ class ScenarioRegistry:
                     unloaded_count += 1
             if unloaded_count < load_admission.unload_count:
                 logger.warning("refused to load scenario %r: too few loaded scenarios are idle", scenario)
-                raise ScenarioCapacityFull(
+                raise ScenarioCapacityFullError(
                     f"cannot load scenario {scenario!r}: {len(loaded)} scenarios are loaded, and too few of them "
                     "are idle to free a load slot; retry later"
                 )

@@ -56,6 +56,7 @@ from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tree import HarnessTree
 from reef.inference.interfaces import InferenceHandler, InferenceRuntime
 from reef.recipe import Recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.scenario.snapshots import ScenarioSnapshots
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import (
@@ -75,6 +76,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import files_digest
 from reef.storage.work_queue import WorkItem
 from reef.train.trainer import ComponentTrainer
+from reef.train.trainer_builder import TrainerBuilder, build_trainer
 
 TOKEN = "artifact-evaluation-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -148,13 +150,18 @@ class WeightRecipe(Recipe):
     harness: bool = False
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        components = {"weights": ComponentSpec(kind=self.runtime.served_weight_kind)}
+        components = {"weights": ComponentSpec(kind="model_adapter")}
         if self.harness:
             components[HARNESS_COMPONENT] = ComponentSpec(files=HarnessFiles(get_adapter("pi")), kind="harness_plugin")
         return ScenarioComponents(components)
 
+
+class ComponentTrainers(TrainerBuilder):
+    """Builds one trainer that only reads records for each component of the scenario."""
+
     def build_trainers(
         self,
+        specs,
         scenario,
         records,
         *,
@@ -169,7 +176,8 @@ class WeightRecipe(Recipe):
         return tuple(
             ComponentTrainer(
                 name,
-                self.build(
+                build_trainer(
+                    specs,
                     scenario,
                     records,
                     algorithm_state=algorithm_states.get(name),
@@ -253,7 +261,9 @@ async def created(client: TestClient, tmp_path: Path, *names: str) -> str:
 @pytest.mark.integration
 def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_release_it_names(tmp_path: Path) -> None:
     runtime = ArtifactRuntime()
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=runtime)
+    )
     lab = ModelCallingLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"}))
 
     async def run() -> None:
@@ -425,7 +435,9 @@ class JudgingLab(ModelCallingLab):
 
 @pytest.mark.integration
 def test_an_evaluation_keeps_the_calls_and_trajectories_that_its_verifier_wrote(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     lab = JudgingLab({"add": 1.0}, tmp_path / "trials")
 
     async def run() -> None:
@@ -493,7 +505,9 @@ def test_an_evaluation_keeps_the_calls_and_trajectories_that_its_verifier_wrote(
 
 @pytest.mark.integration
 def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     queue = dispatcher.queue
 
     def scored(item: WorkItem, value: float) -> None:
@@ -556,7 +570,9 @@ def test_an_evaluation_keeps_at_most_its_max_concurrent_rollouts_in_the_queue(tm
 
 
 def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_benchmark(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     queue = dispatcher.queue
 
     async def run() -> None:
@@ -612,7 +628,9 @@ def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_bench
 
 
 def test_an_evaluation_with_a_harbor_agent_starts_without_reading_a_task_file(tmp_path: Path, monkeypatch) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
 
     def refuse(item) -> Path:
         raise AssertionError(f"the start read the files of {item.item_id}")
@@ -632,7 +650,9 @@ def test_an_evaluation_with_a_harbor_agent_starts_without_reading_a_task_file(tm
 
 
 def test_a_cancelled_evaluation_fails_with_its_rollouts_and_starts_no_waiting_rollout(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     queue = dispatcher.queue
 
     async def run() -> None:
@@ -668,7 +688,9 @@ def test_a_cancelled_evaluation_fails_with_its_rollouts_and_starts_no_waiting_ro
 
 
 def test_a_retry_after_a_task_replace_runs_the_new_files_of_the_task(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     queue = dispatcher.queue
     endpoints = LocalCandidateEndpoints(dispatcher)
 
@@ -703,7 +725,9 @@ def test_a_retry_after_a_task_replace_runs_the_new_files_of_the_task(tmp_path: P
 
 
 def test_a_retry_runs_the_rollouts_without_a_score_again_and_ends_the_evaluation_again(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     queue = dispatcher.queue
 
     async def run() -> None:
@@ -764,7 +788,9 @@ def test_a_retry_runs_the_rollouts_without_a_score_again_and_ends_the_evaluation
 
 
 def test_a_retry_of_a_cancelled_evaluation_also_starts_the_rollouts_that_waited(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     queue = dispatcher.queue
 
     async def run() -> None:
@@ -787,6 +813,48 @@ def test_a_retry_of_a_cancelled_evaluation_also_starts_the_rollouts_that_waited(
                 queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(value).to_json()})
             answer = await finished(client, accepted["evaluation_id"])
             assert (answer["state"], answer["mean_score"], answer["error"]) == ("finished", 0.5, None)
+
+    asyncio.run(run())
+
+
+def test_a_retry_of_an_evaluation_that_too_many_failures_stopped_runs_on(tmp_path: Path, monkeypatch) -> None:
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
+    queue = dispatcher.queue
+    queue_retry = queue.retry
+    slow = iter([0.5])
+
+    def retry_with_a_pause(queue_name: str, item_id: str) -> WorkItem | None:
+        # The pause after the first rollout lets the results thread settle while the other rollouts are still failed.
+        item = queue_retry(queue_name, item_id)
+        time.sleep(next(slow, 0.0))
+        return item
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 6,
+                "max_failed_fraction": 0.5,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            for item in queue.items(EVALUATIONS_QUEUE, scenario="s"):
+                queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox refused the task", retryable=False)
+            assert (await finished(client, accepted["evaluation_id"]))["state"] == "failed"
+
+            monkeypatch.setattr(queue, "retry", retry_with_a_pause)
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+            await asyncio.sleep(0.5)
+            answer = await (await client.get(route, headers=AUTH)).json()
+            assert (answer["state"], answer["error"]) == ("running", None)
+            states = {item.state for item in queue.items(EVALUATIONS_QUEUE, scenario="s")}
+            assert states == {"queued"}
 
     asyncio.run(run())
 
@@ -961,7 +1029,9 @@ def tree_item(
 @pytest.mark.integration
 def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item(tmp_path: Path) -> None:
     runtime = ArtifactRuntime()
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=runtime)
+    )
     lab = TreeCallingLab(tmp_path / "logs")
     dispatcher.workers.add(
         EvaluationRolloutWorker(
@@ -1005,7 +1075,9 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
 
 @pytest.mark.integration
 def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     lab = TreeCallingLab(tmp_path / "logs")
 
     async def run() -> None:
@@ -1041,7 +1113,9 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
 def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
     tmp_path: Path, options: dict[str, Any], reason: str
 ) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
 
     async def run() -> None:
         server, _ = evaluating_server(dispatcher, TreeCallingLab(tmp_path / "logs"))
@@ -1065,7 +1139,9 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
 def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_refused(
     tmp_path: Path, monkeypatch
 ) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
 
     async def run() -> None:
         server, _ = evaluating_server(dispatcher, TreeCallingLab(tmp_path / "logs"))
@@ -1095,7 +1171,9 @@ def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_r
 def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_reports_its_progress(
     tmp_path: Path,
 ) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     queue = dispatcher.queue
 
     async def end(score: float | None) -> None:
@@ -1181,7 +1259,9 @@ class NoCallLab(TaskLab):
 
 @pytest.mark.integration
 def test_a_rollout_that_reached_no_model_fails_though_its_verifier_wrote_a_reward(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
 
     async def run() -> None:
         server, _ = evaluating_server(dispatcher, NoCallLab())
@@ -1207,7 +1287,9 @@ def test_a_rollout_that_reached_no_model_fails_though_its_verifier_wrote_a_rewar
 @pytest.mark.integration
 def test_a_candidate_that_inference_cannot_serve_fails_its_rollouts_and_scores_nothing(tmp_path: Path) -> None:
     runtime = ArtifactRuntime()
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=runtime))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=runtime)
+    )
     lab = ModelCallingLab({"add": 1.0})
 
     async def run() -> None:
@@ -1228,7 +1310,9 @@ def test_a_candidate_that_inference_cannot_serve_fails_its_rollouts_and_scores_n
 
 @pytest.mark.integration
 def test_an_artifact_that_is_not_published_is_refused_before_any_rollout(tmp_path: Path, monkeypatch) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
 
     async def run() -> None:
         server, _ = evaluating_server(dispatcher, ModelCallingLab({"add": 1.0}))
@@ -1249,7 +1333,9 @@ def test_an_artifact_that_is_not_published_is_refused_before_any_rollout(tmp_pat
 
 @pytest.mark.integration
 def test_a_request_that_the_scenario_cannot_run_is_refused_before_any_rollout(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
 
     async def run() -> None:
         app = create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher))
@@ -1276,7 +1362,9 @@ def test_a_request_that_the_scenario_cannot_run_is_refused_before_any_rollout(tm
 
 @pytest.mark.unit
 def test_a_changed_rollout_of_a_deleted_scenario_is_no_failure(tmp_path: Path, caplog) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     try:
         evaluations = ArtifactEvaluations(dispatcher)
         with caplog.at_level(logging.ERROR, logger="reef.service.artifact_evaluations"):
@@ -1305,16 +1393,26 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
     current = ArtifactRuntime(any_artifact=False)
     asyncio.run(
         run(
-            dispatcher_for(tmp_path / "current", WeightRecipe(runtime=current)),
+            dispatcher_for(
+                tmp_path / "current",
+                WeightRecipe(),
+                trainer_builder=ComponentTrainers(),
+                live=LiveObjects(runtime=current),
+            ),
             tmp_path / "current",
             "serves only its current",
             harness=False,
         )
     )
-    composed = WeightRecipe(runtime=ArtifactRuntime(), harness=True)
+    composed = WeightRecipe(harness=True)
     asyncio.run(
         run(
-            dispatcher_for(tmp_path / "harness", composed),
+            dispatcher_for(
+                tmp_path / "harness",
+                composed,
+                trainer_builder=ComponentTrainers(),
+                live=LiveObjects(runtime=ArtifactRuntime()),
+            ),
             tmp_path / "harness",
             "artifacts hold no harness",
             harness=True,
@@ -1324,7 +1422,9 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
 
 @pytest.mark.integration
 def test_a_started_evaluation_service_fails_the_evaluations_whose_rollouts_the_queue_lost(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
 
     async def run() -> None:
         evaluations = ArtifactEvaluations(dispatcher)
@@ -1355,7 +1455,9 @@ def test_a_started_evaluation_service_fails_the_evaluations_whose_rollouts_the_q
 
 @pytest.mark.integration
 def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_the_queue(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     new_artifacts = NewArtifacts()
 
     async def run() -> None:
@@ -1381,7 +1483,7 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_th
                 )
             commit = CommitRecord(
                 scenario="s",
-                step=1,
+                commit_number=1,
                 snapshot=snapshot,
                 selection=ArtifactSelection({"weights": artifact_id}),
                 checkpoint=True,
@@ -1417,11 +1519,12 @@ async def settings_of(client: TestClient) -> dict[str, Any]:
 def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_after_a_restart(
     tmp_path: Path,
 ) -> None:
-    recipe = WeightRecipe(runtime=ArtifactRuntime(), activation=activation_reference({"module": "never"}))
+    recipe = WeightRecipe(activation=activation_reference({"module": "never"}))
+    live = LiveObjects(runtime=ArtifactRuntime())
     (tmp_path / "initial").mkdir()
     # The in-memory repository keeps its registrations in its factory: a restart reuses it.
     factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
-    dispatcher = dispatcher_for(tmp_path, recipe, factory)
+    dispatcher = dispatcher_for(tmp_path, recipe, factory, trainer_builder=ComponentTrainers(), live=live)
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
@@ -1449,7 +1552,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
     asyncio.run(run())
     dispatcher.close()
 
-    restarted = dispatcher_for(tmp_path, recipe, factory)
+    restarted = dispatcher_for(tmp_path, recipe, factory, trainer_builder=ComponentTrainers(), live=live)
 
     async def after_restart() -> None:
         async with TestClient(TestServer(create_app(restarted, tokens=TOKEN))) as client:
@@ -1472,7 +1575,9 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
 def test_the_evaluated_activation_needs_artifact_evaluation_in_either_order_and_a_plugin_rule_is_refused(
     tmp_path: Path,
 ) -> None:
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
     evaluated = {"module": "evaluated", "config": {"min_mean_score": 0.5}}
     evaluation = {"harness": {"name": "terminus-2"}}
 
@@ -1504,7 +1609,7 @@ def test_the_evaluated_activation_needs_artifact_evaluation_in_either_order_and_
             assert settings["activation"] == settings["effective_activation"] == evaluated
 
             # A scenario names built-in rules only: the client does not choose which code the service imports.
-            plugin = {"module": "tests.support._activation_rule_plugin:ComponentRule", "config": {"component": "w"}}
+            plugin = {"module": "tests.support.activation_rule_plugin:ComponentRule", "config": {"component": "w"}}
             for refused in (plugin, "never", {"module": "evaluated", "config": {}}):
                 status, _ = await update(client, {"activation": refused})
                 assert status == 400, refused
@@ -1518,7 +1623,12 @@ def test_a_scenario_under_a_deployment_evaluated_rule_without_artifact_evaluatio
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     evaluated = activation_reference({"module": "evaluated", "config": {"min_mean_score": 0.5}})
-    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime(), activation=evaluated))
+    dispatcher = dispatcher_for(
+        tmp_path,
+        WeightRecipe(activation=evaluated),
+        trainer_builder=ComponentTrainers(),
+        live=LiveObjects(runtime=ArtifactRuntime()),
+    )
     with caplog.at_level("WARNING", logger="reef.scenario.registry"):
         dispatcher.get_or_create_scenario("s", allow_implicit_creation=True)
     assert "activates no new artifact" in caplog.text
@@ -1537,28 +1647,28 @@ async def until(client: TestClient, done) -> list[dict[str, Any]]:
 
 
 @pytest.mark.unit
-def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp_path: Path) -> None:
+def test_a_commit_that_publishes_a_checkpoint_reports_a_new_artifact(tmp_path: Path) -> None:
     new_artifacts = NewArtifacts()
     storage = ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), new_artifacts)
     try:
         session = storage.open("s")
         step = {"algorithm_state": {}, "high_water_sequence": 0, "high_water_offset": 0, "scenario": "s"}
         published = CommitRecord(
-            step=1,
+            commit_number=1,
             snapshot=SnapshotRef("a1", None),
             checkpoint=True,
             selection=ArtifactSelection({"model": "a1"}),
             **step,
         )
-        kept = CommitRecord(step=2, snapshot=SnapshotRef("a1", None), checkpoint=False, **step)
-        session.commit_step(expected_step=0, commit=published)
-        session.commit_step(expected_step=1, commit=kept)
+        kept = CommitRecord(commit_number=2, snapshot=SnapshotRef("a1", None), checkpoint=False, **step)
+        session.append_commit(expected_commit_number=0, commit=published)
+        session.append_commit(expected_commit_number=1, commit=kept)
         assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None, "a1")
         assert new_artifacts.queue.empty(), "a step that publishes nothing reports no artifact"
         # An activation, even one that publishes a composed snapshot, and a new training start make no artifact.
         operation = {"high_water_sequence": 0, "high_water_offset": 0, "scenario": "s", "algorithm_state": None}
         activation = CommitRecord(
-            step=3,
+            commit_number=3,
             snapshot=SnapshotRef("a2", "a1"),
             checkpoint=False,
             operation="activate",
@@ -1567,10 +1677,10 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
             **operation,
         )
         start = CommitRecord(
-            step=4, snapshot=SnapshotRef("a1", None), checkpoint=False, operation="train_from", **operation
+            commit_number=4, snapshot=SnapshotRef("a1", None), checkpoint=False, operation="train_from", **operation
         )
-        session.commit_step(expected_step=2, commit=activation)
-        session.commit_step(expected_step=3, commit=start)
+        session.append_commit(expected_commit_number=2, commit=activation)
+        session.append_commit(expected_commit_number=3, commit=start)
         assert new_artifacts.queue.empty(), "an activation or a new training start reports no artifact"
         session.close()
     finally:
@@ -1601,7 +1711,7 @@ def test_automatic_evaluation_uses_published_artifact_ids(component, selected, e
     observer = NewArtifacts()
     commit = CommitRecord(
         scenario="s",
-        step=1,
+        commit_number=1,
         snapshot=SnapshotRef("storage:snapshot", None),
         checkpoint=True,
         algorithm_state={},

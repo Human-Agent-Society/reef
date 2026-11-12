@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 import pytest
 from tests.support.chat_templates import CharTemplate
-from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.opd import OPDRecipe, OPDSamples, OPDSettings
 from recipes.opd.slime import OpdObjective, OpdSettings
@@ -12,14 +11,14 @@ from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TeacherRequest, rendered_job_data
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
-from reef.recipe.registry import build_recipe
+from reef.recipe.loading import build_recipe
 from reef.sample2job import DistillJobData
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill import settings_from_args
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData
 
 QUESTION = [{"role": "user", "content": "Compute 1 + 1."}]
@@ -106,13 +105,12 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
         "recipes.opd.recipe:OPDRecipe",
         {},
         {},
-        **runtime_bindings(),
     )
     assert isinstance(recipe, OPDRecipe)
     assert recipe.report_type is TeacherContextReport
     assert recipe.default_parameters()["trajectory"] == {"objective": "opd"}
     assert OpdObjective.loss_family == "opd"
-    pipeline = recipe.build_pipeline(PipelineContext("math", TeacherContextReport))
+    pipeline = recipe.stages().build(PipelineContext("math", TeacherContextReport))
     assert isinstance(pipeline.record2sample, OPDSamples)
     assert pipeline.record2sample.exclusive_sources, "each report owns its inference records"
     assert isinstance(pipeline.sample2job, DistillJobData)

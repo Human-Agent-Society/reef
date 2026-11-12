@@ -128,7 +128,7 @@ a unit ready when the samples of all its record sets are made.
 
 When a unit is ready, the pipeline saves each of the unit's samples
 (``unit_samples``) as a data item of the scenario's owner that the scenario
-uses (``TrainerSamples.add_record_samples``, RFC #1140). Then the scenario's
+uses (``TrainerSamples.write_record_samples``, RFC #1140). Then the scenario's
 training state records the unit's records as consumed by the trainer. The stage
 then ends the unit (``consume``) and forgets its samples. Sample ``i`` of record
 set ``s`` is the item ``<scenario>.<trainer>:<s>:<i>``, or
@@ -310,32 +310,43 @@ reads the directory (RFC #1140). The jobs queue keeps only a reference to it.
 The directory holds the samples, not the training request: Reef keeps the
 request for its own accounting.
 
-Format 1 of a directory:
+Format 2 of a directory:
 
 .. code:: text
 
-   job.json        {"format": 1, "key", "sample_count", "kind"}
+   job.json        {"format": 2, "key", "sample_count", "kind"}
    samples.jsonl   one sample per line, in job order
-   tasks/<n>/<directory name>/
 
 - ``job.json`` gives the directory's key, its number of samples, and the kind
   of its samples: ``trajectory``, ``task``, or ``null`` without samples.
-- Each line of ``samples.jsonl`` is the entry of ``JobData.to_dict``. A task's
-  ``task_path`` is relative to the directory: ``tasks/<n>/<directory name>``,
-  where ``n`` counts the tasks from 0.
-- ``tasks/`` holds a copy of each task's directory.
+- Each line of ``samples.jsonl`` is the entry of ``JobData.to_dict``, with one
+  difference for a task. The line of a task has no ``task_path``. Its
+  ``files`` names the task's directory in the task file store
+  (``storage.task_file_backend``): ``partition`` and ``digest``, and ``name``,
+  the name of the directory.
+
+The directory holds no file of a task. The task file store keeps the one copy
+of each task's files, so a job of many tasks writes two small files. Each
+task of a job must therefore be in the task file store: ``TaskSample.files``
+names it there, and Reef refuses job data with a task that has no ``files``.
+The samples that Reef makes from imported and generated tasks have it.
 
 A directory does not change after Reef writes it, and several jobs can read
-it, so a component must not write in it. A component reads it with
-``reef.storage.job_data.read_job_data(job.data_dir, job.data_id)``. A
-component that runs the job elsewhere, such as in a container, gives that
-place ``job.data_uri`` and mounts or copies the directory there.
+it, so a component must not write in it. A component reads the data with
+``job.read_data()``. Each task sample of the result has a local
+``task_path``, which the data store took from the task file store when it
+opened the job. The component must not change that directory.
+
+A component that runs the job elsewhere, such as in a container, gives that
+place ``job.data_uri`` and mounts or copies the directory there. That place
+reads ``files`` from each task line and gets the directory from the task file
+store of the deployment by ``partition`` and ``digest``.
 
 The data store keeps the directories (``DataStore.write_job_directory``,
 ``open_job_directory`` and ``delete_unused_job_directories``) in its segment
 store (``storage.segment_backend``), or in
-``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its samples and of the
-files of its tasks (``job_data_key``). So a job of the same samples, such as
+``<agent_record_dir>/job-directories`` when none is set. The key of a directory is the SHA-256 of its lines (``job_data_key``): the
+samples, and the digest of each task's files. So a job of the same samples, such as
 a second job on one dataset, uses the directory that exists and writes
 nothing. The data store records when a job last used each directory, and its
 periodic work (``DataStore.maintain``, which the data service calls) deletes a
@@ -708,7 +719,7 @@ a new recipe. SPADE (``recipes/beta/spade``) is one generator.
 
 ``TaskGenerator`` is in ``reef.recipe.generated_tasks``, and
 ``TaskGenerationRequest`` in ``reef.record2sample.generator``. Reef calls its class method
-``from_config(config, *, scenario, environ)`` once for each scenario. The
+``from_config(config, *, scenario, environ, state)`` once for each scenario. The
 generator gets what it needs from its ``config`` and from these calls only:
 
 - ``async generate(request: TaskGenerationRequest) -> tuple[HarborTask, ...]``
@@ -725,6 +736,32 @@ generator gets what it needs from its ``config`` and from these calls only:
   before, and the process may have restarted since. A generator keeps what it
   needs for each open generation across a restart, and ignores a second call
   for a generation that it already closed. The default keeps nothing.
+
+``state`` is the ``GeneratorState`` of the scenario's generator
+(``reef.recipe.generated_tasks``). A generator keeps there what it must read
+again after a restart, such as its open generations, and keeps no file of its
+own. The state holds text documents by key, and saved directories:
+
+- ``read(key)`` returns the document of ``key``, or ``None``.
+- ``write(key, document)`` saves the document. It replaces an earlier document
+  of the key.
+- ``remove(key)`` removes the document. An unknown key changes nothing.
+- ``keys(prefix="")`` returns the keys that start with ``prefix``, in
+  increasing string order.
+- ``save_files(directory)`` saves a copy of a directory and returns the digest
+  of its files.
+- ``files(digest)`` returns a local directory with the saved files. Do not
+  change it.
+
+Each write is durable and atomic when it returns. The record-to-sample stage
+builds the state from its task store, so the documents are in the deployment's
+database and the saved directories are in the task file store. A restart on
+another machine reads the same state, and an archive of the scenario retires
+it. The generator gets no other part of the task store: it cannot publish a
+task or read the stage's own documents. For work that needs a directory for a
+short time, such as a task under validation, use a temporary directory. A
+config that names a generator is refused when the scenario has no task
+storage.
 
 Each ``GeneratedTaskResult`` is one of four cases, by the candidate's outcome:
 
@@ -850,7 +887,8 @@ publication or rejection, so a retry of a generation uses the saved candidates
 and does not generate the tasks again. Tasks that share a source record get the
 same split, and a published task keeps its split. A task whose sources join
 tasks of both splits is rejected. The store also keeps each train task's first
-rollout result and the generations whose results the generator received. The
+rollout result and the generations whose results the generator received, and,
+as state documents, the generator's own state. The
 scenario's training state counts the tasks that trained.
 
 After a restart, the record-to-sample stage continues with the next generation number.

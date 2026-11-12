@@ -17,6 +17,7 @@ from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
+from reef.core.job_data import TaskFiles
 from reef.storage.sql_records import SQLScenarioDatabase
 from reef.storage.tasks import (
     SPLIT_NAMES,
@@ -24,7 +25,7 @@ from reef.storage.tasks import (
     SplitName,
     StoredTask,
     TaskCandidate,
-    TaskConflict,
+    TaskConflictError,
     TaskFileStore,
     TaskStorage,
     TaskStore,
@@ -38,12 +39,14 @@ class TaskTables:
 
     ``generations`` holds one row for each generation. ``candidates`` holds one row for each saved
     candidate, with the digest of its task files and its outcome: a published candidate has its split.
-    ``documents`` holds one row for each document key with its text.
+    ``documents`` holds one row for each document key with its text. ``state_documents`` holds one row for
+    each state document key with its current text.
     """
 
     generations: Table
     candidates: Table
     documents: Table
+    state_documents: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -89,6 +92,13 @@ def task_tables(metadata: MetaData, *, foreign_key: str | None = None) -> TaskTa
             Column("document_key", Text, primary_key=True),
             Column("document", Text, nullable=False),
         ),
+        state_documents=Table(
+            "task_state_document",
+            metadata,
+            *key_columns(),
+            Column("document_key", Text, primary_key=True),
+            Column("document", Text, nullable=False),
+        ),
     )
 
 
@@ -121,7 +131,7 @@ class SQLTaskStore(TaskStore):
     def begin_generation(self, *, generation: int, source_record_ids: tuple[str, ...]) -> GenerationState:
         requested = GenerationState(generation=generation, source_record_ids=source_record_ids)
         with self.database._transaction(write=True) as connection:
-            self.database._insert_if_absent(
+            self.database._write_if_absent(
                 connection,
                 self.tables.generations,
                 {
@@ -137,11 +147,11 @@ class SQLTaskStore(TaskStore):
             raise TaskStoreError(f"generation {generation} of task store {self.name!r} has other source records")
         return state
 
-    def save_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
+    def write_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
         # Save the files before the rows, so that a saved candidate always has its files. The file
         # store can be slow or remote, so the copies run outside a database transaction.
         candidates = tuple(
-            TaskCandidate(directory.name, self.files.put(self.scenario, directory)) for directory in directories
+            TaskCandidate(directory.name, self.files.write(self.scenario, directory)) for directory in directories
         )
         with self.database._transaction(write=True) as connection:
             state = self.require_generation(connection, generation)
@@ -185,11 +195,11 @@ class SQLTaskStore(TaskStore):
             name = candidate["task_name"]
             for task in self.published_tasks(connection, task_name=name):
                 if task.files_digest != candidate["files_digest"]:
-                    raise TaskConflict(f"task {name!r} is published with other files")
+                    raise TaskConflictError(f"task {name!r} is published with other files")
                 if task.split != split:
-                    raise TaskConflict(f"task {name!r} is published to {task.split}, not {split}")
+                    raise TaskConflictError(f"task {name!r} is published to {task.split}, not {split}")
             if candidate["split"] is None:
-                self.set_outcome(connection, generation, index, split=split)
+                self.write_outcome(connection, generation, index, split=split)
             (published,) = self.published_tasks(connection, task_name=name)
         return published
 
@@ -204,7 +214,7 @@ class SQLTaskStore(TaskStore):
                 return
             if candidate["error"]:
                 raise TaskStoreError(f"candidate {index} of generation {generation} is rejected for another reason")
-            self.set_outcome(connection, generation, index, error=reason)
+            self.write_outcome(connection, generation, index, error=reason)
 
     def complete_generation(self, *, generation: int) -> GenerationState:
         with self.database._transaction(write=True) as connection:
@@ -239,6 +249,9 @@ class SQLTaskStore(TaskStore):
     def path(self, files_digest: str) -> Path:
         return self.files.path(self.scenario, files_digest)
 
+    def task_files(self, files_digest: str) -> TaskFiles:
+        return TaskFiles(self.scenario, files_digest)
+
     def write_document(self, *, key: str, document: str) -> None:
         if not key:
             raise TaskStoreError("a document needs a non-empty key")
@@ -259,6 +272,39 @@ class SQLTaskStore(TaskStore):
                 select(documents.c.document_key, documents.c.document).where(self.matching(documents))
             )
             return {row.document_key: row.document for row in rows}
+
+    def write_state_document(self, *, key: str, document: str) -> None:
+        if not key:
+            raise TaskStoreError("a state document needs a non-empty key")
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=True) as connection:
+            connection.execute(state_documents.delete().where(self.matching(state_documents, document_key=key)))
+            connection.execute(state_documents.insert().values(**self.key, document_key=key, document=document))
+
+    def delete_state_document(self, *, key: str) -> None:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=True) as connection:
+            connection.execute(state_documents.delete().where(self.matching(state_documents, document_key=key)))
+
+    def state_document(self, key: str) -> str | None:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=False) as connection:
+            document: str | None = connection.execute(
+                select(state_documents.c.document).where(self.matching(state_documents, document_key=key))
+            ).scalar()
+        return document
+
+    def state_document_keys(self, *, prefix: str = "") -> tuple[str, ...]:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=False) as connection:
+            keys = connection.execute(
+                select(state_documents.c.document_key).where(self.matching(state_documents))
+            ).scalars()
+            # The prefix test and the order are Python's, so every database gives the same keys.
+            return tuple(sorted(key for key in keys if key.startswith(prefix)))
+
+    def write_files(self, directory: Path) -> str:
+        return self.files.write(self.scenario, directory)
 
     def published_tasks(self, connection: Connection, **columns: object) -> tuple[StoredTask, ...]:
         """Read the published tasks of this store whose candidates have the given column values, in generation and
@@ -322,7 +368,7 @@ class SQLTaskStore(TaskStore):
             raise TaskStoreError(f"generation {generation} of task store {self.name!r} has no candidate {index}")
         return row
 
-    def set_outcome(self, connection: Connection, generation: int, index: int, **outcome: str) -> None:
+    def write_outcome(self, connection: Connection, generation: int, index: int, **outcome: str) -> None:
         """Write the ``split`` or ``error`` of one candidate."""
         candidates = self.tables.candidates
         connection.execute(

@@ -13,19 +13,21 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.support._training_deployment import LocalDeployment
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.trainers import recipe_trainer
+from tests.support.training_deployment import LocalDeployment
 
+from reef.core import plugins
 from reef.core.errors import RuntimeConfigError
 from reef.service.assembly import _training_recipe, connect_training_component
 from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 
-BACKEND = "tests.support._training_deployment:LocalDeployment"
+BACKEND = "tests.support.training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
 
 
@@ -94,20 +96,20 @@ def test_in_process_backend_rejects_other_topologies(tmp_path, overrides):
 
 def test_installed_backend_name_and_dotted_reference_resolve_the_same_definition(monkeypatch):
     point = EntryPoint(name="test-mlx", value=BACKEND, group="reef.training_backends")
-    monkeypatch.setattr(training, "entry_points", lambda **kwargs: (point,))
+    monkeypatch.setattr(plugins, "entry_points", lambda **kwargs: (point,))
     assert isinstance(training.training_deployment_for("test-mlx"), LocalDeployment)
     assert isinstance(training.training_deployment_for(BACKEND), LocalDeployment)
 
 
 @pytest.mark.parametrize("points", [(), (1, 2)])
 def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, points):
-    monkeypatch.setattr(training, "entry_points", lambda **kwargs: points)
+    monkeypatch.setattr(plugins, "entry_points", lambda **kwargs: points)
     with pytest.raises(DeployConfigError, match=r"unknown|ambiguous"):
         training.training_deployment_for("unavailable")
 
 
 def test_a_component_factory_that_builds_no_training_component_is_refused(monkeypatch):
-    from tests.support._training_deployment import component_factory
+    from tests.support.training_deployment import component_factory
 
     from reef.inference.http import InferenceProxyRuntime
 
@@ -115,7 +117,7 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
     monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="must build a TrainingComponent"):
         connect_training_component(
-            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
+            ServiceSettings(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
         )
 
 
@@ -125,17 +127,17 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     config, _ = resolve_deployment_config(
         {**deployment(), "pipeline": {"sample2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
     )
-    recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
+    recipe, live = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     records = memory_records("scenario")
     try:
-        trainer = recipe.build("scenario", records, root=STUB_ROOT)
-        assert trainer.job_loop.component is recipe.training_component
-        assert type(recipe.training_component).__name__ == "LocalRuntime"
+        trainer = recipe_trainer(recipe, live, "scenario", records, root=STUB_ROOT)
+        assert trainer.job_loop.component is live.training_component
+        assert type(live.training_component).__name__ == "LocalRuntime"
         # The deployment's pipeline section sets the job size.
         assert trainer.job_samples == 2
     finally:
-        recipe.runtime.shutdown()
-        recipe.training_component.close()
+        live.runtime.shutdown()
+        live.training_component.close()
         records.close()
 
 
@@ -151,10 +153,10 @@ def test_a_failed_recipe_build_closes_the_component_and_shuts_down_its_runtime(t
     shutdowns = []
     monkeypatch.setattr(StubInferenceRuntime, "shutdown", lambda runtime: shutdowns.append(runtime))
 
-    def refuse(cls, *args, **kwargs):
+    def refuse(*args, **kwargs):
         raise ValueError("bad recipe config")
 
-    monkeypatch.setattr(SAORecipe, "from_resolved_config", classmethod(refuse))
+    monkeypatch.setattr("reef.service.assembly.load_recipe", refuse)
     with pytest.raises(ValueError, match="bad recipe config"):
         _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     assert Path(f"{marker}.closed").exists()
@@ -182,11 +184,16 @@ def test_in_process_serving_boots_on_cpu_without_loading_slime_or_ray(tmp_path):
     raw["reef"] = {"port": port, "ready-timeout": 10}
     config_path = tmp_path / "serve.yaml"
     config_path.write_text(yaml.safe_dump(raw))
+    # The recipe's public half registers its Slime objective by reference: that imports Slime's objective table and
+    # the two modules of its types, and nothing else of the Slime backend.
     script = """
 import sys
+SLIME_REGISTRATION = {'reef.train.slime_backend.' + name for name in ('objectives', 'schedule', 'signals')}
 class NoGPU:
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'torch','slime','ray','sglang','megatron','mlx'} or fullname.startswith('reef.train.slime_backend'):
+        if fullname.split('.')[0] in {'torch','slime','ray','sglang','megatron','mlx'} or (
+            fullname.startswith('reef.train.slime_backend.') and fullname not in SLIME_REGISTRATION
+        ):
             raise RuntimeError('unexpected execution dependency: ' + fullname)
 sys.meta_path.insert(0, NoGPU())
 from reef.cli import main
@@ -227,3 +234,58 @@ main(sys.argv[1:])
                 process.wait()
         assert process.returncode == 0, log_path.read_text()
     assert Path(str(marker) + ".closed").exists()
+
+
+def test_the_inference_service_of_a_slime_deployment_loads_no_training_framework(tmp_path):
+    # Slime states its facts from its options, so the inference service builds its engines' runtime from them and
+    # never builds the Slime component: the process imports none of the training stack.
+    # Supply the cookbook and test support; keep Reef resolved from the installed wheel.
+    (tmp_path / "recipes").symlink_to(Path(__file__).resolve().parents[2] / "recipes", target_is_directory=True)
+    (tmp_path / "tests").symlink_to(Path(__file__).resolve().parents[1], target_is_directory=True)
+    script = """
+import asyncio, sys
+from dataclasses import replace
+from pathlib import Path
+BLOCKED = {'torch', 'slime', 'ray', 'sglang', 'megatron', 'transformers', 'mlx'}
+class NoTrainingStack:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in BLOCKED:
+            raise RuntimeError('unexpected training dependency: ' + fullname)
+sys.meta_path.insert(0, NoTrainingStack())
+from reef.service.components import build_component_app
+from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.service.deploy.service_config import service_config_from_mapping
+directory = Path(sys.argv[1])
+raw = {
+    'recipe': {'implementation': 'recipes.sao.recipe:SAORecipe'},
+    'inference': {'model-path': '/models/demo', 'num-gpus': 2},
+    'training': {
+        'backend': 'slime',
+        'ray-address': 'ray://head:10001',
+        'options': {'global-batch-size': 4, 'lr': 1e-6, 'megatron-lora-rank': 8},
+    },
+    'pipeline': {'sample2job': {'config': {'job_samples': 2}}},
+}
+config, _ = resolve_deployment_config(raw, None, directory / 'serve.yaml')
+settings = replace(
+    service_config_from_mapping(config),
+    agent_record_dir=str(directory / 'records'),
+    artifact_work_dir=str(directory / 'work'),
+    artifact_cache_dir=str(directory / 'cache'),
+    artifact_backend={'module': 'tests.support.artifact_backend_plugin:MemoryArtifactBackend', 'config': {'label': 'm'}},
+)
+app = build_component_app('inference', settings, environ={})
+app.freeze()
+asyncio.run(app.cleanup())
+loaded = sorted(name for name in sys.modules if name.split('.')[0] in BLOCKED)
+assert not loaded, loaded
+assert 'reef.train.slime_backend.component' not in sys.modules
+assert 'reef.train.slime_backend.facts' in sys.modules
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "stores")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

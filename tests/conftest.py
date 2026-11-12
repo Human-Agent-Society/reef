@@ -22,11 +22,13 @@ import pytest
 from reef.dispatcher import Dispatcher
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import register_loss_family
+from reef.train.slime_backend.objectives import resolve_objective
+from reef.train.tinker_backend.objectives import resolve_objective as resolve_tinker_objective
 
 # The source suite exercises the repository cookbook as well as Reef core.
 # Load those packages explicitly: production ``import reef`` deliberately does
-# not, while importing a selected cookbook package registers its objective and
-# lazy loss-family reference in this test process. The built-in SFT and
+# not, while importing a selected cookbook package registers its objective by
+# reference in this test process. The built-in SFT and
 # dataset recipes are loaded the same way: ``import reef`` does not import them either.
 for _cookbook_package in (
     "reef.recipe.sft",
@@ -41,6 +43,12 @@ for _cookbook_package in (
     "recipes.tttd",
 ):
     importlib.import_module(_cookbook_package)
+
+# A method's loss family registers when its objective's module is imported, which a deployment does when it
+# resolves the recipe's default objective. Do the same here, so that a test can name a cookbook family directly.
+for _cookbook_objective in ("openclawrl", "opd", "sao", "sdft", "sdpo", "tttd"):
+    resolve_objective(_cookbook_objective)
+resolve_tinker_objective("tttd")
 
 
 class PgAlgorithm(SlimeAlgorithm):

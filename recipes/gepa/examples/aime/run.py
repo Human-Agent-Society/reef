@@ -20,7 +20,7 @@ The work directory resumes: the scenario's commit history, which carries the
 method's ``archive.json``, the harness history under ``harness/``, and the
 checkpoints survive a restart. Each round reads the archive from the latest
 commit, settles it from the history, and draws the iteration's plan exactly as
-the method will (``archive_for_step``, ``Archive.plan``), so the problems it
+the method will (``archive_for_job``, ``Archive.plan``), so the problems it
 sends are the minibatch GEPA's order names. ``--dry-run`` boots the recipe and
 prints the plan without a model call.
 """
@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import dataclasses
 import json
 import os
 import shutil
@@ -50,7 +49,7 @@ from harness.heldout import CheckpointedEvaluator
 from recipes.gepa import GEPA
 from recipes.gepa.archive import Archive
 from recipes.gepa.components import texts_of
-from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
+from recipes.gepa.method import ARCHIVE_FILE, archive_for_job
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
@@ -64,7 +63,8 @@ from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.recipe.registry import build_recipe
+from reef.recipe.loading import build_recipe
+from reef.scenario.live_objects import LiveObjects, harness_models
 from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
@@ -106,11 +106,12 @@ RESULTS = HERE / "results" / "quickstart-seed-0-2026-09-01" / "manifest.json"
 
 def load_recipe(
     tasks: list[str], *, api_key: str, seed: int = 0, trainset_size: int
-) -> tuple[str, HarnessEvolutionRecipe]:
-    """The recipe gepa.yaml declares, with the validation split filled in.
+) -> tuple[str, HarnessEvolutionRecipe, LiveObjects]:
+    """The name of the recipe gepa.yaml declares, the recipe with the validation split filled in, and the live
+    objects that run it: the runtime and the harness training component.
 
-    This driver is the deployment: it owns the provider endpoint and hands it
-    to the recipe as its runtime, the way ``reef.upstream_url`` does in a served
+    This driver is the deployment: it owns the provider endpoint and holds it
+    as the runtime, the way ``reef.upstream_url`` does in a served
     deployment. The method never sees the endpoint or the key.
     """
     config = load_config(HERE / "gepa.yaml")
@@ -137,25 +138,51 @@ def load_recipe(
         api_key=api_key,
         inference_timeout_s=RUN_TIMEOUT_S,
     )
-    recipe = build_recipe(str(sections["implementation"]), config=sections, runtime=runtime)
-    if not isinstance(recipe, HarnessEvolutionRecipe) or not isinstance(recipe.method, GEPA):
+    recipe = build_recipe(str(sections["implementation"]), config=sections)
+    if not isinstance(recipe, HarnessEvolutionRecipe):
+        raise SystemExit("gepa.yaml must name the harness evolution recipe with recipes.gepa:GEPA as its method")
+    # The recipe is configuration; the harness training component builds the method and the scorer from it.
+    built = HarnessTrainingComponent.from_settings(
+        recipe.harness_settings(), harness_models(recipe, LiveObjects(runtime=runtime)), environ=os.environ
+    )
+    if not isinstance(built.method, GEPA):
         raise SystemExit("gepa.yaml must name the harness evolution recipe with recipes.gepa:GEPA as its method")
     # Importable classes alone do not carry the driver's registered answers into spawn or Ray workers. The
     # example's own hooks become one snapshot of the answers and contexts; a hook the config names otherwise stays.
     snapshot = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
-    scorer = snapshot if isinstance(recipe.scorer, aime.AIMEAnswerScorer) else recipe.scorer
-    feedback = snapshot if isinstance(recipe.method.feedback, aime.AIMEFeedback) else recipe.method.feedback
-    return recipe.name, dataclasses.replace(recipe, scorer=scorer, method=GEPA(recipe.method.settings, feedback))
+    scorer = snapshot if isinstance(built.scorer, aime.AIMEAnswerScorer) else built.scorer
+    feedback = snapshot if isinstance(built.method.feedback, aime.AIMEFeedback) else built.method.feedback
+    component = HarnessTrainingComponent(
+        built.settings,
+        built.models,
+        method=GEPA(built.method.settings, feedback),
+        executor=built.executor,
+        scorer=scorer,
+        collector=built.collector,
+        agent=built.agent,
+    )
+    return recipe.name, recipe, LiveObjects(runtime=runtime, harness_component=component)
+
+
+def harness_component(live: LiveObjects) -> HarnessTrainingComponent:
+    """The harness training component that ``load_recipe`` built, which ``live`` holds."""
+    component = live.harness_component
+    if not isinstance(component, HarnessTrainingComponent):
+        raise TypeError("the example's recipe runs its steps on its own harness training component")
+    return component
 
 
 @contextmanager
-def worker_runtime(recipe: HarnessEvolutionRecipe):
+def worker_runtime(recipe: HarnessEvolutionRecipe, live: LiveObjects):
     """Ship only the example's harness package; nodes provide Reef and Pi.
 
     Ray reads RAY_ADDRESS when set; without it, start a local Ray runtime.
     Do not tear down an externally owned runtime when embedding this driver.
     """
-    selection, _ = evaluation_selection(recipe.scorer, recipe.worker_executor)
+    scorer = harness_component(live).scorer
+    if scorer is None:
+        raise TypeError("the example's evaluation needs a scorer")
+    selection, _ = evaluation_selection(scorer, recipe.worker_executor)
     if selection.settings.backend != "ray":
         yield
         return
@@ -201,6 +228,7 @@ class RunService:
         scenario: str,
         recipe_name: str,
         recipe: HarnessEvolutionRecipe,
+        live: LiveObjects,
         run_dir: Path,
         upstream_url: str,
         upstream_key: str,
@@ -210,11 +238,13 @@ class RunService:
         self.scenario = scenario
         self.recipe_name = recipe_name
         self.recipe = recipe
+        self.live = live
         self.port = port
         self.base_url = f"http://127.0.0.1:{port}"
         self.dispatcher = Dispatcher(
             recipe,
             InMemoryRepositoryBackend.factory(directory=run_dir / "artifacts"),
+            live=live,
             local_artifact_dir=run_dir / "staged",
             scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
             coordination=memory_coordination(),
@@ -270,15 +300,13 @@ class RunService:
         initial state before any."""
         scenario = self.dispatcher.get_or_create_scenario(self.scenario)
         assert scenario is not None
-        component = self.recipe.harness_component
-        if not isinstance(component, HarnessTrainingComponent):
-            raise TypeError("the example's recipe runs its steps on its own harness training component")
+        component = harness_component(self.live)
         last = JobLoopState.from_dict(scenario.trainer.state).last_job
         return component.state_after(None if last is None else last.job_id)[1]
 
     def history(self) -> History:
         """The scenario's harness history (every candidate, run and decision) as the latest step left it."""
-        return History(self.recipe.state_root(self.scenario) / HARNESS_COMPONENT / HISTORY_DIR)
+        return History(self.recipe.evolution.component_state_dir(self.scenario, HARNESS_COMPONENT) / HISTORY_DIR)
 
     def records(self) -> RecordStore:
         scenario = self.dispatcher.get_or_create_scenario(self.scenario)
@@ -389,7 +417,7 @@ def committed_archive(service: RunService, tasks: Sequence[str], served: Harness
     """The archive as the next step starts from it: the latest commit's, settled from the history, current with
     ``served``."""
     state = service.committed_state()
-    return archive_for_step(
+    return archive_for_job(
         state.method_files.get(ARCHIVE_FILE),
         service.history(),
         tasks,
@@ -493,7 +521,7 @@ def main() -> None:
     if args.dry_run:
         # A dry run proves the recipe boots from gepa.yaml with the real
         # validation set; the placeholder credential is never sent anywhere.
-        recipe_name, _ = load_recipe(tasks, api_key="dry-run", seed=args.seed, trainset_size=len(trainset))
+        recipe_name, _, _ = load_recipe(tasks, api_key="dry-run", seed=args.seed, trainset_size=len(trainset))
         plan = {
             "recipe": recipe_name,
             "scenario": SCENARIO,
@@ -516,12 +544,13 @@ def main() -> None:
 
     key = provider_key()
     WORK.mkdir(parents=True, exist_ok=True)
-    recipe_name, recipe = load_recipe(tasks, api_key=key, seed=args.seed, trainset_size=len(trainset))
-    with worker_runtime(recipe):
+    recipe_name, recipe, live = load_recipe(tasks, api_key=key, seed=args.seed, trainset_size=len(trainset))
+    with worker_runtime(recipe, live):
         service = RunService(
             scenario=SCENARIO,
             recipe_name=recipe_name,
             recipe=recipe,
+            live=live,
             run_dir=WORK,
             upstream_url=aime.OPENAI_BASE_URL,
             upstream_key=key,

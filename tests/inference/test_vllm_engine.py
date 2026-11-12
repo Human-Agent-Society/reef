@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from reef.inference.vllm import engine as engine_module
-from reef.inference.vllm.config import REEF_CONNECTOR_CONFIG, VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 from reef.inference.vllm.engine import ReefVLLMEngine
 
 
@@ -48,7 +48,7 @@ def engine(monkeypatch):
     http = FakeHTTP()
     monkeypatch.setattr(engine_module.requests, "get", http.get)
     monkeypatch.setattr(engine_module.requests, "post", http.post)
-    config = VLLMConfig("model", 2, 2, 8, options={"max-model-len": 4096, "enable_lora": True})
+    config = VLLMSettings("model", 2, 2, 8, options={"max-model-len": 4096, "enable_lora": True})
     engine = ReefVLLMEngine(config, rank=0, gpu_ids=(6, 7))
     engine.server_host, engine.server_port = "10.0.0.5", 18900
     return engine, http
@@ -62,7 +62,7 @@ def test_server_command_line_carries_placement_reef_requirements_then_options(en
     assert arguments[arguments.index("--max-model-len") + 1] == "4096"
     assert "--enable-lora" in arguments
     assert "--no-enable-prefix-caching" in arguments
-    assert json.loads(arguments[arguments.index("--kv-transfer-config") + 1]) == REEF_CONNECTOR_CONFIG
+    assert "--kv-transfer-config" not in arguments
     environment = engine.server_environment()
     assert environment["CUDA_VISIBLE_DEVICES"] == "6,7"
     assert environment["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] == "1"
@@ -167,7 +167,7 @@ def test_init_launches_the_server_and_waits_for_its_health_route(monkeypatch):
         engine_module, "wait_ready", lambda url, proc, timeout, path: waited.append((url, proc, timeout, path))
     )
     monkeypatch.setattr(engine_module, "check_server_owner", lambda *args: waited.append(args))
-    engine = ReefVLLMEngine(VLLMConfig("model", 1, 1, 1, startup_timeout=7), rank=0, gpu_ids=(0,))
+    engine = ReefVLLMEngine(VLLMSettings("model", 1, 1, 1, startup_timeout=7), rank=0, gpu_ids=(0,))
     engine.init("10.0.0.5", 18900)
     assert engine.get_url() == "http://10.0.0.5:18900"
     assert launched[0][0] == "model" and launched[0][2]["CUDA_VISIBLE_DEVICES"] == "0"

@@ -31,9 +31,10 @@ The map, one subpackage per job:
 ``gateway``
     the loopback gateway an agent process reaches its model and its tools
     through, which meters each call.
-``delivery``
-    the file tree that serves a snapshot to a client: its source tree rendered
-    for the scenario's adapter.
+``sync``
+    a harness between a client's machine and Reef: the file tree that serves a
+    snapshot to a client, rendered for the scenario's adapter, and the import
+    and merge of the client's files into a tree.
 
 This package depends on core values, runtime and artifact contracts, and
 sandbox execution, never on training, recipes, scenario coordination, or the

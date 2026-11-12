@@ -92,10 +92,11 @@ A weight recipe is four pieces plus the class that binds them.
 alongside this page. Its ``recipe.py`` and ``processor.py``
 total fewer than 200 lines; the ``slime/`` package holds its objective and its loss family.
 
-Every weight recipe takes a ``training_component`` as its first positional
-argument and an inference ``runtime`` as a keyword argument. Reef builds both
-from the deployment config and passes them in. The training component runs
-the recipe's jobs; the runtime serves the weights that Reef publishes.
+A recipe is configuration: it has no training component and no inference
+runtime. Reef builds both from the deployment config, and the process that
+runs a service holds them (``reef.scenario.live_objects.LiveObjects``). The
+training component runs the recipe's jobs; the runtime serves the weights
+that Reef publishes.
 
 Configure it
 ~~~~~~~~~~~~
@@ -165,12 +166,34 @@ optional forms. Object fields can use ``config_field(default_factory=dict)``.
 Keep range and cross-field checks in ``__post_init__``. Do not repeat scalar
 conversion in the service layer or recipe hooks.
 
-``WeightTrainingRecipe.service_config`` translates the flat deployment layout
-and rejects unknown fields; it does not convert scalar values. The service
-resolves those fields before it builds the training component and passes them
-to ``from_resolved_config``. ``from_environment`` uses that same resolution
-path for standalone recipe construction. Custom construction hooks should
-consume the resolved values; ``_recipe_kwargs`` owns non-field sections.
+A recipe class declares its configuration and does not load itself. One
+loader, ``reef.recipe.loading.load_recipe``, makes the recipe value from the
+declarations of the class:
+
+- ``config_field`` fields, from ``recipe.config`` and their environment
+  fallbacks.
+- ``section_field`` fields. Each holds one config section, parsed into the
+  ``Settings`` dataclass of the field's annotation.
+- ``reader_field`` fields. Each names a ``ConfigReader``, whose ``read``
+  returns the field's value from the config, the environment and the parsed
+  sections. Use one for a value that no single section holds, such as a file
+  that a section names. The value is configuration, never an object that
+  runs.
+- ``section_defaults``, a class attribute with the class's own defaults for
+  its sections. The loader merges the deployment's config over them, key by
+  key. Reefine sets its method, seed and evaluation defaults this way.
+- ``refused_sections``, a class attribute that maps a config section to an
+  error message. The loader raises ``RecipeConfigError`` with that message
+  when the deployment sets the section. SAO refuses ``optimization`` this way.
+- The ``pipeline`` and ``activation`` sections, which every recipe has.
+
+For a weight-training deployment,
+``reef.service.deploy.training.training_recipe_config`` translates the flat
+deployment layout and rejects unknown fields; it does not convert scalar
+values. The service resolves the fields before it builds the training
+component and passes them to the loader. ``build_recipe`` loads a recipe from
+a class reference for standalone use. Do not add a loading method to a recipe
+class: check the relation between fields in ``__post_init__``.
 
 Train each kind of sample with its own method
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -368,10 +391,14 @@ serving of a deployment that sets no ``inference.serving`` and no engine
 setting.
 
 The ``TrainingComponentFactory`` that the config's ``type`` names returns the
-``TrainingComponent`` alone. It runs in the HTTP service's process; Reef
-passes it to the recipe as ``training_component``. The backend does not build
+``TrainingComponent`` alone. It runs in the HTTP service's process, which
+holds it beside the recipe (``LiveObjects.training_component``); the recipe
+does not hold it. The backend does not build
 serving: the ``inference`` section selects it, and the component's
 ``artifact_format`` tells the serving runtime what each snapshot holds.
+The factory's ``facts(config, model_path, environ)`` states the backend's
+``TrainingBackendFacts`` from the same config without building the component;
+see `Facts without a component <executors.rst#facts-without-a-component>`__.
 `Training components <executors.rst#training-components>`__ defines the
 component contract, and `Serving saved weights
 <executors.rst#serving-saved-weights>`__ defines how published weights reach

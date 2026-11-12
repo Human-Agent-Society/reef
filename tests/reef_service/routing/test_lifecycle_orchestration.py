@@ -16,7 +16,7 @@ import yaml
 from reef.service.components import COMPONENT_APPS, build_component_app
 from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.containers import ContainerRuntime
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 
 pytestmark = pytest.mark.unit
 
@@ -208,7 +208,7 @@ def test_managed_routing_refuses_standalone_components(
         pytest.fail("a managed deployment started a standalone component")
 
     monkeypatch.setattr(COMPONENT_APPS[component], "build", refuse_start)
-    settings = ServiceConfig(recipe="recipe", routing_manifest=str(tmp_path / "manifest.yaml"))
+    settings = ServiceSettings(recipe="recipe", routing_manifest=str(tmp_path / "manifest.yaml"))
     with pytest.raises(ValueError, match="requires reef serve without --component"):
         build_component_app(component, settings)
     with pytest.raises(orchestrator.DeployConfigError, match="requires reef serve without --component"):
@@ -223,7 +223,7 @@ def test_managed_object_config_prepares_controller_and_private_child(
     class Controller:
         """Stands in for the routing controller: records what the orchestrator passes and calls, nothing else."""
 
-        def __init__(self, settings: ServiceConfig, runtime: ContainerRuntime) -> None:
+        def __init__(self, settings: ServiceSettings, runtime: ContainerRuntime) -> None:
             observed["deployment_id"] = settings.routing_deployment.deployment_id
             self.directory = tmp_path / "generation"
             self.stop_requested = False

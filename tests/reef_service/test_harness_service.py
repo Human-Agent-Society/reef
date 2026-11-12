@@ -7,14 +7,13 @@ coordination store, as two processes on one host do.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 from contextlib import closing
 from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import PI_SEED, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import harness_repository
-from tests.support.harness_steps import PI_SEED, harness_recipe
 
 import reef.service.harness_imports as harness_imports
 from reef.dispatcher import Dispatcher
@@ -33,10 +32,11 @@ INFERENCE_URL = "http://inference.example:8902"
 
 def open_service(tmp_path: Path, repository, components: frozenset[str]) -> Dispatcher:
     """One process's dispatcher over the shared stores and ``repository``; each process builds its own recipe."""
-    recipe = harness_recipe(tmp_path, lambda workspace, services: None)
+    recipe, live = rebuilt_recipe(*harness_recipe(tmp_path, lambda workspace, services: None))
     return Dispatcher(
-        dataclasses.replace(recipe),
+        recipe,
         repository,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
         components=components,

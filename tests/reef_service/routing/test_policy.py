@@ -42,7 +42,7 @@ from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, RoutingPu
 from reef.service.deploy.routing.deployment_controller import (
     RoutingDeploymentController,
     RoutingDeploymentError,
-    RoutingReadinessTimeout,
+    RoutingReadinessTimeoutError,
 )
 from reef.service.deploy.routing.policy import (
     PolicyState,
@@ -55,11 +55,11 @@ from reef.service.deploy.routing.policy import (
 from reef.service.deploy.routing.reef_lifecycle_client import (
     LifecycleStatus,
     RoutingControlError,
-    RoutingControlTimeout,
+    RoutingControlTimeoutError,
 )
 from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
 from reef.service.request_service import RequestService
 from reef.service.routing import RoutingAdapter, RoutingSnapshot
@@ -79,9 +79,11 @@ def write_source(
     scenario: str = "coding",
     domain_classifier: dict[str, object] | None = None,
     domain_target: str | None = None,
+    image: str | None = "semantic-router@sha256:" + "a" * 64,
     **student_change: str,
 ) -> Path:
-    """A one-Scenario source; ``domain_target`` adds a ``math_request`` domain rule after the keyword rule."""
+    """A one-Scenario source; ``domain_target`` adds a ``math_request`` domain rule after the keyword rule, and
+    ``image`` None omits the router image."""
     targets = {
         "student": {"provider_model": "student-v1", "revision": "r1", "url": url, **student_change},
         "teacher": {"provider_model": "teacher-v2", "revision": "r1", "url": url},
@@ -89,7 +91,7 @@ def write_source(
     rules: list[dict[str, object]] = [{"name": rule, "keywords": [keyword], "target": "teacher"}]
     if domain_target is not None:
         rules.append({"name": "math_request", "domains": ["math"], "target": domain_target})
-    deployment: dict[str, object] = {"semantic_router_image": "semantic-router@sha256:" + "a" * 64}
+    deployment: dict[str, object] = {} if image is None else {"semantic_router_image": image}
     if domain_classifier is not None:
         deployment["domain_classifier"] = domain_classifier
     manifest = {
@@ -326,7 +328,8 @@ def domain_case(tmp_path: Path) -> Iterator[PolicyCase]:
 
 
 @contextlib.contextmanager
-def started_case(tmp_path: Path, source: Path) -> Iterator[PolicyCase]:
+def started_case(tmp_path: Path, source: Path, *, resolved_image: str | None = None) -> Iterator[PolicyCase]:
+    """A ready case; ``resolved_image`` is the image that startup resolved for a source that omits one."""
     actions: list[str] = []
     policy = RoutingDeploymentSettings(
         deployment_id="unit-routing",
@@ -335,7 +338,7 @@ def started_case(tmp_path: Path, source: Path) -> Iterator[PolicyCase]:
         finalization_timeout_seconds=0.05,
         container_stop_timeout_seconds=0.05,
     )
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe", host="127.0.0.1", routing_manifest=str(source), tokens=("service",), routing_deployment=policy
     )
     runtime = FakeRuntime(actions)
@@ -343,10 +346,14 @@ def started_case(tmp_path: Path, source: Path) -> Iterator[PolicyCase]:
     controller.registry.acquire()
     controller.directory = tmp_path / "generation"
     controller.ownership = controller.registry.prepare("generation-one", tmp_path / "generation")
+    # As ``prepare`` freezes it: the startup source's own image, or the one it resolved.
+    controller.semantic_router_image = resolved_image or RoutingSnapshot.load(source).semantic_router_image
     startup = generate(
         source,
         controller.directory,
-        ManagedRoutingRender(policy, "unit-routing", controller.ownership.owner_id, "generation-one"),
+        ManagedRoutingRender(
+            policy, "unit-routing", controller.ownership.owner_id, "generation-one", controller.semantic_router_image
+        ),
     )
     controller.snapshot_version = startup.version
     control = FakeControl(actions)
@@ -474,7 +481,7 @@ def test_a_lost_policy_open_reply_is_confirmed_without_opening_a_new_cycle(
     def lose_reply(action: str | None = None, **kwargs) -> LifecycleStatus:
         status = original(action, **kwargs)
         if action == "open":
-            raise RoutingControlTimeout("lost reply")
+            raise RoutingControlTimeoutError("lost reply")
         return status
 
     monkeypatch.setattr(case.control, "request", lose_reply)
@@ -541,6 +548,57 @@ def test_incompatible_or_unchanged_sources_leave_the_serving_policy_untouched(
         assert last["reason"].endswith("restart the deployment")
     assert case.control.snapshot_version == case.controller.snapshot_version == case.startup_version
     # Nothing reaches the child or the router: not even a candidate check.
+    assert case.router.puts == [] and case.actions == []
+
+
+#: The local image ID that startup resolved for a source without an image.
+RESOLVED_IMAGE = "sha256:" + "c" * 64
+
+
+@pytest.fixture
+def resolved_case(tmp_path: Path) -> Iterator[PolicyCase]:
+    """A ready case whose source omits the router image, which startup resolved to ``RESOLVED_IMAGE``."""
+    source = write_source(tmp_path / "source.json", image=None)
+    with started_case(tmp_path, source, resolved_image=RESOLVED_IMAGE) as started:
+        yield started
+
+
+def generated_image(manifest: Path) -> str:
+    return str(yaml.safe_load(manifest.read_text(encoding="utf-8"))["deployment"]["semantic_router_image"])
+
+
+def test_an_update_of_a_source_without_an_image_keeps_the_resolved_image(resolved_case: PolicyCase) -> None:
+    case = resolved_case
+    compose = yaml.safe_load((case.controller.directory / "compose.yaml").read_text(encoding="utf-8"))
+    assert compose["services"]["semantic-router"]["image"] == RESOLVED_IMAGE
+    assert generated_image(case.controller.directory / "manifest.yaml") == RESOLVED_IMAGE
+    write_source(case.source, keyword="escalate", rule="escalated", image=None)
+    reload(case)
+    # The update applies in place with the frozen image; nothing resolved or built one.
+    assert case.controller.snapshot_version != case.startup_version
+    assert generated_image(Path(case.state()["committed"]["manifest"])) == RESOLVED_IMAGE
+    assert "escalate" in case.router.document and "resolve" not in case.actions
+
+
+@pytest.mark.parametrize(
+    ("image", "event"),
+    [
+        (RESOLVED_IMAGE, "policy_unchanged"),
+        ("sha256:" + "d" * 64, "policy_rejected"),
+        # The same hex as a repository digest is another reference.
+        ("semantic-router@sha256:" + "c" * 64, "policy_rejected"),
+    ],
+)
+def test_naming_an_image_in_a_resolved_deployments_source_changes_nothing_or_needs_a_restart(
+    resolved_case: PolicyCase, image: str, event: str
+) -> None:
+    case = resolved_case
+    write_source(case.source, image=image)
+    reload(case)
+    assert case.events()[-1] == event
+    if event == "policy_rejected":
+        assert last_event(case)["reason"] == "the router image or deployment settings changed; restart the deployment"
+    assert case.control.snapshot_version == case.controller.snapshot_version == case.startup_version
     assert case.router.puts == [] and case.actions == []
 
 
@@ -617,7 +675,7 @@ def test_an_endpoint_change_republishes_the_child_although_the_router_runs_the_s
     [
         RoutingControlError("REEF candidate check returned HTTP 409: requires environment variable NEW_KEY"),
         RoutingControlError("REEF candidate check returned HTTP 503: target_unavailable"),
-        RoutingControlTimeout("REEF candidate check timed out"),
+        RoutingControlTimeoutError("REEF candidate check timed out"),
     ],
     ids=["refused", "provider_unavailable", "timeout"],
 )
@@ -828,7 +886,7 @@ def test_a_trickling_router_holds_neither_a_reopening_nor_an_update_past_its_pha
     case.actions.clear()
     case.controller.ready_deadline = time.monotonic() + 0.3
     started = time.monotonic()
-    with pytest.raises(RoutingReadinessTimeout):
+    with pytest.raises(RoutingReadinessTimeoutError):
         case.controller.wait_ready(initial=False)
     assert time.monotonic() - started < 1 and "control:open" not in case.actions
     case.controller.policy = replace(case.controller.policy, ready_timeout_seconds=0.3)

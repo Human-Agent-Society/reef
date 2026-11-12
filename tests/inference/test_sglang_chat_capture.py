@@ -7,11 +7,11 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from tests.support import tokenizers
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
-from reef.inference.chat import ReasoningStreamSplitter
 from reef.inference.interfaces import InferenceArtifact
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.service.streaming import stream_record
@@ -30,16 +30,8 @@ class RecordingClient(SGLangGenerateClient):
         return self._parser_type()
 
 
-class FakeTokenizer:
-    def __init__(self) -> None:
-        self.rendered_messages = None
-
-    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
-        assert add_generation_prompt is True
-        if not tokenize:
-            return "<user></user><assistant>"
-        self.rendered_messages = (messages, kwargs)
-        return [10, 11]
+class FakeTokenizer(tokenizers.FakeTokenizer):
+    """The shared fake, which decodes the first token only and keeps special tokens, as these tests read it."""
 
     def decode(self, token_ids, *, skip_special_tokens=False):
         assert skip_special_tokens is False
@@ -103,23 +95,6 @@ def test_reasoning_split_follows_sglang_qwen3_parser(text, force_reasoning, mess
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("deltas", "force_reasoning", "parts"),
-    [
-        (["<thi", "nk>a", "</th", "ink>\n\nb"], False, [("thinking", "a"), ("text", "b")]),
-        (["<think>a</think>b"], True, [("thinking", "a"), ("text", "b")]),
-        (["a", "<tool_", "call>x"], True, [("thinking", "a"), ("text", "<tool_call>x")]),
-        (["still thin", "king"], True, [("thinking", "still thin"), ("thinking", "king")]),
-        (["plain ", "text"], False, [("text", "plain "), ("text", "text")]),
-    ],
-)
-def test_reasoning_stream_split_follows_sglang_qwen3_parser(deltas, force_reasoning, parts) -> None:
-    splitter = ReasoningStreamSplitter(enabled=True, force_reasoning=force_reasoning)
-    streamed = [part for delta in deltas for part in splitter.feed(delta)]
-    assert [*streamed, *splitter.finish()] == parts
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
     ("template_kwargs", "message"),
     [
         ({}, {"role": "assistant", "content": "", "reasoning_content": "The answer is 5."}),
@@ -153,7 +128,7 @@ def test_chat_facade_splits_a_tag_free_reply_by_the_rendered_prompt(tmp_path, te
                 tokenizer=HybridThinkingTokenizer(),
             )
             response = await backend.inference(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/chat/completions",
                 {
                     "model": "served-model",
@@ -212,7 +187,7 @@ def test_handler_chat_template_kwargs_apply_when_the_request_omits_them(tmp_path
                 tokenizer=HybridThinkingTokenizer(),
                 chat_template_kwargs={"enable_thinking": False},
             )
-            response = await backend.inference(_artifact(tmp_path), "/v1/chat/completions", payload)
+            response = await backend.inference(local_artifact(tmp_path), "/v1/chat/completions", payload)
         finally:
             await server.close()
 
@@ -227,13 +202,13 @@ def test_handler_chat_template_kwargs_must_not_carry_tools() -> None:
         SGLangInferenceHandler("http://engine", model_path="model", chat_template_kwargs={"tools": []})
 
 
-def _artifact(tmp_path) -> InferenceArtifact:
+def local_artifact(tmp_path) -> InferenceArtifact:
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
     return InferenceArtifact.from_artifact(Artifact.local(checkpoint))
 
 
-def _live_artifact() -> InferenceArtifact:
+def live_artifact() -> InferenceArtifact:
     return InferenceArtifact("artifact:engine:6")
 
 
@@ -318,7 +293,7 @@ def test_chat_facade_answers_from_engine_native_ids_without_retokenizing(tmp_pat
                 tokenizer=tokenizer,
             )
             response = await backend.inference(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/chat/completions",
                 {
                     "model": "served-model",
@@ -344,20 +319,17 @@ def test_chat_facade_answers_from_engine_native_ids_without_retokenizing(tmp_pat
 
 
 @pytest.mark.unit
-def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) -> None:
+def test_chat_facade_reports_the_engine_weight_version_as_the_runtime_load_id(tmp_path) -> None:
     body = {
         "text": "answer",
         "meta_info": {
             "finish_reason": {"type": "stop"},
             "completion_tokens": 3,
             "output_token_logprobs": [[-0.1, 20], [-0.2, 21], [-0.3, 22]],
-            # Tokenizer metadata can move after the final decode;
-            # the scheduler-owned list remains exact.
             "weight_version": "engine:8",
-            "_reef_token_runtime_load_ids": ["engine:6", "engine:7", "engine:7"],
         },
     }
-    artifact = _artifact(tmp_path)
+    artifact = local_artifact(tmp_path)
 
     async def run() -> None:
         async def generate(request):
@@ -388,97 +360,11 @@ def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) 
             await server.close()
 
         assert "training" not in response
-        assert response["choices"][0]["meta_info"]["runtime_load_id"] == "engine:7"
+        assert response["choices"][0]["meta_info"]["runtime_load_id"] == "engine:8"
 
     asyncio.run(run())
-    captured = SGLangGenerateClient().parse(artifact, body)
+    captured = SGLangGenerateClient().parse(body)
     assert captured.rollout_log_probs == [-0.1, -0.2, -0.3]
-    assert captured.token_runtime_load_ids == ["engine:6", "engine:7", "engine:7"]
-
-
-@pytest.mark.unit
-def test_nonstream_fallback_uses_the_scheduler_stamped_final_version() -> None:
-    async def run() -> None:
-        async def generate(request):
-            return web.json_response(
-                {
-                    "text": "answer",
-                    "meta_info": {
-                        "finish_reason": {"type": "stop"},
-                        "output_token_logprobs": [[-0.1, 20]],
-                        # The tokenizer may move first while draining output.
-                        "weight_version": "engine:7",
-                        "_reef_token_runtime_load_ids": ["engine:6"],
-                    },
-                }
-            )
-
-        app = web.Application()
-        app.router.add_post("/generate", generate)
-        server = TestServer(app)
-        await server.start_server()
-        try:
-            backend = SGLangInferenceHandler(
-                str(server.make_url("")).rstrip("/"),
-                model_path="model",
-                tokenizer=FakeTokenizer(),
-            )
-            response = await backend.inference(
-                _live_artifact(),
-                "/v1/chat/completions",
-                {
-                    "messages": [{"role": "user", "content": "hello"}],
-                    "max_completion_tokens": 1,
-                },
-            )
-        finally:
-            await server.close()
-
-        assert response["choices"][0]["meta_info"]["runtime_load_id"] == "engine:6"
-        assert "training" not in response
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_live_chat_rejects_tokenizer_only_runtime_load_ids() -> None:
-    async def run() -> None:
-        async def generate(request):
-            return web.json_response(
-                {
-                    "text": "answer",
-                    "meta_info": {
-                        "finish_reason": {"type": "stop"},
-                        "completion_tokens": 1,
-                        "output_token_logprobs": [[-0.1, 20]],
-                        "weight_version": "engine:7",
-                    },
-                }
-            )
-
-        app = web.Application()
-        app.router.add_post("/generate", generate)
-        server = TestServer(app)
-        await server.start_server()
-        try:
-            backend = SGLangInferenceHandler(
-                str(server.make_url("")).rstrip("/"),
-                model_path="model",
-                tokenizer=FakeTokenizer(),
-            )
-            with pytest.raises(ValueError, match="scheduler-stamped token runtime load IDs"):
-                await backend.inference(
-                    _live_artifact(),
-                    "/v1/chat/completions",
-                    {
-                        "messages": [{"role": "user", "content": "hello"}],
-                        "max_completion_tokens": 1,
-                    },
-                )
-        finally:
-            await server.close()
-
-    asyncio.run(run())
 
 
 @pytest.mark.unit
@@ -545,7 +431,7 @@ def test_chat_facade_parses_tool_calls(tmp_path) -> None:
                 }
             ]
             response = await backend.inference(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/chat/completions",
                 {
                     "messages": [{"role": "user", "content": "read README"}],
@@ -612,7 +498,7 @@ def test_anthropic_facade_normalizes_messages_and_returns_no_training_block(tmp_
                 tokenizer=tokenizer,
             )
             response = await backend.inference(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/messages",
                 {
                     "model": "served-model",
@@ -664,7 +550,7 @@ def test_anthropic_count_tokens_uses_the_exact_template_without_exposing_trainin
 
     response = asyncio.run(
         backend.inference(
-            _artifact(tmp_path),
+            local_artifact(tmp_path),
             "/v1/messages/count_tokens",
             {
                 "model": "served-model",
@@ -728,7 +614,7 @@ def test_anthropic_facade_converts_tool_history_and_sampled_tool_use(tmp_path) -
                 client=parser_factory,
             )
             response = await backend.inference(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/messages",
                 {
                     "model": "served-model",
@@ -819,7 +705,6 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
                     "weight_version": "engine:6",
-                    "_reef_token_runtime_load_ids": ["engine:6"],
                 },
             }
             await response.write(f"data: {json.dumps(event)}\n\n".encode())
@@ -837,7 +722,7 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
                 tokenizer=FakeTokenizer(),
             )
             stream = await backend.inference_stream(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/chat/completions",
                 {
                     "messages": [{"role": "user", "content": "hello"}],
@@ -880,7 +765,6 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_the_message(t
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
                     "weight_version": "engine:6",
-                    "_reef_token_runtime_load_ids": ["engine:6"],
                 },
             }
             await response.write(f"data: {json.dumps(first)}\n\n".encode())
@@ -893,7 +777,6 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_the_message(t
                     "completion_tokens": 2,
                     "output_token_logprobs": [[-0.25, 21]],
                     "weight_version": "engine:8",
-                    "_reef_token_runtime_load_ids": ["engine:7"],
                 },
             }
             await response.write(f"data: {json.dumps(final)}\n\n".encode())
@@ -911,7 +794,7 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_the_message(t
                 tokenizer=FakeTokenizer(),
             )
             stream = await backend.inference_stream(
-                _live_artifact(),
+                live_artifact(),
                 "/v1/messages",
                 {
                     "model": "served-model",
@@ -963,7 +846,6 @@ def test_streaming_records_an_engine_abort_that_the_service_detects(path) -> Non
                     "completion_tokens": 1,
                     "output_token_logprobs": [[-0.5, 20]],
                     "weight_version": "engine:6",
-                    "_reef_token_runtime_load_ids": ["engine:6"],
                 },
             }
             await response.write(f"data: {json.dumps(event)}\n\n".encode())
@@ -979,7 +861,7 @@ def test_streaming_records_an_engine_abort_that_the_service_detects(path) -> Non
                 str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
             )
             stream = await backend.inference_stream(
-                _live_artifact(),
+                live_artifact(),
                 path,
                 {
                     "model": "served-model",
@@ -1011,7 +893,6 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                         "finish_reason": None,
                         "completion_tokens": 1,
                         "output_token_logprobs": [[-0.5, 20]],
-                        "_reef_token_runtime_load_ids": ["engine:6"],
                     },
                 },
                 {
@@ -1021,7 +902,6 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                         "finish_reason": {"type": "stop"},
                         "completion_tokens": 2,
                         "output_token_logprobs": [[-0.25, 21]],
-                        "_reef_token_runtime_load_ids": ["engine:7"],
                     },
                 },
             ]
@@ -1042,7 +922,7 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
                 force_reasoning=True,
             )
             stream = await backend.inference_stream(
-                _live_artifact(),
+                live_artifact(),
                 "/v1/messages",
                 {
                     "model": "served-model",
@@ -1125,7 +1005,7 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
                 client=RecordingClient(FakeStreamingToolParser),
             )
             stream = await backend.inference_stream(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/messages",
                 {
                     "model": "served-model",
@@ -1210,7 +1090,7 @@ def test_chat_facade_rejects_requests_it_cannot_capture_exactly(tmp_path, overri
         )
         with pytest.raises(ValueError, match=message):
             await backend.inference(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hello"}], **overrides},
             )
@@ -1257,7 +1137,7 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path, split_rea
                 tokenizer=FakeTokenizer(),
             )
             response = await backend.inference(
-                _artifact(tmp_path),
+                local_artifact(tmp_path),
                 "/v1/chat/completions",
                 {
                     "model": "served-model",

@@ -11,8 +11,8 @@ from time import monotonic
 from typing import Any
 
 from reef.execution.executor.base import (
-    ExecutorConfig,
     ExecutorFuture,
+    ExecutorLaunch,
     SubmittingExecutor,
     check_rank,
     remaining_time,
@@ -88,7 +88,7 @@ class UniProcExecutor(SubmittingExecutor):
     def from_workers(cls, workers: Sequence[Any], *, owned: bool = False) -> UniProcExecutor:
         if len(workers) > 1:
             raise ValueError("UniProcExecutor accepts at most one worker; use mp for multiple workers")
-        executor = cls(ExecutorConfig(backend=cls))
+        executor = cls(ExecutorLaunch(backend=cls))
         executor._workers = tuple(workers)
         executor._owned = owned
         return executor

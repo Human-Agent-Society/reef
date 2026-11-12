@@ -7,8 +7,8 @@ import sys
 
 import pytest
 
-from reef.inference.sglang import deployment
 from reef.inference.sglang.executor import SGLangExecutor
+from reef.inference.sglang.service import SGLangInferenceService
 
 
 @pytest.mark.parametrize("executor", [None, "auto", "ray"])
@@ -24,19 +24,12 @@ def test_native_inference_factory_accepts_plain_input_without_starting_workers(m
         "num_gpus": 2,
         "gpus_per_engine": 1,
         "gpus_per_node": 2,
-        "models": (
-            {
-                "name": "actor",
-                "groups": ({"worker_type": "regular", "num_gpus": 2, "gpus_per_engine": 1},),
-            },
-        ),
         "executor": executor,
         "executor_options": {"custom": "value"},
     }
-    service = deployment.create_inference(options)
+    service = SGLangInferenceService.from_config(options)
     assert service.config.executor is SGLangExecutor
-    assert service.config.models[0].name == "actor"
-    assert service.config.models[0].groups[0].num_gpus == 2
+    assert service.config.engine_count == 2
     assert service.config.executor_options == {"custom": "value"}
     assert options["executor"] == executor
     service.close()
@@ -45,56 +38,21 @@ def test_native_inference_factory_accepts_plain_input_without_starting_workers(m
 @pytest.mark.parametrize("executor", ["mp", "uni"])
 def test_native_inference_factory_rejects_non_native_executor_aliases(executor):
     with pytest.raises(ValueError, match="SGLang inference requires ray"):
-        deployment.create_inference(
+        SGLangInferenceService.from_config(
             {"model_path": "model", "num_gpus": 1, "gpus_per_engine": 1, "gpus_per_node": 1, "executor": executor}
         )
 
 
-@pytest.mark.parametrize("pause_mode", ["retract", "in_place"])
-def test_only_regular_engines_retract_their_requests_at_a_load(pause_mode):
-    values = {
-        "model_path": "model",
-        "num_gpus": 2,
-        "gpus_per_engine": 1,
-        "gpus_per_node": 2,
-        "pause_mode": pause_mode,
-        "models": (
-            {
-                "name": "actor",
-                "groups": (
-                    {"worker_type": "prefill", "num_gpus": 1, "gpus_per_engine": 1},
-                    {"worker_type": "decode", "num_gpus": 1, "gpus_per_engine": 1},
-                ),
-            },
-        ),
-    }
-    if pause_mode == "in_place":
-        # A PD deployment keeps in-flight KV across a load and remains valid.
-        deployment.create_inference(values).close()
-        return
-    with pytest.raises(ValueError, match="regular SGLang engines"):
-        deployment.create_inference(values)
-
-
-def test_native_factory_validates_lora_receiver_schema_before_allocation(monkeypatch):
-    checks = []
-    monkeypatch.setattr(deployment, "require_lora_tensor_request_schema", lambda: checks.append("tensor"))
-
-    def incompatible_schema():
-        raise RuntimeError("receiver cannot load distributed LoRA")
-
-    monkeypatch.setattr(deployment, "require_lora_distributed_request_schema", incompatible_schema)
-    with pytest.raises(RuntimeError, match="cannot load distributed LoRA"):
-        deployment.create_inference(
-            {
-                "model_path": "model",
-                "num_gpus": 1,
-                "gpus_per_engine": 1,
-                "gpus_per_node": 1,
-                "options": {"enable_lora": True},
-            }
-        )
-    assert checks == ["tensor"]
+@pytest.mark.parametrize(
+    ("capacities", "message"),
+    [
+        ({"num_gpus": 3, "gpus_per_engine": 2, "gpus_per_node": 4}, "whole number of engines"),
+        ({"num_gpus": 4, "gpus_per_engine": 4, "gpus_per_node": 2}, "must fit on one node"),
+    ],
+)
+def test_native_factory_refuses_engines_that_do_not_fit_the_reservation(capacities, message):
+    with pytest.raises(ValueError, match=message):
+        SGLangInferenceService.from_config({"model_path": "model", **capacities})
 
 
 def test_native_factory_imports_and_builds_with_training_stack_blocked():
@@ -105,8 +63,8 @@ def test_native_factory_imports_and_builds_with_training_stack_blocked():
             """
 import sys
 sys.modules.update(dict.fromkeys(('slime', 'megatron', 'torch', 'reef.train.slime_backend')))
-from reef.inference.sglang.deployment import create_inference
-service = create_inference(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
+from reef.inference.sglang.service import SGLangInferenceService
+service = SGLangInferenceService.from_config(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
 assert service.config.options['disable_radix_cache'] is True
 service.close()
 """,

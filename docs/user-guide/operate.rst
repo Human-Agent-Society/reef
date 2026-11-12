@@ -25,7 +25,7 @@ Check health and status
 
 It reports these values for every scenario:
 
-- the step counter and the latest committed step outcome
+- the commit number (``commit_number``) and the outcome of the latest training commit (``last_training_commit``)
 - the artifact that answers the scenario's requests (``served_artifact_id``)
 - whether a job's data is waiting, and the processor's state
 - whether inference is admitted or paused while a snapshot loads
@@ -60,9 +60,8 @@ The starting artifacts come from one of two sources:
 
 - The deployment's default start, when the create request names no artifact item. Reef writes it from the configuration:
 
-  - The ``slime`` backend with full weights writes the model that ``inference.model-path`` names. Each scenario's starting artifact holds a full copy of the model's files, about 2 bytes per parameter in bf16. A Git LFS remote stores each file once.
-  - The ``slime`` backend with LoRA writes an adapter whose weights are zero. It serves the model unchanged.
-  - The ``tinker`` backend writes the checkpoint of its untrained adapter, which stays on the Tinker service.
+  - The ``slime`` and ``tinker`` backends write a base root: one file, ``base.json``, which names the base model and the settings of its adapter. The starting artifact holds no weight file. Serving it serves the base model, and training from it starts at the base model.
+  - The ``spindle_full`` backend writes a reference to the base revision on Hugging Face.
   - A harness recipe writes the files of its seed tree: ``evolution.seed``, else the recipe's own seed. Without a seed, the starting artifact is empty.
   - A recipe of several components writes each component's default start under its name.
 - An artifact item of the scenario's owner (`Choose a scenario's start`_).
@@ -70,6 +69,10 @@ The starting artifacts come from one of two sources:
 The creation row's ``source`` is ``{"kind": "default", "inputs": {...}}``, with the configuration values that decide the default start, such as the model and the seed's checksum. For an item, it is ``{"kind": "item", "item": ..., "uri": ..., "version": ...}``, as an import records it.
 
 A new trainer starts its first job from its starting artifact. A train-from or the trainer's own training step changes the start later (`Train from an artifact`_). Activate that artifact to serve it again, or train from it to start training again from it; the ``slime`` backend refuses train-from, as it refuses every artifact.
+
+Control writes the default start from the training backend's configuration. It asks no training component and calls no training service for it. With ``tinker``, the first job from a base root makes a new LoRA from ``training.options.seed``, so every such job begins with equal weights. With ``seed: null``, the service chooses the initial adapter. The training service then saves one untrained adapter in its ``state-dir`` when the first such job runs, and every such job starts from it.
+
+A scenario that an earlier Reef created keeps its starting artifact: a copy of the model, an adapter whose weights are zero, or the checkpoint of an untrained adapter. Reef serves it and trains from it as before.
 
 A change of the configuration does not change an existing scenario. It keeps its stored starting artifacts, and a new scenario gets the new default start. A start that no longer fits the configuration fails only its own scenario: the runtime refuses to activate it, or the training component refuses to start from it, with that component's message. The ``slime`` backend trains only the weights that its workers load from ``inference.model-path``. It refuses to create a scenario from an artifact item. A scenario whose starting artifact came from other inputs does not load, and the error names both inputs. Reef refuses a scenario that an earlier Reef stored with a shared base snapshot (``reef-scenario/4`` metadata). Create such a scenario again.
 
@@ -226,10 +229,10 @@ For a scenario with several components, restore an earlier complete selection:
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
-     -H "Content-Type: application/json" -d '{"step": 12}' \
+     -H "Content-Type: application/json" -d '{"commit_number": 12}' \
      "$REEF_URL/reef/scenarios/code-repair/restore"
 
-Choose a step from ``GET /reef/scenarios/code-repair/operations``, or use step 0 for the starting artifacts. Reef restores all active component IDs together and appends a ``restore`` operation. It creates no artifacts and leaves the training starts unchanged. The answer's ``components`` gives the restored mapping. Poll startup status before sending inference requests.
+Choose a commit number from ``GET /reef/scenarios/code-repair/operations``, or use 0 for the starting artifacts. Reef restores all active component IDs together and appends a ``restore`` operation. It creates no artifacts and leaves the training starts unchanged. The answer's ``components`` gives the restored mapping. Poll startup status before sending inference requests.
 
 Activation alone does not last under the default rule. The trainer still continues from its training start, and Reef activates the next artifact that it makes. To go back to an older artifact for good, activate it and do one of these:
 
@@ -261,7 +264,7 @@ Track experiments with W&B
 
 Tracking is optional and off by default; ``observability.wandb`` in `Configuration <../reference/configuration.rst#experiment-tracking>`__ lists every key. Export ``WANDB_API_KEY`` before starting the stack; there is no key field, and Reef refuses Slime's ``--wandb-key`` flag so a credential never enters a command line or a run config.
 
-What you see in W&B: one group per scenario and one run per scenario, plus a new run after every train-from, so the training from each new start is its own curve. An activation does not end a run. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/step`` that joins it to the commit history, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
+What you see in W&B: one group per scenario and one run per scenario, plus a new run after every train-from, so the training from each new start is its own curve. An activation does not end a run. Every training result lands on the run-local ``train/step`` axis carrying the monotonic ``reef/commit_number`` that joins it to the commit history, and the commit metrics record ``experiment/run_id``, so a Reef version leads to its run and the run's ``reef/training_job_id`` leads back. A scenario with several trainers prefixes each step's metrics with its component name, on the same ``train/step`` axis, and records the name as ``reef/component``; the run summary then names the last trainer that committed and its job. Reef sends each event from a background thread after its commit lands, in commit order, so a slow tracker does not delay serving or training. Tracking failures are logged and never fail a training step or its commit. Events still queued at shutdown are sent before the tracker closes.
 
 The same run also receives ``operations/*`` every 10 seconds, plotted against
 ``operations/time_seconds``. Use these panels to inspect unread records,
@@ -316,7 +319,7 @@ After a step commits, ``/reef/status`` reports its scenario's
 ``error``. Repository revisions stay internal.
 The ``state`` is ``synchronized`` when the backend head names the chain tip,
 ``pending`` when updating it failed, or ``conflict`` when another writer moved it to an
-unrelated release. The committed step remains successful. Before another commit,
+unrelated snapshot. The committed step remains successful. Before another commit,
 Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
@@ -407,6 +410,14 @@ on its command line. A process keeps its working copy of the artifact
 repository there, and two processes in one working copy break each other's
 fetches.
 
+**Training dependencies.** The inference service builds no training component
+for the ``slime``, ``tinker`` and ``spindle_full`` backends. It reads what it
+needs about the backend from the config. With ``slime``, its environment needs
+no Slime, Megatron, Ray, PyTorch or Transformers. A training backend plugin
+states these facts too (`Facts without a component
+<../developer-guide/executors.rst#facts-without-a-component>`__), so the
+inference service builds no component for it either.
+
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
 coding agent and the evaluation runs. Install the adapter's binary and the
@@ -490,8 +501,11 @@ inference service never creates a scenario: create it first with
   is pending or starting and no route can serve it. A failed startup returns
   ``503`` with ``inference_start_failed`` until a retry of the startup
   succeeds.
-* ``502`` when the engine fails or cannot be reached, and ``504`` when it does
-  not answer within ``inference.timeout-s``.
+* the engine's own ``4xx`` and message when the engine refuses the request, for
+  example a prompt longer than the model's context. An agent reads it to end or
+  compact its run.
+* ``502`` when the engine fails otherwise or cannot be reached, and ``504`` when
+  it does not answer within ``inference.timeout-s``.
 * ``409`` when the engine answers with another model name or aborts the
   request twice. The service reads the row again and retries once, for
   example during a change of the served model.
@@ -604,13 +618,6 @@ scenario gets a new identifier. The same retention settings apply across all
 active and archived stores in the configured schema, while preserving active
 records and retry hashes.
 
-When you upgrade, Reef imports the model configuration files that earlier
-versions kept in ``agent_record_dir`` into the storage backend. Reef then moves
-the imported files to ``agent_record_dir/archived/imported-*``. Reef does not
-read the ``*.commits.jsonl`` files of earlier versions. A deployment upgraded
-from such a version recovers each scenario from its last checkpointed release,
-as after a lost commit history.
-
 A change from one backend to another does not move records or commit history.
 Use a new deployment directory or schema for a new backend.
 
@@ -664,7 +671,7 @@ gives the necessary behavior. With a plugin backend, Reef does not use Git LFS
 and does not need its tools. Do not set ``storage.artifact-repository``: Reef
 refuses that configuration, because the plugin reads its own config.
 
-A change from one backend to another does not move releases. Keep the old
+A change from one backend to another does not move snapshots. Keep the old
 store readable while scenarios refer to its snapshots, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
 
@@ -923,12 +930,12 @@ a storage plugin. Reef calls ``from_config(config)`` to make the plugin. The
 plugin implements two methods:
 
 - ``check_creation(scenario, registered_count=...)``: to refuse a new
-  scenario, raise ``reef.core.errors.ScenarioLimitReached`` (HTTP 409).
+  scenario, raise ``reef.core.errors.ScenarioLimitReachedError`` (HTTP 409).
 - ``admit_load(scenario, loaded=...)``: return a ``LoadAdmission``. Its
   ``unload_count`` is the number of loaded scenarios that Reef must unload
   first. Its ``candidates`` are the scenarios that Reef tries, in that order.
   Reef unloads only idle candidates. If too few candidates are idle, Reef
-  refuses the load with ``reef.core.errors.ScenarioCapacityFull`` (HTTP 503).
+  refuses the load with ``reef.core.errors.ScenarioCapacityFullError`` (HTTP 503).
   The plugin can also raise that error itself.
 
 Reef calls the plugin before it creates a scenario and before it loads one.
@@ -940,22 +947,18 @@ refuses that configuration.
 Upgrade from a Reef that wrote older formats
 --------------------------------------------
 
-This Reef reads only ``reef-commit/8`` commit records and ``reef-scenario/7``
-scenario metadata. It also reads no older record locator, consumption receipt,
-queued work item or ``release_id`` selector. A scenario with older data does not
-load, and its error names the format. Reef does not change or delete that data.
+This Reef reads only the formats that it writes: ``reef-commit/9`` commit
+records, ``reef-scenario/8`` scenario metadata, and the current tables of the
+record database, the data store and the coordination store. It does not
+upgrade a store that an older Reef wrote.
 
-To keep a scenario, rewrite its commit records with the last Reef that has
-``reef migrate-commits``, before you upgrade to this Reef:
+A scenario with an older commit record or older scenario metadata does not
+load, and its error names the format. A PostgreSQL record schema of another
+version stops the start with ``unsupported PostgreSQL record schema version``.
+Reef does not change or delete older data.
 
-#. Stop every Reef process that writes to the deployment.
-#. Back up the deployment (see `Back up a deployment`_).
-#. Run ``reef migrate-commits -c <config>``, and then run it with ``--apply``.
-#. Upgrade Reef, and upgrade ``reef-client`` on each machine with an install.
-
-The command does not rewrite stored records or Git history. A scenario that
-holds an older record locator or a snapshot without an artifact ID does not load
-after the upgrade, so create it again.
+To move to this Reef from one that wrote older formats, use a new deployment
+directory and, for PostgreSQL, a new schema. Then create the scenarios again.
 
 Back up a deployment
 --------------------

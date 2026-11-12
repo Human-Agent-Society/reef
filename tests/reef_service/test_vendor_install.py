@@ -1,5 +1,5 @@
 """Server-side vendor resolution of the harness binary: the pin gate, the
-vendor command, the install prefix, and the backend a recipe builds on it.
+vendor command, the install prefix, and the backend that the harness training component builds on it.
 
 Hermetic: the npm-kind tests shim ``npm`` on PATH and run the real
 subprocess path; the git-kind test records the install steps instead of
@@ -12,15 +12,21 @@ import os
 import stat
 import sys
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.support.harness_jobs import (
+    PI_FAKE,
+    build_harness_backend,
+    changed_rules,
+    harness_recipe,
+    make_pi_binary,
+    rebuilt_recipe,
+)
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import PI_FAKE, build_harness_backend, changed_rules, harness_recipe, make_pi_binary
 
 from reef.execution.executor.config import ExecutorSettings
-from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import (
     DEFAULT_PREFIX_ROOT,
@@ -257,7 +263,7 @@ def _backend(
     executor: ProgramExecutor | None = None,
     worker_executor: ExecutorSettings | None = None,
 ) -> HarnessBackend:
-    """The pi backend a recipe builds with ``binary``; ``None`` resolves the vendor's binary as the build runs."""
+    """The pi backend that the harness training component builds with ``binary``; ``None`` resolves the vendor's binary as the build runs."""
     fields: dict = {}
     if executor is not None:
         fields["executor"] = executor
@@ -267,8 +273,8 @@ def _backend(
     def method(workspace, services):
         return TreePatch(changed_rules("marker rules\n"))
 
-    recipe = replace(harness_recipe(tmp_path, method, binary=binary), **fields)
-    return build_harness_backend(recipe, "demo")
+    recipe, live = rebuilt_recipe(*harness_recipe(tmp_path, method, binary=binary), **fields)
+    return build_harness_backend(recipe, live, "demo")
 
 
 def _step(backend: HarnessBackend) -> TrainingCommit:
@@ -422,7 +428,7 @@ def test_vendor_binary_runs_in_a_real_sandbox_with_a_readonly_install(monkeypatc
     sandbox = SandboxExecutor()
     try:
         sandbox.preflight()
-    except SandboxUnavailable as error:
+    except SandboxUnavailableError as error:
         pytest.skip(str(error))
     monkeypatch.setenv(PREFIX_ENV, str(tmp_path / "install"))
     prefix = install_prefix(get_adapter("pi"))

@@ -5,18 +5,19 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from tests.support._threshold_processor import threshold_pipeline
+from tests.support.polling import wait_until
 from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.threshold_processor import threshold_pipeline
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import ScenarioCapacityFull, ScenarioLimitReached
+from reef.core.errors import ScenarioCapacityFullError, ScenarioLimitReachedError
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.scenario import Scenario
@@ -50,21 +51,24 @@ class StepJobs(StubTrainingComponent):
         return (SavedCheckpoint(0, str(path), str(path)),)
 
 
-@dataclass(frozen=True)
-class StepRecipe(Recipe):
-    backend: StepJobs | None = None
+class StepTrainers(OneTrainerBuilder):
+    """Builds a trainer whose jobs run on ``backend``, on the trainer's own thread; None builds one that trains nothing."""
 
-    def build(
+    def __init__(self, backend: StepJobs | None) -> None:
+        self.backend = backend
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
         return Trainer.build(
             scenario,
@@ -90,13 +94,14 @@ def make_dispatcher(
     initial.mkdir(exist_ok=True)
     (initial / "model.txt").write_text("initial", encoding="utf-8")
     return Dispatcher(
-        StepRecipe(backend=backend),
+        Recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=admission,
         scenario_idle_unload_seconds=idle_unload_seconds,
         coordination=memory_coordination(),
+        trainer_builder=StepTrainers(backend),
     )
 
 
@@ -121,20 +126,13 @@ def loaded_names(dispatcher: Dispatcher) -> list[str]:
     return [row["scenario"] for row in dispatcher.list_scenarios() if row["loaded"]]
 
 
-def wait_for(condition, timeout_seconds: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while not condition():
-        assert time.monotonic() < deadline, "the condition did not become true"
-        time.sleep(0.01)
-
-
 def trained(dispatcher: Dispatcher, name: str, step: int) -> Scenario:
     """Accept one scored pair, and wait until the local worker commits the job of ``step``: its submission, its
-    checkpoint and its end, scenario step ``3 * step``."""
+    checkpoint and its end, commit number ``3 * step``."""
     current = dispatcher.get_or_create_scenario(name)
     assert current is not None
     dispatcher.accept_records(scored_pair(name, step))
-    wait_for(lambda: current.scenario_step == 3 * step and not current.trainer.holds_untrained_records())
+    wait_until(lambda: current.commit_number == 3 * step and not current.trainer.holds_untrained_records())
     return current
 
 
@@ -143,18 +141,18 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
     dispatcher = make_dispatcher(tmp_path, backend=StepJobs(tmp_path / "candidates"))
     try:
         before = trained(dispatcher, "math", 1)
-        artifacts = before.snapshot_queries.snapshot_rows(before.scenario_step)
+        artifacts = before.snapshot_queries.snapshot_rows(before.commit_number)
 
         # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
-        wait_for(lambda: dispatcher.unload_if_idle("math"))
+        wait_until(lambda: dispatcher.unload_if_idle("math"))
         assert loaded_names(dispatcher) == []
         assert [row["scenario"] for row in dispatcher.list_scenarios()] == ["math"]
         assert dispatcher.build_training_status()["loaded_scenarios"] == 0
 
         after = dispatcher.get_or_create_scenario("math")
         assert after is not None and after is not before
-        assert after.scenario_step == 3
-        assert after.snapshot_queries.snapshot_rows(after.scenario_step) == artifacts
+        assert after.commit_number == 3
+        assert after.snapshot_queries.snapshot_rows(after.commit_number) == artifacts
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)
@@ -167,7 +165,7 @@ def test_idle_unload_runs_after_the_configured_idle_time(tmp_path) -> None:
     dispatcher = make_dispatcher(tmp_path, idle_unload_seconds=0.05)
     try:
         dispatcher.accept_record(scored_pair("math", 1)[0])
-        wait_for(lambda: loaded_names(dispatcher) == [])
+        wait_until(lambda: loaded_names(dispatcher) == [])
         assert dispatcher.get_or_create_scenario("math", allow_implicit_creation=False) is not None
     finally:
         dispatcher.close()
@@ -242,7 +240,7 @@ def test_full_service_refuses_a_load_when_no_scenario_is_idle(tmp_path) -> None:
         assert busy is not None
         measurement = busy.operations.start("ingest/write")
 
-        with pytest.raises(ScenarioCapacityFull) as refused:
+        with pytest.raises(ScenarioCapacityFullError) as refused:
             dispatcher.get_or_create_scenario("b")
 
         assert refused.value.retry_after_seconds > 0
@@ -268,7 +266,7 @@ def test_concurrent_loads_share_the_load_limit(tmp_path) -> None:
 
     def load(name: str) -> None:
         # Timing decides which load is refused. The test checks only the limit.
-        with suppress(ScenarioCapacityFull):
+        with suppress(ScenarioCapacityFullError):
             dispatcher.get_or_create_scenario(name)
 
     try:
@@ -293,9 +291,9 @@ def test_registration_limit_refuses_a_new_scenario_and_stores_nothing(tmp_path) 
 
         # A registered scenario loads again. The limit counts registrations, not loads.
         assert dispatcher.get_or_create_scenario("a") is not None
-        with pytest.raises(ScenarioLimitReached, match=r"reef\.max_scenarios"):
+        with pytest.raises(ScenarioLimitReachedError, match=r"reef\.max_scenarios"):
             dispatcher.get_or_create_scenario("b")
-        with pytest.raises(ScenarioLimitReached):
+        with pytest.raises(ScenarioLimitReachedError):
             dispatcher.create_scenario("b")
 
         assert not dispatcher.has_scenario("b")
