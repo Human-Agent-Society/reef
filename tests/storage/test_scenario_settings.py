@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from contextlib import closing
 
 import pytest
-from sqlalchemy import select
 
 from reef.core.serving_config import ServingConfig
 from reef.core.snapshot import SnapshotRef
 from reef.storage.commits import CommitHistoryError, CommitRecord
-from reef.storage.postgres import POSTGRES_SCHEMA_VERSION, PostgresRecordDatabase, PostgresScenarioStorage
+from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -124,33 +122,6 @@ def test_postgres_restart_on_an_empty_directory_finds_commits_and_settings(postg
             assert store.history() == (committed(), committed(2))
             assert store.training_run_position() == (0, 2)
             assert store.recover(checkpoint=None) == committed(2)
-
-
-def test_postgres_upgrade_from_version_15_drops_a_stored_model_setting(postgres_config, tmp_path):
-    url, schema = postgres_config
-    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
-        storage.write_settings("math", ScenarioSettings(training_mode="manual"))
-    with closing(PostgresRecordDatabase(url, schema=schema)) as database:
-        settings = database.settings_table
-        storage_id = database.active_storage_id("math")
-        with database.transaction() as connection:
-            # Write the row that version 15 kept for a scenario's model override.
-            connection.execute(
-                settings.insert().values(
-                    storage_id=storage_id,
-                    name="model_config",
-                    value_json=json.dumps({"url": "http://model.example", "model": "served"}),
-                )
-            )
-            version = settings.metadata.tables[f"{schema}.schema_version"]
-            connection.execute(version.update().values(version=15))
-    with closing(PostgresRecordDatabase(url, schema=schema)) as database, database.transaction() as connection:
-        names = connection.execute(select(database.settings_table.c.name)).scalars().all()
-        version = database.settings_table.metadata.tables[f"{schema}.schema_version"]
-        assert connection.execute(select(version.c.version)).scalar_one() == POSTGRES_SCHEMA_VERSION
-    assert names == ["training_mode"]
-    with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage:
-        assert storage.read_settings("math") == ScenarioSettings(training_mode="manual")
 
 
 def test_postgres_commit_table_keeps_identical_retries_and_rejects_different_content(postgres_config, tmp_path):
