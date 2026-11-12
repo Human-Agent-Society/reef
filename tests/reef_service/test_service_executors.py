@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from reef.execution.executor import ExecutorConfig
+from reef.execution.executor import ExecutorLaunch
 from reef.execution.executor.config import executor_settings, role_executor_settings
 from reef.execution.executor.uniproc import UniProcExecutor
 from reef.service.deploy.config_utils import DeployConfigError
@@ -20,7 +20,7 @@ from reef.service.deploy.process import ProcessWorker, RayProcessWorker
 
 
 class RecordingExecutor(UniProcExecutor):
-    created: list[ExecutorConfig] = []
+    created: list[ExecutorLaunch] = []
 
     def _init_executor(self):
         type(self).created.append(self.config)

@@ -481,11 +481,11 @@ Deployment modules
 * ``config_utils.py`` reads YAML, expands environment/config references and locates
   recipe source packages. It does not download models or validate process graphs.
 * ``service_config.py`` declares shared HTTP, storage and runtime fields and
-  converts effective values into ``ServiceConfig`` for app assembly. With a
+  converts effective values into ``ServiceSettings`` for app assembly. With a
   ``task-import`` section, assembly wraps the scenario storage in
   ``reef/service/task_import.py``, so that each scenario that opens imports the
   deployment's Harbor tasks.
-* ``deployment_config.py`` declares ``DeploymentConfig`` defaults, loads selected
+* ``deployment_config.py`` declares ``DeploymentSettings`` defaults, loads selected
   recipe/runtime declarations, translates the versioned public layout and
   validates component values.
 * ``cli.py`` builds help and applies dotted command-line overrides before shared

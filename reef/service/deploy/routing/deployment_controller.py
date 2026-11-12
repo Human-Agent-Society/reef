@@ -61,7 +61,7 @@ from reef.service.deploy.routing.renderer import (
     router_configuration,
     write_private_document,
 )
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.routing import MAX_READINESS_TIMEOUT_SECONDS, RoutingSnapshot, check_policy_change
 from reef.service.routing_preview import RESPONSE_WRITE_ALLOWANCE_SECONDS
 
@@ -121,7 +121,7 @@ class RoutingDeploymentController:
     """
 
     def __init__(
-        self, settings: ServiceConfig, runtime: ContainerRuntime, *, registry_root: Path | None = None
+        self, settings: ServiceSettings, runtime: ContainerRuntime, *, registry_root: Path | None = None
     ) -> None:
         policy = settings.routing_deployment
         self.policy = policy

@@ -49,7 +49,7 @@ from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos.schedule import StepScheduling
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.trainer import PendingTrainingResult
 from reef.train.types import JobData, PreparedCommit, TrainingCommit
@@ -496,7 +496,7 @@ def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> 
 @pytest.mark.unit
 def test_the_stage_config_sets_the_trainer_job_samples() -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        return PipelineConfig.from_setting(
+        return PipelineSettings.from_setting(
             {"sample2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(sample2job=ThresholdJobData), environ={}
         ).build(context)
 

@@ -38,7 +38,7 @@ from reef.storage.tasks import TaskStorage
 from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.component import ScenarioRoot, TrainingArtifactLayout, TrainingComponent
 from reef.train.jobs import JobLoop
-from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
+from reef.train.pipeline import PipelineSettings, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 
 
@@ -110,7 +110,7 @@ class Recipe:
 
     training_mode: str = config_field("auto")
     #: The deployment's ``pipeline`` section over :meth:`pipeline_spec`; None is the recipe's stages with no config.
-    pipeline_stages: PipelineConfig | None = field(default=None, repr=False, compare=False)
+    pipeline_stages: PipelineSettings | None = field(default=None, repr=False, compare=False)
     #: The deployment's ``activation`` section: the rule that activates new artifacts; None is ``always``.
     activation: PluginReference | None = field(default=None, repr=False, compare=False)
 
@@ -133,18 +133,18 @@ class Recipe:
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
 
-    def stages(self) -> PipelineConfig:
+    def stages(self) -> PipelineSettings:
         """The pipeline's stage classes and their configs."""
         if self.pipeline_stages is not None:
             return self.pipeline_stages
         try:
-            return PipelineConfig.from_setting(None, spec=type(self).pipeline_spec(), environ={})
+            return PipelineSettings.from_setting(None, spec=type(self).pipeline_spec(), environ={})
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
 
     def with_record2sample_config(self, config: Mapping[str, Any]) -> Self:
         """This recipe with each key of ``config`` in place of that key of its record-to-sample stage's config
-        (``PipelineConfig.with_record2sample_config``). An empty ``config`` returns this recipe."""
+        (``PipelineSettings.with_record2sample_config``). An empty ``config`` returns this recipe."""
         if not config:
             return self
         return replace(self, pipeline_stages=Recipe.stages(self).with_record2sample_config(config))
@@ -253,7 +253,7 @@ class Recipe:
         activation = settings.get("activation")
         try:
             if pipeline is not None:
-                kwargs["pipeline_stages"] = PipelineConfig.from_setting(
+                kwargs["pipeline_stages"] = PipelineSettings.from_setting(
                     pipeline, spec=cls.pipeline_spec(), environ=values
                 )
             if activation is not None:

@@ -9,7 +9,7 @@ import pytest
 
 from reef.inference import deployment as registry
 from reef.inference.vllm import deployment
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 from reef.inference.vllm.control import VLLMExecutor
 from reef.inference.vllm.service import VLLMInferenceService
 
@@ -43,14 +43,14 @@ def test_factory_rejects_non_native_executor_aliases(executor):
 
 
 def test_config_derives_reef_serving_options():
-    config = VLLMConfig(**base_values())
+    config = VLLMSettings(**base_values())
     assert config.options["logprobs_mode"] == "processed_logprobs"
     assert config.options["generation_config"] == "vllm"
-    explicit = VLLMConfig(**base_values(options={"generation_config": "/models/qwen/generation"}))
+    explicit = VLLMSettings(**base_values(options={"generation_config": "/models/qwen/generation"}))
     assert explicit.options["generation_config"] == "/models/qwen/generation"
     assert config.options["enable_prefix_caching"] is False
     assert config.engine_count == 1
-    retracting = VLLMConfig(**base_values(pause_mode="retract"))
+    retracting = VLLMSettings(**base_values(pause_mode="retract"))
     assert retracting.options["enable_prefix_caching"] is True
 
 
@@ -71,11 +71,11 @@ def test_config_derives_reef_serving_options():
 )
 def test_config_rejects_settings_reef_cannot_serve(values, message):
     with pytest.raises(ValueError, match=message):
-        VLLMConfig(**values)
+        VLLMSettings(**values)
 
 
 def test_two_engines_serve_behind_a_configured_router():
-    config = VLLMConfig(**base_values(num_gpus=4, router_url="http://router:8000"))
+    config = VLLMSettings(**base_values(num_gpus=4, router_url="http://router:8000"))
     assert config.engine_count == 2
 
 

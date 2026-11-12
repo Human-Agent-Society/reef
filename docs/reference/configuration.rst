@@ -1001,7 +1001,7 @@ The effective settings are handed to the child using a private temporary
 config, removed when the launcher exits. No user YAML file is created.
 
 Public service settings use the same argument parser for YAML and CLI values.
-Their types, defaults, and help are declared on ``ServiceConfig``. Explicit
+Their types, defaults, and help are declared on ``ServiceSettings``. Explicit
 CLI values override YAML values; omitted values use the setting's default.
 Run ``reef serve --help`` to see these options. A flag is the setting's YAML
 path, for example ``--inference.upstream-model``. The last occurrence of a

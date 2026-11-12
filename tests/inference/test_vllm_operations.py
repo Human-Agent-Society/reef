@@ -12,7 +12,7 @@ from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
 from reef.inference.deployment import InferenceConnection
 from reef.inference.vllm.backend import VLLMInferenceBackend
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 from reef.inference.vllm.service import VLLMInferenceService
 
 
@@ -39,7 +39,7 @@ class Receiver:
 
 
 def service():
-    return VLLMInferenceService(VLLMConfig("model", 1, 1, 1))
+    return VLLMInferenceService(VLLMSettings("model", 1, 1, 1))
 
 
 def test_service_adapts_only_connections_with_a_control_executor_without_owning_workers():
@@ -211,7 +211,7 @@ def test_worker_pauses_in_the_configured_mode_and_recovers_only_dead_engines(mon
 
     monkeypatch.setattr(worker_module.ray, "get", lambda refs: list(refs))
     worker = worker_module.VLLMWorker.__new__(worker_module.VLLMWorker)
-    worker.config = VLLMConfig("model", 2, 1, 2, router_url="http://router", pause_mode="retract")
+    worker.config = VLLMSettings("model", 2, 1, 2, router_url="http://router", pause_mode="retract")
     group = SimpleNamespace(all_engines=[engine("a"), None])
     group.engines = [engine for engine in group.all_engines if engine is not None]
 
@@ -249,7 +249,7 @@ def test_engine_group_probes_ports_from_the_configured_base_per_host(monkeypatch
     hosts = iter(["node-a", "node-a", "node-b"])
     monkeypatch.setattr(launch_module.ray, "get", lambda value: value)
     monkeypatch.setattr(launch_module.VLLMEngineGroup, "_launch_actor", lambda self, index: Actor(next(hosts)))
-    config = VLLMConfig("model", 3, 1, 3, router_url="http://router", engine_port_base=20000)
+    config = VLLMSettings("model", 3, 1, 3, router_url="http://router", engine_port_base=20000)
     group = launch_module.VLLMEngineGroup(config, placement=None)
     group.start_engines({})
     assert inits == [("node-a", 20000), ("node-a", 20001), ("node-b", 20000)]

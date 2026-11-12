@@ -50,7 +50,7 @@ from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.pipeline import PipelineSettings, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData
@@ -66,7 +66,7 @@ def sao_processor(context: PipelineContext, job_samples: int | None = None) -> T
     )
 
 
-def single_rollout_steps() -> PipelineConfig:
+def single_rollout_steps() -> PipelineSettings:
     """SAO's default stages with jobs of one sample; with a runtime batch size of 1 each rollout is one optimizer step."""
     return job_sized_stages(SAORecipe.pipeline_spec())
 

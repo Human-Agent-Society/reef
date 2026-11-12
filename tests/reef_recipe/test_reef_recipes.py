@@ -27,17 +27,17 @@ from reef.recipe import Recipe, RecipeConfigError, load_recipe_config
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.sample2job import NoJobData
-from reef.train.pipeline import PipelineConfig, TrainingPipeline
+from reef.train.pipeline import PipelineSettings, TrainingPipeline
 from reef.train.slime_backend.objectives import resolve_slime_objective
 from reef.train.types import JobData
 
 
-def pipeline_stages(recipe_type: type[Recipe], section: dict) -> PipelineConfig:
+def pipeline_stages(recipe_type: type[Recipe], section: dict) -> PipelineSettings:
     """The recipe's stages configured by a deployment ``pipeline`` section, with jobs of one sample."""
     return job_sized_stages(recipe_type.pipeline_spec(), section)
 
 
-def tttd_grid(groups_per_step: int, rollouts_per_group: int) -> PipelineConfig:
+def tttd_grid(groups_per_step: int, rollouts_per_group: int) -> PipelineSettings:
     return pipeline_stages(
         TTTDRecipe,
         {"record2sample": {"config": {"groups_per_step": groups_per_step, "rollouts_per_group": rollouts_per_group}}},
@@ -167,11 +167,11 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 f"import sys; sys.path.insert(0, {str(Path(tests.__file__).parent.parent)!r})\n"
                 "from recipes.tttd import TTTDRecipe\n"
                 "from tests.support.records import memory_records\n"
-                "from reef.train.pipeline import PipelineConfig\n"
+                "from reef.train.pipeline import PipelineSettings\n"
                 "from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings\n"
                 "grid = {'record2sample': {'config': {'groups_per_step': 1, 'rollouts_per_group': 2}},"
                 " 'sample2job': {'config': {'job_samples': 2}}}\n"
-                "stages = PipelineConfig.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
+                "stages = PipelineSettings.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
                 "trainer = TTTDRecipe(**runtime_bindings(), pipeline_stages=stages)"
                 ".build('math', memory_records('math'), root=STUB_ROOT)\n"
                 "assert trainer.pipeline.context.job_parameters['trajectory']['objective'] == 'tttd'\n"

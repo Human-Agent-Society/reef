@@ -23,7 +23,7 @@ from reef.service.deploy import training
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 
 BACKEND = "tests.support.training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -115,7 +115,7 @@ def test_a_component_factory_that_builds_no_training_component_is_refused(monkey
     monkeypatch.setattr(type(component_factory), "__call__", lambda *args: runtime)
     with pytest.raises(TypeError, match="must build a TrainingComponent"):
         connect_training_component(
-            ServiceConfig(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
+            ServiceSettings(recipe=RECIPE, training_backend=BACKEND), model_path="demo", default_parameters={}
         )
 
 

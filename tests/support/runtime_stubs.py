@@ -18,7 +18,7 @@ from reef.inference.interfaces import InferenceBackend
 from reef.inference.serving import OpenedEngines, ServingEngines
 from reef.storage.job_data import read_job_data
 from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 #: The artifact format of a stub component that does not name one.
 FULL_WEIGHTS = ArtifactFormat("full")
@@ -227,7 +227,7 @@ def runtime_bindings(
 
 def job_sized_stages(
     spec: PipelineSpec, section: Mapping[str, Any] | None = None, *, job_samples: int = 1
-) -> PipelineConfig:
+) -> PipelineSettings:
     """The stages of ``spec`` configured by a deployment ``pipeline`` section, with ``job_samples`` set.
 
     A weight recipe needs ``pipeline.sample2job.config.job_samples``; a ``job_samples`` in ``section`` wins.
@@ -235,7 +235,7 @@ def job_sized_stages(
     stages = {key: dict(value) for key, value in (section or {}).items()}
     sample2job = stages.setdefault("sample2job", {})
     sample2job["config"] = {"job_samples": job_samples, **sample2job.get("config", {})}
-    return PipelineConfig.from_setting(stages, spec=spec, environ={})
+    return PipelineSettings.from_setting(stages, spec=spec, environ={})
 
 
 class RunningEngines(ServingEngines):

@@ -17,7 +17,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.snapshot import SnapshotRef
 from reef.dispatcher import Dispatcher
-from reef.observability import TracingConfig, build_record_observer
+from reef.observability import TracingSettings, build_record_observer
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.streaming import stream_record
 from reef.storage.commits import CommitRecord
@@ -30,44 +30,47 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 @pytest.mark.unit
-def test_tracing_config_defaults_to_disabled_and_rejects_unknown_settings() -> None:
-    assert TracingConfig.from_mapping(None) == TracingConfig()
-    assert TracingConfig.from_mapping({}).enabled is False
+def test_tracing_settings_defaults_to_disabled_and_rejects_unknown_settings() -> None:
+    assert TracingSettings.from_mapping(None) == TracingSettings()
+    assert TracingSettings.from_mapping({}).enabled is False
     with pytest.raises(ValueError, match=r"unknown observability\.tracing settings: exporter"):
-        TracingConfig.from_mapping({"enabled": True, "exporter": "jaeger"})
+        TracingSettings.from_mapping({"enabled": True, "exporter": "jaeger"})
     with pytest.raises(ValueError, match="headers must map header names to strings"):
-        TracingConfig.from_mapping({"headers": {"Authorization": 1}})
+        TracingSettings.from_mapping({"headers": {"Authorization": 1}})
     with pytest.raises(ValueError, match="endpoint must be a non-empty string"):
-        TracingConfig.from_mapping({"endpoint": " "})
+        TracingSettings.from_mapping({"endpoint": " "})
     with pytest.raises(ValueError, match="must be a mapping"):
-        TracingConfig.from_mapping("http://localhost:4318")
+        TracingSettings.from_mapping("http://localhost:4318")
     with pytest.raises(ValueError, match=r"set observability\.tracing\.authorization"):
-        TracingConfig.from_mapping({"headers": {"authorization": "Basic abc"}})
+        TracingSettings.from_mapping({"headers": {"authorization": "Basic abc"}})
+    # The constructor checks the same conditions as the section reader.
+    with pytest.raises(ValueError, match="service_name must be a non-empty string"):
+        TracingSettings(service_name=" ")
 
 
 @pytest.mark.unit
 def test_tracing_credential_comes_from_config_or_environment_and_stays_out_of_repr() -> None:
-    configured = TracingConfig.from_mapping(
+    configured = TracingSettings.from_mapping(
         {"authorization": " Basic abc "}, environ={"REEF_TRACING_AUTHORIZATION": "Basic env"}
     )
     assert configured.authorization == "Basic abc"
     assert configured.request_headers() == {"Authorization": "Basic abc"}
     assert "abc" not in repr(configured)
 
-    from_environment = TracingConfig.from_mapping(
+    from_environment = TracingSettings.from_mapping(
         {"headers": {"x-team": "ml"}}, environ={"REEF_TRACING_AUTHORIZATION": "Basic env"}
     )
     assert from_environment.authorization == "Basic env"
     assert from_environment.request_headers() == {"x-team": "ml", "Authorization": "Basic env"}
 
     # Nothing configured: the SDK reads OTEL_EXPORTER_OTLP_HEADERS itself.
-    assert TracingConfig.from_mapping({}, environ={}).request_headers() is None
-    assert TracingConfig.from_mapping({"authorization": ""}).authorization is None
+    assert TracingSettings.from_mapping({}, environ={}).request_headers() is None
+    assert TracingSettings.from_mapping({"authorization": ""}).authorization is None
 
 
 @pytest.mark.unit
-def test_tracing_config_parses_every_setting() -> None:
-    config = TracingConfig.from_mapping(
+def test_tracing_settings_parses_every_setting() -> None:
+    config = TracingSettings.from_mapping(
         {
             "enabled": True,
             "endpoint": " http://collector:4318/v1/traces ",
@@ -76,7 +79,7 @@ def test_tracing_config_parses_every_setting() -> None:
             "service_name": "reef-prod",
         }
     )
-    assert config == TracingConfig(
+    assert config == TracingSettings(
         enabled=True,
         endpoint="http://collector:4318/v1/traces",
         authorization="Basic abc",
@@ -110,7 +113,7 @@ def observer_and_exporter(**overrides):
     from reef.observability.open_telemetry import OpenTelemetryRecordObserver
 
     exporter = InMemorySpanExporter()
-    observer = OpenTelemetryRecordObserver(TracingConfig(enabled=True, **overrides), span_exporter=exporter)
+    observer = OpenTelemetryRecordObserver(TracingSettings(enabled=True, **overrides), span_exporter=exporter)
     return observer, exporter
 
 

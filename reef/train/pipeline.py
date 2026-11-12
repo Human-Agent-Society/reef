@@ -78,8 +78,12 @@ class PipelineSpec:
 
 
 @dataclass(frozen=True)
-class PipelineConfig:
+class PipelineSettings:
     """The two stages of a recipe's pipeline: each stage's class and its config.
+
+    Values: ``record2sample`` names a ``Record2Sample`` class and ``sample2job`` a ``Sample2Job`` class, each
+    with the config that the class parses. ``environ`` is the environment that the stages read. The constructor
+    refuses a reference to another class with ``PluginConfigError``.
 
     It comes from the deployment's ``pipeline`` section over the recipe's
     ``PipelineSpec``. Each key of the section is ``{module, config}``; a key
@@ -93,8 +97,12 @@ class PipelineConfig:
     sample2job: PluginReference
     environ: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
+    def __post_init__(self) -> None:
+        Record2Sample.referenced_class(self.record2sample)
+        Sample2Job.referenced_class(self.sample2job)
+
     @classmethod
-    def from_setting(cls, value: object, *, spec: PipelineSpec, environ: Mapping[str, str]) -> PipelineConfig:
+    def from_setting(cls, value: object, *, spec: PipelineSpec, environ: Mapping[str, str]) -> PipelineSettings:
         """Read the ``pipeline`` section over ``spec``; ``None`` is the recipe's stages with no config."""
         if value is not None and not isinstance(value, Mapping):
             raise PluginConfigError(f"pipeline must be a mapping with {', '.join(PIPELINE_STAGES)}")
@@ -113,7 +121,7 @@ class PipelineConfig:
             environ=dict(environ),
         )
 
-    def with_record2sample_config(self, config: Mapping[str, Any]) -> PipelineConfig:
+    def with_record2sample_config(self, config: Mapping[str, Any]) -> PipelineSettings:
         """The same stages, with each key of ``config`` in place of that key of the record-to-sample stage's config."""
         return replace(self, record2sample=replace(self.record2sample, config={**self.record2sample.config, **config}))
 

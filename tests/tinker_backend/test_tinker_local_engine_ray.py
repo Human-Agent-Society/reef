@@ -229,7 +229,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     from reef.dispatcher import Dispatcher
     from reef.storage.sql_coordination import open_coordination
     from reef.storage.sqlite import SQLiteScenarioStorage
-    from reef.train.pipeline import PipelineConfig
+    from reef.train.pipeline import PipelineSettings
 
     if not REAL:
         monkeypatch.syspath_prepend(str(write_fake_sdk(tmp_path, MODEL)))
@@ -272,7 +272,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
             TTTDRecipe(
                 component,
                 runtime=inference,
-                pipeline_stages=PipelineConfig.from_setting(
+                pipeline_stages=PipelineSettings.from_setting(
                     raw["pipeline"], spec=TTTDRecipe.pipeline_spec(), environ={}
                 ),
             ),

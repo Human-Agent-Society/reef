@@ -59,7 +59,7 @@ from reef.service.deploy.routing.reef_lifecycle_client import (
 )
 from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
 from reef.service.request_service import RequestService
 from reef.service.routing import RoutingAdapter, RoutingSnapshot
@@ -338,7 +338,7 @@ def started_case(tmp_path: Path, source: Path, *, resolved_image: str | None = N
         finalization_timeout_seconds=0.05,
         container_stop_timeout_seconds=0.05,
     )
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="recipe", host="127.0.0.1", routing_manifest=str(source), tokens=("service",), routing_deployment=policy
     )
     runtime = FakeRuntime(actions)

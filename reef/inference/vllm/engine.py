@@ -17,7 +17,7 @@ import requests
 
 from reef.inference.interfaces import InferenceEngine
 from reef.inference.process import check_server_owner, node_address_and_port, ports_in_use, wait_ready
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 from reef.inference.vllm.process import EngineProcess, launch_server
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 class ReefVLLMEngine(InferenceEngine):
     """Own one native vLLM server on this node's reserved GPUs."""
 
-    def __init__(self, config: VLLMConfig, rank: int, gpu_ids: Sequence[int]) -> None:
+    def __init__(self, config: VLLMSettings, rank: int, gpu_ids: Sequence[int]) -> None:
         if len(gpu_ids) != config.gpus_per_engine:
             raise ValueError(f"vLLM engine {rank} needs {config.gpus_per_engine} GPUs, got {list(gpu_ids)}")
         self.config = config

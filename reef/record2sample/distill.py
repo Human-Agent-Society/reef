@@ -26,7 +26,7 @@ from reef.record2sample.reports import ReportContext, ReportSamples
 
 
 @dataclass(frozen=True)
-class DistillSettings(SampleAssemblySettings):
+class DistillSamplesSettings(SampleAssemblySettings):
     """The config of ``DistillSamples``: the teacher's window and the sample assembly.
 
     Values: ``max_teacher_tokens`` is a non-negative int, 0 for no limit; the other keys are as in
@@ -96,7 +96,7 @@ class DistillSamples(ReportSamples):
     with its composition. Each report trains by itself and owns its inference records.
     """
 
-    def __init__(self, context: PipelineContext, settings: DistillSettings) -> None:
+    def __init__(self, context: PipelineContext, settings: DistillSamplesSettings) -> None:
         super().__init__(context, exclusive_sources=True, max_staleness=settings.max_staleness)
         self.assembly = SampleAssembly(settings)
         self.max_teacher_tokens = settings.max_teacher_tokens
@@ -109,7 +109,7 @@ class DistillSamples(ReportSamples):
         context: PipelineContext,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(context, DistillSettings.parse(config, plugin_class=cls))
+        return cls(context, DistillSamplesSettings.parse(config, plugin_class=cls))
 
     def teacher_request(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, response: str, teacher_context: str
@@ -133,4 +133,4 @@ class DistillSamples(ReportSamples):
         return sample.with_metadata(teacher=teacher.as_json())
 
 
-__all__ = ["DistillSamples", "DistillSettings", "StudentCall", "student_call", "student_sample"]
+__all__ = ["DistillSamples", "DistillSamplesSettings", "StudentCall", "student_call", "student_sample"]
