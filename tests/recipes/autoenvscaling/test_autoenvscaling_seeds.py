@@ -863,46 +863,15 @@ def test_a_cursor_holds_non_negative_ints(fields: dict[str, object]) -> None:
 
 
 @pytest.mark.unit
-def test_a_seed_variant_keeps_its_seeds_time_and_machine(tmp_path: Path) -> None:
-    limits = {
-        "agent": {"timeout_sec": 1200.0},
-        "verifier": {"timeout_sec": 600.0},
-        "environment": {"cpus": 1, "memory_mb": 2048, "storage_mb": 4096, "gpus": 0},
-    }
-    generator = seeded(tmp_path, SeedDesigner(), seed_config=limits)
-    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
-    [variant] = asyncio.run(generator.generate(REQUEST))
-    assert variant.metadata["seed_task"] == generator.seeds[0].name
-    for section, values in limits.items():
-        for key, value in values.items():
-            assert variant.config[section][key] == value, (section, key)
-    # The rest of the Designer's config stays: the parent sets no network mode or build timeout.
-    assert variant.config["environment"]["network_mode"] == REPOSITORY_TASK_CONFIG["environment"]["network_mode"]
-
-
-@pytest.mark.unit
 def test_parent_limits_unset_a_limit_the_parent_does_not_set() -> None:
     task = seed_task(0, REPOSITORY_TASK_CONFIG)
     parent = seed_task(1, {"agent": {"timeout_sec": 900}})
     limited = with_parent_limits(task, parent)
     assert limited.config["agent"] == {"timeout_sec": 900}
-    # The parent runs on the sandbox's default machine and verifier time, so the variant does too.
+    # The parent runs on Harbor's default verifier time and the sandbox's default machine, so the variant does too.
     assert limited.config["verifier"] == {"user": "root"}
     assert limited.config["environment"] == {"network_mode": "no-network", "build_timeout_sec": 1200}
     assert "agent" not in with_parent_limits(task, seed_task(2)).config
-
-
-@pytest.mark.unit
-def test_a_variant_of_a_tmax_seed_runs_on_the_machine_its_seed_runs_on(tmp_path: Path) -> None:
-    generator = seeded(tmp_path, SeedDesigner(), seed_config=tmax.TASK_CONFIG)
-    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
-    [variant] = asyncio.run(generator.generate(REQUEST))
-    assert variant.metadata["seed_task"] == generator.seeds[0].name
-    assert variant.config["agent"] == {"timeout_sec": 1200} and variant.config["verifier"] == {
-        "timeout_sec": 600,
-        "user": "root",
-    }
-    assert not {"cpus", "memory_mb", "storage_mb", "gpus"} & variant.config["environment"].keys()
 
 
 class ConfigRecordingGenerator(StandInGenerator):
@@ -919,21 +888,50 @@ class ConfigRecordingGenerator(StandInGenerator):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "seed_config",
+    ("seed_config", "config"),
     [
-        {"agent": {"timeout_sec": 1200.0}, "verifier": {"timeout_sec": 600.0}, "environment": {"cpus": 1}},
-        tmax.TASK_CONFIG,
+        (
+            {
+                "agent": {"timeout_sec": 1200.0},
+                "verifier": {"timeout_sec": 600.0},
+                "environment": {"cpus": 1, "memory_mb": 2048, "storage_mb": 4096, "gpus": 0},
+            },
+            {
+                "agent": {"timeout_sec": 1200.0},
+                "verifier": {"timeout_sec": 600.0, "user": "root"},
+                "environment": {
+                    "cpus": 1,
+                    "memory_mb": 2048,
+                    "storage_mb": 4096,
+                    "gpus": 0,
+                    "network_mode": "no-network",
+                    "build_timeout_sec": 1200,
+                },
+            },
+        ),
+        # A TMax-15K seed sets no machine size, so its variant runs on the sandbox's default machine too.
+        (
+            tmax.TASK_CONFIG,
+            {
+                "agent": {"timeout_sec": 1200},
+                "verifier": {"timeout_sec": 600, "user": "root"},
+                "environment": {"network_mode": "no-network", "build_timeout_sec": 1200},
+            },
+        ),
     ],
     ids=("seed-limits", "tmax-15k"),
 )
-def test_the_designers_check_runs_a_seed_variant_on_the_limits_it_is_admitted_with(
-    tmp_path: Path, seed_config: Mapping[str, Mapping[str, object]]
+def test_a_seed_variant_and_the_designers_check_run_on_its_seeds_time_and_machine(
+    tmp_path: Path, seed_config: Mapping[str, Mapping[str, object]], config: Mapping[str, Mapping[str, object]]
 ) -> None:
     service = ConfigRecordingGenerator(tmp_path / "tasks")
     designer = SeedDesigner()
     generator = seeded(tmp_path, designer, service, seed_config=seed_config)
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
     [variant] = asyncio.run(generator.generate(REQUEST))
+    assert variant.metadata["seed_task"] == generator.seeds[0].name
+    # Admission sets the rest: the seed's network mode and build timeout are not limits a variant keeps.
+    assert variant.config == config
     assert designer.checks[-1]["passed"] is True
     assert service.configs[f"{variant.name}-check-1"] == variant.config
 

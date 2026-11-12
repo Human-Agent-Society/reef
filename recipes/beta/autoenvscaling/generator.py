@@ -77,6 +77,7 @@ from recipes.beta.autoenvscaling.designer import (
     VARIANT_SIMPLER,
     AgentDesigner,
     CandidateChecks,
+    DesignedTask,
     DesignerOutage,
     ModelRefused,
     PromptDesigner,
@@ -143,6 +144,9 @@ DEFAULT_BAND = PassRateBand(DEFAULT_BAND_LOW, DEFAULT_BAND_HIGH)
 DEFAULT_MAX_CHECKS = 6
 DEFAULT_MAX_MODEL_CALLS = 250
 DEFAULT_AGENT_TIMEOUT_SECONDS = 2700.0
+#: How long a Designer's run may take to end after a stop, so that a stopped run whose task held the Claude Code token
+#: is still reported.
+STOPPED_RUN_SECONDS = 60.0
 DEFAULT_AGENT_API = "openai"
 DEFAULT_AGENT_TOKEN_ENV = "REEF_TOKEN"
 # The cloud sandbox the agent runs in: a provider of reef.execution.sandbox.config.REMOTE_EXECUTORS.
@@ -215,7 +219,8 @@ STAGE_SOURCE = "source"  # the source holds no session, or its repository or bas
 # The Designer made no recorded call, the model provider refused its Claude Code run, or admission refused its task.
 STAGE_AUTHORING = "authoring"
 STAGE_OUTAGE = "outage"  # the Designer could not run; the generation ends here
-STAGE_CREDENTIAL = "credential"  # the Designer's task held its Claude Code token; the generation ends here
+# The Designer's task held its Claude Code token; the generation ends here, or at the outage that stopped the run.
+STAGE_CREDENTIAL = "credential"
 STAGE_CHECK = "check"  # a check found a defect in the task, or the task is a duplicate
 STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate refused the task
 STAGE_CALIBRATION = "calibration"  # the solver's calibration rollouts put the task outside the band, or barely vary
@@ -267,7 +272,8 @@ def with_parent_limits(task: HarborTask, parent: HarborTask) -> HarborTask:
     """``task`` with exactly ``parent``'s values of :data:`PARENT_LIMITS`.
 
     A limit the parent sets takes the parent's value, and a limit it does not set is removed, so the task runs on
-    the sandbox's default for it, as the parent does. A table left with no key is removed too.
+    Harbor's default for it (the sandbox's for the machine size), as the parent does. A table left with no key is
+    removed too.
     """
     config = {section: dict(values) for section, values in task.config.items()}
     for section, keys in PARENT_LIMITS.items():
@@ -577,7 +583,9 @@ class OpenGeneration:
     the generation, or empty. ``checks``, ``stages`` and ``paths`` are keyed by task name: the results of the
     task checks, the stage of a refused task (empty when it passed), and where ``validate`` wrote the task.
     Purpose: ``generate`` writes it to the state document ``open/<generation>`` and ``validate`` adds to it;
-    ``record_results`` reads it to close the generation, also after later generations and after a restart.
+    ``record_results`` reads it to close the generation, also after later generations and after a restart, and gives
+    it to ``save_report``. For an attempt that an outage left with no task, ``generate`` writes no document and gives
+    it to ``save_report`` at once.
     """
 
     number: int
@@ -1190,6 +1198,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
         when its variants and seeds run out. Up to ``concurrency`` tasks are written at once, started in slot order
         (:meth:`slot_task`); the slots are still taken in order.
 
+        A slot that an outage stopped takes nothing, but a stopped run whose task held the Claude Code token is a
+        proposal with stage ``credential``, since the token may have left the sandbox: :meth:`rebuilt` gives the run
+        :data:`STOPPED_RUN_SECONDS` to end.
+
         Raises :class:`DesignerOutage` when an outage leaves the generation with no task, after it saved the report of
         the attempt (:meth:`save_report`), since no task waits for results: the recipe tries the generation again,
         and a round whose generation runs out of attempts is not complete, so a restart gives it back. An empty
@@ -1209,13 +1221,14 @@ class AutoEnvScalingGenerator(TaskGenerator):
         error = ""
         tasks: list[HarborTask] = []
         slots = self.slots()
+        task_slots = {index: slot for index, slot in enumerate(slots) if isinstance(slot, TaskSlot)}
         designer_slots = asyncio.Semaphore(self.concurrency)
         stopped = asyncio.Event()
         writing = {
             index: asyncio.ensure_future(self.slot_task(slot, designer_slots, stopped))
-            for index, slot in enumerate(slots)
-            if isinstance(slot, TaskSlot)
+            for index, slot in task_slots.items()
         }
+        taken: set[int] = set()
         next_seed = self.cursor.next_seed
         ended_on_outage = False
         try:
@@ -1229,7 +1242,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 proposal = slot.proposal
                 is_outage = False
                 try:
-                    task = await writing[index]
+                    # Shielded, so a cancelled generation is cancelled here and not through the slot, whose stopped run
+                    # can end with CredentialHeld instead.
+                    task = await asyncio.shield(writing[index])
                 except ProposalRefused as exc:
                     refused.append(
                         replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc))
@@ -1249,6 +1264,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                         task_name=task.name,
                     )
                     tasks.append(task)
+                taken.add(index)
                 # The session is taken; a restart continues with the next one. So is the parent, unless its Designer's
                 # run was cancelled or ended on an outage, neither of them the variant's failure: the parent keeps its
                 # slot for the next generation. Otherwise each parent gets one variant slot, whatever becomes of the
@@ -1269,6 +1285,14 @@ class AutoEnvScalingGenerator(TaskGenerator):
             for running in writing.values():
                 running.cancel()
             await asyncio.gather(*writing.values(), return_exceptions=True)
+            for index, running in writing.items():
+                held = None if index in taken or running.cancelled() else running.exception()
+                if isinstance(held, CredentialHeld):
+                    # The slot takes nothing, but the token may have left the sandbox, so the report names it.
+                    proposal = task_slots[index].proposal
+                    refusal = f"the Designer could not rebuild {proposal.source_record_id}: {held}"
+                    logger.error("AutoEnvScaling generation %d: %s", self.generation, refusal)
+                    refused.append(replace(proposal, stage=STAGE_CREDENTIAL, refusal=refusal))
         open_generation = OpenGeneration(self.generation, tuple(refused), pending, error)
         if ended_on_outage and not tasks:
             # No task waits for results, so the attempt closes now. The recipe's retry saves its open generation under
@@ -1415,7 +1439,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
 
         Raises ``ValueError`` for a None ``source`` without a ``variant`` and a ``source_record_id``,
         :class:`ProposalRefused` when the session becomes no task, also when the model provider refused the Designer's
-        run (stage ``authoring``), and ``DesignerOutage`` when the Designer could not run.
+        run (stage ``authoring``), and ``DesignerOutage`` when the Designer could not run. A cancelled call stops the
+        run and raises ``CancelledError``, or :class:`CredentialHeld` when the run ends within
+        :data:`STOPPED_RUN_SECONDS` and its task held the token.
         """
         if source is None and (variant is None or not source_record_id):
             raise ValueError("a task without a session is a variant of a seeded parent, with the seed's id")
@@ -1441,22 +1467,28 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     # The check above gave a task without a session a variant.
                     if self.seed_designer is None or variant is None:
                         raise ValueError("a variant of a seeded parent needs a SeedVariantDesigner")
-                    designed = await asyncio.to_thread(
-                        self.seed_designer.vary_seed, work_dir, checks, tags=tags, stop=stop, variant=variant
+                    designing = asyncio.create_task(
+                        asyncio.to_thread(
+                            self.seed_designer.vary_seed, work_dir, checks, tags=tags, stop=stop, variant=variant
+                        )
                     )
                 elif variant is None:
-                    designed = await asyncio.to_thread(
-                        self.designer.design, source, work_dir, checks, tags=tags, stop=stop
+                    designing = asyncio.create_task(
+                        asyncio.to_thread(self.designer.design, source, work_dir, checks, tags=tags, stop=stop)
                     )
                 else:
                     if self.variant_designer is None:
                         raise ValueError("adaptive generation needs a VariantDesigner")
-                    designed = await asyncio.to_thread(
-                        self.variant_designer.vary, source, work_dir, checks, tags=tags, stop=stop, variant=variant
+                    designing = asyncio.create_task(
+                        asyncio.to_thread(
+                            self.variant_designer.vary, source, work_dir, checks, tags=tags, stop=stop, variant=variant
+                        )
                     )
+                designed = await asyncio.shield(designing)
             except asyncio.CancelledError:
                 # The thread outlives the cancelled await; the stop signal ends the agent's run in it.
                 stop.set()
+                await stopped_run_end(designing)
                 raise
             except SourceError as exc:
                 raise ProposalRefused(
@@ -1674,8 +1706,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
         outcomes: Mapping[str, TaskOutcome],
     ) -> str:
         """Write the report of ``open_generation`` to the state document ``report/<number>``, replacing the document,
-        and return its key: the generation's error, the band, the cursor, ``proposals`` in index order and the tasks
-        that ran (``outcomes``), each with its check results."""
+        and return its key.
+
+        The report holds the generation's error, the band and, with a calibration, its settings. It holds the cursor's
+        ``next_position`` and, with seeds, its ``next_seed``. It also holds ``proposals`` in index order and the tasks
+        that ran (``outcomes``), each with its check results.
+        """
         document = {
             "generation": open_generation.number,
             "error": open_generation.error,
@@ -1697,6 +1733,19 @@ class AutoEnvScalingGenerator(TaskGenerator):
         report_key = f"{REPORT_PREFIX}{open_generation.number:05d}"
         self.state.write(report_key, json.dumps(document, indent=2) + "\n")
         return report_key
+
+
+async def stopped_run_end(designing: asyncio.Task[DesignedTask]) -> None:
+    """Wait up to :data:`STOPPED_RUN_SECONDS` for a stopped Designer's run to end, and raise its
+    :class:`CredentialHeld`: the task's token may have left the sandbox. A run that has not ended by then goes unread,
+    as a cancelled await's would."""
+    try:
+        await asyncio.wait((designing,), timeout=STOPPED_RUN_SECONDS)
+    finally:
+        designing.cancel()
+    held = designing.exception() if designing.done() else None
+    if isinstance(held, CredentialHeld):
+        raise held
 
 
 def proposal_document(proposal: SessionProposal) -> dict[str, object]:

@@ -237,8 +237,8 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         variant of a seeded parent, written from the parent alone. ``tags`` go unused, since Reef records none of its
         model calls.
 
-        Raises :class:`CredentialHeld` when the task holds the token, also after a refused run or an outage: the task
-        is not admitted.
+        Raises :class:`CredentialHeld` when the task holds the token, also after a refused run or an outage, which its
+        message names and which is its cause: the task is not admitted.
         """
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
@@ -270,7 +270,11 @@ class ClaudeCodeDesigner(SeedVariantDesigner):
         finally:
             is_held = clean_run(work_dir, self.claude_token)
         if is_held:
-            raise CredentialHeld("the agent's task held the run's Claude Code token, so it is not admitted")
+            held = "the agent's task held the run's Claude Code token, so it is not admitted"
+            if failure is None:
+                raise CredentialHeld(held)
+            # The failure, such as a spent plan or a lost sign-in, can meet the next run too.
+            raise CredentialHeld(f"{held}; the run also ended with: {failure}") from failure
         if failure is not None:
             raise failure
         # The transcript's path names the file as renamed.

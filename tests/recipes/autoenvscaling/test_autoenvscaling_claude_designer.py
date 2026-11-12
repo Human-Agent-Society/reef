@@ -489,25 +489,28 @@ def test_a_spent_plan_or_a_lost_sign_in_stays_an_outage(
 
 
 @pytest.mark.unit
-def test_a_refused_run_whose_task_holds_the_token_ends_as_a_held_token(tmp_path: Path, reef_url: str) -> None:
-    session = ScriptedClaudeSession(stdout=result_json(is_error=True, result=SAFEGUARDS_TEXT), task_leak=TOKEN)
-    with pytest.raises(CredentialHeld, match="held the run's Claude Code token"):
-        designed_in(tmp_path, reef_url, session)
-    assert not files_holding(tmp_path / "run", TOKEN)
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize(
-    ("stdout", "exit_code"),
-    [(result_json(api_error_status=429, result="API Error: 429 rate_limit_error"), 0), ("not json", 1)],
-    ids=("rate-limit", "no-result"),
+    ("stdout", "exit_code", "failure"),
+    [
+        (result_json(is_error=True, result=SAFEGUARDS_TEXT), 0, "the model provider refused Claude Code's run"),
+        (
+            result_json(api_error_status=429, result="API Error: 429 rate_limit_error"),
+            0,
+            "Claude Code's run ended with an error (success): API Error: 429 rate_limit_error",
+        ),
+        ("not json", 1, "Claude Code exited 1 without a result: not json"),
+    ],
+    ids=("refusal", "rate-limit", "no-result"),
 )
-def test_an_outage_whose_task_holds_the_token_ends_as_a_held_token(
-    tmp_path: Path, reef_url: str, stdout: str, exit_code: int
+def test_a_refused_or_failed_run_whose_task_holds_the_token_ends_as_a_held_token(
+    tmp_path: Path, reef_url: str, stdout: str, exit_code: int, failure: str
 ) -> None:
     session = ScriptedClaudeSession(stdout=stdout, exit_code=exit_code, task_leak=TOKEN)
-    with pytest.raises(CredentialHeld, match="held the run's Claude Code token"):
+    with pytest.raises(CredentialHeld, match="held the run's Claude Code token") as raised:
         designed_in(tmp_path, reef_url, session)
+    # The failure, which can meet the next run too, stays in the message and as the cause.
+    assert str(raised.value.__cause__).startswith(failure)
+    assert str(raised.value).endswith(f"; the run also ended with: {raised.value.__cause__}")
     assert not files_holding(tmp_path / "run", TOKEN)
 
 

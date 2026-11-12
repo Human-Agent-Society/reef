@@ -56,6 +56,7 @@ from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling import workspace_reply
 from recipes.beta.autoenvscaling.checks import CheckResult, PassRateBand
 from recipes.beta.autoenvscaling.designer import AgentTools, TaskVariant
+from recipes.beta.autoenvscaling.designer_credentials import CredentialHeld
 from recipes.beta.autoenvscaling.tinker import AutoEnvScalingTinkerObjective
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
@@ -148,13 +149,19 @@ def test_a_generator_without_state_numbers_from_the_recipe_generation_and_never_
     assert cursor(tmp_path)["next_generation"] == 7
 
 
-class BlockingDesigner(TaskDesigner):
-    """A Designer whose run lasts until it is stopped."""
+#: How a stopped run ends: as the outage of a stopped run, or with a task that held the Claude Code token.
+STOPPED_RUN = DesignerOutage("the agent's run was stopped")
+STOPPED_HOLDING_THE_TOKEN = CredentialHeld("the agent's task held the run's Claude Code token, so it is not admitted")
 
-    def __init__(self) -> None:
+
+class BlockingDesigner(TaskDesigner):
+    """A Designer whose run lasts until it is stopped, and then raises ``stopped_error``."""
+
+    def __init__(self, stopped_error: DesignerOutage) -> None:
         self.started = threading.Event()
         self.stopped = threading.Event()
         self.work_dirs: list[Path] = []
+        self.stopped_error = stopped_error
 
     def design(
         self,
@@ -170,12 +177,18 @@ class BlockingDesigner(TaskDesigner):
         self.started.set()
         if stop.wait(10):
             self.stopped.set()
-        raise DesignerOutage("the agent's run was stopped")
+        raise self.stopped_error
 
 
 @pytest.mark.unit
-def test_a_cancelled_generation_stops_its_agent_and_takes_no_session(tmp_path: Path) -> None:
-    designer = BlockingDesigner()
+@pytest.mark.parametrize(
+    "stopped_error", [STOPPED_RUN, STOPPED_HOLDING_THE_TOKEN], ids=("stopped", "stopped-holding-the-token")
+)
+def test_a_cancelled_generation_stops_its_agent_and_takes_no_session(
+    tmp_path: Path, stopped_error: DesignerOutage
+) -> None:
+    # A stopped run whose task held the token does not make the cancelled generation return.
+    designer = BlockingDesigner(stopped_error)
     generator = autoenvscaling(tmp_path, designer)
 
     async def cancelled() -> None:
@@ -243,12 +256,13 @@ def test_tasks_are_written_at_once_up_to_the_concurrency_and_keep_their_order(tm
 
 class OutageStandIn(TaskDesigner):
     """The first session's task is an outage once the second session's task is being written; that one runs until
-    it is stopped."""
+    it is stopped, and then raises ``stopped_error``."""
 
-    def __init__(self) -> None:
+    def __init__(self, stopped_error: DesignerOutage) -> None:
         self.sources: list[str] = []
         self.second = threading.Event()
         self.stopped = threading.Event()
+        self.stopped_error = stopped_error
 
     def design(
         self,
@@ -267,21 +281,29 @@ class OutageStandIn(TaskDesigner):
         self.second.set()
         if stop.wait(10):
             self.stopped.set()
-        raise DesignerOutage("the agent's run was stopped")
+        raise self.stopped_error
 
 
 @pytest.mark.unit
-def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(tmp_path: Path) -> None:
-    stand_in = OutageStandIn()
+@pytest.mark.parametrize(
+    ("stopped_error", "stages"),
+    [(STOPPED_RUN, [(0, "outage")]), (STOPPED_HOLDING_THE_TOKEN, [(0, "outage"), (1, "credential")])],
+    ids=("stopped", "stopped-holding-the-token"),
+)
+def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(
+    tmp_path: Path, stopped_error: DesignerOutage, stages: list[tuple[int, str]]
+) -> None:
+    stand_in = OutageStandIn(stopped_error)
     generator = autoenvscaling(tmp_path, stand_in, source_count=4, count=4, concurrency=2)
     with pytest.raises(DesignerOutage, match="the Designer could not rebuild session-1"):
         asyncio.run(generator.generate(REQUEST))
     assert stand_in.stopped.wait(10), "the task being written after the outage was stopped"
     assert sorted(stand_in.sources) == ["session-1", "session-2"], "no task started after the outage"
-    asyncio.run(generator.record_results((), generation=0))
+    assert state(tmp_path).keys("open/") == (), "an attempt with no task closes when it raises"
     document = report(tmp_path)
     assert document["error"].startswith("the Designer could not rebuild session-1")
-    assert [(entry["position"], entry["stage"]) for entry in document["proposals"]] == [(0, "outage")]
+    # A stopped run whose task held the token takes nothing, but the report names it.
+    assert [(entry["position"], entry["stage"]) for entry in document["proposals"]] == stages
     assert cursor(tmp_path)["next_position"] == 1, "the stopped task's session is taken again"
 
 

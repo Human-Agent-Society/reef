@@ -20,9 +20,10 @@ TOKEN_REFUSAL = (
 class CredentialHeld(DesignerOutage):
     """The agent's task held the run's Claude Code token, so it is not admitted.
 
-    Values: the message names no token. Purpose: :meth:`ClaudeCodeDesigner.design` raises it once the run's directory
-    is redacted; the generator ends the generation with stage ``credential``, since the token may have left the
-    sandbox.
+    Values: the message names no token; after a refused run or an outage it names that failure, which is its cause.
+    Purpose: :meth:`ClaudeCodeDesigner.write_task` raises it once the run's directory is redacted, and the generator's
+    ``stopped_run_end`` raises it again in ``rebuilt`` for a run that a cancellation stopped. ``generate`` gives the
+    slot's proposal stage ``credential``, since the token may have left the sandbox.
     """
 
 
