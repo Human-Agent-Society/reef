@@ -137,7 +137,7 @@ sqlite3 "$REEF_AUTOENVSCALING_STATE_DIR/agent-record/$(printf autoenvscaling | s
 
 The directory of an agent run and the repository snapshots are in a temporary directory. A run's directory is removed when the run ends, and a restart clones a repository again.
 
-The generator takes no `state_dir`: a config that still has the key is refused. The generator does not read the files of an earlier `state_dir`, so a scenario that upgrades starts again at its first session, with no parents, and an open generation of the earlier version gets no feedback. The task store keeps every generation and task.
+The generator takes no `state_dir`: a config that still has the key is refused. The generator does not read the files of an earlier `state_dir`, so a scenario that upgrades starts again at its first session and its first seed, with no parents, and an open generation of the earlier version gets no feedback. The task store keeps every generation and task.
 
 ### Configuration
 
