@@ -183,7 +183,7 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
     calls: list[tuple[str, dict[str, object]]] = []
     engine = object.__new__(module.ReefSGLangEngine)
 
-    def request(route, payload=None, **_kwargs):
+    def request(route, payload=None):
         calls.append((route, payload or {}))
         return {"success": True}
 
