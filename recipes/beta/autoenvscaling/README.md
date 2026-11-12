@@ -30,7 +30,7 @@ On the 15 sessions that both arms ran, the arms give 5 and 6 fair tasks. The che
 
 ### Training runs
 
-Qwen3.5-9B trained on Tinker for 50 steps, on TMax seed tasks and Claude Code's variants of them. Steps 1 to 8 ran `examples/tmax_seeds/serve-tinker.yaml` as written. Steps 9 to 50 ran 11 tasks of 32 rollouts per job (`count` 11, `rollouts_per_task` 32, `batch-size` 256), `jobs_per_round: 0` with `refill_tasks` 16, and the Harbor release of TMax v1.1 as seeds.
+Qwen3.5-9B trained on Tinker for 50 steps, on TMax seed tasks and Claude Code's variants of them. Steps 1 to 8 ran `examples/tmax_seeds/serve-tinker.yaml` as written. Steps 9 to 50 ran 8 tasks of 32 rollouts per job (`buffer_size` 8, `rollouts_per_task` 32, `batch-size` 256) from generations of 11 tasks (`count` 11), `jobs_per_round: 0` with `refill_tasks` 16, and the Harbor release of TMax v1.1 as seeds.
 
 Each checkpoint ran Terminal-Bench 2.0 (89 tasks, 5 attempts each) through Reef's artifact evaluation, with the training agent: `VerifiedTerminus2` with thinking off, as in training. avg@5 is the mean over the 89 tasks of each task's mean reward, with a 95% interval over tasks; attempts that failed for an infrastructure reason are left out (3 for the base model). The difference to the base model is paired over tasks, with a bootstrap 95% interval.
 
