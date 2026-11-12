@@ -144,7 +144,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
         attributes: dict[str, AttributeValue] = {
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,
-            "reef.commit_number": commit.commit_number,
+            "reef.step": commit.commit_number,
             "reef.commit_operation": commit.operation,
             "reef.checkpoint": commit.checkpoint,
             "reef.consumed_record_count": len(commit.consumed_ids),
@@ -171,7 +171,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
         consumed_attributes: dict[str, AttributeValue] = {
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,
-            "reef.commit_number": commit.commit_number,
+            "reef.step": commit.commit_number,
             **commit_artifact_attributes(commit),
         }
         if commit.training_job_id is not None:
