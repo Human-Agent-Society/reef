@@ -1,6 +1,6 @@
 """The worker side of a distillation family: the divergences over the vocabulary shards, the loss and the teacher hook.
 
-A recipe's ``objective.py`` forwards its ``@objective``-registered entry
+A recipe's ``objective.py`` forwards its ``@worker_hook``-registered entry
 points to :func:`distill_loss` and :func:`distill_actor_pre_train`. The
 loss follows ``distil_trainer.py`` of the SDFT reference
 (idanshen/Self-Distillation at ``d77573212fa0``): at every response

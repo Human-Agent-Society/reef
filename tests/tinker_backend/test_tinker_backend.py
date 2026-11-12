@@ -31,8 +31,6 @@ from reef.service.deploy.training import local_model_required
 from reef.storage.sql_coordination import memory_coordination
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos.schedule import StepScheduling
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob, job_id_for
 from reef.train.jobs import JobLoopState
 from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
@@ -42,13 +40,12 @@ from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, component_factory
-from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
-from reef.train.tinker_backend.objectives import (
-    TinkerObjective,
-    register_tinker_objective,
-    unregister_tinker_objective,
-)
+from reef.train.tinker_backend.loss_families import resolve_loss_family
+from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow
+from reef.train.tinker_backend.objectives import TinkerObjective, register_objective, unregister_objective
 from reef.train.tinker_backend.preparation import prepare_tinker_job
+from reef.train.tinker_backend.schedule import StepScheduling
+from reef.train.tinker_backend.signals import TrainingSignal
 
 MODEL = "Qwen/Qwen3-8B"
 
@@ -142,17 +139,17 @@ POLICY = LearningRateSchedule("policy", 1e-5, warmup_steps=2)
 @pytest.fixture
 def objective():
     value = SampleObjective()
-    register_tinker_objective(value)
+    register_objective(value.name, value)
     yield value
-    unregister_tinker_objective(value.name)
+    unregister_objective(value.name)
 
 
 @pytest.fixture
 def second_objective():
     value = TttdLossObjective()
-    register_tinker_objective(value)
+    register_objective(value.name, value)
     yield value
-    unregister_tinker_objective(value.name)
+    unregister_objective(value.name)
 
 
 @pytest.fixture
@@ -521,7 +518,7 @@ def test_a_method_whose_loss_has_no_kl_penalty_is_refused_before_training(
     assert client.calls == []
     # TTTD's loss trains the configured KL penalty.
     assert train(component, batch(), second_objective.name, kl_coef=0.1).state == "finished"
-    assert client.calls[-1][2] is resolve_tinker_loss("tttd")
+    assert client.calls[-1][2] is resolve_loss_family("tttd")
 
 
 def test_a_schedule_counts_optimizer_steps_across_jobs_and_restarts(config, client, objective):
@@ -656,8 +653,8 @@ def test_loss_alignment_mask_and_ttdd_centered_kl():
     inputs = TttdTinkerLoss().inputs(rows, [[-0.5, -0.8], [-0.7]], kl_coef=0.1)
     assert inputs[0]["advantages"] == pytest.approx([0, 1.99, 2.0])
     assert inputs[1]["advantages"] == pytest.approx([-0.99])
-    assert resolve_tinker_loss("tttd").needs_base_logprobs
-    assert isinstance(resolve_tinker_loss("tttd"), TttdTinkerLoss)
+    assert resolve_loss_family("tttd").needs_base_logprobs
+    assert isinstance(resolve_loss_family("tttd"), TttdTinkerLoss)
 
 
 @pytest.mark.parametrize(
@@ -1048,7 +1045,7 @@ def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_lo
     data = JobData("sft", (sft_item("a"), sft_item("b")))
     step = prepare_tinker_job(data, "sft", {}, StepScheduling(), batch_size=2, kl_coef=0.0, score_centering=None)
 
-    loss = resolve_tinker_loss("sft")
+    loss = resolve_loss_family("sft")
     (rows,) = step.steps
     assert loss.loss_fn == "cross_entropy"
     # Position i predicts token i+1: the two prompt positions before the target weigh 0.

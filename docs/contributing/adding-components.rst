@@ -39,11 +39,13 @@ Implementation
   ``SlimeObjective`` (``reef/train/slime_backend/objectives.py``) in
   ``<method-package>/slime/__init__.py``, or a ``TinkerObjective``
   (``reef/train/tinker_backend/objectives.py``) in its Tinker module. The
-  package's ``__init__.py`` refers to it with ``register_objective_ref``, so its
-  public half imports no backend. Name it in the recipe's ``default_parameters()``.
+  package's ``__init__.py`` registers it by reference with that backend's
+  ``register_objective``, so its public half imports none of the method's
+  backend code. Name it in the recipe's ``default_parameters()``.
 - A method with its own tensor objective adds a loss family in
-  ``<method-package>/slime/`` (spec in ``__init__.py``, hooks in
-  ``objective.py``) and names it in the objective's ``loss_family``;
+  ``<method-package>/slime/`` (spec in ``__init__.py`` under
+  ``@register_loss_family``, hooks in ``objective.py`` under ``@worker_hook``)
+  and names it in the objective's ``loss_family``;
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
 - Override ``build_components`` only when the method's releases bind
@@ -119,8 +121,9 @@ Implementation
 - Own the job's parameters: parse them into your own typed value, refuse an
   unknown key with ``ValueError``, and declare them in
   ``TrainingComponent.parameters_schema(kind)``. Reef reads none of them. Own your
-  objectives and their registry too. Cut the data into optimizer steps
-  with ``reef.train.algos.schedule.schedule_job_data`` when it fits. Write each
+  objectives, their table and your step schedule too: the Slime and Tinker
+  backends each have their own (``objectives.py``, ``loss_families.py``,
+  ``schedule.py``, ``signals.py``) and share none. Write each
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
 - Implement ``import_start`` to load a published snapshot as the start of the
@@ -139,8 +142,8 @@ Implementation
   dotted reference or the ``reef.training_backends`` entry-point group; see
   `Training backend deployment
   <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
-- Keep step signals in ``reef/train/algos/`` backend-neutral. Translate them
-  into framework payloads inside the integration.
+- Keep the signal that an objective returns inside the integration
+  (``signals.py``), and translate it into framework payloads there.
 - Declare Python dependencies and source pins in ``pyproject.toml``. Add
   plugin entry points and package-data rules there when the framework loads
   Reef assets or hooks dynamically.

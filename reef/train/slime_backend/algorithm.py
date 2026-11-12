@@ -1,8 +1,8 @@
 """Common contract for algorithms exposed by the Slime training backend.
 
 Subclass :class:`SlimeAlgorithm`, set the class attributes, implement the
-abstract method, and decorate the class with ``@register_loss_family`` so
-importing the package registers it::
+abstract method, and decorate the class with ``@register_loss_family``
+(``reef.train.slime_backend.loss_families``) so importing its module registers it::
 
     @register_loss_family
     class MyAlgo(SlimeAlgorithm):
@@ -21,8 +21,8 @@ implementations — override only what your algorithm needs):
     3. **build batch** — ``build_rollout_data``: wire rows → Slime batch dict.
     4. **prepare**     — ``prepare_rollout``: pre-training work (teacher scoring,
        advantage hooks, etc.) in the training component.
-    5. **compute loss** — registered via ``@objective`` in ``objective.py``
-       (worker-side, resolved by :func:`resolve_objective_paths`). Two lanes:
+    5. **compute loss** — registered via ``@worker_hook`` in ``objective.py``
+       (worker-side, resolved by ``loss_families.resolve_objective_paths``). Two lanes:
        a family either replaces Slime's whole loss (``loss_type =
        "custom_loss"`` + a ``custom_loss_function_path`` hook) or keeps
        Slime's stock ``policy_loss`` and swaps only the per-token pg
@@ -39,8 +39,8 @@ implementations — override only what your algorithm needs):
 Stages 1-4 and 6 run in the training component's process (the HTTP service).
 Stage 5 runs in Megatron workers that only receive a serialized ``args``
 Namespace. The component stamps
-``args.loss_family``; the worker calls :func:`resolve_objective_paths` during
-init to import the algorithm's ``objective.py`` (triggering ``@objective``
+``args.loss_family``; the worker calls ``loss_families.resolve_objective_paths`` during
+init to import the algorithm's ``objective.py`` (triggering ``@worker_hook``
 decorators) and project the dotted paths onto ``args``.
 ``bind()`` returns a runtime-bound instance (``self`` for stateless algorithms;
 override to carry per-run state such as a teacher client or a train schedule).
@@ -54,30 +54,30 @@ A family lives in its method package beside its objective hooks:
       __init__.py     the spec: a SlimeAlgorithm subclass, no torch; when the
                       family's wire row is not the default five columns, its
                       row shaper and payload builder live here too
-      objective.py    the @objective hooks, torch (worker side)
+      objective.py    the @worker_hook hooks, torch (worker side)
       <concern>.py    further worker-side torch modules, imported only from
                       objective.py's hooks (e.g. a Megatron teacher)
 
-Register each declared hook with ``@objective`` so the worker resolves and
+Register each declared hook with ``@worker_hook`` so the worker resolves and
 validates it at init time::
 
-    @objective("custom_loss_function_path")
+    @worker_hook("custom_loss_function_path")
     def my_loss(args, batch, logits, sum_of_sample_mean): ...
 
-Register the spec by reference from the package ``__init__`` —
-``register_loss_family_ref("<name>", "my_method.slime:MyMethodAlgorithm")``
-(:mod:`reef.train.algos.registry`) — so the service never imports
-the Slime side and the driver imports it on first resolve. Naming conventions, enforced by
+The package ``__init__`` registers only the method's objective, by reference —
+``register_objective("<name>", "my_method.slime:MyMethodObjective")``
+(:mod:`reef.train.slime_backend.objectives`) — so the package's public half never imports
+the Slime side. The first resolution of the objective imports ``my_method.slime``, and
+``@register_loss_family`` there registers the family. Naming conventions, enforced by
 ``tests/slime_backend/test_slime_algorithm_contract.py``: the spec class is
 ``<Pkg>Algorithm`` and its driver options ``<Pkg>Settings``, both importable
-from the family package root; ``@objective`` entry points are ``<pkg>_loss``,
+from the family package root; ``@worker_hook`` entry points are ``<pkg>_loss``,
 ``<pkg>_advantages``, ``<pkg>_actor_init`` / ``<pkg>_actor_pre_train``; family
 CLI flags are ``--<pkg>-*``.
 """
 
 from __future__ import annotations
 
-import importlib
 import math
 from abc import ABC, abstractmethod
 from argparse import Namespace
@@ -88,7 +88,7 @@ from typing import Any, Literal
 
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
-
+from reef.train.slime_backend.policy_rows import build_policy_rollout_data
 
 #: ``none`` is ``f(r) = 1``; ``truncated`` is ``min(r, upper)``; ``masked`` is
 #: ``r`` strictly inside ``(lower, upper)`` and 0 outside.
@@ -141,96 +141,29 @@ class TrainResult:
     actor_trained: bool = True
 
 
-# --- objective registration (worker-side) ---
+# --- worker hook registration (worker-side) ---
 
-_objective_registry: dict[str, dict[str, str]] = {}
+WORKER_HOOKS: dict[str, dict[str, str]] = {}
 """Maps ``objective.py`` module paths to ``{arg_name: fn_name}`` dicts.
 
-Populated at import time by the :func:`objective` decorator.  The worker
-calls :func:`resolve_objective_paths` to project these onto ``args``.
+Populated at import time by the :func:`worker_hook` decorator.  The worker
+calls ``loss_families.resolve_objective_paths`` to project these onto ``args``.
 """
 
 
-def objective(arg_name: str) -> Callable[[Callable], Callable]:
-    """Mark a function as a Slime objective hook for ``arg_name``.
+def worker_hook(arg_name: str) -> Callable[[Callable], Callable]:
+    """Mark a function as the hook that a Slime worker calls through the argument ``arg_name``.
 
     Records the function's dotted path so the worker can resolve it via
-    :func:`resolve_objective_paths` without the driver ever importing the
+    ``loss_families.resolve_objective_paths`` without the driver ever importing the
     (torch-dependent) ``objective.py`` module.
     """
 
     def decorator(fn: Callable) -> Callable:
-        _objective_registry.setdefault(fn.__module__, {})[arg_name] = fn.__name__
+        WORKER_HOOKS.setdefault(fn.__module__, {})[arg_name] = fn.__name__
         return fn
 
     return decorator
-
-
-def resolve_args_loss_family(args: Namespace) -> SlimeAlgorithm:
-    """Resolve the loss family a worker's ``args`` names.
-
-    The driver stamps the canonical ``loss_family``. For a family it reached
-    through a dotted ``package.module:SPEC`` reference it also stamps that
-    reference on ``loss_family_ref``: the driver's registry does not travel
-    with the Namespace, so a fresh worker process has to import the module
-    itself. The reference wins when present.
-    """
-    from reef.train.slime_backend.loss_families import resolve_loss_family
-
-    return resolve_loss_family(getattr(args, "loss_family_ref", None) or args.loss_family)
-
-
-def resolve_objective_paths(args: Namespace) -> None:
-    """Resolve custom objective function paths onto ``args`` (worker-side).
-
-    Called during worker init.  Imports the algorithm's ``objective`` module
-    (triggering ``@objective`` decorators) and projects each registered
-    dotted path onto ``args``.  A family without an ``objective`` module is
-    skipped when it declares no hooks.  Import failures raised from
-    inside an objective module propagate so a broken worker dependency cannot
-    silently disable the training objective.
-    """
-    loss_family = getattr(args, "loss_family", None)
-    if not loss_family:
-        return
-    spec = resolve_args_loss_family(args)
-    required_hooks = set(spec.required_objective_hooks)
-    if spec.loss_type == "custom_loss":
-        required_hooks.add("custom_loss_function_path")
-    if spec.uses_pg_loss_primitive:
-        required_hooks.add("custom_pg_loss_function_path")
-
-    module_path = f"{spec.__class__.__module__}.objective"
-    try:
-        importlib.import_module(module_path)
-    except ModuleNotFoundError as error:
-        if error.name == module_path:
-            if not required_hooks:
-                return
-            hooks = ", ".join(sorted(required_hooks))
-            raise RuntimeError(
-                f"loss family {loss_family!r} requires objective hooks {hooks}, but {module_path} is missing"
-            ) from error
-        raise
-
-    registered = _objective_registry.get(module_path, {})
-    missing_hooks = required_hooks.difference(registered)
-    if missing_hooks:
-        hooks = ", ".join(sorted(missing_hooks))
-        raise RuntimeError(f"loss family {loss_family!r} did not register required objective hooks: {hooks}")
-    for arg_name, fn_name in registered.items():
-        setattr(args, arg_name, f"{module_path}.{fn_name}")
-
-
-def reset_objective_paths(args: Namespace) -> None:
-    """Clear every objective hook path a family registered in this worker, before another family resolves its own.
-
-    A job of another loss family re-points the worker (see
-    ``worker_hooks.switch_loss_family``); a hook the previous family
-    registered and the next one does not must not stay on ``args``.
-    """
-    for arg_name in {name for hooks in _objective_registry.values() for name in hooks}:
-        setattr(args, arg_name, None)
 
 
 class SlimeAlgorithm(ABC):
@@ -299,7 +232,7 @@ class SlimeAlgorithm(ABC):
     uses_pg_loss_primitive: bool = False
     """Lane B loss injection: keep Slime's ``policy_loss``, swap the pg primitive.
 
-    Declared with a ``custom_pg_loss_function_path`` ``@objective`` hook. The
+    Declared with a ``custom_pg_loss_function_path`` ``@worker_hook`` hook. The
     adapter layer owns the routing (it points Slime's CISPO callsite at the
     registered primitive); families only declare the lane.
     """
@@ -372,9 +305,7 @@ class SlimeAlgorithm(ABC):
 
         Default: shared policy 5-tuple builder. Override for custom wire formats.
         """
-        from reef.train.slime_backend.data_builder import build_policy_rollout_data
-
-        return build_policy_rollout_data(payload, samples, self)
+        return build_policy_rollout_data(payload, samples, self.loss_family)
 
     # --- stage 4: prepare rollout ---
 
@@ -394,7 +325,7 @@ class SlimeAlgorithm(ABC):
         """Adjust the critic role's args (lambda, freeze patterns, etc.). Default: no-op."""
         return
 
-    # --- stage 5: compute loss (worker-side, via @objective decorator) ---
+    # --- stage 5: compute loss (worker-side, via @worker_hook decorator) ---
 
     # --- stage 6: train step ---
 
@@ -466,28 +397,3 @@ class SlimeAlgorithm(ABC):
             )
             raise RuntimeError(message)
         return options, remaining
-
-
-# --- loss family registration (driver-side) ---
-
-_loss_families: dict[str, SlimeAlgorithm] = {}
-"""Loss families registered at import time by :func:`register_loss_family`.
-
-Read by :class:`~reef.train.slime_backend.loss_families.LossFamilyRegistry`
-for decorated classes; instances may also be registered at runtime through
-``register_loss_family(spec)``.
-"""
-
-
-def register_loss_family(cls: Callable[..., Any]) -> Callable[..., Any]:
-    """Class decorator: instantiate and register a loss family.
-
-    Each algorithm module applies this to its ``SlimeAlgorithm`` subclass so
-    resolving the family's reference imports the module — no explicit dict entry.
-    """
-    instance = cls()
-    name = instance.loss_family
-    if name in _loss_families:
-        raise ValueError(f"loss family {name!r} is already registered")
-    _loss_families[name] = instance
-    return cls

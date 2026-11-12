@@ -47,12 +47,12 @@ from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
-from reef.train.algos.schedule import StepScheduling
 from reef.train.component import SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData
 
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"

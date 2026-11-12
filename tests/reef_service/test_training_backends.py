@@ -182,11 +182,16 @@ def test_in_process_serving_boots_on_cpu_without_loading_slime_or_ray(tmp_path):
     raw["reef"] = {"port": port, "ready-timeout": 10}
     config_path = tmp_path / "serve.yaml"
     config_path.write_text(yaml.safe_dump(raw))
+    # The recipe's public half registers its Slime objective by reference: that imports Slime's objective table and
+    # the two modules of its types, and nothing else of the Slime backend.
     script = """
 import sys
+SLIME_REGISTRATION = {'reef.train.slime_backend.' + name for name in ('objectives', 'schedule', 'signals')}
 class NoGPU:
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'torch','slime','ray','sglang','megatron','mlx'} or fullname.startswith('reef.train.slime_backend'):
+        if fullname.split('.')[0] in {'torch','slime','ray','sglang','megatron','mlx'} or (
+            fullname.startswith('reef.train.slime_backend.') and fullname not in SLIME_REGISTRATION
+        ):
             raise RuntimeError('unexpected execution dependency: ' + fullname)
 sys.meta_path.insert(0, NoGPU())
 from reef.cli import main

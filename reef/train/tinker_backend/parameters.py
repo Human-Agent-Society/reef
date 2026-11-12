@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.storage.job_data import JobDataKind
-from reef.train.algos.schedule import StepScheduling
 from reef.train.learning_rate import LEARNING_RATE_DECAY_STYLES, LearningRateSchedule
 from reef.train.task_rollouts import RolloutSettings
 from reef.train.tinker_backend.config import TinkerServiceConfig
-from reef.train.tinker_backend.objectives import resolve_tinker_objective
+from reef.train.tinker_backend.objectives import resolve_objective
+from reef.train.tinker_backend.schedule import StepScheduling
 
 
 def rollout_settings(parameters: Mapping[str, Any]) -> RolloutSettings:
@@ -33,7 +33,7 @@ def rollout_settings(parameters: Mapping[str, Any]) -> RolloutSettings:
 class TinkerJobParameters:
     """The parameters of one Tinker job, with the component's defaults for those the job leaves out.
 
-    Values: ``objective`` is a non-empty name or dotted reference that ``resolve_tinker_objective`` resolves.
+    Values: ``objective`` is a non-empty name or dotted reference that ``resolve_objective`` resolves.
     ``learning_rate_schedule`` is the schedule that the job selects, or None to keep the active one. ``scheduling``
     is the cut of the job's data into optimizer steps, which the objective accepts. ``batch_size`` is a positive int,
     the rollouts of one optimizer step; ``learning_rate`` is finite and positive; ``kl_coef`` is finite and
@@ -64,7 +64,7 @@ class TinkerJobParameters:
                 raise ValueError(f"{name} must be a finite number")
         if self.learning_rate <= 0 or self.kl_coef < 0:
             raise ValueError("learning_rate must be positive and kl_coef non-negative")
-        resolve_tinker_objective(self.objective).validate_scheduling(self.scheduling)
+        resolve_objective(self.objective).validate_scheduling(self.scheduling)
 
     @classmethod
     def from_parameters(cls, parameters: Mapping[str, Any], config: TinkerServiceConfig) -> TinkerJobParameters:

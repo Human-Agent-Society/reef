@@ -28,7 +28,7 @@ from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.sample2job import NoJobData
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.objectives import resolve_objective
 from reef.train.types import JobData
 
 
@@ -72,7 +72,7 @@ def test_recipe_class_resolver_has_no_method_short_names() -> None:
 
 def test_cookbook_weight_training_recipe_loss_family_mappings() -> None:
     mappings = {
-        recipe_type.__name__: resolve_slime_objective(
+        recipe_type.__name__: resolve_objective(
             recipe_type.default_parameters()["trajectory"]["objective"]
         ).loss_family
         for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe)
@@ -175,8 +175,8 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 "trainer = TTTDRecipe(**runtime_bindings(), pipeline_stages=stages)"
                 ".build('math', memory_records('math'), root=STUB_ROOT)\n"
                 "assert trainer.pipeline.context.job_parameters['trajectory']['objective'] == 'tttd'\n"
-                "from reef.train.slime_backend.objectives import resolve_slime_objective\n"
-                "assert resolve_slime_objective('tttd').loss_family == 'tttd'\n"
+                "from reef.train.slime_backend.objectives import resolve_objective\n"
+                "assert resolve_objective('tttd').loss_family == 'tttd'\n"
             ),
         ],
         check=True,
@@ -426,9 +426,7 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
     second = first.with_metadata(source_agent_record_id="i2", reward=1.5)
     checked = set()
     for recipe_type in (OpenClawRLRecipe, SAORecipe, TTTDRecipe):
-        expected_family = resolve_slime_objective(
-            recipe_type.default_parameters()["trajectory"]["objective"]
-        ).loss_family
+        expected_family = resolve_objective(recipe_type.default_parameters()["trajectory"]["objective"]).loss_family
         assert recipe_type.pipeline_spec().sample2job is not NoJobData
         if recipe_type is TTTDRecipe:
             batch = JobData(
@@ -447,7 +445,7 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
                     second,
                 ),
             )
-        objective = resolve_slime_objective(recipe_type.default_parameters()["trajectory"]["objective"])
+        objective = resolve_objective(recipe_type.default_parameters()["trajectory"]["objective"])
         signal = objective.prepare(batch, {})
         assert signal.action == "train"
         assert objective.loss_family == expected_family, recipe_type.__name__

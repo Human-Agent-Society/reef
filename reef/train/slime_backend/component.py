@@ -59,7 +59,6 @@ from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import resolve
 from reef.storage.durable_files import read_json, write_json
 from reef.storage.job_data import JobDataKind, read_job_data
-from reef.train.algos.schedule import StepScheduling
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.learning_rate import (
     LearningRateScheduleState,
@@ -87,7 +86,7 @@ from reef.train.slime_backend.harbor_rollouts import (
     task_job_metrics,
 )
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.objectives import resolve_objective
 from reef.train.slime_backend.parameters import SlimeJobParameters, slime_parameters_schema
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
@@ -110,6 +109,7 @@ from reef.train.slime_backend.rollout_group import (
     serving_exists,
     serving_session,
 )
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 from reef.train.task_rollouts import HarborSettings, task_name
 
@@ -286,7 +286,7 @@ class SlimeJobs(LocalJobComponent):
                 raise ValueError("the tasks of one job need distinct names: each name groups its task's samples")
         elif parameters.harbor is not None:
             raise ValueError("the harbor parameter applies only to a job of tasks")
-        loss_family = resolve_slime_objective(parameters.objective).loss_family
+        loss_family = resolve_objective(parameters.objective).loss_family
         try:
             resolve_loss_family(loss_family)
         except UnknownLossFamilyError as exc:
@@ -314,7 +314,7 @@ class SlimeJobs(LocalJobComponent):
         job_parameters = SlimeJobParameters.from_parameters(parameters)
         if job_parameters.harbor is None:
             raise ValueError("a task job needs the harbor parameter as an object")
-        family = resolve_slime_objective(job_parameters.objective).loss_family
+        family = resolve_objective(job_parameters.objective).loss_family
         if family != SLIME_NATIVE_FAMILY:
             raise ValueError(
                 f"a task job's objective needs the {SLIME_NATIVE_FAMILY!r} loss family, not {family!r}; "

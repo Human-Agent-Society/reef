@@ -109,10 +109,9 @@ per-sample inputs that function reads. The built-in ``importance_sampling``
 family places the trajectory advantage on every response token the loss mask
 selects. The built-in ``sft`` family trains Tinker's ``cross_entropy`` on the
 same tokens, so the `SFT recipe <recipes/sft.rst>`__ runs on Tinker; its
-samples need no rollout log probabilities. A method registers its own ``TinkerLoss`` with
-``register_loss_family_ref(name, "package.module:CLASS", backend="tinker")``,
-next to its Slime reference; the class is imported when the family is first
-resolved. Its ``loss_fn`` names the Tinker built-in it trains with and
+samples need no rollout log probabilities. A method gives its own ``TinkerLoss`` a ``loss_family`` name and decorates the class with
+``@register_loss_family`` (``reef.train.tinker_backend.loss_families``), in the module of
+its ``TinkerObjective``; the class is imported when a job first names that objective. Its ``loss_fn`` names the Tinker built-in it trains with and
 ``inputs`` shapes that function's ``loss_fn_inputs``. A ``TinkerCustomLoss``
 instead computes the loss on the Reef host from the token log probabilities
 Tinker returns, through ``forward_backward_custom``; that path needs torch

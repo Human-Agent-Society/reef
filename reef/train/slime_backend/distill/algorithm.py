@@ -32,12 +32,12 @@ from urllib.parse import urlsplit
 
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm
-from reef.train.slime_backend.data_builder import build_policy_rollout_data
 from reef.train.slime_backend.distill.teacher_engine import (
     ENGINE_TEACHER_BATCH_KEYS,
     TeacherEngine,
     validate_teacher_tokenizer,
 )
+from reef.train.slime_backend.policy_rows import build_policy_rollout_data
 from reef.train.types import TrajectorySample
 
 #: ``self``: the student's own weights read a privileged prefix (the current
@@ -210,7 +210,7 @@ def build_distill_rollout_data(payload: Mapping[str, Any], samples: Sequence, sp
         teacher_rows.append(row[5])
         sample_weights.append(float(row[6]))
 
-    data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec)
+    data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec.loss_family)
     teacher_tokens: list[list[int]] = []
     for index, (row_teacher, tokens, response_length) in enumerate(
         zip(teacher_rows, data["tokens"], data["response_lengths"], strict=True)

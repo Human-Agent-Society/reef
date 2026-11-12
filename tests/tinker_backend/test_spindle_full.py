@@ -20,7 +20,6 @@ from reef.inference.tinker import TinkerInferenceRuntime
 from reef.service.deploy.training import training_deployment_for
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos.signals import TrainingSignal
 from reef.train.component import TrainingJob, job_id_for
 from reef.train.tinker_backend import client as client_module
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
@@ -29,11 +28,8 @@ from reef.train.tinker_backend.config import SpindleFullConfig
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
 from reef.train.tinker_backend.launch import SpindleFullDeployment, spindle_full_settings
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow
-from reef.train.tinker_backend.objectives import (
-    TinkerObjective,
-    register_tinker_objective,
-    unregister_tinker_objective,
-)
+from reef.train.tinker_backend.objectives import TinkerObjective, register_objective, unregister_objective
+from reef.train.tinker_backend.signals import TrainingSignal
 from reef.train.tinker_backend.spindle_export import CheckpointExporter, checkpoint_directory, checkpoint_upload
 
 MODEL = "org/model"
@@ -111,9 +107,9 @@ class Objective(TinkerObjective):
 @pytest.fixture
 def objective():
     value = Objective()
-    register_tinker_objective(value)
+    register_objective(value.name, value)
     yield value
-    unregister_tinker_objective(value.name)
+    unregister_objective(value.name)
 
 
 @pytest.fixture

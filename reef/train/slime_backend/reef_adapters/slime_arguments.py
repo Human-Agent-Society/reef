@@ -6,9 +6,8 @@ import argparse
 import copy
 from collections.abc import Sequence
 
-from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
-from reef.train.slime_backend.loss_families import LOSS_FAMILIES
+from reef.train.slime_backend.loss_families import loss_family_reference, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.megatron.lora import validate_megatron_lora_args
 from reef.train.slime_backend.reef_adapters.preflight import validate_advantage_computation
@@ -159,7 +158,7 @@ def configure_reef_loss_args(args: SlimeArguments) -> None:
     family = args.loss_family
     if not family:
         return
-    spec = LOSS_FAMILIES.resolve(family)
+    spec = resolve_loss_family(family)
     configured = tuple(args.custom_rollout_data_keys or ())
     args.custom_rollout_data_keys = tuple(dict.fromkeys((*configured, *spec.rollout_data_keys)))
     args.reef_rollout_tensor_dtypes = dict(spec.rollout_tensor_dtypes)
@@ -203,7 +202,7 @@ def loss_family_job_args(args: SlimeArguments, spec: SlimeAlgorithm) -> SlimeArg
             "default objective"
         )
     job_args = copy.copy(args)
-    job_args.loss_family_ref = loss_family_refs().get(spec.loss_family)
+    job_args.loss_family_ref = loss_family_reference(spec.loss_family)
     job_args.loss_type = spec.loss_type
     if args.reef_configured_advantage_estimator is not None:
         job_args.advantage_estimator = args.reef_configured_advantage_estimator

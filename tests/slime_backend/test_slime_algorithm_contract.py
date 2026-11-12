@@ -14,13 +14,14 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from recipes.sao.slime import CRITIC_ATTENTION_PARAM_PATTERN, SaoSchedule
-from reef.train.algos.registry import register_loss_family_ref
-from reef.train.slime_backend.algorithm import SlimeAlgorithm, resolve_objective_paths
+from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import (
-    LOSS_FAMILIES,
     UnknownLossFamilyError,
+    loss_family_names,
+    loss_family_reference,
     register_loss_family,
     resolve_loss_family,
+    resolve_objective_paths,
     unregister_loss_family,
 )
 
@@ -61,7 +62,7 @@ _ALL_FAMILIES = ("importance_sampling", "opd", "openclawrl", "pg", "sao", "sdft"
 
 @pytest.mark.unit
 def test_registry_is_the_complete_slime_loss_family_surface() -> None:
-    assert LOSS_FAMILIES.names == _ALL_FAMILIES
+    assert loss_family_names() == _ALL_FAMILIES
     assert resolve_loss_family("sft").loss_type == "sft_loss"
     assert resolve_loss_family("tttd").loss_type == "custom_loss"
     assert resolve_loss_family("importance_sampling").loss_type == "custom_loss"
@@ -71,7 +72,7 @@ def test_registry_is_the_complete_slime_loss_family_surface() -> None:
 
     with pytest.raises(UnknownLossFamilyError, match="available families"):
         resolve_loss_family("missing")
-    # The unknown-family error teaches the two extension paths.
+    # The unknown-family error names the two ways to add a family.
     with pytest.raises(UnknownLossFamilyError, match=r"register_loss_family\(\)"):
         resolve_loss_family("missing")
     with pytest.raises(UnknownLossFamilyError, match=r"package\.module:SPEC"):
@@ -84,7 +85,7 @@ def test_register_loss_family_opens_the_registry() -> None:
     try:
         assert register_loss_family(toy) is toy
         assert resolve_loss_family("toy") is toy
-        assert "toy" in LOSS_FAMILIES.names
+        assert "toy" in loss_family_names()
         # Re-registering the same spec is idempotent; a different spec under
         # the same name is a conflict that names the taken families.
         assert register_loss_family(toy) is toy
@@ -92,17 +93,25 @@ def test_register_loss_family_opens_the_registry() -> None:
             register_loss_family(_TestAlgorithm(loss_family="toy", loss_type="policy_loss"))
     finally:
         unregister_loss_family("toy")
-    assert LOSS_FAMILIES.names == _ALL_FAMILIES
+    assert loss_family_names() == _ALL_FAMILIES
     with pytest.raises(UnknownLossFamilyError):
         resolve_loss_family("toy")
 
 
 @pytest.mark.unit
-def test_registered_family_references_can_be_unregistered() -> None:
-    register_loss_family_ref("temporary", "some_package.loss:TemporaryAlgorithm")
-    assert "temporary" in LOSS_FAMILIES.names
-    unregister_loss_family("temporary")
-    assert "temporary" not in LOSS_FAMILIES.names
+def test_a_family_registers_with_its_class_reference_or_without_one() -> None:
+    # A cookbook family registered as a class when its objective's module was imported: a worker imports it.
+    assert loss_family_reference("tttd") == "recipes.tttd.slime:TttdAlgorithm"
+    assert loss_family_reference("sft") == "reef.train.slime_backend.sft:SftAlgorithm"
+    # An instance is known in this process only; a built-in family's name is taken before its module is imported.
+    assert loss_family_reference("pg") is None
+    for taken in ("slime", "pg"):
+        with pytest.raises(ValueError, match=f"'{taken}' is already registered"):
+            register_loss_family(_TestAlgorithm(loss_family=taken))
+    with pytest.raises(TypeError, match="registers a SlimeAlgorithm"):
+        register_loss_family(object())  # type: ignore[call-overload]
+    with pytest.raises(ValueError, match="non-empty loss_family"):
+        register_loss_family(_TestAlgorithm(loss_family=""))
     with pytest.raises(KeyError, match="registered families"):
         unregister_loss_family("never_registered")
 
@@ -137,7 +146,7 @@ def test_dotted_reference_cannot_shadow_a_registered_family(monkeypatch) -> None
 
     with pytest.raises(UnknownLossFamilyError, match="already registered to a different spec"):
         resolve_loss_family("toy_loss_shadow:ALGORITHM")
-    assert LOSS_FAMILIES.names == _ALL_FAMILIES
+    assert loss_family_names() == _ALL_FAMILIES
 
 
 @pytest.mark.unit
@@ -388,7 +397,7 @@ _ADAPTERS_ROOT = _REPO_ROOT / "reef" / "train" / "slime_backend" / "reef_adapter
 _BUNDLED_FAMILIES = ("openclawrl", "sao", "sdft", "sdpo", "tttd")
 #: Deprecated flag spellings allowed alongside the canonical --<pkg>-* form.
 _DEPRECATED_FLAG_PREFIXES = ("--openclaw-topk-",)
-#: @objective channel -> required entry-point name for package <pkg>.
+#: @worker_hook channel -> required entry-point name for package <pkg>.
 _OBJECTIVE_ENTRY_NAMES = {
     "custom_loss_function_path": "{pkg}_loss",
     "custom_pg_loss_function_path": "{pkg}_loss",
@@ -556,7 +565,7 @@ def test_objective_entry_points_are_named_by_channel(family: str) -> None:
             if not (
                 isinstance(decorator, ast.Call)
                 and isinstance(decorator.func, ast.Name)
-                and decorator.func.id == "objective"
+                and decorator.func.id == "worker_hook"
                 and len(decorator.args) == 1
                 and isinstance(decorator.args[0], ast.Constant)
                 and isinstance(decorator.args[0].value, str)
@@ -616,7 +625,7 @@ def test_objective_resolution_rejects_missing_required_hook_registrations(monkey
     # Load the spec before import_module is patched, so only the objective module's import sees the patch.
     resolve_loss_family("tttd")
     monkeypatch.setattr(importlib, "import_module", lambda _name: ModuleType("empty_objective"))
-    monkeypatch.setattr(base_module, "_objective_registry", {})
+    monkeypatch.setattr(base_module, "WORKER_HOOKS", {})
     with pytest.raises(RuntimeError, match="custom_loss_function_path"):
         resolve_objective_paths(SimpleNamespace(loss_family="tttd"))
 
@@ -639,7 +648,7 @@ def test_objective_resolution_derives_core_hook_requirements(
     try:
         register_loss_family(toy)
         monkeypatch.setattr(importlib, "import_module", lambda _name: ModuleType("empty_objective"))
-        monkeypatch.setattr(base_module, "_objective_registry", {})
+        monkeypatch.setattr(base_module, "WORKER_HOOKS", {})
         with pytest.raises(RuntimeError, match=required_channel):
             resolve_objective_paths(SimpleNamespace(loss_family="toy_objective"))
     finally:
@@ -704,11 +713,9 @@ def test_dotted_reference_accepts_the_decorated_class(monkeypatch) -> None:
     # The documented external pattern: decorate the class, name it as
     # package.module:ClassName. Resolving returns the instance the decorator
     # registered, so the canonical name resolves to the same object.
-    from reef.train.slime_backend.algorithm import register_loss_family as decorate
-
     module = ModuleType("toy_loss_decorated")
 
-    @decorate
+    @register_loss_family
     class ToyAlgorithm(SlimeAlgorithm):
         loss_family = "toy_decorated"
         loss_type = "sft_loss"
@@ -722,10 +729,13 @@ def test_dotted_reference_accepts_the_decorated_class(monkeypatch) -> None:
         spec = resolve_loss_family("toy_loss_decorated:ToyAlgorithm")
         assert isinstance(spec, ToyAlgorithm)
         assert resolve_loss_family("toy_decorated") is spec
-        assert "toy_decorated" in LOSS_FAMILIES.names
+        assert "toy_decorated" in loss_family_names()
+        # A class inside a function cannot be imported by another process, so it registers no reference of its
+        # own; the dotted reference that resolved it is the one a worker imports.
+        assert loss_family_reference("toy_decorated") == "toy_loss_decorated:ToyAlgorithm"
     finally:
         unregister_loss_family("toy_decorated")
-    assert "toy_decorated" not in LOSS_FAMILIES.names
+    assert "toy_decorated" not in loss_family_names()
 
 
 @pytest.mark.unit
@@ -738,7 +748,8 @@ def test_dotted_family_reference_survives_a_fresh_worker_process(tmp_path) -> No
     package = tmp_path / "toy_worker_family"
     package.mkdir()
     (package / "__init__.py").write_text(
-        "from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family\n"
+        "from reef.train.slime_backend.algorithm import SlimeAlgorithm\n"
+        "from reef.train.slime_backend.loss_families import register_loss_family\n"
         "\n"
         "@register_loss_family\n"
         "class ToyWorkerAlgorithm(SlimeAlgorithm):\n"
@@ -751,8 +762,9 @@ def test_dotted_family_reference_survives_a_fresh_worker_process(tmp_path) -> No
     )
     script = (
         "from argparse import Namespace\n"
-        "from reef.train.slime_backend.algorithm import resolve_args_loss_family, resolve_objective_paths\n"
-        "from reef.train.slime_backend.loss_families import UnknownLossFamilyError\n"
+        "from reef.train.slime_backend.loss_families import (\n"
+        "    UnknownLossFamilyError, resolve_args_loss_family, resolve_objective_paths\n"
+        ")\n"
         "try:\n"
         "    resolve_args_loss_family(Namespace(loss_family='toy_worker'))\n"
         "    print('canonical:resolved')\n"

@@ -11,12 +11,12 @@ from dataclasses import replace
 import pytest
 from tests.support._trajectories import policy_trajectory
 
-from reef.train.algos.schedule import RolloutUnit, StepScheduling, schedule_job_data
-from reef.train.algos.signals import TrainingSignal
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.objectives import SlimeObjective
 from reef.train.slime_backend.reef_adapters import preparation
 from reef.train.slime_backend.reef_adapters.preparation import build_slime_payload
+from reef.train.slime_backend.schedule import RolloutUnit, StepScheduling, schedule_job_data
+from reef.train.slime_backend.signals import TrainingSignal
 from reef.train.types import JobData
 
 
@@ -414,7 +414,7 @@ def test_prepare_slime_job_reports_schedule_metrics(monkeypatch: pytest.MonkeyPa
         def prepare(self, batch, state):
             return TrainingSignal("train", {}, {"steps": 1}, tuple(range(8)))
 
-    monkeypatch.setattr(preparation, "resolve_slime_objective", lambda _name: ScheduleObjective())
+    monkeypatch.setattr(preparation, "resolve_objective", lambda _name: ScheduleObjective())
 
     result = preparation.prepare_slime_job(
         grouped_batch(8, 1),
@@ -441,7 +441,7 @@ def test_prepare_slime_job_groups_rows_by_the_objective_rollout_unit(
         def prepare(self, batch, state):
             return TrainingSignal("train", {}, {}, (1.0, -1.0, 1.0, -1.0))
 
-    monkeypatch.setattr(preparation, "resolve_slime_objective", lambda _name: GroupedObjective())
+    monkeypatch.setattr(preparation, "resolve_objective", lambda _name: GroupedObjective())
 
     result = preparation.prepare_slime_job(grouped_batch(2, 2), "any", {}, StepScheduling(), step_size=1)
 
