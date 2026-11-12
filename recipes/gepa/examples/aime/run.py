@@ -278,7 +278,7 @@ class RunService:
 
     def history(self) -> History:
         """The scenario's harness history (every candidate, run and decision) as the latest step left it."""
-        return History(self.recipe.state_root(self.scenario) / HARNESS_COMPONENT / HISTORY_DIR)
+        return History(self.recipe.evolution.component_state_dir(self.scenario, HARNESS_COMPONENT) / HISTORY_DIR)
 
     def records(self) -> RecordStore:
         scenario = self.dispatcher.get_or_create_scenario(self.scenario)

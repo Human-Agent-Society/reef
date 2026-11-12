@@ -30,7 +30,6 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
-from reef.record2sample import Record2Sample
 from reef.sample2job import NoJobData
 from reef.storage.data import DataStore
 from reef.storage.records import RecordStore
@@ -180,10 +179,11 @@ class Recipe:
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """Directories that belong to one scenario alone, archived when the scenario is deleted.
 
-        The record-to-sample stage names them.
+        The value is a function of the recipe's configuration fields alone. The default is what the
+        record-to-sample stage's config names (``PipelineSettings.scenario_state_dirs``). The dispatcher holds a
+        recipe of any class, so each recipe class answers for its own configuration.
         """
-        stage = self.stages().record2sample
-        return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
+        return self.stages().scenario_state_dirs(scenario)
 
     def job_components(self) -> tuple[TrainingComponent, ...]:
         """The training components whose jobs this recipe's trainers submit, each under its own ``name``: the
@@ -396,7 +396,11 @@ class Recipe:
     def harness_state_dir(self, scenario: str, component: str) -> Path | None:
         """The directory of ``component``'s harness evolution state in ``scenario``: its history, its step records
         and the running step's progress (``reef.train.harness_backend.component``); ``None`` for a recipe that
-        evolves no harness."""
+        evolves no harness.
+
+        The value is a function of the recipe's configuration fields alone (``EvolutionSettings.component_state_dir``
+        for a harness recipe). The harness routes hold a recipe of any class, so each recipe class answers for its
+        own configuration."""
         return None
 
     def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
@@ -411,14 +415,10 @@ class Recipe:
         ``None`` for a recipe that serves no harness tree. Every scenario of
         the process shares it, so the scenario list names it before a
         scenario loads.
-        """
-        return None
 
-    def serving_status(self) -> Mapping[str, Any] | None:
-        """Runtime-wide serving state this recipe owns, for ``/reef/status``.
-
-        ``None`` when the recipe has nothing beyond per-scenario training
-        state to report.
+        The value is configuration: an override reads only the recipe's own configuration fields, such as
+        ``evolution.adapter``, and no runtime, training component or store. A service that holds any recipe
+        reads it here.
         """
         return None
 
@@ -509,11 +509,6 @@ class WeightTrainingRecipe(Recipe):
     def default_start(self) -> DefaultStart:
         """The training component's untrained checkpoint (``TrainingComponent.default_start``)."""
         return self.training_component.default_start()
-
-    def serving_status(self) -> Mapping[str, Any] | None:
-        """The engine's adapter residency on a runtime that serves per-scenario adapters."""
-        status = self.runtime.adapter_residency_status()
-        return None if status is None else {"adapters": status}
 
     @classmethod
     def resolve_training_component(cls, component: TrainingComponent | None) -> TrainingComponent:

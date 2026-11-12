@@ -99,7 +99,8 @@ class EvolutionSettings(Settings):
     ``models`` maps a name other than ``served`` to a model section (``url``,
     ``model``, ``api_key_env``); ``model_metadata`` maps a model name to its
     metadata. ``state_dir`` is the directory of every scenario's history
-    and job records. Every count is ≥ 0, where 0 turns its limit off.
+    and job records: ``scenario_state_dir`` and ``component_state_dir``
+    name a scenario's and a component's directory under it. Every count is ≥ 0, where 0 turns its limit off.
     The retired ``publish`` and ``review_kinds`` are refused: the top-level
     ``activation`` section decides whether a kept tree serves.
     ``executor`` and ``sandbox`` choose where tasks run
@@ -147,6 +148,15 @@ class EvolutionSettings(Settings):
         if "served" in self.models:
             raise ValueError("evolution.models may not name a model 'served'; that is the model under test")
 
+    def scenario_state_dir(self, scenario: str) -> Path:
+        """The directory of ``scenario`` under ``state_dir``, made absolute."""
+        return Path(self.state_dir).expanduser().resolve() / scenario
+
+    def component_state_dir(self, scenario: str, component: str) -> Path:
+        """The directory of ``component``'s history, step records and step progress in ``scenario``:
+        ``scenario_state_dir(scenario) / component``."""
+        return self.scenario_state_dir(scenario) / component
+
 
 def plugin_name(setting: str | Mapping[str, Any]) -> str:
     """A stable text form of a plugin setting: the reference, or its JSON with sorted keys."""
@@ -188,7 +198,7 @@ class RecipeJobs(HarnessJobs):
         return self.recipe.seed
 
     def state_root(self, scenario: str, component: str) -> Path:
-        return self.recipe.state_root(scenario) / component
+        return self.recipe.evolution.component_state_dir(scenario, component)
 
     def backend(self, scenario: str, component: str) -> HarnessBackend:
         return self.recipe.build_backend(scenario, component)
@@ -367,6 +377,7 @@ class HarnessEvolutionRecipe(Recipe):
 
     @property
     def harness_adapter(self) -> str | None:
+        """``evolution.adapter``."""
         return self.evolution.adapter
 
     @classmethod
@@ -512,17 +523,13 @@ class HarnessEvolutionRecipe(Recipe):
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """The scenario's history and job records: what a delete archives beside the record store."""
-        return (self.state_root(scenario),)
+        return (self.evolution.scenario_state_dir(scenario),)
 
     def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
         return self.model_binding(scenario)
 
     def harness_state_dir(self, scenario: str, component: str) -> Path | None:
-        return self.state_root(scenario) / component
-
-    def state_root(self, scenario: str) -> Path:
-        """The scenario's directory under ``evolution.state_dir``, made absolute."""
-        return Path(self.evolution.state_dir).expanduser().resolve() / scenario
+        return self.evolution.component_state_dir(scenario, component)
 
     def build(
         self,
@@ -582,7 +589,7 @@ class HarnessEvolutionRecipe(Recipe):
         """
         descriptor = get_adapter(self.evolution.adapter)
         # Each component of a composed scenario keeps its own history and records.
-        root = self.state_root(scenario) / component
+        root = self.evolution.component_state_dir(scenario, component)
         try:
             history = History.open(root / HISTORY_DIR)
         except OSError as exc:

@@ -20,7 +20,7 @@ from typing import Literal
 
 import pytest
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 from tests.support.samples import made_task
 from tests.support.threshold_processor import ThresholdJobData
 
@@ -31,7 +31,7 @@ from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
-from reef.recipe import Recipe
+from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import NoSamples
 from reef.storage.job_data import read_job_data
 from reef.storage.records import RecordStore
@@ -190,6 +190,51 @@ def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer()
     status = dispatcher.build_training_status()["scenarios"]["s"]
     assert status["training_jobs"] == []
     assert status["finished_jobs"] == 3
+
+
+class ResidencyRuntime(StubInferenceRuntime):
+    """A runtime that reports ``residency`` as its adapter residency, or raises ``failure`` when it is asked."""
+
+    def __init__(self, residency: Mapping[str, int] | None = None, failure: Exception | None = None) -> None:
+        super().__init__()
+        self.residency = residency
+        self.failure = failure
+
+    def adapter_residency_status(self) -> Mapping[str, int] | None:
+        if self.failure is not None:
+            raise self.failure
+        return self.residency
+
+
+def serving_status(recipe: Recipe, tmp_path: Path) -> Mapping[str, object]:
+    """The ``serving`` block of the status that a dispatcher of ``recipe`` builds."""
+    dispatcher = Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
+    )
+    try:
+        return dispatcher.build_training_status()["serving"]
+    finally:
+        dispatcher.close()
+
+
+def test_status_reports_the_adapter_residency_that_the_runtime_of_the_weights_reports(tmp_path: Path) -> None:
+    residency = {"resident": 1, "capacity": 2}
+    weights = TestPolicyRecipe(**runtime_bindings(runtime=ResidencyRuntime(residency)))
+
+    assert serving_status(weights, tmp_path) == {"test_policy": {"adapters": residency}}
+    # A composite holds the block under the name of its weight component.
+    composite = CompositeRecipe(components={"records": Recipe(), "policy": weights})
+    assert serving_status(composite, tmp_path) == {"composite": {"policy": {"adapters": residency}}}
+    # A runtime that reports no residency, and a recipe that trains no weights, add nothing.
+    assert serving_status(TestPolicyRecipe(**runtime_bindings()), tmp_path) == {}
+    assert serving_status(Recipe(runtime=ResidencyRuntime(residency)), tmp_path) == {}
+    assert serving_status(CompositeRecipe(components={"records": Recipe(), "other": Recipe()}), tmp_path) == {}
+    # A runtime that cannot answer leaves the rest of the status readable.
+    failing = TestPolicyRecipe(**runtime_bindings(runtime=ResidencyRuntime(failure=RuntimeError("engines are down"))))
+    assert serving_status(failing, tmp_path) == {"test_policy": {"error": "RuntimeError: engines are down"}}
 
 
 def test_status_of_a_trainer_without_a_job_loop_has_no_job_fields() -> None:
