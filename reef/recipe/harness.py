@@ -281,11 +281,6 @@ class HarnessEvolutionRecipe(Recipe):
         config = {**sample2job.config, "evaluation_split": True}
         return replace(stages, sample2job=replace(sample2job, config=config))
 
-    @property
-    def harness_adapter(self) -> str | None:
-        """``evolution.adapter``."""
-        return self.evolution.adapter
-
     def activation_rule(self, reference: PluginReference | None = None) -> ActivationRule:
         """The rule ``Recipe.activation_rule`` names, with the adapter's parts checked. It reads the recipe's
         configuration and the adapter's descriptor, and no live object.
@@ -320,13 +315,6 @@ class HarnessEvolutionRecipe(Recipe):
         tree's checksum.
         """
         return DefaultStart(files=dict(self.seed.files), inputs={"seed": self.seed.checksum()})
-
-    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
-        """The scenario's history and job records: what a delete archives beside the record store."""
-        return (self.evolution.scenario_state_dir(scenario),)
-
-    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
-        return self.evolution.component_state_dir(scenario, component)
 
 
 __all__ = ["HarnessEvolutionRecipe", "HarnessLayout"]

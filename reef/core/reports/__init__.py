@@ -8,16 +8,21 @@ on each other. ``ReportBase`` is the contract; ``ScoredRolloutReport`` is
 the shared score-only vocabulary and ``TeacherContextReport`` the shared
 vocabulary of the distilling recipes (a rollout and the text its teacher
 sees); method-specific contracts live with their method packages.
+``shared_report_type`` gives the one contract of a scenario whose components
+declare several.
 """
 
+from reef.core.reports.any_component import AnyComponentReport, shared_report_type
 from reef.core.reports.base import ReportBase, ReportValidationError, validate_report_payload
 from reef.core.reports.scored_rollout import ScoredRolloutReport
 from reef.core.reports.teacher_context import TeacherContextReport
 
 __all__ = [
+    "AnyComponentReport",
     "ReportBase",
     "ReportValidationError",
     "ScoredRolloutReport",
     "TeacherContextReport",
+    "shared_report_type",
     "validate_report_payload",
 ]

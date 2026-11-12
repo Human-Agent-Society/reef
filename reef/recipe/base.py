@@ -9,14 +9,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from pathlib import Path
 from typing import Any, ClassVar, Self
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
-from reef.core.components import RECORDS_COMPONENT
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
 from reef.evaluation.activation import build_activation_rule
@@ -113,35 +111,6 @@ class Recipe:
             return self
         return replace(self, pipeline_stages=Recipe.stages(self).with_record2sample_config(config))
 
-    def for_record2sample_configs(
-        self, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
-    ) -> Recipe:
-        """The recipe from which the trainer builder builds the trainer of each component that ``configs`` names
-        with those keys over its record-to-sample config (``ScenarioSettings.record2sample_config``).
-
-        ``components`` is what the scenario serves. The default applies the config of the one component that
-        the recipe's only trainer binds. Empty ``configs`` return this recipe. A recipe that binds several trainers
-        overrides this method; the default raises ``RecipeConfigError`` for such a recipe.
-        """
-        if not configs:
-            return self
-        if len(components.names) > 1:
-            raise RecipeConfigError(
-                f"{type(self).__name__} serves components {list(components.names)}: override "
-                "for_record2sample_configs to give each trainer its own record2sample config"
-            )
-        component = components.names[0] if components.names else RECORDS_COMPONENT
-        return self.with_record2sample_config(configs.get(component, {}))
-
-    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
-        """Directories that belong to one scenario alone, archived when the scenario is deleted.
-
-        The value is a function of the recipe's configuration fields alone. The default is what the
-        record-to-sample stage's config names (``PipelineSettings.scenario_state_dirs``). The dispatcher holds a
-        recipe of any class, so each recipe class answers for its own configuration.
-        """
-        return self.stages().scenario_state_dirs(scenario)
-
     @property
     def report_type(self) -> type[ReportBase] | None:
         """The typed external-report contract this recipe accepts.
@@ -150,6 +119,9 @@ class Recipe:
         concrete :class:`~reef.core.reports.ReportBase` subclass. ``None`` keeps
         ingress open for record-only and computed-feedback recipes. This is a
         runtime capability, not a dataclass field or recipe configuration.
+
+        A ``CompositeRecipe`` declares none of its own: the contract of a deployment is
+        ``reef.scenario.factory.scenario_report_type``, which reads each component's.
         """
         return None
 
@@ -171,30 +143,6 @@ class Recipe:
         configuration gives it; empty by default. The deployment's default start is
         ``reef.scenario.live_objects.default_start``."""
         return DefaultStart()
-
-    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
-        """The directory of ``component``'s harness evolution state in ``scenario``: its history, its step records
-        and the running step's progress (``reef.train.harness_backend.component``); ``None`` for a recipe that
-        evolves no harness.
-
-        The value is a function of the recipe's configuration fields alone (``EvolutionSettings.component_state_dir``
-        for a harness recipe). The harness routes hold a recipe of any class, so each recipe class answers for its
-        own configuration."""
-        return None
-
-    @property
-    def harness_adapter(self) -> str | None:
-        """The adapter this recipe's harness artifacts render for, as ``GET /reef/harness`` serves them.
-
-        ``None`` for a recipe that serves no harness tree. Every scenario of
-        the process shares it, so the scenario list names it before a
-        scenario loads.
-
-        The value is configuration: an override reads only the recipe's own configuration fields, such as
-        ``evolution.adapter``, and no runtime, training component or store. A service that holds any recipe
-        reads it here.
-        """
-        return None
 
 
 #: The component of a weight-training recipe's weights.

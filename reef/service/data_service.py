@@ -18,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import QueueWorker
+from reef.recipe.deployment import harness_adapter
 from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, DataStoreUnavailableError
 from reef.service.data_transfer import ArchiveWriters, run_export, run_import
 from reef.storage.artifact_items import artifact_item
@@ -55,7 +56,7 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
             # has no kind.
             declared = components.components.get(row["component"])
             kind = None if declared is None else declared.kind
-            missing.append(artifact_item(scenario, row, kind, uri, dispatcher.recipe.harness_adapter))
+            missing.append(artifact_item(scenario, row, kind, uri, harness_adapter(dispatcher.recipe)))
     for start in range(0, len(missing), MAX_ITEMS_PER_CREATE):
         store.create(owner, missing[start : start + MAX_ITEMS_PER_CREATE])
     return len(missing)

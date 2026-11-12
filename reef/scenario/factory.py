@@ -36,11 +36,12 @@ from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError
+from reef.core.reports import ReportBase, shared_report_type
 from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe, WeightTrainingRecipe
-from reef.recipe.composite import CompositeRecipe
+from reef.recipe.composite import CompositeRecipe, component_recipes
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.sample2job import NoJobData
@@ -286,10 +287,54 @@ def read_trainer_spec(recipe: Recipe, live: LiveObjects) -> TrainerSpec:
     )
 
 
+def scenario_report_type(recipe: Recipe) -> type[ReportBase] | None:
+    """The report contract that the ingress of a scenario of ``recipe`` checks; ``None`` keeps ingress open.
+
+    It is the contract of the report types that the deployment's recipes declare
+    (``reef.core.reports.shared_report_type`` over ``component_recipes``): a recipe's own ``report_type``, and
+    for a composite the one that its components share, or a contract that a payload meets when any component's
+    parses it. Each trainer parses reports with its own component's contract, so a weight recipe with a strict
+    report and a harness recipe with a plain scored one share a scenario: ingress refuses only a report that no
+    component takes.
+    """
+    return shared_report_type(child.report_type for _, child in component_recipes(recipe))
+
+
+def with_record2sample_configs(
+    recipe: Recipe, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
+) -> Recipe:
+    """``recipe`` with a scenario's own record-to-sample keys ``configs``, by component name
+    (``ScenarioSettings.record2sample_config``), over the record-to-sample config of each component's recipe
+    (``Recipe.with_record2sample_config``). The trainer builder builds the scenario's trainers from the result.
+
+    ``components`` is what the scenario serves. Empty ``configs`` return ``recipe``. A composite gives each child
+    the keys under the child's component name. Any other recipe takes the keys of the one component that its
+    trainer binds, which is the records component for a scenario with no component; it raises
+    ``RecipeConfigError`` when the scenario serves several components.
+    """
+    if not configs:
+        return recipe
+    if isinstance(recipe, CompositeRecipe):
+        return replace(
+            recipe,
+            components={
+                component: child.with_record2sample_config(configs.get(component, {}))
+                for component, child in recipe.components.items()
+            },
+        )
+    if len(components.names) > 1:
+        raise RecipeConfigError(
+            f"{type(recipe).__name__} serves components {list(components.names)}: only a composite recipe gives "
+            "each trainer its own record2sample config"
+        )
+    component = components.names[0] if components.names else RECORDS_COMPONENT
+    return recipe.with_record2sample_config(configs.get(component, {}))
+
+
 def read_trainer_specs(recipe: Recipe, live: LiveObjects) -> TrainerSpec | ComponentTrainerSpecs:
     """The trainer specs of ``recipe`` on the objects of ``live``: one spec for each component of a
-    ``CompositeRecipe``, with the composite's report type, or the one spec of any other recipe
-    (``read_trainer_spec``).
+    ``CompositeRecipe``, with the scenario's report type (``scenario_report_type``), or the one spec of any other
+    recipe (``read_trainer_spec``).
 
     A component of a composite whose trainer only reads records has no mode to run in: its spec has the mode
     ``auto``.
@@ -300,7 +345,7 @@ def read_trainer_specs(recipe: Recipe, live: LiveObjects) -> TrainerSpec | Compo
     for component, component_recipe in recipe.components.items():
         spec = read_trainer_spec(component_recipe, live)
         specs[component] = replace(spec, training_mode="auto") if spec.job_component is None else spec
-    return ComponentTrainerSpecs(specs, recipe.report_type)
+    return ComponentTrainerSpecs(specs, scenario_report_type(recipe))
 
 
 class ScenarioFactory:
@@ -561,7 +606,7 @@ class ScenarioFactory:
             # The scenario's own record-to-sample keys (RFC #1362). The instance keeps them, so that a process that
             # loaded the scenario can see that control changed them (``Scenario.record2sample_config``).
             record2sample_config = self._storage.read_settings(name).record2sample_config
-            recipe = self._recipe.for_record2sample_configs(components, record2sample_config)
+            recipe = with_record2sample_configs(self._recipe, components, record2sample_config)
             try:
                 trainers = self.trainer_builder.build_trainers(
                     read_trainer_specs(recipe, self.live),
@@ -613,9 +658,9 @@ class ScenarioFactory:
                     training_component=self.live.training_component,
                     activation_rule=self._recipe.activation_rule(),
                     served_models=self.served_models,
-                    # The recipe's own contract, not the first trainer's: a composite agrees
-                    # one across its components, whatever order they are listed in.
-                    report_type=self._recipe.report_type,
+                    # The deployment's contract, not the first trainer's: the components of a composite
+                    # agree one, whatever order they are listed in.
+                    report_type=scenario_report_type(self._recipe),
                 ),
                 repository=repository,
                 root_source=root_source,

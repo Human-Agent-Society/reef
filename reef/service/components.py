@@ -35,6 +35,7 @@ from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
 from reef.recipe.composite import CompositeRecipe
+from reef.recipe.deployment import harness_adapter
 from reef.scenario.live_objects import ServedEndpoint, close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
@@ -113,7 +114,7 @@ class InferenceApp(ComponentApp):
             tokens=settings.tokens,
             evaluation_tokens=evaluation_token_for(settings.tokens),
             timeout_seconds=timeout_seconds,
-            for_codex=recipe.harness_adapter == "codex",
+            for_codex=harness_adapter(recipe) == "codex",
         )
         if settings.routing_manifest is not None:
             try:
@@ -175,7 +176,7 @@ class HarnessApp(ComponentApp):
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({"harness"}))
-        if not dispatcher.recipe.harness_adapter:
+        if harness_adapter(dispatcher.recipe) is None:
             dispatcher.close()
             raise ValueError(f"recipe {settings.recipe!r} evolves no harness, so it has no harness service")
         return create_harness_app(

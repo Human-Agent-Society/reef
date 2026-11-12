@@ -164,8 +164,8 @@ committer carries the other forward from the previous checkpoint:
 
 The root snapshot of such a scenario keeps one directory per component
 (``weights/``, ``harness/``). ``CompositeRecipe`` (``reef.recipe.composite``)
-builds exactly this from existing flat recipes, one per component, and runs
-each one's trainer as its own worker; see `configuration
+maps each component name to an existing flat recipe. Reef builds exactly
+this from the mapping, and runs each recipe's trainer as its own worker; see `configuration
 <../reference/configuration.rst#recipe-configuration>`__ for its layout.
 
 Remote weight snapshots

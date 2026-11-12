@@ -35,6 +35,7 @@ from reef.evaluation.activation import EvaluatedActivation, activation_setting, 
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
+from reef.recipe.deployment import harness_adapter
 from reef.recipe.errors import RecipeConfigError
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ItemStart, ScenarioFactory
@@ -279,7 +280,7 @@ class ScenarioRegistry:
             registered = self._backend_factory.list_registrations()
         with self._lock:
             loaded = dict(self._scenarios)
-        adapter = self._recipe.harness_adapter
+        adapter = harness_adapter(self._recipe)
         rows = []
         for name in sorted(set(registered) | set(loaded)):
             current = loaded.get(name)

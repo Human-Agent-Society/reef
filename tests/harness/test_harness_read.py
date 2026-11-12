@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
-from tests.support.harness_jobs import evolution_config
+from tests.support.harness_jobs import configured_live, evolution_config
 
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.components import ScenarioComponents
@@ -12,8 +12,10 @@ from reef.evaluation.harness import EvaluationSettings
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
 from reef.recipe import CompositeRecipe, Recipe
+from reef.recipe.deployment import harness_adapter
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -39,10 +41,11 @@ class _HarnessRecipe(Recipe):
         return DefaultStart(files={} if self.rules is None else {"rules.md": self.rules})
 
 
-def _service(tmp_path, *, recipe) -> RequestService:
+def _service(tmp_path, *, recipe, live: LiveObjects | None = None) -> RequestService:
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(None),
         coordination=memory_coordination(),
@@ -119,17 +122,13 @@ def test_harness_components_ignore_repository_bookkeeping(tmp_path) -> None:
     assert components.read_files(Artifact.local(root)) == PI_RULES_RENDER
 
 
-@dataclass(frozen=True, kw_only=True)
-class ClaudeHarnessRecipe(_HarnessRecipe):
-    @property
-    def harness_adapter(self) -> str | None:
-        return "claude"
-
-
 def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
     (tmp_path / "harness").mkdir()
     (tmp_path / "weights").mkdir()
-    harness = _service(tmp_path / "harness", recipe=ClaudeHarnessRecipe(rules="x")).dispatcher
+    claude = load_recipe(
+        HarnessEvolutionRecipe, {"model": {"path": "small"}, **evolution_config(adapter="claude")}, {}
+    )
+    harness = _service(tmp_path / "harness", recipe=claude, live=configured_live(claude)).dispatcher
     weights = _service(tmp_path / "weights", recipe=Recipe()).dispatcher
     assert [(row["scenario"], row["adapter"]) for row in harness.list_scenarios()] == [("delivery", "claude")]
     assert all("adapter" not in row for row in weights.list_scenarios())
@@ -145,8 +144,8 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
 def test_harness_recipes_name_their_adapter() -> None:
     config = {"model": {"path": "small"}, **evolution_config(adapter="claude")}
     built = load_recipe(HarnessEvolutionRecipe, config, {})
-    assert built.harness_adapter == "claude"
-    assert Recipe().harness_adapter is None
+    assert harness_adapter(built) == "claude"
+    assert harness_adapter(Recipe()) is None
     # A composite names the adapter of its harness component, wherever that component stands.
-    assert CompositeRecipe(components={"config": Recipe(), "harness": built}).harness_adapter == "claude"
-    assert CompositeRecipe(components={"config": Recipe(), "records": Recipe()}).harness_adapter is None
+    assert harness_adapter(CompositeRecipe(components={"config": Recipe(), "harness": built})) == "claude"
+    assert harness_adapter(CompositeRecipe(components={"config": Recipe(), "records": Recipe()})) is None

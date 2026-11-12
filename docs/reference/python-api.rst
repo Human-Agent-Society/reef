@@ -214,7 +214,7 @@ recipe: GEPA, Meta-Harness, ACE and ReasoningBank name the base recipe and set
      - the ``HarnessSettings`` that the harness training component builds
        itself from
    * - ``runs_offline()``, ``task_directories(descriptor)``,
-       ``configured_tasks()``, ``harness_state_dir(scenario, component)``
+       ``configured_tasks()``
      - functions of the configuration
 
 The recipe holds no runtime, no served endpoint and no training component.
@@ -339,11 +339,14 @@ dispatcher as ``dispatcher.live.runtime``.
 The same module holds the functions that need a recipe and a live object:
 
 - ``scenario_components(recipe, live, scenario)`` gives the components of a
-  deployment's scenario: ``recipe.build_components(scenario)``, with the kind
+  deployment's scenario: what the configuration declares
+  (``declared_components(recipe, scenario)``), with the kind
   of the weight component from the runtime (``served_weight_kind``) and its
   layout from the training component (``TrainingArtifactLayout``). A process
   that holds ``training_facts`` gets a ``TrainingFactsLayout``: it answers
-  ``resolves_references`` and checks no import.
+  ``resolves_references`` and checks no import. The
+  declaration is ``recipe.build_components(scenario)``; for a composite, it is
+  each child's one declared component under the child's component name.
 - ``default_start(recipe, live)`` gives the root content of a new scenario:
   the training component's untrained checkpoint for a weight recipe, each
   component's start under its directory for a composite, and
@@ -358,26 +361,60 @@ the recipe and the live objects
 (``reef.scenario.factory.read_trainer_specs``): the recipe's ``stages()``,
 ``report_type``, ``training_mode`` and, for a ``WeightTrainingRecipe``, its
 ``parameters_by_kind()``, with the training component of ``LiveObjects``. A ``CompositeRecipe`` gives
-one spec for each component. The factory's ``TrainerBuilder``
+one spec for each component, with the scenario's report contract
+(``scenario_report_type``, below). The factory's ``TrainerBuilder``
 (``reef.train.trainer_builder``) then builds one trainer for each spec with
 ``Trainer.build``, and binds it to its snapshot component. A recipe that is
 not a composite has one trainer, so its scenario serves at most one component.
 
 ``check_root_start(recipe, live, root)`` checks an item start before scenario
 registration. ``root`` is the scenario's ``ScenarioRoot``, with its artifact
-and source. The function calls ``root_start`` of the training component in
-``live``; without one, it checks nothing. For a ``CompositeRecipe`` it checks
-each component's view of the root, the same view as trainer construction
-uses. A refusal raises ``ValueError`` and leaves the scenario unregistered.
+and source. Each recipe of the deployment has its root checked by the
+component that runs its jobs: the function calls ``root_start`` of the
+training component in ``live`` for a weight recipe, and of the harness
+component in ``live`` for a harness recipe. A recipe of a ``CompositeRecipe``
+has its own component's view of the root checked, the same view as trainer
+construction uses. The function checks nothing for a recipe that submits no
+job, and for a component that ``live`` does not hold. A refusal raises
+``ValueError`` and leaves the scenario unregistered.
 
-Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
-reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
-adapter ``GET /reef/harness`` renders the recipe's harness artifacts for
-(``None``, the default, for a recipe with no harness tree;
-``HarnessEvolutionRecipe`` names ``evolution.adapter``, and ``CompositeRecipe``
-the adapter of its harness component). It is a configuration value: an
-override reads only the recipe's own configuration fields.
-The scenario list names it for every scenario. Every recipe declares
+A ``CompositeRecipe`` is a mapping from component name to child recipe, and
+it computes nothing from the children. Its ``__post_init__`` checks the
+mapping: at least two entries, valid component names, no nested composite,
+one ``training_mode``, at most one ``WeightTrainingRecipe`` and at most one
+``HarnessEvolutionRecipe``. Code that holds the recipe of a deployment reads
+its recipes with ``reef.recipe.composite.component_recipes(recipe)``: the
+pairs ``(component name, child)`` of a composite, and the one pair
+``(None, recipe)`` of any other recipe. These functions answer for a
+deployment from its configuration alone:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 46 54
+
+   * - Function
+     - Result
+   * - ``reef.recipe.deployment.harness_recipe(recipe)``
+     - the deployment's one harness recipe with its component name, or
+       ``None``
+   * - ``reef.recipe.deployment.harness_adapter(recipe)``
+     - the adapter that ``GET /reef/harness`` renders the harness artifacts
+       for (``evolution.adapter`` of the harness recipe), or ``None``; the
+       scenario list names it for every scenario
+   * - ``reef.recipe.deployment.harness_state_dir(recipe, scenario, component)``
+     - the directory of the component's harness evolution state, or ``None``
+   * - ``reef.recipe.deployment.scenario_state_dirs(recipe, scenario)``
+     - the directories that a scenario delete archives
+   * - ``reef.scenario.factory.scenario_report_type(recipe)``
+     - the report contract that ingress checks: the one that the recipes
+       share, or a contract that a report meets when any recipe's parses it
+       (``reef.core.reports.shared_report_type``)
+   * - ``reef.scenario.factory.with_record2sample_configs(recipe, components, configs)``
+     - the recipe with a scenario's own record-to-sample keys, by component
+
+Every recipe other than a composite may declare ``report_type``, the
+``ReportBase`` subclass its reports parse as (``None`` keeps ingress open).
+Every recipe declares
 ``pipeline_spec()``, the default class of each pipeline stage (see `Pipeline
 stages <#pipeline-stages>`__). Weight-training recipes add these members:
 

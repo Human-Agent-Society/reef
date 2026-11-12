@@ -19,6 +19,7 @@ from aiohttp.typedefs import Handler
 from reef.core.records_types import AgentRecord
 from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
+from reef.recipe.deployment import harness_adapter
 from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError
 from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
@@ -177,7 +178,7 @@ def add_replica_routing(
         preview,
         RouterManagementClient(policy.sr_management_port, environment[MANAGEMENT_TOKEN_ENV]),
     )
-    for_codex = recipe.harness_adapter == "codex"
+    for_codex = harness_adapter(recipe) == "codex"
 
     @web.middleware
     async def route_manifest_scenarios(request: web.Request, handler: Handler) -> web.StreamResponse:
