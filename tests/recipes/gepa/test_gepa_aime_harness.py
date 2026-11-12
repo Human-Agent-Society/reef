@@ -22,6 +22,7 @@ from tests.support.harness_service import job_backend, seed_root
 from tests.support.harness_steps import TreeArtifacts
 from tests.support.records import memory_records
 from tests.support.serving import wait_for_serving
+from tests.support.trainers import recipe_trainer
 
 from reef.core.evaluation import PolicyHarness, RolloutRequest
 from reef.harness import TaskResult
@@ -145,7 +146,7 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     monkeypatch.setattr("reef.evaluation.harness.runner.run_task", lambda *args, **kwargs: pi_run("### 17"))
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     records = memory_records("test")
-    trainer = recipe.build("test", records, artifacts=artifacts_of(recipe), root=seed_root(recipe))
+    trainer = recipe_trainer(recipe, "test", records, artifacts=artifacts_of(recipe), root=seed_root(recipe))
     try:
         evaluator = job_backend(trainer).evaluator
         assert evaluator.worker_pool.selection.settings.backend == "uni"
@@ -198,7 +199,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     driver.aime.ANSWERS.clear()
     records = memory_records("test")
     with driver.worker_runtime(recipe):
-        trainer = recipe.build("isolated", records, artifacts=artifacts_of(recipe), root=seed_root(recipe))
+        trainer = recipe_trainer(recipe, "isolated", records, artifacts=artifacts_of(recipe), root=seed_root(recipe))
         try:
             evaluator = job_backend(trainer).evaluator
             assert evaluator.worker_pool.selection.settings.backend == ("mp" if executor == "auto" else executor)

@@ -4,7 +4,6 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, closing
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -36,6 +35,7 @@ from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import TrainingCommit
+from reef.train.trainer_builder import SpecTrainerBuilder
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -205,37 +205,20 @@ def test_a_release_header_on_a_report_neither_selects_nor_binds_the_scenarios_st
 
 
 @pytest.mark.unit
-def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
+def test_the_dispatcher_builds_a_scenarios_trainers_from_the_served_recipe(tmp_path) -> None:
     selected: list[str] = []
 
-    @dataclass(frozen=True)
-    class RecordingRecipe(Recipe):
-        def build(
-            self,
-            scenario,
-            records,
-            *,
-            algorithm_state=None,
-            experiment_logger=None,
-            task_storage=None,
-            artifacts=None,
-            samples=None,
-            root=None,
-        ):
-            selected.append(self.name)
-            return super().build(
-                scenario,
-                records,
-                algorithm_state=algorithm_state,
-                experiment_logger=experiment_logger,
-                root=root,
-            )
+    class RecordingTrainers(SpecTrainerBuilder):
+        def build_trainers(self, specs, scenario, records, **arguments):
+            selected.append(specs.name)
+            return super().build_trainers(specs, scenario, records, **arguments)
 
     dispatcher = Dispatcher(
-        RecordingRecipe(name="tttd"),
+        Recipe(name="tttd"),
         InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
+        trainer_builder=RecordingTrainers(),
     )
 
     dispatcher.get_or_create_scenario("discovery")

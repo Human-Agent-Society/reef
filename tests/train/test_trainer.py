@@ -10,13 +10,14 @@ from sqlalchemy import func, select
 from tests.support.chat_templates import CharTemplate
 from tests.support.conversations import conversation
 from tests.support.grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
-from tests.support.grouped_pg import grouped_policy_pipeline
+from tests.support.grouped_pg import ComparisonSetSamples, GroupedPolicyJobData, grouped_policy_pipeline
 from tests.support.records import item_records, memory_records, token_inference
 from tests.support.runtime_stubs import (
     STUB_ROOT,
     RecordingComponent,
     StubInferenceRuntime,
     StubTrainingComponent,
+    job_sized_stages,
     runtime_bindings,
 )
 from tests.support.samples import data_storage, open_sample_store, sample_store
@@ -27,6 +28,7 @@ from tests.support.threshold_processor import ThresholdJobData, threshold_pipeli
 from recipes.sao import SAOJobData, SAOSamples
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
+from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.errors import TrainingStartRefusedError
@@ -45,13 +47,14 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
-from reef.train import PipelineContext, Trainer, TrainingPipeline
+from reef.train import ComponentTrainer, PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos.schedule import StepScheduling
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.trainer import PendingTrainingResult
+from reef.train.trainer_builder import SpecTrainerBuilder, TrainerSpec
 from reef.train.types import JobData, PreparedCommit, TrainingCommit
 
 NUM_GPUS = 0
@@ -74,6 +77,25 @@ def preparing_trainer(records: ItemRecordStore, **options) -> Trainer:
         "root": STUB_ROOT,
     }
     return Trainer.build("math", records, **{**values, **options})
+
+
+@pytest.mark.unit
+def test_one_trainer_spec_is_bound_to_the_only_component_and_refused_for_several() -> None:
+    spec = TrainerSpec(name="recipe", stages=PipelineSettings.from_setting(None, spec=PipelineSpec(), environ={}))
+    builder = SpecTrainerBuilder()
+
+    def components(*names: str) -> ScenarioComponents:
+        return ScenarioComponents({name: ComponentSpec() for name in names})
+
+    def build(served: ScenarioComponents) -> tuple[ComponentTrainer, ...]:
+        return builder.build_trainers(spec, "math", memory_records("math"), components=served, algorithm_states={})
+
+    for served, bound in ((components(), "records"), (components("weights"), "weights")):
+        (component_trainer,) = build(served)
+        assert component_trainer.component == bound and not component_trainer.trainer.trains
+        component_trainer.trainer.close()
+    with pytest.raises(ValueError, match="only a composite recipe binds one trainer per component"):
+        build(components("weights", "harness"))
 
 
 def finish(trainer: Trainer) -> None:
@@ -682,31 +704,16 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
         def default_parameters(cls):
             return {kind: {"objective": _GROUPED_PG_OBJECTIVE} for kind in ("trajectory", "task")}
 
-        def build(
-            self,
-            scenario,
-            records,
-            *,
-            algorithm_state=None,
-            experiment_logger=None,
-            task_storage=None,
-            artifacts=None,
-            samples=None,
-            root=None,
-        ):
-            return Trainer.build(
-                scenario,
-                records,
-                pipeline_factory=partial(grouped_policy_pipeline, job_samples=1),
-                job_loop=JobLoop(component, scenario=scenario),
-                job_parameters=self.parameters_by_kind(),
-                algorithm_state=algorithm_state,
-                experiment_logger=experiment_logger,
-                root=root,
-            )
+        @classmethod
+        def pipeline_spec(cls):
+            return PipelineSpec(ComparisonSetSamples, GroupedPolicyJobData)
 
     dispatcher = Dispatcher(
-        GroupedPgRecipe(**runtime_bindings(component, inference_runtime), name="grouped_pg"),
+        GroupedPgRecipe(
+            **runtime_bindings(component, inference_runtime),
+            name="grouped_pg",
+            pipeline_stages=job_sized_stages(GroupedPgRecipe.pipeline_spec()),
+        ),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),

@@ -35,6 +35,7 @@ from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBack
 from reef.artifact.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
@@ -131,7 +132,7 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
     sized = SAORecipe(
         **runtime_bindings(), pipeline_stages=job_sized_stages(SAORecipe.pipeline_spec(), job_samples=128)
     )
-    assert sized.build_pipeline(PipelineContext("math")).buffer_size == 128
+    assert sized.stages().build(PipelineContext("math")).buffer_size == 128
 
 
 @pytest.mark.unit
@@ -144,7 +145,7 @@ def test_sao_recipe_reads_reef_side_config() -> None:
         **runtime_bindings(),
     )
 
-    sample2job = recipe.build_pipeline(PipelineContext("math")).sample2job
+    sample2job = recipe.stages().build(PipelineContext("math")).sample2job
     assert (sample2job.job_samples, sample2job.buffer_size) == (2, 16)
 
 
@@ -159,7 +160,7 @@ def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
     assert deployment["training"]["options"]["global-batch-size"] == "${training.config.global_batch_size}"
     assert deployment["pipeline"]["sample2job"]["config"]["job_samples"] == "${training.config.global_batch_size}"
 
-    pipeline = recipe.build_pipeline(PipelineContext("math"))
+    pipeline = recipe.stages().build(PipelineContext("math"))
     assert pipeline.sample2job.job_samples == global_batch_size
 
     assert isinstance(pipeline.record2sample, SAOSamples)
@@ -190,8 +191,8 @@ def test_sao_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(
     pipeline: dict[str, Any], message: str
 ) -> None:
     recipe = SAORecipe.from_environment({}, config={"pipeline": pipeline}, **runtime_bindings())
-    with pytest.raises(RecipeConfigError, match=message):
-        recipe.build_pipeline(PipelineContext("math"))
+    with pytest.raises(PluginConfigError, match=message):
+        recipe.stages().build(PipelineContext("math"))
 
 
 @pytest.mark.unit

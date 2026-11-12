@@ -35,10 +35,15 @@ from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
+from reef.core.plugins import PluginConfigError
 from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.composite import CompositeRecipe
+from reef.recipe.errors import RecipeConfigError
+from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.sample2job import NoJobData
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import ScenarioArtifactFiles
@@ -57,6 +62,7 @@ from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
 from reef.train.component import ScenarioRoot
 from reef.train.trainer import ComponentTrainer
+from reef.train.trainer_builder import ComponentTrainerSpecs, SpecTrainerBuilder, TrainerBuilder, TrainerSpec
 from reef.train.training_requests import TrainingRequestQueue
 
 
@@ -235,6 +241,60 @@ def recovered_trainer_states(
     return states
 
 
+def read_trainer_spec(recipe: Recipe) -> TrainerSpec:
+    """The spec of the one trainer of ``recipe``, which is not a composite.
+
+    - A ``HarnessEvolutionRecipe`` submits each step as a job of its ``harness_component``.
+    - A ``WeightTrainingRecipe`` submits jobs to its ``training_component``, with its ``parameters_by_kind``.
+    - Any other recipe only reads records.
+
+    The recipe holds the job component and the data store until RFC #1390 takes them off it.
+
+    Raise ``TypeError`` for a weight recipe whose class declares no ``sample2job`` stage. Raise
+    ``RecipeConfigError`` for a harness recipe that has no training component.
+    """
+    job_component = None
+    job_parameters = None
+    if isinstance(recipe, HarnessEvolutionRecipe):
+        if recipe.harness_component is None:
+            raise RecipeConfigError("harness evolution has no training component to run its steps")
+        job_component = recipe.harness_component
+    elif isinstance(recipe, WeightTrainingRecipe):
+        if type(recipe).pipeline_spec().sample2job is NoJobData:
+            raise TypeError(
+                f"{type(recipe).__name__} declares no sample2job: return a PipelineSpec with a Sample2Job subclass "
+                "from pipeline_spec()"
+            )
+        # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
+        job_component = recipe.training_component
+        job_parameters = recipe.parameters_by_kind()
+    return TrainerSpec(
+        name=recipe.name,
+        stages=recipe.stages(),
+        report_type=recipe.report_type,
+        training_mode=recipe.training_mode,
+        job_parameters=job_parameters,
+        job_component=job_component,
+        data_store=recipe.data_store,
+    )
+
+
+def read_trainer_specs(recipe: Recipe) -> TrainerSpec | ComponentTrainerSpecs:
+    """The trainer specs of ``recipe``: one spec for each component of a ``CompositeRecipe``, with the composite's
+    report type, or the one spec of any other recipe (``read_trainer_spec``).
+
+    A component of a composite whose trainer only reads records has no mode to run in: its spec has the mode
+    ``auto``.
+    """
+    if not isinstance(recipe, CompositeRecipe):
+        return read_trainer_spec(recipe)
+    specs = {}
+    for component, component_recipe in recipe.components.items():
+        spec = read_trainer_spec(component_recipe)
+        specs[component] = replace(spec, training_mode="auto") if spec.job_component is None else spec
+    return ComponentTrainerSpecs(specs, recipe.report_type)
+
+
 class ScenarioFactory:
     """Register, assemble, and recover complete scenario instances.
 
@@ -252,8 +312,11 @@ class ScenarioFactory:
         experiment_reports: ExperimentReportQueue | None = None,
         served_models: ServedModels | None = None,
         training_requests: TrainingRequestQueue | None = None,
+        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         self._recipe = recipe
+        #: Builds each scenario's trainers from the recipe's specs; None is ``SpecTrainerBuilder``.
+        self.trainer_builder = SpecTrainerBuilder() if trainer_builder is None else trainer_builder
         #: The training requests of every scenario; None builds scenarios that take no request.
         self._training_requests = training_requests
         self.served_models = served_models
@@ -484,24 +547,33 @@ class ScenarioFactory:
             # The scenario's own record-to-sample keys (RFC #1362). The instance keeps them, so that a process that
             # loaded the scenario can see that control changed them (``Scenario.record2sample_config``).
             record2sample_config = self._storage.read_settings(name).record2sample_config
-            trainers = self._recipe.for_record2sample_configs(components, record2sample_config).build_trainers(
-                name,
-                store.records,
-                components=components,
-                algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
-                experiment_logger=experiment_logger,
-                task_storage=store.tasks,
-                artifacts=ScenarioArtifactFiles(name=name, store=store, repository=repository, components=components),
-                samples=self._storage.sample_store(name, store),
-                root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
-            )
+            recipe = self._recipe.for_record2sample_configs(components, record2sample_config)
+            try:
+                trainers = self.trainer_builder.build_trainers(
+                    read_trainer_specs(recipe),
+                    name,
+                    store.records,
+                    components=components,
+                    algorithm_states={
+                        component: state.algorithm_state for component, state in recovered_states.items()
+                    },
+                    experiment_logger=experiment_logger,
+                    task_storage=store.tasks,
+                    artifacts=ScenarioArtifactFiles(
+                        name=name, store=store, repository=repository, components=components
+                    ),
+                    samples=self._storage.sample_store(name, store),
+                    root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
+                )
+            except PluginConfigError as exc:
+                raise RecipeConfigError(str(exc)) from exc
             if any(
                 component_trainer.trainer.trains
                 and component_trainer.trainer.pipeline.training_mode != self._recipe.training_mode
                 for component_trainer in trainers
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
-                raise ValueError("recipe.build must pass its training_mode to Trainer.build")
+                raise ValueError("every trainer that trains must run the recipe's training_mode")
             if len(trainers) > 1 and not store.durable:
                 raise ReefError(
                     f"scenario {name!r} runs a trainer per component: each recovers from its own commits, "

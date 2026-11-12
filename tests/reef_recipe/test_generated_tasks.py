@@ -944,7 +944,7 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     assert GeneratedTaskRecipe.report_type.fget(GeneratedTaskRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
     recipe = training_recipe()
     assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"
-    built = recipe.build_pipeline(PipelineContext("one"))
+    built = recipe.stages().build(PipelineContext("one"))
     assert (
         isinstance(built.record2sample, GeneratedTaskSamples) and built.record2sample.worker is None
     ), "no round runs"
@@ -1006,7 +1006,7 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     )
     ScriptedGenerator.built.clear()
     session, samples = scenario_session(tmp_path, "one")
-    built = recipe.build_pipeline(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
+    built = recipe.stages().build(PipelineContext("one", task_storage=session.tasks, samples=samples.for_trainer("")))
     assert isinstance(built.record2sample, GeneratedTaskSamples)
     assert isinstance(built.record2sample.task_generator, ScriptedGenerator)
     [generator_arguments] = ScriptedGenerator.built
@@ -1039,8 +1039,8 @@ def test_a_generator_without_the_task_storage_of_a_scenario_session_is_refused()
     record2sample = {"module": "reef.recipe.generated_tasks:GeneratedTaskSamples", "config": {"generator": generator}}
     recipe = generated_pipeline_recipe({}, {"record2sample": record2sample})
     ScriptedGenerator.built.clear()
-    with pytest.raises(RecipeConfigError, match="generator needs the task storage of a scenario session"):
-        recipe.build_pipeline(PipelineContext("one"))
+    with pytest.raises(PluginConfigError, match="generator needs the task storage of a scenario session"):
+        recipe.stages().build(PipelineContext("one"))
     assert ScriptedGenerator.built == []
 
 
@@ -1075,15 +1075,15 @@ def test_a_generator_setting_that_names_no_usable_generator_is_refused(generator
             }
         },
     )
-    with pytest.raises(RecipeConfigError, match=message):
-        recipe.build_pipeline(PipelineContext("one"))
+    with pytest.raises(PluginConfigError, match=message):
+        recipe.stages().build(PipelineContext("one"))
 
 
 def test_the_rollout_settings_of_a_task_job_are_no_sample2job_config() -> None:
     sample2job = {"module": "reef.recipe.generated_tasks:GeneratedTaskJobData", "config": {"rollouts_per_task": 4}}
     recipe = generated_pipeline_recipe({}, {"sample2job": sample2job})
-    with pytest.raises(RecipeConfigError, match="unknown config fields: rollouts_per_task"):
-        recipe.build_pipeline(PipelineContext("one"))
+    with pytest.raises(PluginConfigError, match="unknown config fields: rollouts_per_task"):
+        recipe.stages().build(PipelineContext("one"))
 
 
 class ConfiglessSamples(Record2Sample):
@@ -1098,8 +1098,8 @@ class ConfiglessSamples(Record2Sample):
 
 def test_a_stage_without_from_config_cannot_be_named_in_the_pipeline_section() -> None:
     recipe = generated_pipeline_recipe({}, {"record2sample": {"module": f"{MODULE}:ConfiglessSamples"}})
-    with pytest.raises(RecipeConfigError, match="ConfiglessSamples cannot be built from a deployment file"):
-        recipe.build_pipeline(PipelineContext("one"))
+    with pytest.raises(PluginConfigError, match="ConfiglessSamples cannot be built from a deployment file"):
+        recipe.stages().build(PipelineContext("one"))
 
 
 def fail_first_result_saves(

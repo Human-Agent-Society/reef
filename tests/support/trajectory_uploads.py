@@ -11,6 +11,7 @@ from typing import Any
 from aiohttp import ClientResponse
 from aiohttp.test_utils import TestClient
 from tests.support.runtime_stubs import RecordingComponent
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import DefaultStart, InMemoryRepositoryBackend
 from reef.artifact.repository import RepositoryBackendFactory
@@ -29,6 +30,7 @@ from reef.storage.tasks import LocalTaskFileStore
 from reef.train import JobData, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
+from reef.train.trainer_builder import TrainerBuilder
 
 TOKEN = "upload-test-token"
 HEADERS = {"x-reef-scenario": "s", "Authorization": f"Bearer {TOKEN}"}
@@ -105,40 +107,59 @@ class UploadRecipe(Recipe):
     def default_start(self) -> DefaultStart:
         return self.start
 
-    def build(
+
+class UploadTrainers(OneTrainerBuilder):
+    """Builds the trainer of ``recipe``: its jobs run on a ``RecordingComponent`` that keeps them in
+    ``recipe.batches``, on the trainer's own thread."""
+
+    def __init__(self, recipe: UploadRecipe) -> None:
+        self.recipe = recipe
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
+        recipe = self.recipe
         return Trainer.build(
             scenario,
             records,
             # An uploaded trajectory is one sample, so two uploads make one job's data.
             pipeline_factory=lambda context: TrainingPipeline(
-                context, record2sample=self.task_stage(), sample2job=self.batch_stage(context, None, 2)
+                context, record2sample=recipe.task_stage(), sample2job=recipe.batch_stage(context, None, 2)
             ),
-            job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
+            job_loop=JobLoop(RecordingComponent(recipe.batches), scenario=scenario),
             root=root,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            training_mode=self.training_mode,
+            training_mode=spec.training_mode,
             task_storage=task_storage,
             samples=samples,
         )
 
 
-def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFactory | None = None) -> Dispatcher:
+def dispatcher_for(
+    tmp_path: Path,
+    recipe: Recipe,
+    factory: RepositoryBackendFactory | None = None,
+    trainer_builder: TrainerBuilder | None = None,
+) -> Dispatcher:
     """A dispatcher with a data store, as deployment assembly builds it; the scenario storage owns the task files.
 
     ``factory`` defaults to an in-memory repository under ``tmp_path``; a test that restarts passes its own.
+    ``trainer_builder`` builds the trainers; None is ``UploadTrainers`` for an ``UploadRecipe``, and the
+    dispatcher's own builder for any other recipe.
     """
+    if trainer_builder is None and isinstance(recipe, UploadRecipe):
+        trainer_builder = UploadTrainers(recipe)
     initial = tmp_path / "initial"
     initial.mkdir(parents=True, exist_ok=True)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
@@ -152,6 +173,7 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
         record_storage=storage,
         data_store=data,
         coordination=coordination,
+        trainer_builder=trainer_builder,
     )
     # The data service runs the data jobs, as assembly runs it.
     dispatcher.workers.add(

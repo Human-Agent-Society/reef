@@ -12,21 +12,19 @@ import pytest
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordRetention, RecordStore
-from reef.storage.samples import TrainerSamples, TrainingState
+from reef.storage.samples import TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore, TaskStorage
-from reef.train.backend import ComponentArtifacts
-from reef.train.component import ScenarioRoot
 from reef.train.trainer import Trainer
+from reef.train.trainer_builder import TrainerBuilder
 from reef.train.types import TrainingCommit
 
 
@@ -125,20 +123,22 @@ class OpaqueStorage(ScenarioStorage):
         self._inner.close()
 
 
-class FailingRecipe(Recipe):
-    def build(
+class FailingTrainers(TrainerBuilder):
+    def build_trainers(
         self,
-        scenario: str,
-        records: RecordStore,
+        specs,
+        scenario,
+        records,
         *,
-        algorithm_state: Mapping[str, Any] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
-        raise RuntimeError("injected recipe failure")
+        components,
+        algorithm_states,
+        experiment_logger=None,
+        task_storage=None,
+        artifacts=None,
+        samples=None,
+        root=None,
+    ):
+        raise RuntimeError("injected trainers failure")
 
 
 class IncompleteRecords(RecordStore):
@@ -266,12 +266,15 @@ def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(
     assert factory.events[-1] == ("close_storage", "")
 
 
-@pytest.mark.parametrize("failure_point", ("recovery", "recipe"))
+@pytest.mark.parametrize("failure_point", ("recovery", "trainers"))
 def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point: str) -> None:
     factory = OpaqueStorage(tmp_path / "private-store", fail_recovery=failure_point == "recovery")
-    recipe = FailingRecipe() if failure_point == "recipe" else Recipe()
     dispatcher = Dispatcher(
-        recipe, backend_factory(tmp_path), scenario_storage=factory, coordination=memory_coordination()
+        Recipe(),
+        backend_factory(tmp_path),
+        scenario_storage=factory,
+        coordination=memory_coordination(),
+        trainer_builder=FailingTrainers() if failure_point == "trainers" else None,
     )
     try:
         with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):

@@ -223,7 +223,9 @@ for both sides. ``storage/durable_files.py`` writes JSON files and directories
 durably, for the training components' job records.
 ``tests/contributing/test_dependency_boundaries.py`` checks these boundaries.
 
-In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
+In ``train/``, ``trainer.py`` holds the ``Trainer``; ``trainer_builder.py``
+builds a scenario's trainers from the specs that the scenario factory reads
+from the recipe; ``jobs.py`` holds the
 ``JobLoop`` and the committed ``JobLoopState``;
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
@@ -284,7 +286,8 @@ The extension points those packages expose are in `Python API
   checkpoint metadata into registration information and a ``CommitRecord``.
   ``ScenarioFactory`` receives the storage service from deployment assembly
   and handles registration, snapshot selection, and recovery. It opens a
-  session, restores committed artifacts, builds the trainer, replays records,
+  session, restores committed artifacts, builds the trainers from the recipe's
+  values (``read_trainer_specs``), replays records,
   and returns a complete ``Scenario``; failure closes its owned resources. ``committer.py`` owns writes and retry ordering;
   ``snapshots.py`` owns snapshot and artifact queries under the same publication
   lock. ``history.py`` pages retained records and commits. ``registry.py`` owns

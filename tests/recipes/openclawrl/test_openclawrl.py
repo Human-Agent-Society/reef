@@ -9,6 +9,7 @@ import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, job_sized_stages, runtime_bindings
+from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import policy_trajectory
 
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
@@ -19,6 +20,7 @@ from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
+from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.pipeline_context import PipelineContext
@@ -325,7 +327,7 @@ def test_recipe_serves_loaded_weights_and_builds_a_trainer() -> None:
     recipe = OpenClawRLRecipe(**runtime_bindings(), pipeline_stages=job_sized_stages(OpenClawRLRecipe.pipeline_spec()))
     components = recipe.build_components("s")
     assert components.loaded_component == "weights"
-    trainer = recipe.build("s", memory_records("s"), root=STUB_ROOT)
+    trainer = recipe_trainer(recipe, "s", memory_records("s"), root=STUB_ROOT)
     assert trainer.job_loop is not None
     assert trainer.pipeline.context.job_parameters["trajectory"]["objective"] == "openclawrl"
     trainer.close()
@@ -361,7 +363,7 @@ def test_the_pipeline_section_configures_the_stages() -> None:
             },
         }
     )
-    built = recipe.build_pipeline(PipelineContext("s"))
+    built = recipe.stages().build(PipelineContext("s"))
     try:
         assert isinstance(built.record2sample, OpenClawRLSamples)
         assert isinstance(built.sample2job, OpenClawRLJobData)
@@ -381,7 +383,7 @@ def test_the_pipeline_section_configures_the_stages() -> None:
 
 @pytest.mark.unit
 def test_the_default_stages_are_correlate_only_and_buffer_one_job() -> None:
-    built = openclawrl_recipe({"sample2job": {"config": {"job_samples": 16}}}).build_pipeline(PipelineContext("s"))
+    built = openclawrl_recipe({"sample2job": {"config": {"job_samples": 16}}}).stages().build(PipelineContext("s"))
     assert isinstance(built.record2sample, OpenClawRLSamples)
     assert built.record2sample.openclawrl_judging.prm is None and built.record2sample.worker is None
     assert built.buffer_size == 16
@@ -419,15 +421,15 @@ def test_the_retired_teacher_settings_are_refused() -> None:
 )
 def test_the_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict, match: str) -> None:
     recipe = openclawrl_recipe(pipeline)
-    with pytest.raises(RecipeConfigError, match=match):
-        recipe.build_pipeline(PipelineContext("s"))
+    with pytest.raises(PluginConfigError, match=match):
+        recipe.stages().build(PipelineContext("s"))
 
 
 @pytest.mark.unit
 def test_the_batches_need_the_openclawrl_sample_stage() -> None:
     recipe = openclawrl_recipe({"record2sample": {"module": "reef.record2sample:NoSamples"}})
-    with pytest.raises(RecipeConfigError, match="OpenClawRLJobData needs OpenClawRLSamples"):
-        recipe.build_pipeline(PipelineContext("s"))
+    with pytest.raises(PluginConfigError, match="OpenClawRLJobData needs OpenClawRLSamples"):
+        recipe.stages().build(PipelineContext("s"))
 
 
 @pytest.mark.unit

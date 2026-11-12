@@ -14,6 +14,7 @@ from tests.support.runtime_stubs import runtime_bindings
 
 reef_recipe = pytest.importorskip("reef.recipe.base", reason="requires a reef checkout")
 
+from reef.core.plugins import PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.train.slime_backend.objectives import resolve_slime_objective
@@ -50,7 +51,7 @@ def test_example_pipeline_section_builds_the_coral_stages():
     from recipes.beta.coral.processor import CoralGrouping, CoralJobData, CoralSamples
 
     deployment = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
-    pipeline = coral_recipe({"pipeline": deployment["pipeline"]}).build_pipeline(PipelineContext("coral-demo"))
+    pipeline = coral_recipe({"pipeline": deployment["pipeline"]}).stages().build(PipelineContext("coral-demo"))
 
     assert isinstance(pipeline.record2sample, CoralSamples)
     assert isinstance(pipeline.record2sample.grouping, CoralGrouping)
@@ -60,7 +61,7 @@ def test_example_pipeline_section_builds_the_coral_stages():
 
 
 def test_default_group_size_is_four():
-    pipeline = coral_recipe({}).build_pipeline(PipelineContext("coral-demo"))
+    pipeline = coral_recipe({}).stages().build(PipelineContext("coral-demo"))
 
     assert pipeline.record2sample.grouping.group_size == 4
 
@@ -81,5 +82,5 @@ def test_group_size_in_the_recipe_config_is_refused(key):
 )
 def test_bad_stage_config_is_refused_when_the_pipeline_builds(pipeline, message):
     recipe = coral_recipe({"pipeline": pipeline})
-    with pytest.raises(RecipeConfigError, match=message):
-        recipe.build_pipeline(PipelineContext("coral-demo"))
+    with pytest.raises(PluginConfigError, match=message):
+        recipe.stages().build(PipelineContext("coral-demo"))

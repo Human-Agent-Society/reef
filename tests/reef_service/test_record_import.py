@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import RecordingComponent
 from tests.support.samples import made_task
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
@@ -73,27 +74,36 @@ class LearningRecipe(Recipe):
     def report_type(self):
         return ScoredRolloutReport
 
-    def build(
+
+class LearningTrainers(OneTrainerBuilder):
+    """Builds the trainer of ``recipe``: its jobs run on a ``RecordingComponent`` that keeps them in
+    ``recipe.batches``, on the trainer's own thread."""
+
+    def __init__(self, recipe: LearningRecipe) -> None:
+        self.recipe = recipe
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=feedback_pipeline,
-            job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
+            job_loop=JobLoop(RecordingComponent(self.recipe.batches), scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            report_type=self.report_type,
-            training_mode=self.training_mode,
+            report_type=spec.report_type,
+            training_mode=spec.training_mode,
             root=root,
         )
 
@@ -119,6 +129,7 @@ def dispatcher_for(tmp_path, recipe):
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
+        trainer_builder=LearningTrainers(recipe) if isinstance(recipe, LearningRecipe) else None,
     )
 
 

@@ -195,8 +195,8 @@ recipe: GEPA, Meta-Harness, ACE and ReasoningBank name the base recipe and set
 than the tree.
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
-starts without the extra contracts of a specialized base; it does not force the
-recipe to remain record-only.
+starts without the extra contracts of a specialized base; the trainer of such a
+recipe only reads records.
 
 +---------------------------------+------------------------------------------------------+
 | What you are building           | Where to start                                       |
@@ -210,8 +210,9 @@ recipe to remain record-only.
 |                                 | when the method changes more than the tree, such as  |
 |                                 | the files a client pulls                             |
 +---------------------------------+------------------------------------------------------+
-| evolve a different artifact     | subclass ``Recipe``, override ``build()`` and        |
-|                                 | ``build_components()``                               |
+| evolve a different artifact     | subclass ``WeightTrainingRecipe`` over a             |
+|                                 | ``TrainingComponent`` that makes the artifact, and   |
+|                                 | override ``build_components()``                      |
 +---------------------------------+------------------------------------------------------+
 | serve an externally produced    | subclass ``Recipe``, override ``build_components()`` |
 | artifact                        | only                                                 |
@@ -236,18 +237,10 @@ Common members
 |                                                   | ``None``                    | for ``WeightTrainingRecipe``;  |
 |                                                   |                             | its first positional argument  |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build(scenario, records, algorithm_state=...,`` | ``Trainer``                 | construct the scenario trainer |
-| ``task_storage=..., releases=...)``               |                             | and give ``task_storage`` to   |
-|                                                   |                             | ``Trainer.build``;             |
-|                                                   |                             | ``releases`` reads the         |
-|                                                   |                             | component's committed snapshots|
-+---------------------------------------------------+-----------------------------+--------------------------------+
-| ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per snapshot       |
-| ``components=..., algorithm_states=...,``         | ...]``                      | component; defaults to the     |
-| ``task_storage=..., releases=...)``               |                             |                                |
-|                                                   |                             | single trainer ``build``       |
-|                                                   |                             | returns, bound to the          |
-|                                                   |                             | scenario's one component       |
+| ``stages()``                                      | ``PipelineSettings``        | the two stage classes and      |
+|                                                   |                             | their configs: the deployment's|
+|                                                   |                             | ``pipeline`` section over      |
+|                                                   |                             | ``pipeline_spec()``            |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_components(scenario)``                    | ``ScenarioComponents``      | the components of one named    |
 |                                                   |                             | scenario's snapshots, each with|
@@ -258,6 +251,15 @@ Common members
 | ``serving_status()``                              | ``Mapping | None``          | runtime-wide state for         |
 |                                                   |                             | ``/reef/status``               |
 +---------------------------------------------------+-----------------------------+--------------------------------+
+
+A recipe builds no trainer. The scenario factory reads a ``TrainerSpec`` from
+the recipe (``reef.scenario.factory.read_trainer_specs``): its ``stages()``,
+``report_type``, ``training_mode`` and, for a ``WeightTrainingRecipe``, its
+``parameters_by_kind()`` and training component. A ``CompositeRecipe`` gives
+one spec for each component. The factory's ``TrainerBuilder``
+(``reef.train.trainer_builder``) then builds one trainer for each spec with
+``Trainer.build``, and binds it to its snapshot component. A recipe that is
+not a composite has one trainer, so its scenario serves at most one component.
 
 ``check_root_start(root)`` checks an item start before scenario registration.
 ``root`` is the recipe's ``ScenarioRoot``, with its artifact and source.
@@ -625,15 +627,13 @@ To open a store, call ``task_storage.open(name)``. Each record-to-sample stage
 uses its own ``name``.
 
 A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
-The scenario factory gives ``session.tasks`` to ``Recipe.build_trainers``,
-which gives it to ``Trainer.build``. A recipe that overrides ``build`` must
-give ``task_storage`` to ``Trainer.build`` too, and accept the ``releases``
-keyword, which the scenario always passes. A composite recipe gives each
+The scenario factory gives ``session.tasks`` to its trainer builder, which
+gives it to ``Trainer.build``. For a composite recipe, the builder gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
 components never share a store. The scenario's imported tasks are not a task
 store: they are task items that the scenario uses. The factory reads them from
 the data store with the session's ``training_state`` as ``SampleStore``
-(RFC #1140). It gives them to ``Recipe.build_trainers`` as ``samples``. Each
+(RFC #1140). It gives them to its trainer builder as ``samples``. Each
 trainer reads them as itself (``SampleStore.for_trainer``) from
 ``PipelineContext.samples``.
 

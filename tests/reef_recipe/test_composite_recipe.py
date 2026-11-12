@@ -14,11 +14,11 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.runtime_stubs import StubTrainingComponent, job_sized_stages
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
@@ -39,6 +39,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.config import recipe_config_from_file_layout
+from reef.scenario.factory import read_trainer_specs
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.data import MemoryDataStore
@@ -46,10 +47,10 @@ from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
-from reef.train import Trainer, TrainingCommit
+from reef.train import TrainingCommit
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
-from reef.train.jobs import JobLoop
-from reef.train.pipeline import PipelineSettings, PipelineSpec, TrainingPipeline
+from reef.train.pipeline import PipelineSettings, PipelineSpec
+from reef.train.trainer_builder import ComponentTrainerSpecs, SpecTrainerBuilder, TrainerSpec
 
 
 class _FileJobs(StubTrainingComponent):
@@ -84,36 +85,46 @@ class _TreeRecipe(Recipe):
     def default_start(self) -> DefaultStart:
         return DefaultStart(files=self.seed or {})
 
-    def step_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(context, job_samples=1)
+    def step_stages(self) -> PipelineSettings:
+        """The stages of the recipe's trainer: one report is one job."""
+        return job_sized_stages(PipelineSpec(ThresholdSamples, ThresholdJobData))
 
     def step_jobs(self) -> _FileJobs:
         return _FileJobs(self.label, self.artifact_dir)
 
-    def build(
-        self,
-        scenario,
-        records,
-        *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=self.step_pipeline,
-            job_loop=JobLoop(self.step_jobs(), scenario=scenario),
-            algorithm_state=algorithm_state,
-            report_type=self.report_type,
-            experiment_logger=experiment_logger,
-            training_mode=self.training_mode,
-            samples=samples,
-            root=root,
-        )
+
+def tree_spec(recipe: Recipe, spec: TrainerSpec) -> TrainerSpec:
+    """``spec`` for a ``_TreeRecipe``: its trainer runs the recipe's jobs on its own thread, with the recipe's
+    stages and mode. Any other recipe keeps ``spec``."""
+    if not isinstance(recipe, _TreeRecipe):
+        return spec
+    return replace(
+        spec, stages=recipe.step_stages(), job_component=recipe.step_jobs(), training_mode=recipe.training_mode
+    )
+
+
+class _TreeTrainers(SpecTrainerBuilder):
+    """Builds the trainers of ``recipe``, a ``_TreeRecipe`` or a composite with ``_TreeRecipe`` components, from
+    each recipe's ``tree_spec``."""
+
+    def __init__(self, recipe: Recipe) -> None:
+        self.recipe = recipe
+
+    def build_trainers(self, specs, scenario, records, **arguments):
+        if isinstance(specs, ComponentTrainerSpecs):
+            recipes = self.recipe.components
+            specs = replace(
+                specs,
+                specs={component: tree_spec(recipes[component], spec) for component, spec in specs.specs.items()},
+            )
+        else:
+            specs = tree_spec(self.recipe, specs)
+        return super().build_trainers(specs, scenario, records, **arguments)
+
+
+def build_trainers(recipe: Recipe, scenario: str, records, **arguments):
+    """The trainers that a dispatcher of ``_serve`` builds for ``recipe``."""
+    return _TreeTrainers(recipe).build_trainers(read_trainer_specs(recipe), scenario, records, **arguments)
 
 
 @dataclass(frozen=True)
@@ -190,6 +201,7 @@ def _serve(recipe: CompositeRecipe, tmp_path: Path, *, hold_local_cycles: bool =
         data_store=storage.data,
         coordination=memory_coordination(),
         hold_local_cycles=hold_local_cycles,
+        trainer_builder=_TreeTrainers(recipe),
     )
 
 
@@ -207,7 +219,8 @@ def test_composite_recipe_merges_components_seeds_and_trainers(tmp_path: Path) -
     # No weight-training component: the base holds no model.
     assert base.model_files is None and base.model_component is None
     assert recipe.report_type is None
-    trainers = recipe.build_trainers(
+    trainers = build_trainers(
+        recipe,
         "agent",
         SQLiteScenarioStorage().open("agent").records,
         components=components,
@@ -227,7 +240,8 @@ def test_each_component_trainer_takes_only_its_own_record2sample_keys(tmp_path: 
     recipe = CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe(pipeline_stages=stages)})
     components = recipe.build_components("agent")
     configured = recipe.for_record2sample_configs(components, {"config": {"trajectory_idle_seconds": 7}})
-    trainers = configured.build_trainers(
+    trainers = build_trainers(
+        configured,
         "agent",
         SQLiteScenarioStorage().open("agent").records,
         components=components,
@@ -570,7 +584,8 @@ def test_components_with_different_report_contracts_admit_what_any_of_them_accep
         }
     )
     assert mixed.report_type is not None and mixed.report_type.__name__.startswith("AnyOf")
-    trainers = mixed.build_trainers(
+    trainers = build_trainers(
+        mixed,
         "agent",
         SQLiteScenarioStorage().open("agent").records,
         components=mixed.build_components("agent"),
@@ -657,12 +672,14 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
     tree = tmp_path / "seed"
     tree.mkdir()
     (tree / "rules.md").write_text("seed")
+    recipe = _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"rules.md": "seed"})
     dispatcher = Dispatcher(
-        _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"rules.md": "seed"}),
+        recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(None),
         coordination=memory_coordination(),
+        trainer_builder=_TreeTrainers(recipe),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -737,8 +754,17 @@ class _RolloutTreeRecipe(_TreeRecipe):
     closing: threading.Event = field(default_factory=threading.Event)
     rollout_done: threading.Event = field(default_factory=threading.Event)
 
-    def step_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(context, sample2job=_ClosingJobData(context, self.closing, self.rollout_done))
+    def step_stages(self) -> PipelineSettings:
+        closing, rollout_done = self.closing, self.rollout_done
+
+        class JobData(_ClosingJobData):
+            @classmethod
+            def from_config(cls, config, *, context, record2sample, environ):
+                return cls(context, closing, rollout_done)
+
+        return PipelineSettings(
+            record2sample=PluginReference(ThresholdSamples, {}), sample2job=PluginReference(JobData, {})
+        )
 
 
 @pytest.mark.unit

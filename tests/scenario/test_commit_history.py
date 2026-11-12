@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from contextlib import closing
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from threading import Event, Thread
@@ -26,6 +26,7 @@ from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
+from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
@@ -36,7 +37,7 @@ from reef.recipe.base import Recipe
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_snapshot
 from reef.storage.job_data import read_job_data
-from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id, stage_item_id
+from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 from reef.train import Trainer
@@ -420,23 +421,25 @@ class _SavedArtifactJobs(StubTrainingComponent):
         return (SavedCheckpoint(0, str(self.artifact_path), str(self.artifact_path)),)
 
 
-@dataclass(frozen=True)
-class _SavedArtifactRecipe(Recipe):
-    backend: _SavedArtifactJobs
+class _SavedArtifactTrainers(OneTrainerBuilder):
+    """Builds a trainer whose jobs run on ``backend``, on the trainer's own thread."""
 
-    def build(
+    def __init__(self, backend: _SavedArtifactJobs) -> None:
+        self.backend = backend
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
-        del experiment_logger
         return Trainer.build(
             scenario,
             records,
@@ -453,13 +456,14 @@ def build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
     (artifact_path / "model.txt").write_text("trained")
     backend = _SavedArtifactJobs(artifact_path)
     dispatcher = Dispatcher(
-        _SavedArtifactRecipe(backend=backend),
+        Recipe(),
         repository_factory(tmp_path),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         # The tests drive the steps themselves; a local cycle would race them for the batch.
         hold_local_cycles=True,
         coordination=memory_coordination(),
+        trainer_builder=_SavedArtifactTrainers(backend),
     )
     return dispatcher, backend
 
@@ -539,27 +543,28 @@ class ProtectAllPipeline(TrainingPipeline):
         return frozenset()
 
 
-@dataclass(frozen=True)
-class ProtectAllPolicyRecipe(TestPolicyRecipe):
-    def build(
+class ProtectAllTrainers(OneTrainerBuilder):
+    """Builds the weight trainer of the recipe over ``ProtectAllPipeline``."""
+
+    def build_trainer(
         self,
+        spec,
         scenario,
         records,
         *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
+        algorithm_state,
+        experiment_logger,
+        task_storage,
+        artifacts,
+        samples,
+        root,
     ):
-        component = self.training_component
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=ProtectAllPipeline,
-            job_loop=JobLoop(component, scenario=scenario),
-            job_parameters={kind: {"objective": "sft"} for kind in SAMPLE_KINDS},
+            job_loop=JobLoop(spec.job_component, scenario=scenario),
+            job_parameters=spec.job_parameters,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             root=root,
@@ -579,11 +584,12 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
 
     def build(component):
         return Dispatcher(
-            ProtectAllPolicyRecipe(**runtime_bindings(component)),
+            TestPolicyRecipe(**runtime_bindings(component)),
             backend_factory,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),
             coordination=memory_coordination(),
+            trainer_builder=ProtectAllTrainers(),
         )
 
     first_component = SourceRecordingComponent(tmp_path / "first")

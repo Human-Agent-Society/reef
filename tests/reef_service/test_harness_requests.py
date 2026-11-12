@@ -15,6 +15,7 @@ from tests.support.harness_service import backend_step, catalog, drive_trainer_j
 from tests.support.harness_steps import COMPONENT, TreeArtifacts, changed_rules, harness_backend, harness_recipe
 from tests.support.records import memory_records
 from tests.support.samples_service import make_samples
+from tests.support.trainers import recipe_trainer
 
 from reef.core.plugins import PluginReference
 from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires, required_by
@@ -461,7 +462,8 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
         (tmp_path / str(index)).mkdir()
         recipe = manual_recipe(tmp_path / str(index), method)
         records = memory_records("agents")
-        trainer = recipe.build(
+        trainer = recipe_trainer(
+            recipe,
             "agents",
             records,
             artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT),

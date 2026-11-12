@@ -26,21 +26,13 @@ from reef.evaluation.activation import activation_reference, build_activation_ru
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.interfaces import InferenceRuntime
-from reef.observability import ExperimentLogger
-from reef.pipeline_context import PipelineContext
 from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
-from reef.sample2job import NoJobData
 from reef.storage.data import DataStore
-from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
-from reef.storage.tasks import TaskStorage
-from reef.train.backend import CommittedArtifacts, ComponentArtifacts
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.component import ScenarioRoot, TrainingArtifactLayout, TrainingComponent
-from reef.train.jobs import JobLoop
-from reef.train.pipeline import PipelineSettings, PipelineSpec, TrainingPipeline
-from reef.train.trainer import ComponentTrainer, Trainer
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
 @dataclass(frozen=True)
@@ -95,8 +87,9 @@ class Recipe:
 
     Instantiating ``Recipe`` directly records traffic without producing job
     data. Specialized recipes are frozen dataclasses over this base: they
-    add their own fields, override ``build`` and, when needed, narrow the
-    ``runtime`` field.
+    add their own fields and, when needed, narrow the ``runtime`` field.
+    The scenario factory builds the trainers from a recipe's values
+    (``reef.scenario.factory.read_trainer_specs``).
     """
 
     config_sections: ClassVar[tuple[str, ...]] = ()
@@ -153,11 +146,11 @@ class Recipe:
     def for_record2sample_configs(
         self, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
     ) -> Recipe:
-        """The recipe whose :meth:`build_trainers` builds the trainer of each component that ``configs`` names with
-        those keys over its record-to-sample config (``ScenarioSettings.record2sample_config``).
+        """The recipe from which the trainer builder builds the trainer of each component that ``configs`` names
+        with those keys over its record-to-sample config (``ScenarioSettings.record2sample_config``).
 
         ``components`` is what the scenario serves. The default applies the config of the one component that
-        :meth:`build_trainers` binds. Empty ``configs`` return this recipe. A recipe that binds several trainers
+        the recipe's only trainer binds. Empty ``configs`` return this recipe. A recipe that binds several trainers
         overrides this method; the default raises ``RecipeConfigError`` for such a recipe.
         """
         if not configs:
@@ -169,13 +162,6 @@ class Recipe:
             )
         component = components.names[0] if components.names else RECORDS_COMPONENT
         return self.with_record2sample_config(configs.get(component, {}))
-
-    def build_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        """Build the training pipeline of one scenario from :meth:`stages`, in pipeline order."""
-        try:
-            return self.stages().build(context)
-        except PluginConfigError as exc:
-            raise RecipeConfigError(str(exc)) from exc
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """Directories that belong to one scenario alone, archived when the scenario is deleted.
@@ -291,83 +277,6 @@ class Recipe:
         runtime capability, not a dataclass field or recipe configuration.
         """
         return None
-
-    def build(
-        self,
-        scenario: str,
-        records: RecordStore,
-        *,
-        algorithm_state: Mapping[str, Any] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=self.build_pipeline,
-            algorithm_state=algorithm_state,
-            report_type=self.report_type,
-            experiment_logger=experiment_logger,
-            training_mode=self.training_mode,
-            task_storage=task_storage,
-            samples=samples,
-        )
-
-    def build_trainers(
-        self,
-        scenario: str,
-        records: RecordStore,
-        *,
-        components: ScenarioComponents,
-        algorithm_states: Mapping[str, Mapping[str, Any] | None],
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: CommittedArtifacts | None = None,
-        samples: SampleStore | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> tuple[ComponentTrainer, ...]:
-        """Build every trainer of the named scenario, each bound to the component it evolves.
-
-        The default builds the one trainer :meth:`build` returns and binds it
-        to the scenario's only component (``records`` when the scenario serves
-        none). A recipe that declares several components overrides
-        this to return one trainer per component. The scenario runs them as
-        separate workers that take turns, one step at a time.
-        ``algorithm_states`` carries each one's recovered state under its
-        component name. ``task_storage`` opens the generated task stores of
-        the scenario session, and ``samples`` is the data items that it trains
-        on. Each trainer gives them to its pipeline as its own
-        (``SampleStore.for_trainer``, ``""`` for the only trainer).
-        ``releases`` reads the scenario's committed snapshots; each trainer
-        reads those of its own component. ``root`` is the scenario's root
-        snapshot, where a new trainer starts; a recipe of several components
-        gives each trainer its own component of it
-        (``ScenarioComponents.component_artifact``).
-        """
-        if len(components.names) > 1:
-            raise RecipeConfigError(
-                f"{type(self).__name__} serves components {list(components.names)}: override build_trainers "
-                "to bind one trainer per component"
-            )
-        component = components.names[0] if components.names else RECORDS_COMPONENT
-        return (
-            ComponentTrainer(
-                component,
-                self.build(
-                    scenario,
-                    records,
-                    algorithm_state=algorithm_states.get(component),
-                    experiment_logger=experiment_logger,
-                    task_storage=task_storage,
-                    artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
-                    samples=None if samples is None else samples.for_trainer(""),
-                    root=root,
-                ),
-            ),
-        )
 
     def build_components(self, scenario: str) -> ScenarioComponents:
         """The components that every snapshot of the named scenario binds.
@@ -577,77 +486,6 @@ class WeightTrainingRecipe(Recipe):
         their field declarations. This exists only for structural rules such
         as SAO refusing an ``optimization`` section.
         """
-
-    def build(
-        self,
-        scenario: str,
-        records: RecordStore,
-        *,
-        algorithm_state: Mapping[str, Any] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
-        """Build a trainer from this recipe's pipeline, job parameters, and report contract.
-
-        Override with ``Trainer.build`` for bespoke wiring such as a local
-        training backend, and pass :attr:`report_type` and ``task_storage``
-        through there too.
-        """
-        return self._build_trainer(
-            scenario,
-            records,
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            task_storage=task_storage,
-            artifacts=artifacts,
-            samples=samples,
-            root=root,
-        )
-
-    def _build_trainer(
-        self,
-        scenario: str,
-        records: RecordStore,
-        *,
-        algorithm_state: Mapping[str, Any] | None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
-        """Build the shared weight trainer with this recipe's report contract."""
-        if type(self).pipeline_spec().sample2job is NoJobData:
-            raise TypeError(
-                f"{type(self).__name__} declares no sample2job: return a PipelineSpec with a Sample2Job subclass "
-                f"from pipeline_spec() or override build() for bespoke trainer wiring"
-            )
-        # A weight trainer's job size has no default: the deployment sets pipeline.sample2job.config.job_samples.
-        try:
-            return Trainer.build(
-                scenario,
-                records,
-                pipeline_factory=self.build_pipeline,
-                job_loop=JobLoop(
-                    self.training_component,
-                    scenario=scenario,
-                    scenario_component=None if artifacts is None else artifacts.component,
-                    data_store=self.data_store,
-                ),
-                root=root,
-                job_parameters=self.parameters_by_kind(),
-                algorithm_state=algorithm_state,
-                report_type=self.report_type,
-                experiment_logger=experiment_logger,
-                training_mode=self.training_mode,
-                task_storage=task_storage,
-                samples=samples,
-            )
-        except PluginConfigError as exc:
-            raise RecipeConfigError(str(exc)) from exc
 
 
 def close_runtimes(

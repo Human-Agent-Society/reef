@@ -65,25 +65,18 @@ from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, validate_tree
-from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.data import DataStore
-from reef.storage.records import RecordStore
-from reef.storage.samples import TrainerSamples
-from reef.storage.tasks import TaskStorage
-from reef.train.backend import ComponentArtifacts
-from reef.train.component import ScenarioRoot, TrainingComponent
+from reef.train.component import TrainingComponent
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
-from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineSettings, PipelineSpec
-from reef.train.trainer import Trainer
 
 #: The directory of the harness training component's jobs and starts under ``evolution.state_dir``.
 TRAINING_DIR = ".training"
@@ -228,8 +221,9 @@ class HarnessEvolutionRecipe(Recipe):
     ``HarnessTrainingComponent`` over ``RecipeSteps`` of this recipe, under ``<evolution.state_dir>/.training``,
     which each copy of the recipe makes again, or the jobs queue's view of one (``with_job_components``).
     Purpose: a deployment names it as its recipe; the service builds it once
-    from the deployment config, and ``build`` makes each scenario's trainer,
-    which submits each step as a job of ``harness_component``.
+    from the deployment config, and the scenario factory's trainer builder
+    makes each scenario's trainer, which submits each step as a job of
+    ``harness_component``.
     """
 
     method: Method
@@ -523,45 +517,6 @@ class HarnessEvolutionRecipe(Recipe):
     def state_root(self, scenario: str) -> Path:
         """The scenario's directory under ``evolution.state_dir``, made absolute."""
         return Path(self.evolution.state_dir).expanduser().resolve() / scenario
-
-    def build(
-        self,
-        scenario: str,
-        records: RecordStore,
-        *,
-        algorithm_state: Mapping[str, Any] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
-        """The scenario's trainer: it submits each step as a job of ``harness_component``, whose start is the
-        component's head snapshot in ``releases``."""
-        if artifacts is None:
-            raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed snapshots")
-        if self.evaluation.imported_tasks and samples is None:
-            raise RecipeConfigError("evolution.evaluation.imported_tasks needs the samples of a scenario session")
-        if self.harness_component is None:
-            raise RecipeConfigError("harness evolution has no training component to run its steps")
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=self.build_pipeline,
-            job_loop=JobLoop(
-                self.harness_component,
-                scenario=scenario,
-                scenario_component=artifacts.component,
-                data_store=self.data_store,
-            ),
-            root=root,
-            algorithm_state=algorithm_state,
-            report_type=self.report_type,
-            experiment_logger=experiment_logger,
-            training_mode=self.training_mode,
-            task_storage=task_storage,
-            samples=samples,
-        )
 
     def build_policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin:
         """The publication policy that ``evolution.evaluation.policy`` names, measuring through ``backend``."""

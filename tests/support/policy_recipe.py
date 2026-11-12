@@ -10,18 +10,13 @@ from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass
 from typing import Any
 
-from tests.support.threshold_processor import threshold_pipeline
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.inference.interfaces import InferenceRuntime
-from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
-from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, TrainerSamples
-from reef.storage.tasks import TaskStorage
-from reef.train.backend import ComponentArtifacts
-from reef.train.component import ScenarioRoot, TrainingComponent
-from reef.train.jobs import JobLoop
-from reef.train.trainer import Trainer
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
+from reef.train.component import TrainingComponent
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
 @dataclass(frozen=True)
@@ -48,27 +43,23 @@ class TestPolicyRecipe(WeightTrainingRecipe):
             raise TypeError("TestPolicyRecipe requires a TrainingComponent")
         return cls(training_component, runtime=runtime)
 
-    def build(
-        self,
-        scenario: str,
-        records: RecordStore,
-        *,
-        algorithm_state: Mapping[str, Any] | None = None,
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: ComponentArtifacts | None = None,
-        samples: TrainerSamples | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> Trainer:
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=lambda context: threshold_pipeline(
-                context, job_samples=1, accept_multi_turn=True, max_staleness=self.max_staleness
-            ),
-            job_loop=JobLoop(self.training_component, scenario=scenario),
-            job_parameters={kind: {"objective": "sft"} for kind in SAMPLE_KINDS},
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            root=root,
-        )
+    def __post_init__(self) -> None:
+        if self.pipeline_stages is None:
+            # One report is one job, and a report of several model calls trains as one sample.
+            section = {
+                "record2sample": {
+                    "config": {"accept_multi_turn_policy_samples": True, "max_staleness": self.max_staleness}
+                },
+                "sample2job": {"config": {"job_samples": 1}},
+            }
+            stages = PipelineSettings.from_setting(section, spec=self.pipeline_spec(), environ={})
+            object.__setattr__(self, "pipeline_stages", stages)
+        super().__post_init__()
+
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(ThresholdSamples, ThresholdJobData)
+
+    @classmethod
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "sft"} for kind in SAMPLE_KINDS}

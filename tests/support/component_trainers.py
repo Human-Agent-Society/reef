@@ -29,6 +29,7 @@ from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
+from reef.train.trainer_builder import TrainerBuilder
 
 WEIGHTS = "weights"
 HARNESS = "harness"
@@ -191,8 +192,21 @@ class _TwoTrainerRecipe(Recipe):
             )
         return threshold_pipeline(context, job_samples=1, max_staleness=MAX_STALENESS)
 
+
+class TwoTrainerBuilder(TrainerBuilder):
+    """Builds the trainers of a ``_TwoTrainerRecipe``: one for each of its backends, whose jobs run on the trainer's
+    own thread, and the weights trainer when the recipe has a training component.
+
+    ``recipe`` gives the backends, the pipelines and the training component. ``_dispatcher`` sets it to the
+    dispatcher's recipe, whose training component is the jobs queue's view of it.
+    """
+
+    def __init__(self, recipe: _TwoTrainerRecipe) -> None:
+        self.recipe = recipe
+
     def build_trainers(
         self,
+        specs,
         scenario,
         records,
         *,
@@ -204,11 +218,13 @@ class _TwoTrainerRecipe(Recipe):
         samples=None,
         root=None,
     ):
+        recipe = self.recipe
+
         def factory_for(component: str):
-            return lambda context: self.pipeline_for(component, context)
+            return lambda context: recipe.pipeline_for(component, context)
 
         # Each trainer reads the samples as the component that its commits name; the only trainer names none.
-        alone = len(self.backends) + (self.training_component is not None) == 1
+        alone = len(recipe.backends) + (recipe.training_component is not None) == 1
 
         def samples_for(component: str) -> TrainerSamples | None:
             return None if samples is None else samples.for_trainer("" if alone else component)
@@ -227,9 +243,9 @@ class _TwoTrainerRecipe(Recipe):
                     root=root,
                 ),
             )
-            for component, backend in self.backends.items()
+            for component, backend in recipe.backends.items()
         )
-        training = self.training_component
+        training = recipe.training_component
         if training is None:
             return trainers
         # The weights trainer submits jobs to the training component; it comes first, as the local weights trainer does.
@@ -359,10 +375,12 @@ def _dispatcher(
     hold_local_cycles: bool = False,
     components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
     start: DefaultStart | None = None,
+    trainer_builder: TrainerBuilder | None = None,
 ) -> tuple[Dispatcher, dict[str, ComponentJobs]]:
     """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` when one is given. ``start`` is the
     two trainer recipe's default start, one seed file per component by default. ``components`` are the services that
-    it runs; without ``samples``, only the test makes samples (``make_samples``)."""
+    it runs; without ``samples``, only the test makes samples (``make_samples``). ``trainer_builder`` builds the
+    trainers; None is a ``TwoTrainerBuilder`` for a ``_TwoTrainerRecipe``."""
     repository = _repository(tmp_path) if backend_factory is None else backend_factory
     seeds = {} if start is None else {"start": start}
     if recipe is not None:
@@ -383,6 +401,8 @@ def _dispatcher(
         )
     records = tmp_path / "records" if records_dir is None else records_dir
     storage = data_storage(records)
+    if trainer_builder is None and isinstance(recipe, _TwoTrainerRecipe):
+        trainer_builder = TwoTrainerBuilder(recipe)
     dispatcher = Dispatcher(
         recipe,
         repository,
@@ -395,7 +415,10 @@ def _dispatcher(
         # The work queues live beside the records, so a restarted dispatcher finds the running job, as in a deployment.
         coordination=open_coordination("sqlite", agent_record_dir=str(records), record_database_url=None),
         components=components,
+        trainer_builder=trainer_builder,
     )
+    if isinstance(trainer_builder, TwoTrainerBuilder) and isinstance(dispatcher.recipe, _TwoTrainerRecipe):
+        trainer_builder.recipe = dispatcher.recipe
     return dispatcher, backends
 
 

@@ -117,7 +117,7 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
         }
     )
 
-    pipeline = recipe.build_pipeline(PipelineContext("discovery", report_type=recipe.report_type))
+    pipeline = recipe.stages().build(PipelineContext("discovery", report_type=recipe.report_type))
 
     assert isinstance(pipeline.record2sample, TTTDSamples)
     assert isinstance(pipeline.sample2job, TTTDJobData)
@@ -129,7 +129,7 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
 
 @pytest.mark.unit
 def test_tttd_default_grid_is_the_paper_grid() -> None:
-    pipeline = _recipe({"data": {}}).build_pipeline(PipelineContext("discovery"))
+    pipeline = _recipe({"data": {}}).stages().build(PipelineContext("discovery"))
 
     assert isinstance(pipeline.sample2job, TTTDJobData)
     assert (pipeline.sample2job.groups_per_step, pipeline.sample2job.rollouts_per_group) == (8, 64)
@@ -154,8 +154,8 @@ def test_tttd_refuses_the_grid_in_the_recipe_config(key: str) -> None:
 )
 def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict, message: str) -> None:
     recipe = _recipe({"data": {}, "pipeline": pipeline})
-    with pytest.raises(RecipeConfigError, match=message):
-        recipe.build_pipeline(PipelineContext("discovery", report_type=recipe.report_type))
+    with pytest.raises(PluginConfigError, match=message):
+        recipe.stages().build(PipelineContext("discovery", report_type=recipe.report_type))
 
 
 @pytest.mark.unit

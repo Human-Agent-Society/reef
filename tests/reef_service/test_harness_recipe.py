@@ -49,12 +49,13 @@ from tests.support.harness_steps import (
 from tests.support.records import memory_records
 from tests.support.samples import data_storage, sample_store
 from tests.support.strategies import resolve_task_scorer
+from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact import Artifact
 from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
-from reef.core.plugins import PluginReference
+from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.prompts import untrusted_text
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, TaskSplit, write_harbor_task, write_split_manifest
@@ -273,7 +274,9 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
         evaluation=evaluation, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
     )
     built = from_config(settings, runtime=runtime())
-    trainer = built.build("demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built))
+    trainer = recipe_trainer(
+        built, "demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built)
+    )
     try:
         backend = job_backend(trainer)
         selection = built.build_policy(backend)
@@ -294,17 +297,17 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     assert result.metrics["min_margin"] == 1.0
 
 
-def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committed_releases(tmp_path: Path) -> None:
+def test_the_trainer_of_a_harness_recipe_submits_each_step_to_the_harness_component(tmp_path: Path) -> None:
     built = harness_recipe(tmp_path, lambda workspace, services: None)
-    trainer = built.build("demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built))
+    trainer = recipe_trainer(
+        built, "demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built)
+    )
     # The trainer submits each step as a job of the recipe's harness component.
     assert isinstance(trainer, Trainer) and trainer.job_loop_required().component is built.harness_component
     assert isinstance(built.harness_component, HarnessTrainingComponent)
     assert built.job_components() == (built.harness_component,)
     assert trainer.pipeline.context.report_type is ScoredRolloutReport
     trainer.close()
-    with pytest.raises(RecipeConfigError, match="reads its head tree from the scenario's committed snapshots"):
-        built.build("demo", memory_records("demo"), root=seed_root(built))
 
 
 def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
@@ -322,7 +325,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
     assert built.scenario_state_dirs("demo") == (state / "demo",)
     records = memory_records("demo")
     for scenario in ("demo", "other"):
-        trainer = built.build(scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
+        trainer = recipe_trainer(built, scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
         backend = job_backend(trainer)
         root = state / scenario / COMPONENT
         assert backend.history.root == root / "history" and backend.records.root == root / "steps"
@@ -452,8 +455,6 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         assert evaluation_tasks() == [str(first.sample.task_path)]
         second = import_task("held-2", "eval")
         assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
-        with pytest.raises(RecipeConfigError, match="needs the samples of a scenario session"):
-            built.build("s", memory_records("s"), artifacts=artifacts_for(built), root=seed_root(built))
 
 
 def test_offline_runs_need_task_directories_to_evaluate_on_and_a_scorer() -> None:
@@ -488,7 +489,9 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         return built
 
     def trainer_of(recipe: HarnessEvolutionRecipe) -> Trainer:
-        return recipe.build("demo", memory_records("demo"), artifacts=artifacts_for(recipe), root=seed_root(recipe))
+        return recipe_trainer(
+            recipe, "demo", memory_records("demo"), artifacts=artifacts_for(recipe), root=seed_root(recipe)
+        )
 
     records = trainer_of(
         from_config(
@@ -528,9 +531,9 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         # The stage refuses a buffer that cannot hold one job's data.
         ({"buffer_size": 1, "job_samples": 2}, "buffer_size 1 is smaller than job_samples 2"),
     ):
-        with pytest.raises(RecipeConfigError, match=message):
+        with pytest.raises(PluginConfigError, match=message):
             trainer_of(from_config(settings(pipeline={"sample2job": {"config": stage_config}}), runtime=proxy))
-    with pytest.raises(RecipeConfigError, match="batch_policy"):
+    with pytest.raises(PluginConfigError, match="batch_policy"):
         trainer_of(
             from_config(settings(pipeline={"sample2job": {"config": {"batch_policy": "records"}}}), runtime=proxy)
         )

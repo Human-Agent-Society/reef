@@ -20,6 +20,7 @@ from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
+from reef.core.plugins import PluginConfigError
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
 from reef.pipeline_context import PipelineContext
@@ -325,7 +326,7 @@ def test_build_dispatcher_applies_common_recipe_controls(stub_repository, tmp_pa
     dispatcher = build(
         tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings={"sample2job": {"config": {"buffer_size": 4}}}
     )
-    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).buffer_size == 4
+    assert dispatcher.recipe.stages().build(PipelineContext("s")).buffer_size == 4
 
 
 @pytest.mark.unit
@@ -335,8 +336,8 @@ def test_a_sample2job_batch_size_is_an_unknown_stage_key(stub_repository, tmp_pa
         tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings={"sample2job": {"config": {"batch_size": 4}}}
     )
     # Stage configs are checked when a scenario builds its pipeline.
-    with pytest.raises(RecipeConfigError, match="unknown config fields: batch_size"):
-        dispatcher.recipe.build_pipeline(PipelineContext("s"))
+    with pytest.raises(PluginConfigError, match="unknown config fields: batch_size"):
+        dispatcher.recipe.stages().build(PipelineContext("s"))
 
 
 @pytest.mark.unit
@@ -467,7 +468,7 @@ def test_build_dispatcher_gives_max_staleness_to_the_record_to_sample_stage_only
 
     # The window belongs to the record-to-sample stage; the training component never receives it.
     assert "max_staleness" not in dispatcher.recipe.training_component.component.config
-    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).record2sample.max_staleness == 2
+    assert dispatcher.recipe.stages().build(PipelineContext("s")).record2sample.max_staleness == 2
 
 
 @pytest.mark.unit

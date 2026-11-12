@@ -31,6 +31,7 @@ from tests.support.harness_service import backend_step, drive_job, harness_dispa
 from tests.support.harness_steps import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe, head_of
 from tests.support.records import memory_records
 from tests.support.strategies import resolve_task_scorer
+from tests.support.trainers import recipe_trainer
 
 import recipes.meta_harness
 from recipes.meta_harness import MetaHarness, MetaHarnessSettings
@@ -265,7 +266,9 @@ def test_a_deployment_names_the_method_for_any_adapter(tmp_path: Path, adapter: 
     assert recipe.evolution.adapter == adapter and recipe.seed == SEED
     artifacts = ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
     assert isinstance(
-        recipe.build("general-task", memory_records("general-task"), artifacts=artifacts, root=seed_root(recipe)),
+        recipe_trainer(
+            recipe, "general-task", memory_records("general-task"), artifacts=artifacts, root=seed_root(recipe)
+        ),
         Trainer,
     )
 
