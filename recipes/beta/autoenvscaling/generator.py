@@ -279,7 +279,15 @@ def with_parent_limits(task: HarborTask, parent: HarborTask) -> HarborTask:
     return replace(task, config=config)
 
 
-def admitted_task(reply: str, *, generation: int, index: int, record_id: str, checkout_path: str | None) -> HarborTask:
+def admitted_task(
+    reply: str,
+    *,
+    generation: int,
+    index: int,
+    record_id: str,
+    checkout_path: str | None,
+    parent: HarborTask | None = None,
+) -> HarborTask:
     """A Designer's reply as a Harbor task: the one admission for every Designer's task and the agent's candidates.
 
     The reply goes through the generator service's parser and authoring checks, the rules a prompt Designer's
@@ -287,7 +295,9 @@ def admitted_task(reply: str, *, generation: int, index: int, record_id: str, ch
     :class:`~reef.record2sample.generator.designer.DesignerReplyError` from the parser). The Dockerfile gets
     :data:`HISTORY_STEP` for the repository at ``checkout_path`` as its last step. The step runs as root; a final
     stage that switched to another user switches back after it. A task with no repository (a ``checkout_path`` of
-    None: a variant of a seeded parent) gets no step, since its ``cd`` would fail the build.
+    None: a variant of a seeded parent) gets no step, since its ``cd`` would fail the build. The task's config is
+    :data:`REPOSITORY_TASK_CONFIG`, and for a variant, whose ``parent`` is the task it varies, the parent's limits
+    (:func:`with_parent_limits`).
     """
     harbor_reply = parse_harbor_reply(reply)
     if checkout_path is not None:
@@ -309,7 +319,8 @@ def admitted_task(reply: str, *, generation: int, index: int, record_id: str, ch
     generated = GeneratedHarborTask(
         reply=harbor_reply, generation=generation, index=index, source_record_id=record_id, skill=TASK_NAME_SUFFIX
     )
-    return replace(harbor_task(generated), config=REPOSITORY_TASK_CONFIG)
+    task = replace(harbor_task(generated), config=REPOSITORY_TASK_CONFIG)
+    return task if parent is None else with_parent_limits(task, parent)
 
 
 class GeneratorChecks(CandidateChecks):
@@ -324,7 +335,9 @@ class GeneratorChecks(CandidateChecks):
     With a ``reviewer``, a candidate that passes the oracle check also gets the test review, and the check passes
     only when the review finds nothing. A review that could not run says so and does not fail the check.
     ``checkout_path`` is the repository's path in the environment, or None for a task with no repository, which
-    admission gives no history step.
+    admission gives no history step. ``parent`` is the task a variant varies, or None for a task from a session: a
+    variant's candidates are admitted with the parent's limits, as its task is, so a check runs with the limits the
+    admitted task has.
     """
 
     def __init__(
@@ -338,6 +351,7 @@ class GeneratorChecks(CandidateChecks):
         checkout_path: str | None,
         max_checks: int,
         reviewer: ReviewCheck | None = None,
+        parent: HarborTask | None = None,
     ) -> None:
         super().__init__(max_checks, is_reviewing=reviewer is not None)
         self.generator = generator
@@ -347,6 +361,7 @@ class GeneratorChecks(CandidateChecks):
         self.source_record_id = source_record_id
         self.checkout_path = checkout_path
         self.reviewer = reviewer
+        self.parent = parent
         self.used_check_count = 0
         self.is_closed = False
         self.lock = threading.Lock()
@@ -383,6 +398,7 @@ class GeneratorChecks(CandidateChecks):
                 index=self.index,
                 record_id=self.source_record_id,
                 checkout_path=self.checkout_path,
+                parent=self.parent,
             )
         except (ValueError, HarborTaskError) as exc:
             return {"passed": False, "stage": "authoring", "errors": str(exc)[:ERROR_CHARS]}
@@ -1406,6 +1422,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
             checkout_path=None if source is None else source.repository.path,
             max_checks=self.max_checks,
             reviewer=self.tool_reviewer,
+            parent=None if variant is None else read_harbor_task(variant.parent_dir),
         )
         tags = {"role": "designer", "generation": str(self.generation), "index": str(index)}
         stop = threading.Event()
@@ -1454,13 +1471,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     index=index,
                     record_id=record_id or record_source,
                     checkout_path=checks.checkout_path,
+                    parent=checks.parent,
                 )
             except (ValueError, HarborTaskError) as exc:
                 raise ProposalRefused(
                     f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
                 ) from exc
-            if variant is not None:
-                task = with_parent_limits(task, read_harbor_task(variant.parent_dir))
             lineage = {} if variant is None else {"parent_task": variant.parent, "variant": variant.direction}
             if variant is not None and variant.seed_task:
                 lineage["seed_task"] = variant.seed_task

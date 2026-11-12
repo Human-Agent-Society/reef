@@ -77,7 +77,7 @@ from reef.core.tasks.split import TaskSplit, extend_split_by_source
 from reef.execution.sandbox.process import ProcessOutcome
 from reef.recipe.generated_tasks.generator import HeldOutTask, RejectedTask, RolledOutTask
 from reef.recipe.generated_tasks.processor import split_source_ids
-from reef.record2sample.generator import OracleResult
+from reef.record2sample.generator import OracleResult, WrittenTask
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 
@@ -903,6 +903,39 @@ def test_a_variant_of_a_tmax_seed_runs_on_the_machine_its_seed_runs_on(tmp_path:
         "user": "root",
     }
     assert not {"cpus", "memory_mb", "storage_mb", "gpus"} & variant.config["environment"].keys()
+
+
+class ConfigRecordingGenerator(StandInGenerator):
+    """The stand-in generator service; it keeps the config of each task written to it, by task name."""
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.configs: dict[str, Mapping[str, Mapping[str, object]]] = {}
+
+    async def write_task(self, task: HarborTask) -> WrittenTask:
+        self.configs[task.name] = task.config
+        return await super().write_task(task)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "seed_config",
+    [
+        {"agent": {"timeout_sec": 1200.0}, "verifier": {"timeout_sec": 600.0}, "environment": {"cpus": 1}},
+        tmax.TASK_CONFIG,
+    ],
+    ids=("seed-limits", "tmax-15k"),
+)
+def test_the_designers_check_runs_a_seed_variant_on_the_limits_it_is_admitted_with(
+    tmp_path: Path, seed_config: Mapping[str, Mapping[str, object]]
+) -> None:
+    service = ConfigRecordingGenerator(tmp_path / "tasks")
+    designer = SeedDesigner()
+    generator = seeded(tmp_path, designer, service, seed_config=seed_config)
+    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    [variant] = asyncio.run(generator.generate(REQUEST))
+    assert designer.checks[-1]["passed"] is True
+    assert service.configs[f"{variant.name}-check-1"] == variant.config
 
 
 @pytest.mark.unit
