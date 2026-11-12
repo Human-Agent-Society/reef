@@ -3,9 +3,11 @@ keeps."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
+from tests.support.task_service_stubs import generator_state
 
 from recipes.beta.spade import (
     PlayRecord,
@@ -22,11 +24,10 @@ from recipes.beta.spade.generation import (
     GenerationRecord,
     ProposalRecord,
     TaskMeasure,
+    generation_report,
     mean_reward,
-    recorded_generations,
-    saved_designer_advantages,
-    write_generation_report,
 )
+from recipes.beta.spade.generator import saved_designer_advantages
 
 
 def record(name: str, without: float, with_hint: float, code: str = "", skill: str | None = "deduction") -> PlayRecord:
@@ -143,7 +144,7 @@ def test_mean_reward_is_the_mean_of_the_rewards_that_ran_and_zero_without_any() 
     assert mean_reward((1.0, 0.0)) == 0.5 and mean_reward(()) == 0.0
 
 
-def test_a_generation_report_keeps_the_proposals_the_measures_and_the_experience(tmp_path: Path) -> None:
+def test_a_generation_report_keeps_the_proposals_the_measures_and_the_experience() -> None:
     measure = TaskMeasure(
         name="harbor-00002-000",
         skill=None,
@@ -160,23 +161,20 @@ def test_a_generation_report_keeps_the_proposals_the_measures_and_the_experience
         ),
         measures=(measure,),
     )
-    path = write_generation_report(tmp_path / "state", generation)
-    assert path == tmp_path / "state" / "generation-00002.json"
-    assert recorded_generations(tmp_path / "state") == (2,) and recorded_generations(tmp_path / "none") == ()
-    assert load_experience(path) == generation.experience == (measure.record,)
-    (tmp_path / "state" / "generation-x.json").write_text("{}")
-    assert recorded_generations(tmp_path / "state") == (2,)
+    report = generation_report(generation)
+    document = json.loads(report)
+    assert document["generation"] == 2 and document["tasks"][0]["regret"] == 0.5
+    assert [proposal["refusal"] for proposal in document["proposals"]] == ["", "reply refused: no json"]
+    assert load_experience(report) == generation.experience == (measure.record,)
 
 
-def test_load_experience_refuses_a_file_that_is_not_a_report(tmp_path: Path) -> None:
-    (tmp_path / "x.json").write_text("{}")
+def test_load_experience_refuses_a_document_that_is_not_a_report() -> None:
     with pytest.raises(GenerationError, match="holds no experience"):
-        load_experience(tmp_path / "x.json")
+        load_experience("{}")
     with pytest.raises(GenerationError, match="is not a generation report"):
-        load_experience(tmp_path / "missing.json")
-    (tmp_path / "y.json").write_text('{"experience": [{"name": "t"}]}')
+        load_experience("not json")
     with pytest.raises(GenerationError, match="cannot take"):
-        load_experience(tmp_path / "y.json")
+        load_experience('{"experience": [{"name": "t"}]}')
 
 
 # The reference code's paper runs (cmd/slime/*/0617/train_plateau_6skill.sh): 0.6 * plateau + 0.4 * floored regret.
@@ -296,9 +294,10 @@ def test_a_report_keeps_the_designer_advantages_of_the_recipes_generation(tmp_pa
         recipe_generation=7,
         designer_advantages={"d1": 0.0},
     )
-    write_generation_report(tmp_path, generation)
-    assert saved_designer_advantages(tmp_path, 7) == {"d1": 0.0}
-    assert saved_designer_advantages(tmp_path, 0) == {}, "the report belongs to the recipe's generation 7"
-    (tmp_path / "generation-00001.json").write_text("not json")
+    state = generator_state(tmp_path, "spade")
+    state.write("report/00000", generation_report(generation))
+    assert saved_designer_advantages(state, 7) == {"d1": 0.0}
+    assert saved_designer_advantages(state, 0) == {}, "the report belongs to the recipe's generation 7"
+    state.write("report/00001", "not json")
     with pytest.raises(GenerationError, match="is not a generation report"):
-        saved_designer_advantages(tmp_path, 8)
+        saved_designer_advantages(state, 8)

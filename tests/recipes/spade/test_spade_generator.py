@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 import yaml
 from tests.support.samples import open_sample_store
-from tests.support.task_service_stubs import StandInGenerator, task_for
+from tests.support.task_service_stubs import StandInGenerator, generator_state, task_for
 
 from recipes.beta.spade import ScoreSettings, SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
@@ -38,7 +38,7 @@ def spade(tmp_path: Path, service: StandInGenerator | None = None, **fields: Any
     return SpadeTaskGenerator(
         scenario="spade",
         service=service if service is not None else StandInGenerator(tmp_path / "tasks"),
-        state_dir=tmp_path / "state",
+        state=generator_state(tmp_path / "state", "spade"),
         **{
             "count": 3,
             "hint_plays": 1,
@@ -63,7 +63,9 @@ def run_tasks(generator: SpadeTaskGenerator, *, plain: float = 0.25) -> tuple[Ge
 
 
 def report(tmp_path: Path, generation: int) -> dict[str, Any]:
-    return json.loads((tmp_path / "state" / f"generation-{generation:05d}.json").read_text())
+    document = generator_state(tmp_path / "state", "spade").read(f"report/{generation:05d}")
+    assert document is not None
+    return json.loads(document)
 
 
 def test_a_generation_asks_the_designer_count_times_across_the_skills(tmp_path: Path) -> None:
@@ -189,7 +191,7 @@ def test_eval_tasks_receive_no_designer_reward_or_training_experience(tmp_path: 
     assert document["proposals"][0]["refusal"] == ""
 
 
-def test_a_restarted_generator_carries_on_from_the_reports_on_disk(tmp_path: Path) -> None:
+def test_a_restarted_generator_carries_on_from_the_reports_in_its_state(tmp_path: Path) -> None:
     generator = spade(tmp_path, count=1)
     asyncio.run(generator.record_results(run_tasks(generator), generation=0))
     service = StandInGenerator(tmp_path / "tasks")
@@ -229,7 +231,7 @@ def test_without_hint_plays_or_when_they_fail_the_return_with_hint_is_the_plain_
     generator = spade(tmp_path / "second", failing, count=1)
     asyncio.run(generator.record_results(run_tasks(generator), generation=0))
     assert failing.reports[0]["score"] == 0.0
-    document = json.loads((tmp_path / "second" / "state" / "generation-00000.json").read_text())
+    document = report(tmp_path / "second", 0)
     assert document["error"] == "the hint plays of harbor-00000-000-inspection failed: the rollout job failed"
 
 
@@ -253,28 +255,25 @@ def test_history_from_another_scenario_is_refused_before_the_designer_call(tmp_p
     assert service.proposals == []
 
 
-def test_from_config_reads_its_section_and_keeps_one_state_directory_for_each_scenario(tmp_path: Path) -> None:
+def test_from_config_reads_its_section_and_takes_the_state_of_its_scenario(tmp_path: Path) -> None:
+    state = generator_state(tmp_path, "one")
     generator = SpadeTaskGenerator.from_config(
-        {
-            "generator_url": "http://127.0.0.1:8910",
-            "state_dir": str(tmp_path),
-            "count": 2,
-            "skills": "inspection, repair",
-        },
+        {"generator_url": "http://127.0.0.1:8910", "count": 2, "skills": "inspection, repair"},
         scenario="one",
         environ={},
+        state=state,
     )
-    assert generator.state_dir == tmp_path / "one" and generator.count == 2
+    assert generator.state is state and generator.count == 2
     assert generator.skills == ("inspection", "repair") and generator.hint_plays == 2
     for config, message in (
-        ({"state_dir": "s"}, "generator_url"),
-        ({"generator_url": "${endpoints.generator}", "state_dir": "s"}, "generator_url"),
-        ({"generator_url": "http://g"}, "state_dir"),
-        ({"generator_url": "http://g", "state_dir": "s", "rollouts": 2}, "does not take rollouts"),
-        ({"generator_url": "http://g", "state_dir": "s", "count": 0}, "count must be positive"),
+        ({}, "generator_url"),
+        ({"generator_url": "${endpoints.generator}"}, "generator_url"),
+        ({"generator_url": "http://g", "state_dir": "s"}, r"does not take state_dir: .* \(RFC #1370\)"),
+        ({"generator_url": "http://g", "rollouts": 2}, "does not take rollouts"),
+        ({"generator_url": "http://g", "count": 0}, "count must be positive"),
     ):
         with pytest.raises(PluginConfigError, match=message):
-            SpadeTaskGenerator.from_config(config, scenario="one", environ={})
+            SpadeTaskGenerator.from_config(config, scenario="one", environ={}, state=state)
 
 
 def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Path) -> None:
@@ -318,10 +317,12 @@ def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_p
     (second,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=1)))
     asyncio.run(generator.record_results((RolledOutTask(second, (0.25,)),), generation=1))
     assert report(tmp_path, 1)["tasks"][0]["name"] == second.name
+    assert generator_state(tmp_path / "state", "spade").keys() == ("open/00000", "report/00001")
     restarted = spade(tmp_path, service, count=1)
     assert restarted.generation == 2, "numbering continues after the open generation"
     asyncio.run(restarted.record_results((RolledOutTask(first, (0.25,)),), generation=0))
     assert report(tmp_path, 0)["tasks"][0]["name"] == first.name
+    assert generator_state(tmp_path / "state", "spade").keys() == ("report/00000", "report/00001")
     reports = len(service.reports)
     asyncio.run(restarted.record_results((RolledOutTask(first, (0.25,)),), generation=0))
     assert len(service.reports) == reports, "a second delivery of a closed generation does nothing"
@@ -414,7 +415,8 @@ def test_the_advantages_belong_to_the_recipes_generation_number(tmp_path: Path) 
 
 
 def test_from_config_reads_the_score_settings_the_scale_cap_and_train_designer(tmp_path: Path) -> None:
-    base = {"generator_url": "http://127.0.0.1:8910", "state_dir": str(tmp_path)}
+    base = {"generator_url": "http://127.0.0.1:8910"}
+    state = generator_state(tmp_path, "one")
     generator = SpadeTaskGenerator.from_config(
         {
             **base,
@@ -429,13 +431,14 @@ def test_from_config_reads_the_score_settings_the_scale_cap_and_train_designer(t
         },
         scenario="one",
         environ={},
+        state=state,
     )
     assert (
         generator.score_settings == PAPER_4B
         and generator.max_designer_scale == 32.0
         and generator.is_training_designer
     )
-    defaults = SpadeTaskGenerator.from_config(base, scenario="one", environ={})
+    defaults = SpadeTaskGenerator.from_config(base, scenario="one", environ={}, state=state)
     assert defaults.score_settings == ScoreSettings() and defaults.max_designer_scale == 50.0
     assert not defaults.is_training_designer
     # A value of the wrong type is refused, not converted: "false" would turn the training on.
@@ -448,15 +451,17 @@ def test_from_config_reads_the_score_settings_the_scale_cap_and_train_designer(t
         ({**base, "train_designer": "false"}, "train_designer must be true or false"),
     ):
         with pytest.raises(PluginConfigError, match=message):
-            SpadeTaskGenerator.from_config(config, scenario="one", environ={})
+            SpadeTaskGenerator.from_config(config, scenario="one", environ={}, state=state)
 
 
 def test_the_slime_example_trains_the_designer_with_the_paper_score_settings(tmp_path: Path) -> None:
     example = Path(__file__).parents[3] / "recipes/beta/spade/examples/slime/serve.yaml"
     text = example.read_text().replace("${endpoints.generator}", "http://127.0.0.1:8910")
-    stage_config = yaml.safe_load(text.replace("${REEF_SPADE_STATE_DIR}", str(tmp_path)))["pipeline"]["record2sample"]
+    stage_config = yaml.safe_load(text)["pipeline"]["record2sample"]
     settings = GeneratedTaskSettings.parse(stage_config["config"], plugin_class=GeneratedTaskSamples)
     assert (settings.designer_delay, settings.jobs_per_round, settings.max_staleness) == (1, 1, 2)
-    generator = SpadeTaskGenerator.from_config(stage_config["config"]["generator"]["config"], scenario="s", environ={})
+    generator = SpadeTaskGenerator.from_config(
+        stage_config["config"]["generator"]["config"], scenario="s", environ={}, state=generator_state(tmp_path, "s")
+    )
     assert generator.score_settings == PAPER_4B and generator.is_training_designer
     assert (generator.count, generator.hint_plays, len(generator.skills)) == (24, 16, 3)

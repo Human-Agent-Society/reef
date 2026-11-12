@@ -8,8 +8,8 @@ and passes with one. ``experience_text`` is that section of the prompt; the gene
 ``reef.record2sample.generator`` carries it as data. ``designer_score`` is the Designer's score of one task, the
 reference code's mix of a flat-top difficulty reward (``plateau_reward``) and the floored regret, and
 ``centered_advantages`` turns a generation's scores into the advantages that train its replies. The rest of this
-module is the bookkeeping of one generation, which ``SpadeTaskGenerator`` writes under its state directory and reads
-back after a restart.
+module is the bookkeeping of one generation, which ``SpadeTaskGenerator`` keeps as a report document in its state
+and reads back after a restart.
 """
 
 from __future__ import annotations
@@ -20,7 +20,6 @@ import statistics
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
 from typing import Literal
 
 from reef.core.prompts import untrusted_text
@@ -32,7 +31,6 @@ INSTRUCTION_EXCERPT_CHARS = 1200
 RECORDED_EXCERPT_CHARS = 600
 MASTERED_RETURN = 0.9
 TOO_HARD_RETURN = 0.1
-REPORT_PREFIX = "generation-"
 DEFAULT_MAX_DESIGNER_SCALE = 50.0
 
 
@@ -193,14 +191,14 @@ class TaskMeasure:
 
 @dataclass(frozen=True)
 class GenerationRecord:
-    """What one generation produced, as its report file keeps it.
+    """What one generation produced, as its report document keeps it.
 
     Values: ``generation`` is SPADE's number of the generation; ``proposals`` holds each proposal and what became of
     it, and ``measures`` each train task that ran; ``error`` is empty or names what stopped part of the generation.
     ``recipe_generation`` is the recipe's number of the generation, or None for a report that does not know it.
     ``designer_advantages`` maps the inference record ID of each Designer reply that trains to its advantage, a
     finite number (``centered_advantages``); the constructor refuses another value.
-    Purpose: ``SpadeTaskGenerator.record_results`` makes it, ``write_generation_report`` keeps it, and
+    Purpose: ``SpadeTaskGenerator.record_results`` makes it and keeps its ``generation_report``, and
     ``saved_designer_advantages`` reads its advantages back.
     """
 
@@ -319,14 +317,9 @@ def mean_reward(rewards: Sequence[float]) -> float:
     return statistics.fmean(rewards) if rewards else 0.0
 
 
-def report_path_for(state_dir: Path, generation: int) -> Path:
-    return Path(state_dir) / f"{REPORT_PREFIX}{generation:05d}.json"
-
-
-def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
-    """Keep every proposal, refusal and measure of one generation, and the experience the next generation's prompts take."""
-    state_dir = Path(state_dir)
-    state_dir.mkdir(parents=True, exist_ok=True)
+def generation_report(record: GenerationRecord) -> str:
+    """The report document of one generation: every proposal, refusal and measure, and the experience the next
+    generation's prompts take."""
     document = {
         "generation": record.generation,
         "recipe_generation": record.recipe_generation,
@@ -348,58 +341,22 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
         "experience": [asdict(measure.record) for measure in record.measures],
         "designer_advantages": dict(record.designer_advantages),
     }
-    path = report_path_for(state_dir, record.generation)
-    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
-    return path
+    return json.dumps(document, indent=2) + "\n"
 
 
-def load_experience(report_path: Path) -> tuple[PlayRecord, ...]:
-    """The play records a generation report holds, for the next generation's prompts."""
+def load_experience(report: str) -> tuple[PlayRecord, ...]:
+    """The play records that the generation report ``report`` holds, for the next generation's prompts.
+
+    Raises ``GenerationError`` if ``report`` is not a generation report.
+    """
     try:
-        document = json.loads(Path(report_path).read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise GenerationError(f"{report_path} is not a generation report: {exc}") from exc
+        document = json.loads(report)
+    except ValueError as exc:
+        raise GenerationError(f"the text is not a generation report: {exc}") from exc
     records = document.get("experience") if isinstance(document, dict) else None
     if not isinstance(records, list):
-        raise GenerationError(f"{report_path} holds no experience")
+        raise GenerationError("the generation report holds no experience")
     try:
         return tuple(PlayRecord(**record) for record in records)
     except (TypeError, ValueError) as exc:
-        raise GenerationError(f"{report_path} holds a record the Designer cannot take: {exc}") from exc
-
-
-def recorded_generations(state_dir: Path) -> tuple[int, ...]:
-    """The generations whose reports are under the state directory, in order."""
-    state_dir = Path(state_dir)
-    if not state_dir.is_dir():
-        return ()
-    numbers = []
-    for path in sorted(state_dir.glob(f"{REPORT_PREFIX}*.json")):
-        stem = path.name[len(REPORT_PREFIX) : -len(".json")]
-        if stem.isdigit():
-            numbers.append(int(stem))
-    return tuple(numbers)
-
-
-def saved_designer_advantages(state_dir: Path, recipe_generation: int) -> dict[str, float]:
-    """The Designer advantages that the report of the recipe's generation ``recipe_generation`` keeps.
-
-    The result is empty when no report under ``state_dir`` names that generation, such as a report written before
-    reports named it. Raises ``GenerationError`` for a report that cannot be read.
-    """
-    # The report of a generation usually has the recipe's number; another report is a fallback.
-    numbers = recorded_generations(state_dir)
-    ordered = sorted(numbers, key=lambda number: number != recipe_generation)
-    for number in ordered:
-        path = report_path_for(state_dir, number)
-        try:
-            document = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise GenerationError(f"{path} is not a generation report: {exc}") from exc
-        if not isinstance(document, dict) or document.get("recipe_generation") != recipe_generation:
-            continue
-        advantages = document.get("designer_advantages")
-        if not isinstance(advantages, dict):
-            raise GenerationError(f"{path} holds no Designer advantages")
-        return {str(record_id): float(advantage) for record_id, advantage in advantages.items()}
-    return {}
+        raise GenerationError(f"the generation report holds a record the Designer cannot take: {exc}") from exc

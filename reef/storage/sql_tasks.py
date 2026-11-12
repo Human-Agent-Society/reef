@@ -38,12 +38,14 @@ class TaskTables:
 
     ``generations`` holds one row for each generation. ``candidates`` holds one row for each saved
     candidate, with the digest of its task files and its outcome: a published candidate has its split.
-    ``documents`` holds one row for each document key with its text.
+    ``documents`` holds one row for each document key with its text. ``state_documents`` holds one row for
+    each state document key with its current text.
     """
 
     generations: Table
     candidates: Table
     documents: Table
+    state_documents: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
 
@@ -84,6 +86,13 @@ def task_tables(metadata: MetaData, *, foreign_key: str | None = None) -> TaskTa
         ),
         documents=Table(
             "task_document",
+            metadata,
+            *key_columns(),
+            Column("document_key", Text, primary_key=True),
+            Column("document", Text, nullable=False),
+        ),
+        state_documents=Table(
+            "task_state_document",
             metadata,
             *key_columns(),
             Column("document_key", Text, primary_key=True),
@@ -268,6 +277,39 @@ class SQLTaskStore(TaskStore):
             return connection.execute(
                 select(documents.c.document).where(self.matching(documents, document_key=key))
             ).scalar()
+
+    def write_state_document(self, *, key: str, document: str) -> None:
+        if not key:
+            raise TaskStoreError("a state document needs a non-empty key")
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=True) as connection:
+            connection.execute(state_documents.delete().where(self.matching(state_documents, document_key=key)))
+            connection.execute(state_documents.insert().values(**self.key, document_key=key, document=document))
+
+    def remove_state_document(self, *, key: str) -> None:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=True) as connection:
+            connection.execute(state_documents.delete().where(self.matching(state_documents, document_key=key)))
+
+    def state_document(self, key: str) -> str | None:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=False) as connection:
+            document: str | None = connection.execute(
+                select(state_documents.c.document).where(self.matching(state_documents, document_key=key))
+            ).scalar()
+        return document
+
+    def state_document_keys(self, *, prefix: str = "") -> tuple[str, ...]:
+        state_documents = self.tables.state_documents
+        with self.database._transaction(write=False) as connection:
+            keys = connection.execute(
+                select(state_documents.c.document_key).where(self.matching(state_documents))
+            ).scalars()
+            # The prefix test and the order are Python's, so every database gives the same keys.
+            return tuple(sorted(key for key in keys if key.startswith(prefix)))
+
+    def save_files(self, directory: Path) -> str:
+        return self.files.put(self.scenario, directory)
 
     def published_tasks(self, connection: Connection, **columns: object) -> tuple[StoredTask, ...]:
         """Read the published tasks of this store whose candidates have the given column values, in generation and

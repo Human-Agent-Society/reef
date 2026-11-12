@@ -89,7 +89,6 @@ pipeline:
           regret_weight: 0.4
           regret_scale: 0.15
           train_designer: true
-          state_dir: ${REEF_SPADE_STATE_DIR}/generations
   # One task job holds one generation's train tasks.
   sample2job:
     config:

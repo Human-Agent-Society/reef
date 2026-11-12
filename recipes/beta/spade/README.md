@@ -31,7 +31,23 @@ SPADE is a task generator. The deployment selects it in `pipeline.record2sample.
 
 Regret is the mean hint reward minus the mean plain reward. Without hint rollouts, regret is 0. The mean plain reward determines the task's band: mastered above 0.9, out of reach below 0.1, and frontier otherwise. The next prompt lists frontier tasks by regret, highest first.
 
-The recipe saves each task and its train/eval split in the scenario's task store. Related source sessions keep the same split across generations. Until `record_results` closes a generation, the generator keeps its proposals in `state_dir/<scenario>/open-<generation>.json`, named by the recipe's generation number. It then saves each proposal, refusal, and measurement in `state_dir/<scenario>/generation-<number>.json`. After a restart, it reads the last report to recover the experience, closes open generations when their results arrive, and numbers new generations after the reports and open generations.
+The recipe saves each task and its train/eval split in the scenario's task store. Related source sessions keep the same split across generations.
+
+The generator keeps its own state in the same task store, as state documents, and keeps no file of its own. So the state is in the deployment's database, and a restart on another machine reads it. Each number in a key has five digits:
+
+| Document | Content |
+| --- | --- |
+| `open/<generation>` | the proposals of a generation that `record_results` has not closed, named by the recipe's generation number |
+| `report/<number>` | each proposal, refusal, and measurement of a closed generation, named by SPADE's own number of the generation |
+
+After a restart, the generator reads the last report to recover the experience, closes open generations when their results arrive, and numbers new generations after the reports and open generations.
+
+The documents are rows of the table `task_state_document` in the scenario's database, under the store name `generated-tasks`. With SQLite storage, the database of a scenario is `<storage.agent-record-dir>/<SHA-256 of the scenario name>.sqlite3`. To read the report of SPADE's generation 0:
+
+```bash
+sqlite3 "$REEF_SPADE_STATE_DIR/agent-record/$(printf spade | shasum -a 256 | cut -d' ' -f1).sqlite3" \
+  "select document from task_state_document where store_name = 'generated-tasks' and document_key = 'report/00000'"
+```
 
 The Designer's reports and the hint rollouts share the scenario with the training rollouts. The recipe trains only on the plain arm.
 
@@ -40,7 +56,6 @@ The generator's `config` keys:
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `generator_url` | required | the generator service, `${endpoints.generator}` |
-| `state_dir` | required | where each scenario keeps its generation reports |
 | `count` | 8 | Designer proposals in each generation |
 | `skills` | none | skills the proposals cycle through |
 | `difficulty` | `medium` | the difficulty the Designer aims for |
@@ -56,6 +71,8 @@ The generator's `config` keys:
 | `regret_scale` | 1.0 | the regret that counts as 1 in the score |
 | `max_designer_scale` | 50 | the largest scale of the Designer's advantages |
 | `train_designer` | false | keep each Designer reply's sample, and give the recipe the advantages that train the replies |
+
+The generator takes no `state_dir`: a config that still has the key is refused. The generator does not read the files of an earlier `state_dir`, so a scenario that upgrades starts with no experience, and an open generation of the earlier version gets no feedback. The task store keeps every generation and task.
 
 Set `eval_fraction` and `split_seed` in `pipeline.record2sample.config`, outside the generator configuration. With the defaults, 0.0 and 0, all tasks train. The task store keeps each published task's split, not these settings. After a restart, published tasks keep their split and new tasks are placed with the settings in force. Reef does not refuse a changed `eval_fraction` or `split_seed`, so keep both fixed for the life of a scenario.
 
@@ -147,14 +164,15 @@ from pathlib import Path
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord
 from reef.core.tasks import HarborTask
+from reef.recipe.generated_tasks import GeneratorState
 from reef.record2sample.generator import HttpGenerator, TaskGenerationRequest
 
 
 async def rebuild_task(
-    records: tuple[AgentRecord, ...], assets: tuple[Path, ...], generator_url: str, state_dir: Path
+    records: tuple[AgentRecord, ...], assets: tuple[Path, ...], generator_url: str, state: GeneratorState
 ) -> HarborTask:
     generator = SpadeTaskGenerator(
-        scenario="spade", service=HttpGenerator(generator_url), state_dir=state_dir, count=1
+        scenario="spade", service=HttpGenerator(generator_url), state=state, count=1
     )
     (generated,) = await generator.generate(
         TaskGenerationRequest(records, "Reconstruct the original task before it was solved.", assets)
@@ -165,7 +183,7 @@ async def rebuild_task(
     return generated.task
 ```
 
-The example generates and validates one task. It does not write it for rollouts or train on it. With source records, the task keeps their original IDs in `source_agent_record_ids`. It stores the new Designer receipt in `metadata["designer_record_id"]`. If the Designer refuses, `generate` returns no task. To report the Designer's score, pass the task results to `record_results`.
+The example generates and validates one task. It does not write it for rollouts or train on it. `state` is the generator's state. In a deployment, the recipe builds it from the scenario's task store. A direct caller builds it the same way, from an open scenario session: `StoredGeneratorState(session.tasks.open("generated-tasks"))`, with `StoredGeneratorState` from `reef.recipe.generated_tasks`. With source records, the task keeps their original IDs in `source_agent_record_ids`. It stores the new Designer receipt in `metadata["designer_record_id"]`. If the Designer refuses, `generate` returns no task. To report the Designer's score, pass the task results to `record_results`.
 
 History tasks use `harbor-history-<hash>` names derived from the scenario, source record IDs, and Designer receipt. Each new Designer call gets a separate name, even with the same source records. Name conflicts are refused without deleting the existing task. Identical task content is still refused as a duplicate.
 

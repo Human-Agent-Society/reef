@@ -64,7 +64,7 @@ from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 MAX_PARAMETERS = 65535
 
 #: The version of the record schema that this adapter writes; it upgrades every older version.
-POSTGRES_SCHEMA_VERSION = 21
+POSTGRES_SCHEMA_VERSION = 22
 #: The record tables of a version before the record items (RFC #1219), in the order that a drop removes them.
 OLD_RECORD_TABLES = ("record_node", "consumed_agent_record", "record_consumption", "record_eviction", "agent_record")
 logger = logging.getLogger(__name__)
@@ -143,6 +143,8 @@ class PostgresRecordDatabase:
                 # record tables: a scenario's records are record items (RFC #1219), and
                 # PostgresScenarioStorage drops the OLD_RECORD_TABLES once their records are record items. Version 21
                 # drops sample_train_count (migrate_training_samples): the train counts are a count over the commits.
+                # Version 22 adds task_state_document, the state documents of a task store (RFC #1370); create_all
+                # adds it to an older schema.
                 metadata.create_all(connection)
                 migrate_training_samples(connection, schema)
                 migrate_scenario_settings(connection, self.settings_table)

@@ -9,6 +9,7 @@ import asyncio
 import importlib.util
 import json
 import sys
+import tempfile
 import threading
 import types
 from collections.abc import Mapping, Sequence
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support.task_service_stubs import DOCUMENT, StandInGenerator
+from tests.support.task_service_stubs import DOCUMENT, StandInGenerator, generator_state
 
 from recipes.beta.autoenvscaling import (
     AgentAuthor,
@@ -41,6 +42,7 @@ from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, SandboxProgram
 from reef.harness.harbor.rollouts import TaskRollout
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
+from reef.recipe.generated_tasks.processor import StoredGeneratorState
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 
@@ -339,14 +341,28 @@ def autoenvscaling(
     **fields: Any,
 ) -> AutoEnvScalingGenerator:
     fields["band"] = PassRateBand(fields.pop("band_low", 0.25), fields.pop("band_high", 0.75))
+    session_sources = load_sources(sources_file(tmp_path, source_count))
     return AutoEnvScalingGenerator(
         scenario="autoenvscaling",
         service=service if service is not None else StandInGenerator(tmp_path / "tasks"),
         author=author,
-        sources=load_sources(sources_file(tmp_path, source_count)),
-        state_dir=tmp_path / "state",
+        sources=session_sources,
+        state=state(tmp_path),
+        temporary=tempfile.TemporaryDirectory(dir=tmp_path),
         **{"count": 3, **fields},
     )
+
+
+def state(tmp_path: Path) -> StoredGeneratorState:
+    """The state of the generator that ``autoenvscaling(tmp_path, ...)`` builds, opened again as a restart does."""
+    return generator_state(tmp_path / "state", "autoenvscaling")
+
+
+def state_document(tmp_path: Path, key: str) -> Any:
+    """The JSON value of one document of the generator's state."""
+    document = state(tmp_path).read(key)
+    assert document is not None
+    return json.loads(document)
 
 
 def run_tasks(generator: AutoEnvScalingGenerator, *training: tuple[float, ...]) -> tuple[GeneratedTaskResult, ...]:
@@ -367,11 +383,13 @@ def run_tasks(generator: AutoEnvScalingGenerator, *training: tuple[float, ...]) 
 
 
 def report(tmp_path: Path, generation: int = 0) -> dict[str, Any]:
-    return json.loads((tmp_path / "state" / f"generation-{generation:05d}.json").read_text())
+    document: dict[str, Any] = state_document(tmp_path, f"report/{generation:05d}")
+    return document
 
 
 def cursor(tmp_path: Path) -> dict[str, int]:
-    return json.loads((tmp_path / "state" / "cursor.json").read_text())
+    document: dict[str, int] = state_document(tmp_path, "cursor")
+    return document
 
 
 class ScriptedRollouts(StandInGenerator):
@@ -447,7 +465,6 @@ class RefusingGenerator(StandInGenerator):
 def generating_config(tmp_path: Path, **fields: object) -> dict[str, object]:
     return {
         "generator_url": "http://127.0.0.1:8910",
-        "state_dir": str(tmp_path / "state"),
         "sources_path": str(sources_file(tmp_path, 2)),
         "agent_model": "gpt-6-sol",
         "agent_reef_url": "http://127.0.0.1:8901",

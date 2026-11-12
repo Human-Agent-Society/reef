@@ -5,7 +5,8 @@ names the generator (:class:`reef.recipe.generated_tasks.TaskGenerator`) in
 ``pipeline.record2sample.config.generator``. The recipe does not depend on the
 generator's method:
 
-- ``generator``: the contract of the task generator: ``TaskGenerator``,
+- ``generator``: the contract of the task generator: ``TaskGenerator``, its
+  durable state ``GeneratorState``,
   ``TaskValidationResult`` and ``GeneratedTaskResult``, one of
   ``RejectedTask``, ``HeldOutTask``, ``RolledOutTask`` and ``FailedTask``. The request,
   ``TaskGenerationRequest``, is the generator service's
@@ -16,6 +17,7 @@ generator's method:
   ``GeneratedTaskJobData`` makes task jobs of the generated tasks, which the
   training component rolls out on its own sampler. ``GenerationRunner`` owns
   generation, validation, task publication and result delivery on the stage's worker.
+  ``StoredGeneratorState`` is the generator's state in the scenario's task store.
 - ``results``: each train task's first rollout result, the generations
   delivered to the generator and the Designer replies that train
   (``DesignerReplies``), kept in the task store's documents.
@@ -29,13 +31,19 @@ runs their training rollouts.
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
+    GeneratorState,
     HeldOutTask,
     RejectedTask,
     RolledOutTask,
     TaskGenerator,
     TaskValidationResult,
 )
-from reef.recipe.generated_tasks.processor import GeneratedTaskJobData, GeneratedTaskSamples, GeneratedTaskSettings
+from reef.recipe.generated_tasks.processor import (
+    GeneratedTaskJobData,
+    GeneratedTaskSamples,
+    GeneratedTaskSettings,
+    StoredGeneratorState,
+)
 from reef.recipe.generated_tasks.recipe import GeneratedTaskRecipe
 
 __all__ = [
@@ -45,9 +53,11 @@ __all__ = [
     "GeneratedTaskResult",
     "GeneratedTaskSamples",
     "GeneratedTaskSettings",
+    "GeneratorState",
     "HeldOutTask",
     "RejectedTask",
     "RolledOutTask",
+    "StoredGeneratorState",
     "TaskGenerator",
     "TaskValidationResult",
 ]

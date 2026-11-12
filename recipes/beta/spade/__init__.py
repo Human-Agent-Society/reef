@@ -7,7 +7,7 @@ based regret as the Designer's signal.
 
 - ``generation``: the experience section (results sorted by regret into the frontier, the mastered and the
   out of reach), the Designer's score of a task (``designer_score``) and the advantages of a generation's replies
-  (``centered_advantages``), a generation's records and its report file.
+  (``centered_advantages``), a generation's records and its report document.
 - ``generator``: ``SpadeTaskGenerator``, the Designer's generations through the generator service.
 - ``slime``: ``SpadeObjective``, the objective ``spade`` of Slime task jobs: SPADE's z-score of the plays, and the
   Designer's delayed replies in the job's first optimizer step.
