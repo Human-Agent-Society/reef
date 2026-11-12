@@ -176,8 +176,9 @@ REPOSITORY_TASK_CONFIG: dict[str, dict[str, object]] = {
         "build_timeout_sec": 1200,
     },
 }
-#: The task.toml limits a variant keeps from its parent. A variant is harder or simpler by what it asks, not by more
-#: time or a larger machine, so its pass rate stays comparable with its parent's place in the band.
+#: The task.toml limits a variant keeps from its parent, set or unset as the parent has them. A variant is harder or
+#: simpler by what it asks, not by more time or a larger machine, so its pass rate stays comparable with its parent's
+#: place in the band.
 PARENT_LIMITS: Mapping[str, tuple[str, ...]] = {
     "agent": ("timeout_sec",),
     "verifier": ("timeout_sec",),
@@ -261,13 +262,20 @@ CONFIG_KEYS = frozenset(
 
 
 def with_parent_limits(task: HarborTask, parent: HarborTask) -> HarborTask:
-    """``task`` with ``parent``'s values of :data:`PARENT_LIMITS`; a limit the parent does not set stays as it is."""
+    """``task`` with exactly ``parent``'s values of :data:`PARENT_LIMITS`.
+
+    A limit the parent sets takes the parent's value, and a limit it does not set is removed, so the task runs on
+    the sandbox's default for it, as the parent does. A table left with no key is removed too.
+    """
     config = {section: dict(values) for section, values in task.config.items()}
     for section, keys in PARENT_LIMITS.items():
         limits = parent.config.get(section, {})
-        for key in keys:
-            if key in limits:
-                config.setdefault(section, {})[key] = limits[key]
+        values = {key: value for key, value in config.get(section, {}).items() if key not in keys}
+        values.update({key: limits[key] for key in keys if key in limits})
+        if values:
+            config[section] = values
+        else:
+            config.pop(section, None)
     return replace(task, config=config)
 
 

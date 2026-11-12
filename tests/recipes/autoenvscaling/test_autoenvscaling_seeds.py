@@ -56,7 +56,7 @@ from recipes.beta.autoenvscaling import (
 )
 from recipes.beta.autoenvscaling import claude_designer as claude_designer_module
 from recipes.beta.autoenvscaling import designer as designer_module
-from recipes.beta.autoenvscaling import load_sources, workspace_reply
+from recipes.beta.autoenvscaling import load_sources, tmax, workspace_reply
 from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.claude_designer import CLAUDE_CHECK_TEXT
 from recipes.beta.autoenvscaling.designer import SEED_VARIANT_PROMPT, VARIANT_INPUTS_TEXT, agent_prompt, agent_rules
@@ -881,13 +881,28 @@ def test_a_seed_variant_keeps_its_seeds_time_and_machine(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
-def test_parent_limits_leave_a_limit_the_parent_does_not_set() -> None:
+def test_parent_limits_unset_a_limit_the_parent_does_not_set() -> None:
     task = seed_task(0, REPOSITORY_TASK_CONFIG)
     parent = seed_task(1, {"agent": {"timeout_sec": 900}})
     limited = with_parent_limits(task, parent)
-    assert limited.config["agent"]["timeout_sec"] == 900
-    assert limited.config["verifier"] == REPOSITORY_TASK_CONFIG["verifier"]
-    assert limited.config["environment"] == REPOSITORY_TASK_CONFIG["environment"]
+    assert limited.config["agent"] == {"timeout_sec": 900}
+    # The parent runs on the sandbox's default machine and verifier time, so the variant does too.
+    assert limited.config["verifier"] == {"user": "root"}
+    assert limited.config["environment"] == {"network_mode": "no-network", "build_timeout_sec": 1200}
+    assert "agent" not in with_parent_limits(task, seed_task(2)).config
+
+
+@pytest.mark.unit
+def test_a_variant_of_a_tmax_seed_runs_on_the_machine_its_seed_runs_on(tmp_path: Path) -> None:
+    generator = seeded(tmp_path, SeedDesigner(), seed_config=tmax.TASK_CONFIG)
+    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    [variant] = asyncio.run(generator.generate(REQUEST))
+    assert variant.metadata["seed_task"] == generator.seeds[0].name
+    assert variant.config["agent"] == {"timeout_sec": 1200} and variant.config["verifier"] == {
+        "timeout_sec": 600,
+        "user": "root",
+    }
+    assert not {"cpus", "memory_mb", "storage_mb", "gpus"} & variant.config["environment"].keys()
 
 
 @pytest.mark.unit
