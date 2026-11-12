@@ -135,19 +135,27 @@ Facts without a component
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 A service that does not run a training component still needs some answers
-about it. A backend states them from its configuration as a
+about it, and a new scenario needs its root before any job runs. A backend
+states both from its configuration as a
 ``reef.train.component.TrainingBackendFacts`` value.
 ``TrainingComponentFactory.facts(config, model_path, environ)`` returns it from
 the config that ``__call__`` builds the component from, and
-``training_backend_facts(config, model_path=...)`` calls it. Stating the facts
-builds no component, starts nothing, calls no service and imports no training
-framework or SDK. The members are:
+``training_backend_facts(config, model_path=...)`` calls it. Every factory
+defines ``facts``; it is abstract. Stating the facts builds no component,
+starts nothing, calls no service and imports no training framework or SDK. The
+members are:
 
 ``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs``
    The component's members of the same names.
 ``default_start_inputs``
-   The ``inputs`` of the component's default start: the model and the
-   settings that decide its content.
+   The ``inputs`` of the default start: the model and the settings that
+   decide its content.
+``default_start()``
+   The content of a new scenario's root, as a ``DefaultStart``: a few small
+   text files and ``default_start_inputs``. It holds no weight file. A backend
+   that trains a base model writes a base root (``base.json``,
+   ``reef.artifact.base_root``) or a reference to the base model's commit
+   (``hf-reference.json``).
 ``parameters_schema(kind)``
    The JSON Schema of a job's parameters, or ``None``.
 ``check_root_start(root)``
@@ -160,12 +168,19 @@ also refuses to start when its options, as written, state other facts than
 Slime's parser read from them.
 
 Everything else stays a call to the component, because it needs the training
-service, its files or its framework: the files of the default start,
-``root_start`` and ``import_start`` (they write a start), ``check_artifact``,
-``check_task_jobs``, ``check_job``, ``changed_parts`` and the jobs.
+service, its files or its framework: ``root_start`` and ``import_start``
+(they write a start), ``check_artifact``, ``check_task_jobs``, ``check_job``,
+``changed_parts`` and the jobs.
 
-The default ``facts`` returns ``None``: the backend states no facts from its
-configuration, and a caller builds the component and reads the members there.
+The facts are the one place that states the default start. A
+``TrainingComponent`` has no ``default_start`` method, and Reef asks no
+component for a root. The component has two duties toward the start:
+
+- ``default_start_inputs`` returns the same inputs as the facts.
+- ``root_start(root)`` accepts a root that holds the files of
+  ``facts.default_start()`` and returns the start of a job at the base model.
+  The default ``root_start`` calls ``import_start`` on the root's files.
+
 The harness component has no factory; ``HarnessFacts.from_settings`` makes its
 facts from the ``HarnessSettings``.
 
@@ -331,8 +346,10 @@ the start's weights and objective state. The Tinker component does the same.
 Every driver loads Slime's latest checkpoint. A job therefore starts from
 the component's latest checkpoint; the start of the startup weights names the
 untrained weights, until the first rollout is saved. A scenario trains on Slime
-only when its root snapshot holds the default start of the configured inputs
-(``root_start``). The component checks the start
+only when its root snapshot came from the default start of the configured
+inputs (``root_start``). The default start is a base root. The workers make the
+startup weights from the model when they start, so ``root_start`` reads the
+root's source and none of its files. The component checks the start
 when Reef submits the job, and the driver again when the job runs: a queued
 job whose start an earlier job moved past fails. ``import_start`` refuses
 every snapshot, so a Slime scenario refuses ``train-from``. Because the jobs

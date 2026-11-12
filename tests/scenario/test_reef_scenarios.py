@@ -435,7 +435,7 @@ class _RootImportingComponent(StubTrainingComponent):
         super().__init__(shares_scenarios=True)
         self.model = model
 
-    def default_start(self) -> DefaultStart:
+    def stub_default_start(self) -> DefaultStart:
         return DefaultStart(files={"model.txt": self.model}, inputs={"model": self.model})
 
     def root_start(self, root: ScenarioRoot) -> str:

@@ -66,8 +66,9 @@ class LiveObjects:
     - ``runtime`` is the serving runtime, or ``None`` for a process with none.
     - ``training_component`` runs the jobs of the recipe that trains weights, or is ``None`` when no recipe of the
       deployment trains weights or the process built no component for it.
-    - ``training_facts`` are the facts of the training backend of that recipe, in a process that built them in
-      place of the component, or ``None``. The inference service of a backend that states its facts holds them
+    - ``training_facts`` are the facts of the training backend of that recipe, as its configuration states them
+      (``reef.train.component.training_backend_facts``), or ``None`` when no recipe of the deployment trains
+      weights. A process holds them beside the component, or alone: the inference service builds no component
       (``reef.service.assembly.load_serving_deployment``).
     - ``harness_component`` runs the jobs of the deployment's harness recipe, or is ``None`` when the deployment
       evolves no harness or the process built no component for it.
@@ -75,10 +76,11 @@ class LiveObjects:
     - ``served_endpoint`` is where this Reef answers inference itself, or ``None`` when a harness run calls the
       runtime's own endpoint.
 
-    At most one of ``training_component`` and ``training_facts`` is set. A process has the component, which
-    answers everything about the backend; or the facts, which answer what ``TrainingBackendFacts`` states and run
-    no job; or neither. The two components, when both are set, have different names: a job names its component by
-    that name.
+    A value with a ``training_component`` has ``training_facts``, and the two are of one backend: they have the
+    same name. The facts write the default start of a new scenario and check an item root (``default_start``,
+    ``check_root_start``). The component runs the jobs and answers what needs the backend's service or its files.
+    A process with the facts alone runs no job. The two components, when both are set, have different names: a job
+    names its component by that name.
 
     Purpose: the service assembly builds one value for each process (``reef.service.assembly``). The dispatcher
     gets it and gives the scenario factory a copy whose components are the jobs queue's views. The functions of
@@ -103,8 +105,14 @@ class LiveObjects:
                 raise TypeError(f"{name} must be a TrainingComponent, got {type(component).__name__}")
         if self.training_facts is not None and not isinstance(self.training_facts, TrainingBackendFacts):
             raise TypeError(f"training_facts must be TrainingBackendFacts, got {type(self.training_facts).__name__}")
-        if self.training_component is not None and self.training_facts is not None:
-            raise ValueError("a process holds the training component or the backend's facts, not both")
+        if self.training_component is not None:
+            if self.training_facts is None:
+                raise ValueError("a process that holds the training component holds the facts of its backend too")
+            if self.training_component.name != self.training_facts.name:
+                raise ValueError(
+                    f"the training component {self.training_component.name!r} and the facts of the backend "
+                    f"{self.training_facts.name!r} are of two backends"
+                )
         if self.data_store is not None and not isinstance(self.data_store, DataStore):
             raise TypeError(f"data_store must be a DataStore, got {type(self.data_store).__name__}")
         if self.served_endpoint is not None and not isinstance(self.served_endpoint, ServedEndpoint):
@@ -175,13 +183,13 @@ def check_recipe_objects(recipe: Recipe, live: LiveObjects) -> None:
     A recipe that trains weights, alone or as a component of a composite, needs a runtime, and a training component
     or the backend's facts (``LiveObjects.training_facts``). A weight recipe whose jobs are task jobs
     (``WeightTrainingRecipe.trains_task_jobs``) needs a training component that takes the recipe's task parameters
-    (``TrainingComponent.check_task_jobs``); a process that holds the facts runs no job and leaves that check to
-    the processes that hold the component. Raise ``RecipeConfigError`` otherwise.
+    (``TrainingComponent.check_task_jobs``); a process that holds the facts and no component runs no job and leaves
+    that check to the processes that hold the component. Raise ``RecipeConfigError`` otherwise.
     """
     for _, one in component_recipes(recipe):
         if not isinstance(one, WeightTrainingRecipe):
             continue
-        if live.training_facts is not None:
+        if live.training_component is None and live.training_facts is not None:
             if live.runtime is None:
                 raise RecipeConfigError("weight recipes require an independent inference runtime")
             continue
@@ -234,10 +242,10 @@ def scenario_components(recipe: Recipe, live: LiveObjects, scenario: str) -> Sce
     if name is None:
         return declared
     layout: ArtifactLayout
-    if live.training_facts is not None:
-        layout = TrainingFactsLayout(live.training_facts)
-    elif live.training_component is not None:
+    if live.training_component is not None:
         layout = TrainingArtifactLayout(live.training_component)
+    elif live.training_facts is not None:
+        layout = TrainingFactsLayout(live.training_facts)
     else:
         raise RecipeConfigError(f"{type(recipe).__name__} requires a training component")
     if live.runtime is None:
@@ -249,29 +257,26 @@ def scenario_components(recipe: Recipe, live: LiveObjects, scenario: str) -> Sce
 def default_start(recipe: Recipe, live: LiveObjects) -> DefaultStart:
     """The content of a new scenario's root snapshot when no artifact item starts the scenario.
 
-    - A weight recipe starts from the training component's untrained checkpoint
-      (``TrainingComponent.default_start``).
-    - A composite starts from each component's default start under that component's directory. The files and the
-      model files of a component go under its name, and each input is named ``<component>.<input>``.
+    - A weight recipe starts from what the training backend's facts write from the configuration
+      (``TrainingBackendFacts.default_start``): a base root or a reference to the base model. No training
+      component makes it.
+    - A composite starts from each component's default start under that component's directory. The files of a
+      component go under its name, and each input is named ``<component>.<input>``.
     - Any other recipe starts from what its configuration gives (``Recipe.default_start``).
 
-    Raise ``RecipeConfigError`` when two components of a composite hold model files, and when the recipe trains
-    weights and ``live`` has no training component.
+    Raise ``RecipeConfigError`` when the recipe trains weights and ``live`` has no facts of the training backend.
     """
     if isinstance(recipe, WeightTrainingRecipe):
-        return weight_objects(recipe, live)[0].default_start()
+        if live.training_facts is None:
+            raise RecipeConfigError(f"{type(recipe).__name__} requires the facts of its training backend")
+        return live.training_facts.default_start()
     if not isinstance(recipe, CompositeRecipe):
         return recipe.default_start()
     sources = {component: default_start(child, live) for component, child in recipe.components.items()}
-    models = [component for component, source in sources.items() if source.model_files is not None]
-    if len(models) > 1:
-        raise RecipeConfigError(f"components {models} each hold a base model; a composite trains one model")
     return DefaultStart(
         files={
             f"{component}/{path}": text for component, source in sources.items() for path, text in source.files.items()
         },
-        model_files=sources[models[0]].model_files if models else None,
-        model_component=models[0] if models else None,
         inputs={
             f"{component}.{name}": value
             for component, source in sources.items()
@@ -283,23 +288,21 @@ def default_start(recipe: Recipe, live: LiveObjects) -> DefaultStart:
 def check_root_start(recipe: Recipe, live: LiveObjects, root: ScenarioRoot) -> None:
     """Check that training can start from ``root`` before an item start is registered.
 
-    Each recipe of the deployment (``component_recipes``) has its root checked by the component that runs its
-    jobs (``TrainingComponent.root_start``): the training component of ``live`` for a weight recipe, and the
-    harness component of ``live`` for a harness recipe. A recipe of a composite has its own component's view of
-    the root checked (``component_root``); a recipe on its own has ``root`` checked. Nothing is checked for a
-    recipe that submits no job, and for one whose component ``live`` does not hold. Raise ``ValueError`` on
-    refusal.
+    Each recipe of the deployment (``component_recipes``) has its root checked. The facts of the training backend
+    check the root of a weight recipe (``TrainingBackendFacts.check_root_start``), which writes nothing. The
+    harness component of ``live`` checks the root of a harness recipe (``TrainingComponent.root_start``). A recipe
+    of a composite has its own component's view of the root checked (``component_root``); a recipe on its own has
+    ``root`` checked. Nothing is checked for a recipe that submits no job, and for one whose facts or component
+    ``live`` does not hold. Raise ``ValueError`` on refusal.
     """
     for component, child in component_recipes(recipe):
-        job_component: TrainingComponent | None
+        view = root if component is None else component_root(root, component)
         if isinstance(child, WeightTrainingRecipe):
-            job_component = live.training_component
+            if live.training_facts is not None:
+                live.training_facts.check_root_start(view)
         elif isinstance(child, HarnessEvolutionRecipe):
-            job_component = live.harness_component
-        else:
-            job_component = None
-        if job_component is not None:
-            job_component.root_start(root if component is None else component_root(root, component))
+            if live.harness_component is not None:
+                live.harness_component.root_start(view)
 
 
 def harness_models(

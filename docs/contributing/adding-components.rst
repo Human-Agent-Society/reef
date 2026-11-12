@@ -154,11 +154,21 @@ Implementation
   service SDK. Define the facts type in the integration's own package, from
   its own settings, and let the component answer the same members from a value
   of it, so the two cannot differ. Share no facts code with another backend.
+  ``facts`` is abstract: every factory defines it.
   With the facts, ``reef serve --component inference`` builds the serving
   runtime from ``facts.artifact_format`` and never builds the component, so
-  its environment does not need the framework. A factory that inherits
-  ``facts``, which returns ``None``, makes the inference service build the
-  component.
+  its environment does not need the framework.
+- State the default start in the facts, and nowhere else.
+  ``facts.default_start()`` returns the ``DefaultStart`` that a new scenario's
+  root holds: a few small text files and ``default_start_inputs``. Write no
+  weight file. A backend that trains a base model writes a base root
+  (``base.json`` with ``BaseRoot(inputs).to_text()``) or a reference to the
+  base model's commit (``hf-reference.json``). The component defines no
+  ``default_start``. It defines the ``default_start_inputs`` property, with
+  the facts' value, and its ``root_start`` (or the ``import_start`` behind it)
+  starts a job at the base model from a root that holds those files.
+  ``facts.check_root_start(root)`` refuses the same roots as
+  ``component.root_start(root)``.
   Add a test that compares the facts with the component for two configs, and
   one that builds the facts without the framework. See `Facts without a
   component <../developer-guide/executors.rst#facts-without-a-component>`__.

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tests.support.runtime_stubs import FULL_WEIGHTS, StubInferenceRuntime, StubTrainingComponent
 
+from reef.artifact import DefaultStart
 from reef.core.config import config_option
 from reef.inference.registry import RuntimeFactory
 from reef.train.component import TrainingBackendFacts, TrainingComponentFactory
@@ -48,6 +49,9 @@ class LocalFactory(TrainingComponentFactory):
 
     def config_type(self):
         return Options
+
+    def facts(self, config, model_path, environ):
+        return LocalFacts()
 
     def __call__(self, config, model_path, environ):
         return LocalRuntime(config, model_path)
@@ -98,6 +102,9 @@ class LocalFacts(TrainingBackendFacts):
     def default_start_inputs(self):
         return {"model": "stub"}
 
+    def default_start(self):
+        return DefaultStart(inputs=self.default_start_inputs)
+
     def parameters_schema(self, kind):
         return None
 
@@ -106,15 +113,12 @@ class LocalFacts(TrainingBackendFacts):
 
 
 class FactsFactory(LocalFactory):
-    """A factory that states the facts of its component; ``built`` counts the components that it built."""
+    """``LocalFactory`` that counts the components that it built in ``built``."""
 
     kind = "test-local-facts"
 
     def __init__(self):
         self.built = 0
-
-    def facts(self, config, model_path, environ):
-        return LocalFacts()
 
     def __call__(self, config, model_path, environ):
         self.built += 1

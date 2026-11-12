@@ -97,9 +97,7 @@ class TinkerComponentFactory(TrainingComponentFactory):
     def config_type(self) -> type:
         return TinkerSettings
 
-    def facts(
-        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
-    ) -> TrainingBackendFacts | None:
+    def facts(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingBackendFacts:
         """The ``TinkerFacts`` of the config's settings: no SDK client, sampler or API key."""
         return TinkerFacts.of(
             model_path, TinkerSettings(**{key: value for key, value in config.items() if key != "type"})
@@ -179,9 +177,7 @@ class SpindleFullComponentFactory(TrainingComponentFactory):
     def config_type(self) -> type:
         return SpindleFullSettings
 
-    def facts(
-        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
-    ) -> TrainingBackendFacts | None:
+    def facts(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingBackendFacts:
         """The ``SpindleFullFacts`` of the config's settings: no SDK client, sampler, exporter or API key."""
         return SpindleFullFacts.of(
             model_path, SpindleFullSettings(**{key: value for key, value in config.items() if key != "type"})

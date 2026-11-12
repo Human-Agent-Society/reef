@@ -13,6 +13,7 @@ from typing import Any, Self
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.components import TextFileTree
+from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError
 from reef.core.weight_layout import ArtifactFormat
 from reef.harness.adapters import get_adapter
@@ -36,8 +37,9 @@ class HarnessFacts(TrainingBackendFacts):
     component keeps the state of each scenario component apart, so scenarios share it; the jobs of one scenario
     run one at a time. The backend declares no parameters schema. ``check_tree(tree)`` raises ``ValueError`` for a
     tree that fails the adapter's validation; ``tree_in(directory)`` is the checked tree of the snapshot in
-    ``directory``, its text files without the repository's own files (``TextFileTree``). ``check_root_start``
-    accepts a root whose files are such a tree.
+    ``directory``, its text files without the repository's own files (``TextFileTree``). ``default_start`` is
+    the seed tree's files, as ``HarnessEvolutionRecipe.default_start`` gives them. ``check_root_start`` accepts a
+    root whose files are a tree that passes ``check_tree``.
 
     Purpose: ``from_settings`` makes one from the deployment's ``HarnessSettings``; ``HarnessTrainingComponent``
     makes one from the same settings and answers from it.
@@ -79,6 +81,10 @@ class HarnessFacts(TrainingBackendFacts):
     @property
     def default_start_inputs(self) -> Mapping[str, str]:
         return {"seed": self.seed.checksum()}
+
+    def default_start(self) -> DefaultStart:
+        """The seed tree's files; the empty seed makes a root with no files."""
+        return DefaultStart(files=dict(self.seed.files), inputs=self.default_start_inputs)
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return None

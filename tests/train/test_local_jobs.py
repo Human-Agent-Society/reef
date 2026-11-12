@@ -14,7 +14,6 @@ from tests.support.job_data import job_data_ref
 from tests.support.polling import wait_until
 from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import DefaultStart
 from reef.core.job_data import JobData
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import write_json
@@ -58,8 +57,9 @@ class GatedComponent(LocalJobComponent):
     def concurrent_jobs(self) -> bool:
         return self.concurrent
 
-    def default_start(self) -> DefaultStart:
-        return DefaultStart()
+    @property
+    def default_start_inputs(self) -> dict[str, str]:
+        return {}
 
     def root_start(self, root: ScenarioRoot) -> str:
         return "gated:base"

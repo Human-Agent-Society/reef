@@ -12,6 +12,7 @@ from typing import Any
 import pytest
 import yaml
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.training_deployment import LocalFacts
 
 from reef.core.config import config_arguments, config_option, parse_config_values
 from reef.core.errors import RuntimeConfigError
@@ -288,6 +289,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
 
     monkeypatch.setattr(assembly, "resolve_config_field_values", resolve)
     monkeypatch.setattr(assembly, "connect_training_component", connect)
+    monkeypatch.setattr(assembly, "training_backend_facts", lambda config, *, model_path: LocalFacts())
     settings = ServiceSettings(
         recipe="reef_config_extension:Training",
         model_path="model",

@@ -12,7 +12,16 @@ from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
 from reef.core.errors import RuntimeConfigError
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
-from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob, job_id_for, training_backend_facts
+from reef.train.component import (
+    JobStatus,
+    SavedCheckpoint,
+    TrainingBackendFacts,
+    TrainingComponent,
+    TrainingComponentFactory,
+    TrainingJob,
+    job_id_for,
+    training_backend_facts,
+)
 from reef.train.slime_backend.signals import PreparedJob
 from reef.train.types import JobData
 
@@ -202,20 +211,31 @@ def test_a_base_root_is_admitted_exactly_for_the_default_start_that_it_names(tmp
         component.check_artifact(DirectoryFiles(tmp_path))
 
 
-#: A factory that overrides no ``facts``: the stand-in backend of ``tests.support.training_deployment``.
+#: The factory of the stand-in backend of ``tests.support.training_deployment``.
 LOCAL_FACTORY = "tests.support.training_deployment:component_factory"
 
 
 @pytest.mark.unit
-def test_a_backend_that_states_no_facts_answers_none_and_builds_nothing(tmp_path, monkeypatch):
-    """The default of ``TrainingComponentFactory.facts``: a caller that needs the facts builds the component."""
+def test_every_factory_states_its_facts_and_stating_them_builds_no_component(tmp_path, monkeypatch):
+    """``TrainingComponentFactory.facts`` is required: the facts are the one source of a default start."""
+
+    class NoFacts(TrainingComponentFactory):
+        kind = "no-facts"
+
+        def __call__(self, config, model_path, environ):
+            raise AssertionError("not built")
+
+    with pytest.raises(TypeError, match="abstract"):
+        NoFacts()
+    assert not hasattr(TrainingComponent, "default_start")
     marker = tmp_path / "built"
-    assert training_backend_facts({"type": LOCAL_FACTORY, "marker": str(marker)}, model_path="m", environ={}) is None
+    facts = training_backend_facts({"type": LOCAL_FACTORY, "marker": str(marker)}, model_path="m", environ={})
+    assert isinstance(facts, TrainingBackendFacts) and facts.default_start().inputs == facts.default_start_inputs
     assert not marker.exists()
     with pytest.raises(RuntimeConfigError, match="dotted reference as type"):
         training_backend_facts({}, model_path="m", environ={})
     from tests.support.training_deployment import component_factory
 
     monkeypatch.setattr(type(component_factory), "facts", lambda *args: {"name": "local"})
-    with pytest.raises(TypeError, match="must state TrainingBackendFacts or None"):
+    with pytest.raises(TypeError, match="must state TrainingBackendFacts"):
         training_backend_facts({"type": LOCAL_FACTORY}, model_path="m", environ={})

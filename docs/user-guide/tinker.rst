@@ -93,6 +93,14 @@ remote training state and sampler. The inference side serves the sampler that
 a snapshot names. Each job starts from the scenario's last saved checkpoint,
 which ``state-dir`` keeps across restarts.
 
+A new scenario starts from a base root: a ``base.json`` file that names the
+model, the LoRA rank and the service. Control writes it from the
+configuration and calls no Tinker service for it. Serving it samples the base
+model. The first job from it makes a new LoRA from ``seed``. With
+``seed: null``, the training service saves one untrained adapter when the
+first such job runs, keeps its manifest in ``<state-dir>/base/``, and starts
+every such job from it.
+
 ``training.options.batch-size`` (default 1) is the batch size: the samples in
 one optimizer step. ``pipeline.sample2job.config.job_samples`` is the job size:
 the training pipeline submits a job when it holds this many samples. Set it
@@ -375,7 +383,8 @@ Prerequisites:
 
 The default start is a reference to the base revision (`Import an artifact
 <operate.rst#import-an-artifact>`__), which a new scenario's root snapshot
-holds; a job from it starts a new model with the base's own weights.
+holds. Control writes it from the configuration. A job from it starts a new
+model with the base's own weights.
 
 Every snapshot refers to its weights on Hugging Face. When Spindle saves a
 checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint

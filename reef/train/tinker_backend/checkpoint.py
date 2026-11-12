@@ -110,12 +110,14 @@ class TinkerCheckpoint:
 
 @dataclass(frozen=True)
 class FreshStart:
-    """The start of a new model of all the parameters of ``base_model``, with the base model's own weights.
+    """The start of a new model of ``base_model``, whose outputs are the base model's.
 
-    Values: ``base_model`` is non-empty. The start has no training state: no optimizer state, no learning-rate
-    schedule progress, and an empty objective state, as a ``TinkerCheckpoint`` of the untrained base would have; it
-    names no sampler, so its rollouts sample the base model. Purpose: the full-parameter training component starts a
-    job from it when the job starts from the base; ``TinkerClient.train`` creates the model on the service.
+    Values: ``base_model`` is non-empty. The new model is what the client trains: all the parameters with the base
+    model's own weights, or an untrained LoRA of the client's rank and seed. The start has no training state: no
+    optimizer state, no learning-rate schedule progress, and an empty objective state, as a ``TinkerCheckpoint`` of
+    the untrained base would have; it names no sampler, so its rollouts sample the base model. Purpose: a Tinker
+    component starts a job from it when the job starts from the backend's default start; ``TinkerClient.train``
+    creates the model on the service.
     """
 
     base_model: str

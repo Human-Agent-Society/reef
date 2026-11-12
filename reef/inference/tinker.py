@@ -50,8 +50,9 @@ def checkpoint_sampler_path(
 ) -> str | None:
     """The sampler that a snapshot's checkpoint manifest names; ``None`` for the base model's own weights.
 
-    A base root (``reef.artifact.base_root``) of ``base_model`` on ``service`` is the base model. A LoRA's default
-    start that holds the untrained adapter's manifest names a sampler that serves the base model's outputs.
+    A base root (``reef.artifact.base_root``) of ``base_model`` on ``service`` is the base model: a LoRA's default
+    start. A root of an older Reef holds the untrained adapter's manifest, whose sampler serves the base model's
+    outputs.
     Under full-parameter training (``full``), a snapshot without a manifest has the base model's weights: the
     component's base, a reference to the base revision, or an import of the base's files (RFC #996).
     ``ValueError``: the snapshot is not materialized; its base file is not readable, or names another model or

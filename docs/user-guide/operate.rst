@@ -60,9 +60,8 @@ The starting artifacts come from one of two sources:
 
 - The deployment's default start, when the create request names no artifact item. Reef writes it from the configuration:
 
-  - The ``slime`` backend with full weights writes the model that ``inference.model-path`` names. Each scenario's starting artifact holds a full copy of the model's files, about 2 bytes per parameter in bf16. A Git LFS remote stores each file once.
-  - The ``slime`` backend with LoRA writes an adapter whose weights are zero. It serves the model unchanged.
-  - The ``tinker`` backend writes the checkpoint of its untrained adapter, which stays on the Tinker service.
+  - The ``slime`` and ``tinker`` backends write a base root: one file, ``base.json``, which names the base model and the settings of its adapter. The starting artifact holds no weight file. Serving it serves the base model, and training from it starts at the base model.
+  - The ``spindle_full`` backend writes a reference to the base revision on Hugging Face.
   - A harness recipe writes the files of its seed tree: ``evolution.seed``, else the recipe's own seed. Without a seed, the starting artifact is empty.
   - A recipe of several components writes each component's default start under its name.
 - An artifact item of the scenario's owner (`Choose a scenario's start`_).
@@ -70,6 +69,10 @@ The starting artifacts come from one of two sources:
 The creation row's ``source`` is ``{"kind": "default", "inputs": {...}}``, with the configuration values that decide the default start, such as the model and the seed's checksum. For an item, it is ``{"kind": "item", "item": ..., "uri": ..., "version": ...}``, as an import records it.
 
 A new trainer starts its first job from its starting artifact. A train-from or the trainer's own training step changes the start later (`Train from an artifact`_). Activate that artifact to serve it again, or train from it to start training again from it; the ``slime`` backend refuses train-from, as it refuses every artifact.
+
+Control writes the default start from the training backend's configuration. It asks no training component and calls no training service for it. With ``tinker``, the first job from a base root makes a new LoRA from ``training.options.seed``, so every such job begins with equal weights. With ``seed: null``, the service chooses the initial adapter. The training service then saves one untrained adapter in its ``state-dir`` when the first such job runs, and every such job starts from it.
+
+A scenario that an earlier Reef created keeps its starting artifact: a copy of the model, an adapter whose weights are zero, or the checkpoint of an untrained adapter. Reef serves it and trains from it as before.
 
 A change of the configuration does not change an existing scenario. It keeps its stored starting artifacts, and a new scenario gets the new default start. A start that no longer fits the configuration fails only its own scenario: the runtime refuses to activate it, or the training component refuses to start from it, with that component's message. The ``slime`` backend trains only the weights that its workers load from ``inference.model-path``. It refuses to create a scenario from an artifact item. A scenario whose starting artifact came from other inputs does not load, and the error names both inputs. Reef refuses a scenario that an earlier Reef stored with a shared base snapshot (``reef-scenario/4`` metadata). Create such a scenario again.
 
@@ -410,10 +413,10 @@ fetches.
 **Training dependencies.** The inference service builds no training component
 for the ``slime``, ``tinker`` and ``spindle_full`` backends. It reads what it
 needs about the backend from the config. With ``slime``, its environment needs
-no Slime, Megatron, Ray, PyTorch or Transformers. For a training backend
-plugin that states no facts from its config, the inference service builds the
-backend's training component, as the other services do. Install that
-backend's dependencies there.
+no Slime, Megatron, Ray, PyTorch or Transformers. A training backend plugin
+states these facts too (`Facts without a component
+<../developer-guide/executors.rst#facts-without-a-component>`__), so the
+inference service builds no component for it either.
 
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the

@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples import data_storage
 from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
 
@@ -417,7 +417,9 @@ def _dispatcher(
         recipe = _TwoTrainerRecipe(
             backends=backends, auto_only_components=auto_only_components, trains_weights=True, **seeds
         )
-        live = LiveObjects(runtime=StubInferenceRuntime(), training_component=training)
+        live = LiveObjects(
+            runtime=StubInferenceRuntime(), training_component=training, training_facts=StubFacts(training)
+        )
     records = tmp_path / "records" if records_dir is None else records_dir
     storage = data_storage(records)
     if trainer_builder is None and isinstance(recipe, _TwoTrainerRecipe):

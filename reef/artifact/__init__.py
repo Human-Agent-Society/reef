@@ -25,15 +25,16 @@ and ``test_reef_artifacts.py`` show the contract a backend must satisfy.
 Every scenario owns its root snapshot, a snapshot with no parent.
 ``RepositoryBackend.register`` stores it and makes it the scenario's head in
 one atomic step; a second caller gets the winner's head. Scenarios share no
-snapshot. A root that holds the recipe's ``DefaultStart`` reads its model
-files (a ``BaseModelFiles``, for example a ``ModelDirectory``) only when the
-scenario is created, so a process that only opens scenarios makes none.
+snapshot. A root that no artifact item starts holds the deployment's
+``DefaultStart``: a few small text files that the configuration decides, and
+no weight file.
 
 An artifact of a weight component has one of three forms: its own weight files, a
 reference to a Hugging Face commit that holds them (``REFERENCE_FILE``, RFC #995), or
 a base root, which holds ``BASE_FILE`` alone and stands for the deployment's base
-model (``reef.artifact.base_root``). Readers accept a base root; no code in Reef
-writes one yet.
+model (``reef.artifact.base_root``). A new scenario of a backend that trains a
+base model starts from a base root, which the backend's facts write
+(``TrainingBackendFacts.default_start``).
 
 Backends used with a scenario commit history must subclass
 ``StagedSnapshotRepositoryBackend``. ``publish`` must accept
@@ -65,12 +66,10 @@ from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBacke
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
 from reef.artifact.repository import (
-    BaseModelFiles,
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
     DefaultStart,
     EnumerableRepositoryBackendFactory,
-    ModelDirectory,
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
@@ -114,7 +113,6 @@ __all__ = [
     "ArtifactSourceReader",
     "ArtifactSources",
     "ArtifactValidator",
-    "BaseModelFiles",
     "BaseRoot",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
@@ -131,7 +129,6 @@ __all__ = [
     "HuggingFaceRevisionFiles",
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
-    "ModelDirectory",
     "PEFTValidator",
     "RegistrationAwareRepositoryBackendFactory",
     "Repository",

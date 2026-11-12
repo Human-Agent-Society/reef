@@ -18,7 +18,15 @@ from reef.inference.interfaces import InferenceBackend
 from reef.inference.serving import OpenedEngines, ServingEngines
 from reef.scenario.live_objects import LiveObjects
 from reef.storage.data import DataStore
-from reef.train.component import JobStatus, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
+from reef.storage.job_data import JobDataKind
+from reef.train.component import (
+    JobStatus,
+    SavedCheckpoint,
+    ScenarioRoot,
+    TrainingBackendFacts,
+    TrainingComponent,
+    TrainingJob,
+)
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 #: The artifact format of a stub component that does not name one.
@@ -77,9 +85,14 @@ class StubTrainingComponent(TrainingComponent):
         if not isinstance(parameters.get("rollout"), Mapping):
             raise ValueError("a task job needs the rollout parameter as an object")
 
-    def default_start(self) -> DefaultStart:
-        """An empty base: a stub checkpoint is any directory."""
+    def stub_default_start(self) -> DefaultStart:
+        """The default start that the stub's facts write (``StubFacts``): an empty root, since a stub checkpoint is
+        any directory. A subclass overrides it to start its scenarios from other files."""
         return DefaultStart(inputs={"model": self.backend_name})
+
+    @property
+    def default_start_inputs(self) -> Mapping[str, str]:
+        return self.stub_default_start().inputs
 
     @property
     def base_start(self) -> str:
@@ -216,17 +229,65 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         return version
 
 
+class StubFacts(TrainingBackendFacts):
+    """The facts of the test component ``component``: each member answers from the component itself.
+
+    ``default_start`` is ``component.stub_default_start()``, and ``check_root_start`` raises exactly when
+    ``component.root_start`` raises. A test gives the value to ``LiveObjects.training_facts`` beside the component,
+    as a deployment's assembly gives the facts of the backend's configuration.
+    """
+
+    def __init__(self, component: StubTrainingComponent) -> None:
+        if not isinstance(component, StubTrainingComponent):
+            raise TypeError("StubFacts states the facts of a StubTrainingComponent")
+        self.component = component
+
+    @property
+    def name(self) -> str:
+        return self.component.name
+
+    @property
+    def artifact_format(self) -> ArtifactFormat | None:
+        return self.component.artifact_format
+
+    @property
+    def shares_scenarios(self) -> bool:
+        return self.component.shares_scenarios
+
+    @property
+    def concurrent_jobs(self) -> bool:
+        return self.component.concurrent_jobs
+
+    @property
+    def default_start_inputs(self) -> Mapping[str, str]:
+        return self.component.default_start_inputs
+
+    def default_start(self) -> DefaultStart:
+        return self.component.stub_default_start()
+
+    def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
+        return self.component.parameters_schema(kind)
+
+    def check_root_start(self, root: ScenarioRoot) -> None:
+        self.component.root_start(root)
+
+
 def live_objects(
     component: TrainingComponent | None = None,
     runtime: StubInferenceRuntime | None = None,
     *,
     data_store: DataStore | None = None,
 ) -> LiveObjects:
-    """The live objects of a test deployment that trains weights: the training component ``component`` and the
-    inference runtime ``runtime``; stubs fill what is missing. ``data_store`` is the deployment's data store."""
+    """The live objects of a test deployment that trains weights: the training component ``component``, its facts
+    when it is a stub (``StubFacts``), and the inference runtime ``runtime``; stubs fill what is missing.
+    ``data_store`` is the deployment's data store."""
+    training_component = StubTrainingComponent() if component is None else component
     return LiveObjects(
         runtime=StubInferenceRuntime() if runtime is None else runtime,
-        training_component=StubTrainingComponent() if component is None else component,
+        training_component=training_component,
+        training_facts=(
+            StubFacts(training_component) if isinstance(training_component, StubTrainingComponent) else None
+        ),
         data_store=data_store,
     )
 

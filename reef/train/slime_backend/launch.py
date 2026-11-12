@@ -232,9 +232,7 @@ class SlimeComponentFactory(TrainingComponentFactory):
 
     kind = SlimeDeployment.component_type
 
-    def facts(
-        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
-    ) -> TrainingBackendFacts | None:
+    def facts(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingBackendFacts:
         """The ``SlimeFacts`` of the config's training options, with their configuration references resolved.
 
         The teacher's options state no fact, so the teacher's URL is not read. ``RuntimeConfigError`` for options
