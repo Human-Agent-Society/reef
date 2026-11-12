@@ -556,12 +556,14 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
     assert build_environments == [{"type": "e2b"}], "Docker builds one image at a time, so it gets no build first"
     assert HarborChecks(environment="e2b").environment == "e2b"
     # An environment the generator cannot probe is refused.
-    for environment in ("", "modal"):
-        with pytest.raises(ValueError, match=f"the Harbor environment must be docker or e2b, not '{environment}'"):
+    for environment in ("", "podman"):
+        with pytest.raises(
+            ValueError, match=f"the Harbor environment must be docker or e2b or modal, not '{environment}'"
+        ):
             HarborChecks(environment=environment)
     for fields, message in (
         ({"environment": ""}, "the Harbor environment must be docker or e2b"),
-        ({"environment": "modal"}, "the Harbor environment must be docker or e2b, not 'modal'"),
+        ({"environment": "podman"}, "the Harbor environment must be docker or e2b or modal, not 'podman'"),
         ({"concurrency": 0}, "concurrency must be a positive int"),
     ):
         with pytest.raises(ValueError, match=message):
@@ -767,8 +769,8 @@ def test_an_e2b_generator_waits_for_the_e2b_key_and_package_and_not_for_docker(
     reason = parser.missing()
     assert reason.startswith(f"dockerfile_parse does not import under {sys.executable}"), reason
     assert "install reef-infra[e2b]" in reason
-    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b, not 'modal'"):
-        readiness_probes(environment="modal")
+    with pytest.raises(ValueError, match="the Harbor environment must be docker or e2b or modal, not 'podman'"):
+        readiness_probes(environment="podman")
     with pytest.raises(ValueError, match="non-empty environment variable name"):
         EnvironmentVariableProbe("")
 
@@ -858,7 +860,7 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         ({"tasks-root": "/tmp/t", "port": 0}, "port must be"),
         ({"tasks-root": "/tmp/t", "tasks_root": "/tmp/u"}, "twice"),
         ({"tasks-root": "/tmp/t", "designer-api": "anthropic"}, "designer-api must be openai or responses"),
-        ({"tasks-root": "/tmp/t", "environment": "modal"}, r"generator\.environment must be docker or e2b"),
+        ({"tasks-root": "/tmp/t", "environment": "podman"}, r"generator\.environment must be docker or e2b or modal"),
         ({"tasks-root": "/tmp/t", "environment": "Docker"}, r"generator\.environment must be docker or e2b"),
     ):
         with pytest.raises(ValueError, match=message):

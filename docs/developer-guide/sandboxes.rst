@@ -22,10 +22,11 @@ them:
   its credentials come from.
 - ``reef.execution.sandbox.task_environment`` names every Harbor task environment type
   (``HARBOR_TASK_ENVIRONMENTS``) and checks what a host needs to run tasks in
-  the ones it has probes for (``PROBED_TASK_ENVIRONMENTS``: ``docker`` and
-  ``e2b``). ``task_environment_probes(environment)`` returns a readiness probe
-  for each need, such as the Docker daemon, or the E2B key, the e2b package and
-  dockerfile-parse; ``checked_task_environment`` refuses any other name.
+  each of them (``PROBED_TASK_ENVIRONMENTS``: ``docker``, ``e2b`` and
+  ``modal``). ``task_environment_probes(environment)`` returns a readiness probe
+  for each need: the Docker daemon; the E2B key, the e2b package and
+  dockerfile-parse; or the two Modal token variables and the modal package.
+  ``checked_task_environment`` refuses any other name.
 
 Every other caller uses these interfaces.
 
