@@ -1206,7 +1206,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
 
     from reef.core import AgentRecord
     from reef.core.reports import ReportValidationError
-    from reef.storage.records import RecordConflict
+    from reef.storage.records import RecordConflictError
 
     with closing(
         build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
@@ -1214,7 +1214,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
         item = AgentRecord.create(scenario="math", request_type=RequestType.INFERENCE, payload={})
         dispatcher.accept_record(item)
         dispatcher.accept_record(item)
-        with pytest.raises(RecordConflict):
+        with pytest.raises(RecordConflictError):
             dispatcher.accept_record(replace(item, payload={"different": True}))
         with pytest.raises(ReportValidationError):
             dispatcher.accept_record(

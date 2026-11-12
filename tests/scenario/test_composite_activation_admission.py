@@ -20,7 +20,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
-from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
+from reef.core.errors import CommitPendingError, ReefError, TrainingStartRefusedError
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
 from reef.execution.workers import SERVICE_COMPONENTS
@@ -224,7 +224,7 @@ def test_a_weights_start_the_training_component_refuses_is_refused_before_anythi
         served = scenario.current_snapshot().revision
         steps = scenario.commit_number
         assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights job 1"
-        with pytest.raises(TrainingStartRefused, match="cannot train from these weights"):
+        with pytest.raises(TrainingStartRefusedError, match="cannot train from these weights"):
             scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
         with pytest.raises(ValueError, match="name the component"):
             scenario.train_from(base)
@@ -256,9 +256,9 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
         assert decided.metrics["training_job"]["event"] == "checkpoint"
         trainer = scenario.trainer_for(WEIGHTS)
         assert trainer.pending_job_data is None and trainer.has_pending_commit
-        with pytest.raises(CommitPending, match="waits for its commit"):
+        with pytest.raises(CommitPendingError, match="waits for its commit"):
             scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
-        with pytest.raises(CommitPending, match="waits for its commit"):
+        with pytest.raises(CommitPendingError, match="waits for its commit"):
             scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
         assert scenario.current_snapshot().revision == served
         scenario.commit(decided, component=WEIGHTS)

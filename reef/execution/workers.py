@@ -13,8 +13,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
+from reef.core.errors import ConfigError, InternalError
+from reef.core.plugins import PluginConfigError
 from reef.execution.work_logs import capture_log
-from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLostError, WorkQueue
 
 logger = logging.getLogger(__name__)
 
@@ -104,11 +106,11 @@ class ServiceWorker(ABC):
         """Stop, wait for the thread, and release what the worker owns."""
 
 
-class WorkerStopped(Exception):
+class WorkerStoppedError(InternalError):
     """``run_item`` stopped because its worker stops: the item goes back to the queue, and another worker runs it."""
 
 
-class ItemFailed(Exception):
+class ItemFailedError(InternalError):
     """The work of an item ran and failed, so a retry fails again: the item fails for good with this message."""
 
 
@@ -128,11 +130,12 @@ class QueueWorker(ServiceWorker):
     event that the lease extension sets when the worker no longer holds the item, so that long work can stop. Its
     errors end the item as follows:
 
-    - ``ItemFailed``: the item fails for good, with the error's message;
-    - one of ``permanent_errors``: the item fails for good;
-    - ``WorkerStopped``: the item goes back to the queue at once, and the attempt does not count
+    - ``ItemFailedError``: the item fails for good, with the error's message;
+    - one of ``permanent_errors``: the item fails for good, except a ``ConfigError`` that is no
+      ``PluginConfigError``, which fails as retryable;
+    - ``WorkerStoppedError``: the item goes back to the queue at once, and the attempt does not count
       (``WorkQueue.give_back``);
-    - ``WorkLeaseLost``: the item stays with the worker that holds it now;
+    - ``WorkLeaseLostError``: the item stays with the worker that holds it now;
     - any other error: the item fails as retryable, until it uses up its attempts.
 
     A store error ends the round, and the worker looks again after ``poll_seconds``. Each item that ends
@@ -262,21 +265,26 @@ class QueueWorker(ServiceWorker):
                 self.queue.start(self.queue_name, item.id, self.worker_id)
                 result = self.run_item(item, extender.lease_lost)
             self.finish_item(item, result)
-        except WorkLeaseLost:
+        except WorkLeaseLostError:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
-        except WorkerStopped:
+        except WorkerStoppedError:
             try:
                 self.queue.give_back(self.queue_name, item.id, self.worker_id)
-            except WorkLeaseLost:
+            except WorkLeaseLostError:
                 logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
-        except ItemFailed as exc:
+        except ItemFailedError as exc:
             self.fail(item, str(exc), retryable=False)
             return
         except Exception as exc:
             logger.exception("worker %s could not run %s", self.worker_id, item.id)
-            self.fail(item, f"{type(exc).__name__}: {exc}", retryable=not isinstance(exc, self.permanent_errors))
+            # A bad deployment, runtime or recipe configuration is not the item's input: a retry can pass after
+            # a correction. A plugin's config error stays permanent.
+            retryable = not isinstance(exc, self.permanent_errors) or (
+                isinstance(exc, ConfigError) and not isinstance(exc, PluginConfigError)
+            )
+            self.fail(item, f"{type(exc).__name__}: {exc}", retryable=retryable)
             return
         self.item_finished(item, result)
 
@@ -287,7 +295,7 @@ class QueueWorker(ServiceWorker):
         error = error.strip() or "the work item failed"
         try:
             failed = self.queue.fail(self.queue_name, item.id, self.worker_id, error, retryable=retryable)
-        except WorkLeaseLost:
+        except WorkLeaseLostError:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return
         if failed.state == "failed":
@@ -346,11 +354,11 @@ class ServiceWorkers:
 
 __all__ = [
     "SERVICE_COMPONENTS",
-    "ItemFailed",
+    "ItemFailedError",
     "QueueWorker",
     "ServiceSet",
     "ServiceWorker",
     "ServiceWorkers",
-    "WorkerStopped",
+    "WorkerStoppedError",
     "service_components",
 ]

@@ -15,7 +15,7 @@ from tests.support.threshold_processor import threshold_pipeline
 
 from reef.artifact import Artifact, ArtifactPublicationError, DefaultStart, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import CommitPending
+from reef.core.errors import CommitPendingError
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.recipe import Recipe
@@ -198,7 +198,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
         result = training.result(timeout=2)
         assert result.metrics["training_job"]["event"] == "submitted"
         # The submission waits for its commit, so the activation is refused.
-        with pytest.raises(CommitPending, match="waits for its commit"):
+        with pytest.raises(CommitPendingError, match="waits for its commit"):
             writer.result(timeout=2)
         assert scenario.current_snapshot() == current_ref
         assert scenario.commit_number == 3

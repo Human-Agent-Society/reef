@@ -22,7 +22,7 @@ from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import threshold_pipeline
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 
-from reef.artifact.artifact import ArtifactNotFound
+from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
@@ -1278,7 +1278,7 @@ def test_reef_runs_a_managers_actions_and_drops_a_request_above_its_job_limit(tm
         step = scenario.commit_number
         dispatcher.run_manager_action(view, TrainFrom(view.training_start), job_limit=1)
         assert scenario.store.history()[-1].operation == "train_from" and scenario.commit_number == step + 1
-        with pytest.raises(ArtifactNotFound):
+        with pytest.raises(ArtifactNotFoundError):
             dispatcher.run_manager_action(view, TrainFrom("no-such-artifact"), job_limit=1)
     finally:
         dispatcher.close()

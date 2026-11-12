@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from tests.support.harness_render import native_tool
 
-from reef.execution.sandbox.process import SandboxExecutor, SandboxUnavailable
+from reef.execution.sandbox.process import SandboxExecutor, SandboxUnavailableError
 from reef.harness.runners.native import LoadError, ToolModule, ToolRunner, _invoke, _ModuleRun, load_tools
 from reef.harness.runners.native.enforce import (
     CHILD,
@@ -454,7 +454,7 @@ def require_nested_jail() -> None:
         try:
             SandboxExecutor().preflight()
             return
-        except SandboxUnavailable as exc:
+        except SandboxUnavailableError as exc:
             reason = str(exc)
     if os.environ.get("REEF_REQUIRE_SANDBOX") == "1":
         pytest.fail(reason)
@@ -471,7 +471,7 @@ def test_nested_jail_requirement_handles_host_availability(
 
     def _preflight(executor: SandboxExecutor) -> None:
         if availability == "refused":
-            raise SandboxUnavailable("nested namespaces unavailable")
+            raise SandboxUnavailableError("nested namespaces unavailable")
 
     monkeypatch.setattr(SandboxExecutor, "preflight", _preflight)
     if availability == "available":

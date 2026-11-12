@@ -44,7 +44,7 @@ from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import threshold_pipeline
 from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import Artifact, ArtifactNotFound, DefaultStart, SnapshotRef
+from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.snapshot_chain import ArtifactSnapshotChain
 from reef.core import AgentRecord, RequestType
@@ -1411,7 +1411,7 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
     def fail_once(self: ArtifactSnapshotChain, ref: SnapshotRef) -> Artifact:
         if calls["failed"] == 0:
             calls["failed"] += 1
-            raise ArtifactNotFound("the remote is away")
+            raise ArtifactNotFoundError("the remote is away")
         return original(self, ref)
 
     monkeypatch.setattr(ArtifactSnapshotChain, "resolve", fail_once)

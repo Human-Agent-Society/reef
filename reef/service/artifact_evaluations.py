@@ -34,7 +34,7 @@ from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.sources import ArtifactSources
-from reef.core.errors import CommitPending, ReefError, UnknownScenario
+from reef.core.errors import CommitPendingError, InternalError, ReefError, ScenarioNotFoundError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
     ArtifactEvaluationSettings,
@@ -67,10 +67,10 @@ from reef.harness.harbor.agent import can_run_in_task_container, task_agent_tool
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
 from reef.service.collections import collection_tasks
-from reef.service.data import DataAccess, NoDataStore
+from reef.service.data import DataAccess, DataStoreUnavailableError
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore, StoredItem, record_source
-from reef.storage.evaluations import EvaluationStateConflict, StoredEvaluation
+from reef.storage.evaluations import EvaluationStateConflictError, StoredEvaluation
 from reef.storage.item_kinds import evaluation_call_id
 from reef.storage.observer import RecordObserver
 from reef.storage.record_items import (
@@ -79,7 +79,7 @@ from reef.storage.record_items import (
     evaluation_trajectory_items,
     stored_evaluation_call,
 )
-from reef.storage.task_collections import CollectionNotFound
+from reef.storage.task_collections import CollectionNotFoundError
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
@@ -391,7 +391,7 @@ class EvaluationResults:
         evaluation went with the scenario, so an unknown scenario is no failure."""
         try:
             self.settle(scenario, evaluation_id)
-        except UnknownScenario:
+        except ScenarioNotFoundError:
             logger.debug("evaluation %s: its scenario %s no longer exists", evaluation_id, scenario)
         except Exception:
             logger.exception("could not end evaluation %s of %s", evaluation_id, scenario)
@@ -482,6 +482,8 @@ class EvaluationResults:
                     )
                 else:
                     evaluations.fail(evaluation_id, error=error or "the evaluation failed", finished_at=time.time())
+        except InternalError:
+            raise
         except (ReefError, ValueError) as exc:
             # The scenario was deleted, or the evaluation ended already: nothing is left to record it in.
             logger.warning("could not store the end of evaluation %s: %s", evaluation_id, exc)
@@ -495,8 +497,10 @@ class EvaluationResults:
             try:
                 self.dispatcher.activate(scenario, request.artifact_id, request.component)
                 return
-            except CommitPending:
+            except CommitPendingError:
                 time.sleep(ACTIVATION_RETRY_SECONDS * (attempt + 1))
+            except InternalError:
+                raise
             except (ReefError, ValueError) as exc:
                 logger.warning("could not activate artifact %s of %s: %s", request.artifact_id, scenario, exc)
                 return
@@ -604,8 +608,8 @@ class ArtifactEvaluations:
     def start(self, scenario: str, body: object) -> StoredEvaluation:
         """Check a client's request ``body`` against ``scenario``, store it, and queue its rollouts.
 
-        Raise ``ValueError`` or ``ReefError`` for a request that the scenario cannot run, ``UnknownScenario``
-        for an unknown scenario, and ``ArtifactNotFound`` for an unknown artifact.
+        Raise ``ValueError`` or ``ReefError`` for a request that the scenario cannot run, ``ScenarioNotFoundError``
+        for an unknown scenario, and ``ArtifactNotFoundError`` for an unknown artifact.
         """
         artifact_id, settings = request_settings(body)
         return self.accept(scenario, artifact_id, settings, state="running")
@@ -642,7 +646,7 @@ class ArtifactEvaluations:
         as the others end. When the rollouts are final, ``EvaluationResults`` ends the evaluation as it ends a first
         run, and gives a finished one to the activation rule.
 
-        ``EvaluationStateConflict`` for an evaluation with no rollout to run again, and for an ended one whose
+        ``EvaluationStateConflictError`` for an evaluation with no rollout to run again, and for an ended one whose
         rollouts the queue no longer keeps (``WorkQueue.delete_final``).
         """
         with self.dispatcher.locked_scenario(scenario) as current:
@@ -664,11 +668,13 @@ class ArtifactEvaluations:
                 or [item.id for item in items] != expected
                 or (stored.state == "finished" and len(items) < total)
             ):
-                raise EvaluationStateConflict(f"evaluation {evaluation_id!r}: Reef no longer keeps its rollouts")
+                raise EvaluationStateConflictError(f"evaluation {evaluation_id!r}: Reef no longer keeps its rollouts")
             again = [item for item in items if item.final and rollout_failed(item)]
             # An ended evaluation with rollouts that never started has those to run, also with no failed rollout.
             if not again and not (ended and len(items) < total):
-                raise EvaluationStateConflict(f"evaluation {evaluation_id!r} has no ended rollout without a score")
+                raise EvaluationStateConflictError(
+                    f"evaluation {evaluation_id!r} has no ended rollout without a score"
+                )
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             retried = current.store.evaluations.reopen(evaluation_id) if ended else stored
@@ -758,7 +764,7 @@ class ArtifactEvaluations:
             raise ValueError(f"scenario {scenario!r} has no owner, so it can use no collection")
         try:
             stored, tasks = collection_tasks(DataAccess.of(self.dispatcher).require_store(), owner, name)
-        except (NoDataStore, CollectionNotFound) as exc:
+        except (DataStoreUnavailableError, CollectionNotFoundError) as exc:
             raise ValueError(str(exc)) from exc
         benchmarks = tuple(
             (benchmark, in_split)
@@ -781,7 +787,7 @@ class ArtifactEvaluations:
             raise ValueError(f"scenario {scenario!r} has no owner, so it can use no artifact item")
         try:
             item = DataAccess.of(self.dispatcher).require_store().read(owner, item_id)
-        except NoDataStore as exc:
+        except DataStoreUnavailableError as exc:
             raise ValueError(str(exc)) from exc
         if item is None:
             raise ValueError(f"{owner!r} stores no item {item_id!r}")

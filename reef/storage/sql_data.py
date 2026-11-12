@@ -75,13 +75,13 @@ from reef.storage.data import (
     JOB_DIRECTORY_TTL_SECONDS,
     MAX_QUERY_LIMIT,
     DataStore,
-    ItemConflict,
+    ItemConflictError,
     ItemGroup,
     ItemKind,
-    ItemNotFound,
+    ItemNotFoundError,
     NewItem,
     RecordLink,
-    ScenarioArchived,
+    ScenarioArchivedError,
     StoredItem,
     check_filters,
     check_groups,
@@ -289,8 +289,8 @@ class SQLDataStore(DataStore):
     (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``. Every
     operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
-    ``ItemConflict``, never in a failed insert. ``create``, ``update`` and ``delete`` take ``lock_scenarios`` for the
-    scenarios that they give a use or whose trajectory nodes they change. Concurrent creates of one owner and one
+    ``ItemConflictError``, never in a failed insert. ``create``, ``update`` and ``delete`` take ``lock_scenarios`` for
+    the scenarios that they give a use or whose trajectory nodes they change. Concurrent creates of one owner and one
     set of scenarios in this process share one transaction (a group commit), because only one of them can hold
     the lock at a time. ``segments`` is None, or the segment store that keeps the content of
     trajectory items and nodes in the partition of each owner; the store closes it with itself. ``job_directories`` keeps
@@ -628,7 +628,7 @@ class SQLDataStore(DataStore):
     def commit_group(self, group: tuple[str, frozenset[str]]) -> None:
         """Write the first waiting creates of ``group``, up to ``GROUP_COMMIT_ITEMS`` items, in one transaction, and
         give the lead to the next waiting create. When the transaction fails, write each create alone, so that one
-        create's ``ItemConflict`` does not refuse the others."""
+        create's ``ItemConflictError`` does not refuse the others."""
         owner = group[0]
         with self.group_lock:
             waiting = self.waiting[group]
@@ -663,7 +663,7 @@ class SQLDataStore(DataStore):
     def commit_creates(self, owner: str, batch: Sequence[PendingCreate]) -> list[tuple[StoredItem, ...]]:
         """Write the rows of the creates ``batch`` of ``owner`` in one transaction, and return the items of each.
 
-        An ID in two creates gets the row of the first; another digest in the later one is an ``ItemConflict``.
+        An ID in two creates gets the row of the first; another digest in the later one is an ``ItemConflictError``.
         """
         prepared = [entry for pending in batch for entry in pending.prepared]
         values: dict[str, dict[str, Any]] = {}
@@ -682,7 +682,7 @@ class SQLDataStore(DataStore):
             current = {origin: self.current_generation(connection, owner, origin) for origin, _ in checked}
             for origin, generation in checked:
                 if current[origin] != generation:
-                    raise ScenarioArchived(f"generation {generation!r} of {origin!r} is no longer current")
+                    raise ScenarioArchivedError(f"generation {generation!r} of {origin!r} is no longer current")
             sequences = self.write_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
             uses = [
@@ -707,14 +707,14 @@ class SQLDataStore(DataStore):
             stored_rows = self.rows(connection, owner, kept) if kept else {}
             for item_id, row in stored_rows.items():
                 if row["digest"] != values[item_id]["digest"]:
-                    raise ItemConflict(f"item {item_id!r} of {owner!r} is stored with other content")
+                    raise ItemConflictError(f"item {item_id!r} of {owner!r} is stored with other content")
             stored = {
                 item.item_id: item
                 for item in self.stored_items(connection, owner, list(stored_rows.values()), content=False)
             }
             for item, _, digest in prepared:
                 if item.item_id in sequences and digest != values[item.item_id]["digest"]:
-                    raise ItemConflict(f"item {item.item_id!r} of {owner!r} is stored with other content")
+                    raise ItemConflictError(f"item {item.item_id!r} of {owner!r} is stored with other content")
             return [
                 tuple(
                     (
@@ -942,7 +942,7 @@ class SQLDataStore(DataStore):
             existing = self.rows(connection, owner, unique_ids, lock=True)
             missing = [item_id for item_id in unique_ids if item_id not in existing]
             if missing:
-                raise ItemNotFound(f"{owner!r} stores no item {missing[0]!r}")
+                raise ItemNotFoundError(f"{owner!r} stores no item {missing[0]!r}")
             patched = {
                 item_id: patched_metadata(json.loads(existing[item_id]["metadata_json"]), patch)
                 for item_id in unique_ids
@@ -1153,7 +1153,7 @@ class SQLDataStore(DataStore):
         with self.transaction() as connection:
             row = self.rows(connection, owner, [item_id]).get(item_id)
             if row is None:
-                raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+                raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
             metadata = json.loads(row["metadata_json"])
             # The lock orders this write with the other writes of the item's scenarios, as an update does.
             self.lock_scenarios(connection, owner, scenarios_of([metadata]))

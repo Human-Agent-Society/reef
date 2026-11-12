@@ -9,7 +9,7 @@ from tests.support.harness_methods import IMPROVED, SEED, QueueChat, meta_harnes
 from tests.support.harness_service import checkpoint_result, report_once
 
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
+from reef.artifact.artifact import Artifact, ArtifactConflictError, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
@@ -270,7 +270,7 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
         assert scenario.repository.checkpoint_artifact == committed.snapshot
         assert unrelated not in (old_head, committed.snapshot)
-        with pytest.raises(ArtifactConflict):
+        with pytest.raises(ArtifactConflictError):
             scenario.repository.synchronize_checkpoint()
         assert backend.current() == unrelated and len(scenario.store.history()) == 2
     finally:
@@ -285,7 +285,7 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         coordination=memory_coordination(),
     )
     try:
-        with pytest.raises(ArtifactConflict):
+        with pytest.raises(ArtifactConflictError):
             restarted.get_or_create_scenario("postcommit-head-conflict")
         assert len(chat.prompts) == 1
     finally:

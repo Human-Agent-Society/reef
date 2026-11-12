@@ -20,7 +20,7 @@ from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord, 
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainingState
-from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
+from reef.storage.scenario import ScenarioStore, ScenarioStoreConflictError
 from reef.storage.tasks import TaskStorage
 
 
@@ -215,20 +215,24 @@ class CommitHistoryScenarioStore(ScenarioStore):
             ):
                 raise ValueError("expected_commit_number must be a non-negative integer")
             if commit.scenario != self._scenario:
-                raise ScenarioStoreConflict(f"commit belongs to scenario {commit.scenario!r}, not {self._scenario!r}")
+                raise ScenarioStoreConflictError(
+                    f"commit belongs to scenario {commit.scenario!r}, not {self._scenario!r}"
+                )
             if commit.commit_number != expected_commit_number + 1:
-                raise ScenarioStoreConflict(
+                raise ScenarioStoreConflictError(
                     f"commit number must be {expected_commit_number + 1}, got {commit.commit_number}"
                 )
             history = self._history()
             existing = self._commits_by_number.get(commit.commit_number)
             if existing is not None:
                 if not same_commit(existing, commit):
-                    raise ScenarioStoreConflict(f"commit {commit.commit_number} conflicts with its existing record")
+                    raise ScenarioStoreConflictError(
+                        f"commit {commit.commit_number} conflicts with its existing record"
+                    )
                 return existing
             current_commit_number = history[-1].commit_number if history else self._initial_commit_number
             if expected_commit_number != current_commit_number:
-                raise ScenarioStoreConflict(
+                raise ScenarioStoreConflictError(
                     f"expected commit number {expected_commit_number}, current commit number is {current_commit_number}"
                 )
             self._commit_history.append(commit)

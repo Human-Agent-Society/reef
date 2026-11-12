@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from tests.support.polling import wait_until
 
-from reef.execution.processes import ProcessRequest, ProcessScope, ProcessScopeClosed
+from reef.execution.processes import ProcessRequest, ProcessScope, ProcessScopeClosedError
 
 pytestmark = pytest.mark.unit
 
@@ -64,7 +64,7 @@ def test_stop_waits_for_cleanup_and_rejects_new_launches(tmp_path: Path) -> None
         (pid,) = scope.pids()
         scope.request_stop()
         assert not scope.wait_closed(0)
-        with pytest.raises(ProcessScopeClosed):
+        with pytest.raises(ProcessScopeClosedError):
             scope.run(request(tmp_path, "raise SystemExit(0)"))
         scope.request_stop(grace_seconds=0)  # repeated closure must not shorten the accepted grace
         assert scope.wait_closed(5)
@@ -102,7 +102,7 @@ def test_child_scope_is_stopped_with_its_owner(tmp_path: Path) -> None:
         parent.request_stop()
         assert parent.wait_closed(5)
         assert pending.result(timeout=5).reason == "stopped"
-    with pytest.raises(ProcessScopeClosed):
+    with pytest.raises(ProcessScopeClosedError):
         child.run(request(tmp_path, "pass"))
     with pytest.raises(ValueError, match="cycle"):
         child.attach(parent)
@@ -116,7 +116,7 @@ def test_concurrent_spawn_and_close_cannot_lose_a_child(tmp_path: Path) -> None:
         start.wait()
         try:
             return scope.run(request(tmp_path, "import time; time.sleep(60)")).reason
-        except ProcessScopeClosed:
+        except ProcessScopeClosedError:
             return "refused"
 
     with ThreadPoolExecutor() as pool:

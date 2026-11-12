@@ -919,12 +919,12 @@ a storage plugin. Reef calls ``from_config(config)`` to make the plugin. The
 plugin implements two methods:
 
 - ``check_creation(scenario, registered_count=...)``: to refuse a new
-  scenario, raise ``reef.core.errors.ScenarioLimitReached`` (HTTP 409).
+  scenario, raise ``reef.core.errors.ScenarioLimitReachedError`` (HTTP 409).
 - ``admit_load(scenario, loaded=...)``: return a ``LoadAdmission``. Its
   ``unload_count`` is the number of loaded scenarios that Reef must unload
   first. Its ``candidates`` are the scenarios that Reef tries, in that order.
   Reef unloads only idle candidates. If too few candidates are idle, Reef
-  refuses the load with ``reef.core.errors.ScenarioCapacityFull`` (HTTP 503).
+  refuses the load with ``reef.core.errors.ScenarioCapacityFullError`` (HTTP 503).
   The plugin can also raise that error itself.
 
 Reef calls the plugin before it creates a scenario and before it loads one.

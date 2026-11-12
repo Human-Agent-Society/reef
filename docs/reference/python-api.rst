@@ -489,7 +489,7 @@ Direct ``Scenario`` construction requires ``store=...``. Replace the former
 removed. ``CommitHistoryScenarioStore.commit_history`` is for backend diagnostics.
 
 The abstract bases ``ScenarioStore`` and ``ScenarioStorage`` are exported from
-``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflict``.
+``reef.storage.scenario``, alongside ``ScenarioSettings`` and ``ScenarioStoreConflictError``.
 Concrete storage classes live under ``reef.storage``:
 ``commit_history.CommitHistoryScenarioStore`` accepts a ``RecordStore``, a
 ``TaskStorage`` (``tasks=``), and a ``CommitHistory``. The bundled record
@@ -581,7 +581,7 @@ prepared from the same commit number cannot both succeed. An identical recorded 
 returns the original record, even after later commits; only
 ``recorded_at`` is excluded from retry comparison. A new commit with a stale
 expected commit number, or a retry with conflicting content, raises
-``ScenarioStoreConflict`` without advancing the store.
+``ScenarioStoreConflictError`` without advancing the store.
 
 ``CommitHistoryScenarioStore`` serializes writers through ``CommitHistory.locked()``.
 ``SQLCommitHistory`` holds one write transaction of the record store, which
@@ -713,7 +713,7 @@ its split. The published tasks are the candidates with a split. A
 Each write is durable when it returns. An identical retry of a write changes
 nothing. A write that conflicts with the stored state raises
 ``TaskStoreError``. If a task name is published with other files or in the
-other split, the store raises ``TaskConflict``, a subclass of
+other split, the store raises ``TaskConflictError``, a subclass of
 ``TaskStoreError``. The caller serializes the writers of one store.
 
 SQLite keeps the task tables in the database file of the scenario.
@@ -790,7 +790,7 @@ stores`_).
        data store owns it and closes it.
    * - ``create(owner, items)``
      - Stores ``NewItem`` values, all or none. The same ID and content again
-       changes nothing; other content is ``ItemConflict``. Bad metadata is
+       changes nothing; other content is ``ItemConflictError``. Bad metadata is
        ``ValueError``.
    * - ``read(owner, item_id)``
      - The ``StoredItem``, or ``None``.
@@ -802,7 +802,7 @@ stores`_).
    * - ``update(owner, item_ids, patch)``
      - Applies one JSON merge patch to each item's metadata, all or none.
        Changing ``kind``, ``owner`` or ``origin`` is ``ValueError``; an
-       unknown ID is ``ItemNotFound``.
+       unknown ID is ``ItemNotFoundError``.
    * - ``delete(owner, item_id)``
      - Removes the item; ``False`` for an unknown ID.
    * - ``task_path(item)``
@@ -854,7 +854,7 @@ partition per owner. A deployment selects the store in
        returns. The data store never writes one ID twice.
    * - ``read(partition, lines)``
      - The bytes of each ``SegmentLine`` (``segment_id``, ``offset``,
-       ``length``), in order. Raise ``SegmentNotFound`` for a missing
+       ``length``), in order. Raise ``SegmentNotFoundError`` for a missing
        segment or a line past its end.
    * - ``delete(partition, segment_id)``
      - Remove the segment. A missing segment is not an error.
@@ -913,7 +913,7 @@ A backend shares no snapshot between scenarios. It must:
   step. When the scenario has a head, also one that another caller registered
   first, store nothing and return that head.
 - Implement ``artifact_snapshot(artifact_id)``. Return the ``SnapshotRef`` of
-  the stored snapshot that holds the artifact, or raise ``ArtifactNotFound``
+  the stored snapshot that holds the artifact, or raise ``ArtifactNotFoundError``
   when this repository has no such ID. The ID must keep naming the same files
   and metadata across publications and restarts. Reject an attempt to bind it
   to different content. The inherited ``resolve_artifact(artifact_id)``
@@ -922,9 +922,9 @@ A backend shares no snapshot between scenarios. It must:
   The first binds an unbound ID to a stored snapshot and returns any earlier binding; a binding never
   changes. The second returns a value that is equal for two snapshots exactly when they hold the same
   files and metadata for the artifact. The inherited ``bind_artifact_ids(snapshot)`` uses both, and
-  raises ``ArtifactConflict`` for an ID that names other content. Call it before a head moves.
+  raises ``ArtifactConflictError`` for an ID that names other content. Call it before a head moves.
 - Implement ``resolve_snapshot(revision)``. Return a ``SnapshotRef`` for a
-  stored snapshot, or raise ``ArtifactNotFound``. Its ``revision`` and
+  stored snapshot, or raise ``ArtifactNotFoundError``. Its ``revision`` and
   ``parent_revision`` are backend locators, separate from component IDs.
 - Keep each component entry's ``artifact_id`` in the manifests it stores.
 

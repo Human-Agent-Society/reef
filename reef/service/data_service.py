@@ -18,10 +18,10 @@ from collections.abc import Mapping, Sequence
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import QueueWorker
-from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, NoDataStore
+from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, DataStoreUnavailableError
 from reef.service.data_transfer import ArchiveWriters, run_export, run_import
 from reef.storage.artifact_items import artifact_item
-from reef.storage.data import ItemConflict, ItemNotFound, NewItem
+from reef.storage.data import ItemConflictError, ItemNotFoundError, NewItem
 from reef.storage.data_queue import ARTIFACT_COPY_KIND, DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
@@ -136,7 +136,7 @@ class DataWorker(QueueWorker):
     Purpose: the process that runs the data service starts one or more.
     """
 
-    permanent_errors = (ValueError, ItemNotFound, ItemConflict, NoDataStore)
+    permanent_errors = (ValueError, ItemNotFoundError, ItemConflictError, DataStoreUnavailableError)
 
     def __init__(
         self, queue: WorkQueue, jobs: Sequence[DataJob], *, worker_id: str, poll_seconds: float = 0.2

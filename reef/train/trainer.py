@@ -19,7 +19,7 @@ from threading import Lock
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import CommitPending, TrainingStartRefused
+from reef.core.errors import CommitPendingError, TrainingStartRefusedError
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
@@ -175,7 +175,7 @@ class Trainer:
         starts its first job from ``root``, its scenario's root snapshot
         (``TrainingComponent.root_start``); ``root`` is then required, and a
         root that the component cannot start from raises
-        ``TrainingStartRefused``.
+        ``TrainingStartRefusedError``.
         """
         trains = job_loop is not None
         pipeline = pipeline_factory(
@@ -212,7 +212,7 @@ class Trainer:
                 try:
                     start = job_loop.component.root_start(root)
                 except ValueError as exc:
-                    raise TrainingStartRefused(
+                    raise TrainingStartRefusedError(
                         f"scenario {scenario!r} cannot train from its root snapshot {root.artifact.ref.revision}: {exc}"
                     ) from exc
                 initial_state = JobLoopState(start).to_dict()
@@ -840,24 +840,26 @@ class Trainer:
     def import_start(self, artifact: Artifact) -> str:
         """The start of a job that trains from ``artifact``, the trainer's component of a snapshot, materialized:
         what its training component imports of it (``TrainingComponent.import_start``), which can copy weights for
-        minutes. Raise ``TrainingStartRefused`` when this trainer cannot start from ``artifact``."""
+        minutes. Raise ``TrainingStartRefusedError`` when this trainer cannot start from ``artifact``."""
         tree = artifact.local_path
         if tree is None:
-            raise TrainingStartRefused(f"artifact {artifact.ref.revision!r} has no local files to train from")
+            raise TrainingStartRefusedError(f"artifact {artifact.ref.revision!r} has no local files to train from")
         if self._job_loop is None:
-            raise TrainingStartRefused(f"the trainer of scenario {self.scenario!r} trains nothing to start")
+            raise TrainingStartRefusedError(f"the trainer of scenario {self.scenario!r} trains nothing to start")
         try:
             return self._job_loop.component.import_start(tree)
         except ValueError as exc:
-            raise TrainingStartRefused(f"scenario {self.scenario!r} cannot train from this artifact: {exc}") from exc
+            raise TrainingStartRefusedError(
+                f"scenario {self.scenario!r} cannot train from this artifact: {exc}"
+            ) from exc
 
     def start_from(self, start: str) -> None:
         """Set the training start to ``start``, what ``import_start`` gave for an artifact, and cancel the running
-        job that continues the start before (``JobLoop.started_from``). Raise ``CommitPending`` while a commit is in
-        preparation."""
+        job that continues the start before (``JobLoop.started_from``). Raise ``CommitPendingError`` while a commit is
+        in preparation."""
         with self._lock:
             if self.pending_commit is not None:
-                raise CommitPending("cannot set the training start while a training result waits for its commit")
+                raise CommitPendingError("cannot set the training start while a training result waits for its commit")
             loop_state = JobLoopState.from_dict(self._state)
             self._state = self.job_loop_required().started_from(loop_state, start).to_dict()
 

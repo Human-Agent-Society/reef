@@ -22,7 +22,7 @@ from reef.core.snapshot import SnapshotRef
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.scenario import ScenarioStoreConflict
+from reef.storage.scenario import ScenarioStoreConflictError
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 
@@ -116,18 +116,18 @@ def test_retry_with_tuple_values_matches_the_stored_json(store):
 def test_retry_rejects_different_committed_content(store, changed):
     original = store.append_commit(expected_commit_number=0, commit=commit())
 
-    with pytest.raises(ScenarioStoreConflict, match="conflicts"):
+    with pytest.raises(ScenarioStoreConflictError, match="conflicts"):
         store.append_commit(expected_commit_number=0, commit=replace(original, **changed))
 
     assert store.history() == (original,)
 
 
 def test_commit_rejects_skips_wrong_expected_commit_number_and_foreign_scenario(store):
-    with pytest.raises(ScenarioStoreConflict, match="current commit number is 0"):
+    with pytest.raises(ScenarioStoreConflictError, match="current commit number is 0"):
         store.append_commit(expected_commit_number=1, commit=commit(2))
-    with pytest.raises(ScenarioStoreConflict, match="commit number must be 1"):
+    with pytest.raises(ScenarioStoreConflictError, match="commit number must be 1"):
         store.append_commit(expected_commit_number=0, commit=commit(2))
-    with pytest.raises(ScenarioStoreConflict, match="scenario 'code'"):
+    with pytest.raises(ScenarioStoreConflictError, match="scenario 'code'"):
         store.append_commit(expected_commit_number=0, commit=commit(scenario="code"))
 
     assert store.history() == ()
@@ -301,7 +301,7 @@ def test_recovery_rejects_journal_for_another_scenario():
 
 def test_existing_initial_commit_number_is_fenced_without_history():
     with closing(sqlite_session(initial_commit_number=3)) as session:
-        with pytest.raises(ScenarioStoreConflict, match="current commit number is 3"):
+        with pytest.raises(ScenarioStoreConflictError, match="current commit number is 3"):
             session.append_commit(expected_commit_number=0, commit=commit())
         session.append_commit(expected_commit_number=3, commit=commit(4))
 
@@ -318,7 +318,7 @@ def test_conflicting_sessions_have_only_one_winner(open_storage):
                 return session.append_commit(
                     expected_commit_number=0, commit=replace(commit(), metrics={"writer": label})
                 )
-            except ScenarioStoreConflict:
+            except ScenarioStoreConflictError:
                 return None
 
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -365,7 +365,7 @@ def test_session_refreshes_cached_history_after_another_writer(open_storage):
         first.append_commit(expected_commit_number=0, commit=commit())
         assert first.history() == (commit(),)
         second.append_commit(expected_commit_number=1, commit=commit(2))
-        with pytest.raises(ScenarioStoreConflict, match="conflicts"):
+        with pytest.raises(ScenarioStoreConflictError, match="conflicts"):
             first.append_commit(expected_commit_number=1, commit=replace(commit(2), metrics={"different": True}))
         assert first.append_commit(expected_commit_number=1, commit=replace(commit(2), recorded_at=9999.0)) == commit(
             2
@@ -384,7 +384,7 @@ def _commit_in_process(directory, started, ready, results, label):
         try:
             session.append_commit(expected_commit_number=0, commit=replace(commit(), metrics={"writer": label}))
             results.put("accepted")
-        except ScenarioStoreConflict:
+        except ScenarioStoreConflictError:
             results.put("conflict")
     factory.close()
 

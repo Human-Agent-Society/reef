@@ -15,6 +15,8 @@ from typing import Any
 
 import requests
 
+from reef.core.errors import InternalError
+
 logger = logging.getLogger(__name__)
 
 #: Startup attempts for one engine while other processes keep holding its probed ports.
@@ -27,7 +29,7 @@ PORT_RELEASE_SECONDS = 30.0
 PORT_RECHECK_SECONDS = 1.0
 
 
-class PortConflictError(RuntimeError):
+class PortConflictError(InternalError, RuntimeError):
     """Another process listens on the port of an engine's server."""
 
 

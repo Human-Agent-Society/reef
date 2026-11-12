@@ -9,7 +9,7 @@ from reef.artifact.repository import Repository
 from reef.core.errors import ReefError
 
 
-class SnapshotNotRestorable(ReefError):
+class SnapshotNotRestorableError(ReefError):
     """A snapshot has identity but no durable bytes to restore."""
 
 
@@ -91,4 +91,4 @@ class ArtifactSnapshotChain:
         self._repository.discard(artifact)
 
 
-__all__ = ["ArtifactSnapshotChain", "SnapshotNotRestorable"]
+__all__ = ["ArtifactSnapshotChain", "SnapshotNotRestorableError"]

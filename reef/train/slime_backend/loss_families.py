@@ -25,11 +25,12 @@ import importlib
 
 # Importing the objectives registers the references of the built-in families.
 import reef.train.slime_backend.objectives  # noqa: F401
+from reef.core.errors import InternalError
 from reef.train.algos.registry import _unregister_loss_family_ref, loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, _loss_families
 
 
-class UnknownLossFamilyError(RuntimeError):
+class UnknownLossFamilyError(InternalError, RuntimeError):
     """Raised when the driver is asked to boot an unsupported loss family."""
 
 

@@ -8,7 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.runtime_stubs import StubTrainingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.core import UnknownScenario
+from reef.core import ScenarioNotFoundError
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.scenario.admission import ScenarioLimits
@@ -91,7 +91,7 @@ def test_scenario_contract_serves_the_training_components_schema_by_sample_kind(
 
 
 def test_scenario_contract_raises_for_unknown_scenario(tmp_path) -> None:
-    with pytest.raises(UnknownScenario):
+    with pytest.raises(ScenarioNotFoundError):
         _dispatcher(tmp_path).scenario_contract("nope")
 
 
@@ -108,7 +108,7 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
     assert not value.has_scenario("delivery")
     assert "delivery" not in {row["scenario"] for row in value.list_scenarios()}
     assert value.get_or_create_scenario("delivery", allow_implicit_creation=False) is None
-    with pytest.raises(UnknownScenario):
+    with pytest.raises(ScenarioNotFoundError):
         value.delete_scenario("delivery")
     # The name is free: a new scenario under it starts from the base, not the dropped chain.
     again = value.get_or_create_scenario("delivery")
@@ -119,7 +119,7 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
 def test_delete_scenario_refuses_names_that_are_paths() -> None:
     value = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
     for name in ("", ".", "..", "a/b"):
-        with pytest.raises(UnknownScenario):
+        with pytest.raises(ScenarioNotFoundError):
             value.delete_scenario(name)
 
 

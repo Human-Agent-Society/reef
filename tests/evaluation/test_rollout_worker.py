@@ -34,10 +34,10 @@ from reef.evaluation.rollout_worker import (
     verifier_output,
 )
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import WorkerStopped
+from reef.execution.workers import WorkerStoppedError
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
-from reef.storage.work_queue import NewWork, WorkLeaseLost
+from reef.storage.work_queue import NewWork, WorkLeaseLostError
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:
@@ -428,7 +428,7 @@ def test_a_verifier_output_that_cannot_be_kept_is_logged_and_changes_nothing(tmp
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLost), ("stopped", WorkerStopped)])
+@pytest.mark.parametrize(("event", "error"), [("lease_lost", WorkLeaseLostError), ("stopped", WorkerStoppedError)])
 def test_a_running_trial_is_cancelled_once_the_worker_loses_the_rollout_or_stops(monkeypatch, event, error):
     monkeypatch.setattr("reef.evaluation.rollout_worker.LEASE_CHECK_S", 0.01)
     cancelled = threading.Event()

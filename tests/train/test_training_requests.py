@@ -10,7 +10,7 @@ from tests.support.samples_service import make_samples
 from reef.core.training_request import normalize_training_request_payload
 from reef.pipeline_context import PipelineContext
 from reef.sample2job import Sample2Job
-from reef.storage.records import RecordConflict
+from reef.storage.records import RecordConflictError
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.work_queue import NewWork
 from reef.train.jobs import JobLoop
@@ -28,7 +28,7 @@ def test_a_request_is_filed_once_and_another_payload_under_its_id_conflicts() ->
     training_requests = TrainingRequestQueue(memory_coordination().work_queue).of("s")
     first = training_requests.file("one", payload("one"))
     assert training_requests.file("one", payload("one")) == first
-    with pytest.raises(RecordConflict, match="different content"):
+    with pytest.raises(RecordConflictError, match="different content"):
         training_requests.file("one", payload("other"))
     assert [request.id for request in training_requests.queued()] == ["one"]
     assert training_requests.get("one") == first
@@ -117,5 +117,5 @@ def test_retrying_a_request_written_before_artifact_identity_keeps_its_item():
     training_requests = TrainingRequestQueue(queue).of("s")
     assert training_requests.file("one", payload("one")) == original
     assert training_requests.queued()[0].artifact_id == "r-1"
-    with pytest.raises(RecordConflict, match="different content"):
+    with pytest.raises(RecordConflictError, match="different content"):
         training_requests.file("one", payload("changed"))
