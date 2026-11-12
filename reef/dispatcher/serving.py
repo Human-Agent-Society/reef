@@ -100,7 +100,7 @@ class QueueStartupReporter(StartupReporter):
     def add(self, entry: Mapping[str, JsonValue]) -> None:
         with self.lock:
             try:
-                self.queue.add_progress(
+                self.queue.append_progress(
                     self.item.queue, self.item.id, self.worker_id, {PROGRESS_KEY: dict(entry)}, number=self.number
                 )
                 self.number += 1
@@ -202,7 +202,7 @@ class ServingWorker(QueueWorker):
         for stop in self.routes.due_stops(time.time()):
             payload: dict[str, JsonValue] = {"served": dict(stop.served.to_json()), "stop_after": stop.stop_after}
             identifier = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-            self.queue.add(
+            self.queue.append(
                 NewWork(
                     SERVING_QUEUE,
                     f"stop:{identifier}",

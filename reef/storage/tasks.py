@@ -169,7 +169,7 @@ class TaskStore(ABC):
     not interpret a document of ``D`` or ``S``.
 
     The task files of the scenario are not part of the triple. They hold the
-    directory of each candidate, and each directory that ``save_files`` saved,
+    directory of each candidate, and each directory that ``write_files`` saved,
     by the digest of its files.
 
     A store is part of a scenario session and closes with it. Each write is
@@ -185,7 +185,7 @@ class TaskStore(ABC):
         """
 
     @abstractmethod
-    def save_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
+    def write_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
         """Save a copy of each candidate task directory of a generation, in order, before validation or rollouts.
 
         The name of a candidate is the name of its directory. Raises
@@ -251,7 +251,7 @@ class TaskStore(ABC):
         """
 
     @abstractmethod
-    def remove_state_document(self, *, key: str) -> None:
+    def delete_state_document(self, *, key: str) -> None:
         """Remove ``key`` from ``S``: after the call, ``S`` has no document of ``key``.
 
         A key that ``S`` does not hold changes nothing.
@@ -266,7 +266,7 @@ class TaskStore(ABC):
         """Return the keys of ``S`` that start with ``prefix``, in increasing string order."""
 
     @abstractmethod
-    def save_files(self, directory: Path) -> str:
+    def write_files(self, directory: Path) -> str:
         """Save a copy of ``directory`` in the task files of the scenario and return the digest of its files.
 
         ``path`` returns the copy by this digest. The call does not change
@@ -278,7 +278,7 @@ class TaskStore(ABC):
 
     @abstractmethod
     def path(self, files_digest: str) -> Path:
-        """Return the local directory of a candidate, a published task or a ``save_files`` call, by its ``files_digest``.
+        """Return the local directory of a candidate, a published task or a ``write_files`` call, by its ``files_digest``.
 
         The caller must not change the directory. Raises ``TaskStoreError`` if
         the scenario holds no files of ``files_digest``.
@@ -296,7 +296,7 @@ class TaskStorage(ABC):
 class TaskFileStore(Plugin, ABC):
     """Keeps the directory of each saved candidate, published task and imported task, addressed by the digest of its files.
 
-    The store also keeps each directory that ``TaskStore.save_files`` saved.
+    The store also keeps each directory that ``TaskStore.write_files`` saved.
     It keeps the files of each scenario apart, so that ``archive`` retires
     them with the scenario. The scenario storage owns the store and closes
     it.
@@ -313,7 +313,7 @@ class TaskFileStore(Plugin, ABC):
         """
 
     @abstractmethod
-    def put(self, scenario: str, source: Path) -> str:
+    def write(self, scenario: str, source: Path) -> str:
         """Save a copy of the task directory ``source`` and return the digest of its files.
 
         The copy is durable when the method returns. Raises ``TaskStoreError``
@@ -365,7 +365,7 @@ class LocalTaskFileStore(TaskFileStore):
     it into place. The store never reads ``.staging``. An interrupted copy can
     stay there. An operator can delete it while no Reef service runs. Without
     a directory, the store uses a temporary directory and deletes it on
-    ``close``. The store creates its directories on the first ``put``.
+    ``close``. The store creates its directories on the first ``write``.
     """
 
     def __init__(self, directory: Path | None = None) -> None:
@@ -382,7 +382,7 @@ class LocalTaskFileStore(TaskFileStore):
         NoSettings.parse(config, plugin_class=cls)
         return cls(directory)
 
-    def put(self, scenario: str, source: Path) -> str:
+    def write(self, scenario: str, source: Path) -> str:
         digest = files_digest(source)
         target = self.scenario_directory(scenario) / digest
         if target.exists():

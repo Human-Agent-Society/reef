@@ -243,7 +243,7 @@ async def check(args: argparse.Namespace, pidfd: int) -> dict[str, object]:
     with closing(SQLiteScenarioStorage(directory / "records")) as storage, closing(storage.open(SCENARIO)) as scenario:
         for result in results:
             receipt = result["receipt"]
-            record = scenario.records.get(SCENARIO, receipt)
+            record = scenario.records.read(SCENARIO, receipt)
             if record is None:
                 raise RuntimeError(f"missing record for receipt {receipt}")
             route = record.payload["metadata"]["routing"]

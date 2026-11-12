@@ -70,7 +70,7 @@ def segment_files(tmp_path) -> list:
 def test_a_segment_is_json_lines_and_a_reader_reads_only_its_lines(tmp_path):
     store = LocalSegmentStore(tmp_path)
     data, places = segment_lines("s1", ['{"a":1}', '{"b":"二"}'])
-    store.put("acme", "s1", data)
+    store.write("acme", "s1", data)
     assert [json.loads(line) for line in data.decode().splitlines()] == [{"a": 1}, {"b": "二"}]
     assert store.read("acme", list(reversed(places))) == ('{"b":"二"}'.encode(), b'{"a":1}')
     with pytest.raises(SegmentNotFound):

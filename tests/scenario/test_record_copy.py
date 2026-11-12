@@ -57,7 +57,7 @@ def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_store
             assert trainer.holds_untrained_records()
             assert trainer.produce_samples().records_read == 1
             assert trainer.produce_samples().records_read == 0, "a process reads each record once"
-            assert current.store.records.get("t", "s/r1") is None, "t stores no copy"
+            assert current.store.records.read("t", "s/r1") is None, "t stores no copy"
             assert current.used_record("s/r1").payload == {"score": 1.0}
 
         # A new process reads the item again: no commit consumed it.

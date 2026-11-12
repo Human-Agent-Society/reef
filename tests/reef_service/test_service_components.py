@@ -352,11 +352,11 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(ini
     assert changes.training_requests == ["math"]
 
     # A job that a worker takes changes nothing to commit; its checkpoint and its end each wake control.
-    queue.add(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))
+    queue.append(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))
     job = queue.take(JOBS_QUEUE, "training-1", ["job:stub"])
     watcher.run_once()
     assert changes.jobs == []
-    queue.add_progress(JOBS_QUEUE, job.id, "training-1", {"step": 0}, number=0)
+    queue.append_progress(JOBS_QUEUE, job.id, "training-1", {"step": 0}, number=0)
     watcher.run_once()
     assert changes.jobs == ["math"]
     queue.finish(JOBS_QUEUE, job.id, "training-1", {"state": "finished", "metrics": {}})

@@ -437,7 +437,7 @@ def test_inference_records_do_not_need_snapshot_history(tmp_path):
         store = storage.open("math")
         try:
             assert store.history() == ()
-            assert store.records.get("math", receipt).artifact_id == "model-artifact"
+            assert store.records.read("math", receipt).artifact_id == "model-artifact"
         finally:
             store.close()
     finally:
