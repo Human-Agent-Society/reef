@@ -17,6 +17,7 @@ from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.training_deployment import LocalDeployment
 
+from reef.core import plugins
 from reef.core.errors import RuntimeConfigError
 from reef.service.assembly import _training_recipe, connect_training_component
 from reef.service.deploy import training
@@ -94,14 +95,14 @@ def test_in_process_backend_rejects_other_topologies(tmp_path, overrides):
 
 def test_installed_backend_name_and_dotted_reference_resolve_the_same_definition(monkeypatch):
     point = EntryPoint(name="test-mlx", value=BACKEND, group="reef.training_backends")
-    monkeypatch.setattr(training, "entry_points", lambda **kwargs: (point,))
+    monkeypatch.setattr(plugins, "entry_points", lambda **kwargs: (point,))
     assert isinstance(training.training_deployment_for("test-mlx"), LocalDeployment)
     assert isinstance(training.training_deployment_for(BACKEND), LocalDeployment)
 
 
 @pytest.mark.parametrize("points", [(), (1, 2)])
 def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, points):
-    monkeypatch.setattr(training, "entry_points", lambda **kwargs: points)
+    monkeypatch.setattr(plugins, "entry_points", lambda **kwargs: points)
     with pytest.raises(DeployConfigError, match=r"unknown|ambiguous"):
         training.training_deployment_for("unavailable")
 

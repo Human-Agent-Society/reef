@@ -51,5 +51,5 @@ def test_component_playbooks_name_the_live_registration_points() -> None:
 
     assert "register_kind" in playbooks and "def register_kind" not in recipe_registry
     assert "package.module:ClassName" in playbooks
-    assert "@register_runtime_kind" in playbooks and "def register_runtime_kind" in runtime_registry
+    assert "RuntimeFactory" in playbooks and "def register_runtime_kind" not in runtime_registry
     assert "register_routes" in playbooks and "def register_routes" in route_registry

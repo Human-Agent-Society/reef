@@ -104,8 +104,8 @@ Two other extension points have separate names and purposes:
 
 The deployment selects native backends with ``training.backend`` and ``inference.backend``.
 Custom request adapters use ``inference.handler-factory`` and
-``inference.handler-config``. The factory path names an ``InferenceHandler``
-subclass. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
+``inference.handler-config``. The factory setting names an ``InferenceHandler``
+subclass as ``package.module:ClassName``. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
 **config)`` class method; arbitrary functions are not accepted. Handlers injected
 directly into ``create_app`` or ``build_app`` need only implement the inference methods.
 

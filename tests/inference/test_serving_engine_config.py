@@ -11,9 +11,9 @@ import pytest
 from reef.core.weight_layout import ArtifactFormat
 from reef.inference.remote.runtime import serving_engine_config
 from reef.inference.sglang import config as sglang_config
-from reef.inference.sglang.deployment import create_inference
 from reef.inference.sglang.launch import engine_environment
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
+from reef.inference.sglang.service import SGLangInferenceService
 from reef.inference.vllm.config import VLLMSettings
 
 FULL = ArtifactFormat("full")
@@ -49,7 +49,7 @@ def engine_input(
 def test_sglang_input_loads_the_model_with_the_flags_reef_serving_relies_on(monkeypatch):
     monkeypatch.setenv("SGLANG_PLUGINS", "telemetry")
     values = engine_input(options={"mem-fraction-static": 0.7}, num_gpus=4, tensor_parallel_size=2)
-    config = create_inference(values).config
+    config = SGLangInferenceService.from_config(values).config
     assert (config.model_path, config.num_gpus, config.gpus_per_engine, config.gpus_per_node) == (
         "Qwen/Qwen3-8B",
         4,
@@ -70,21 +70,23 @@ def test_sglang_input_loads_the_model_with_the_flags_reef_serving_relies_on(monk
 
 def test_sglang_input_enables_reefs_plugin_without_other_plugins(monkeypatch):
     monkeypatch.delenv("SGLANG_PLUGINS", raising=False)
-    assert engine_environment(create_inference(engine_input()).config)["SGLANG_PLUGINS"] == "reef"
+    assert engine_environment(SGLangInferenceService.from_config(engine_input()).config)["SGLANG_PLUGINS"] == "reef"
     assert "SGLANG_PLUGINS" not in os.environ
 
 
 def test_sglang_shares_prefixes_only_when_each_load_retracts_the_requests_in_flight():
-    sharing = create_inference(engine_input(prefix_sharing=True)).config
+    sharing = SGLangInferenceService.from_config(engine_input(prefix_sharing=True)).config
     assert sharing.pause_mode == "retract" and sharing.options["disable_radix_cache"] is False
-    opted_out = create_inference(engine_input(prefix_sharing=True, options={"disable-radix-cache": True})).config
+    opted_out = SGLangInferenceService.from_config(
+        engine_input(prefix_sharing=True, options={"disable-radix-cache": True})
+    ).config
     assert opted_out.options["disable_radix_cache"] is True, "a deployment may always opt out of sharing"
     with pytest.raises(ValueError, match="disable_radix_cache=true"):
-        create_inference(engine_input(options={"disable-radix-cache": False}))
+        SGLangInferenceService.from_config(engine_input(options={"disable-radix-cache": False}))
 
 
 def test_adapter_releases_size_the_engines_adapter_table_from_the_release_format_and_capacity():
-    config = create_inference(engine_input(artifact_format=ADAPTER, adapter_capacity=4)).config
+    config = SGLangInferenceService.from_config(engine_input(artifact_format=ADAPTER, adapter_capacity=4)).config
     assert {
         name: config.options[name]
         for name in (
@@ -109,14 +111,14 @@ def test_adapter_releases_size_the_engines_adapter_table_from_the_release_format
 def test_retracting_adapter_engines_share_prefixes_only_when_sglang_keys_them_by_adapter(monkeypatch, adapter_scoped):
     """One engine holds several scenarios' adapters; the engine must keep their prefix-cache entries apart."""
     monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
-    config = create_inference(engine_input(artifact_format=ADAPTER, prefix_sharing=True)).config
+    config = SGLangInferenceService.from_config(engine_input(artifact_format=ADAPTER, prefix_sharing=True)).config
     assert config.options["disable_radix_cache"] is not adapter_scoped
     values = engine_input(artifact_format=ADAPTER, prefix_sharing=True, options={"disable-radix-cache": False})
     if adapter_scoped:
-        create_inference(values)
+        SGLangInferenceService.from_config(values)
     else:
         with pytest.raises(ValueError, match="does not key prefix-cache entries by adapter"):
-            create_inference(values)
+            SGLangInferenceService.from_config(values)
 
 
 def test_only_sglang_variables_reach_the_engines_on_the_component_host():
@@ -127,7 +129,7 @@ def test_only_sglang_variables_reach_the_engines_on_the_component_host():
 
 def test_router_options_configure_the_router_and_router_port_binds_it():
     values = engine_input(options={"router-policy": "cache_aware", "router-port": 30000, "context-length": 4096})
-    config = create_inference(values).config
+    config = SGLangInferenceService.from_config(values).config
     assert config.router_options == {"policy": "cache_aware"}
     assert config.router_port == 30000
     assert config.options["context_length"] == 4096

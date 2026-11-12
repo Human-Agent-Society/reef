@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.core.plugins import PluginConfigError
 from reef.execution.executor import Executor, ExecutorFuture, ExecutorLaunch, WorkerSpec, resolve
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import ConcurrentExecutorFuture, UniProcExecutor
@@ -201,8 +202,8 @@ def test_factory_auto_launches_multiple_process_workers_and_dispatches_ranked_rp
         executor.shutdown()
 
 
-@pytest.mark.parametrize("backend", [CustomExecutor, f"{__name__}:CustomExecutor", f"{__name__}.CustomExecutor"])
-def test_factory_accepts_custom_executor_class_and_import_paths(backend):
+@pytest.mark.parametrize("backend", [CustomExecutor, f"{__name__}:CustomExecutor"])
+def test_factory_accepts_a_custom_executor_class_and_its_reference(backend):
     executor = Executor.create(ExecutorLaunch(backend=backend))
     assert isinstance(executor, CustomExecutor)
     executor.shutdown()
@@ -210,7 +211,14 @@ def test_factory_accepts_custom_executor_class_and_import_paths(backend):
 
 @pytest.mark.parametrize(
     ("backend", "error"),
-    [(int, TypeError), ("builtins:int", TypeError), ("missing", ValueError), (None, ValueError), ("", ValueError)],
+    [
+        (int, TypeError),
+        ("builtins:int", PluginConfigError),
+        ("missing", PluginConfigError),
+        (f"{__name__}.CustomExecutor", PluginConfigError),
+        (None, ValueError),
+        ("", ValueError),
+    ],
 )
 def test_factory_rejects_invalid_backends(backend, error):
     with pytest.raises(error):

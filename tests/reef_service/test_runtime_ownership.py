@@ -10,7 +10,7 @@ from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingCompon
 
 from reef.artifact import GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
-from reef.inference.registry import RuntimeRegistry
+from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_named_recipe
@@ -110,11 +110,20 @@ def test_a_named_recipe_takes_its_configured_runtime_and_an_invalid_one_releases
     events: list[str] = []
     runtimes: list[OwnedRuntime] = []
 
-    def build_runtime(*args):
-        runtimes.append(OwnedRuntime(events))
-        return runtimes[-1]
+    class RuntimeBuilder(RuntimeFactory):
+        kind = "injected"
 
-    registry = RuntimeRegistry({"injected": build_runtime, "component": lambda *args: OwnedComponent(events)})
+        def __call__(self, config, model_path, recipe_config, environ):
+            runtimes.append(OwnedRuntime(events))
+            return runtimes[-1]
+
+    class ComponentBuilder(RuntimeFactory):
+        kind = "component"
+
+        def __call__(self, config, model_path, recipe_config, environ):
+            return OwnedComponent(events)
+
+    registry = RuntimeRegistry({"injected": RuntimeBuilder(), "component": ComponentBuilder()})
     (tmp_path / "valid.yaml").write_text(
         "recipe:\n  implementation: recipe\n  runtime:\n    type: injected\ninference:\n  upstream-model: test-model\n"
     )

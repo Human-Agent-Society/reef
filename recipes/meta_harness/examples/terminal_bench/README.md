@@ -144,7 +144,7 @@ not bundle it. `pip install -e .` in this directory registers it as
 `terminus` on the `reef.harness_adapters` entry point group, and installs the
 `reef-terminus` runner that its runs launch. A deployment then names it
 with `evolution.adapter: terminus`, as `terminal_bench.yaml` does. The runner
-writes one trial file per run, and `reef_terminus.trajectory.read_trials`,
+writes one trial file per run, and `reef_terminus.trajectory.TrialReader`,
 the adapter's `sessions` reader, reads it back.
 
 Terminus 2 is a Harbor agent class, not a CLI. `reef-terminus` reads the
