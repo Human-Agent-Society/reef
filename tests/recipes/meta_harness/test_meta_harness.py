@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._strategies import resolve_task_scorer
 from tests.support.harness_methods import (
     ALTERNATE,
     IMPROVED,
@@ -31,6 +30,7 @@ from tests.support.harness_methods import (
 from tests.support.harness_service import backend_step, drive_job, harness_dispatcher, report_once, seed_root
 from tests.support.harness_steps import COMPONENT, TreeArtifacts, build_harness_backend, harness_recipe, head_of
 from tests.support.records import memory_records
+from tests.support.strategies import resolve_task_scorer
 
 import recipes.meta_harness
 from recipes.meta_harness import MetaHarness, MetaHarnessSettings

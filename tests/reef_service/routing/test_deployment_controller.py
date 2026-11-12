@@ -51,7 +51,7 @@ from reef.service.deploy.routing.reef_lifecycle_client import (
 )
 from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.routing import RoutingAdapter, RoutingSnapshot
 from reef.service.routing_preview import PreviewSettings
 
@@ -777,7 +777,7 @@ def test_partial_prepare_failure_keeps_lock_until_safe_cleanup(
     # A source that names its image: preparation reads it, and the render then fails.
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text(json.dumps(routing_manifest("http://127.0.0.1:9")), encoding="utf-8")
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="base",
         host="127.0.0.1",
         tokens=("unit-token",),
@@ -809,7 +809,7 @@ def preparing_controller(
     monkeypatch.setattr(controller_module.sys, "platform", "linux")
     manifest = tmp_path / "manifest.yaml"
     manifest.write_text(json.dumps(routing_manifest("http://127.0.0.1:9", image=image)), encoding="utf-8")
-    settings = ServiceConfig(
+    settings = ServiceSettings(
         recipe="base",
         host="127.0.0.1",
         tokens=("unit-token",),
@@ -1051,7 +1051,7 @@ def test_invalid_candidate_cannot_touch_an_existing_generation(
     def invalid_candidate() -> str:
         raise ValueError("invalid routing candidate")
 
-    case.controller.service_settings = ServiceConfig(
+    case.controller.service_settings = ServiceSettings(
         recipe="base",
         host="127.0.0.1",
         tokens=("test-token",),
@@ -1083,7 +1083,7 @@ def test_the_open_budget_covers_each_provider_check_and_preview_with_the_childs_
     path.write_text(json.dumps(manifest), encoding="utf-8")
     policy = RoutingDeploymentSettings(deployment_id="unit-routing", selection_timeout_seconds=7)
     controller = RoutingDeploymentController(
-        ServiceConfig(recipe="base", routing_deployment=policy, inference_timeout_s=inference_timeout_s),
+        ServiceSettings(recipe="base", routing_deployment=policy, inference_timeout_s=inference_timeout_s),
         FakeRuntime([]),
         registry_root=tmp_path / "registry",
     )
@@ -1098,4 +1098,4 @@ def test_the_open_budget_covers_each_provider_check_and_preview_with_the_childs_
 
 def test_routing_requires_a_deployment_identity(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="deployment_id"):
-        RoutingDeploymentController(ServiceConfig(recipe="base"), FakeRuntime([]), registry_root=tmp_path)
+        RoutingDeploymentController(ServiceSettings(recipe="base"), FakeRuntime([]), registry_root=tmp_path)

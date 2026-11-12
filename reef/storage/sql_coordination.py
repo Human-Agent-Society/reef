@@ -470,7 +470,7 @@ class SQLServedModels(ServedModelsWriter):
                 )
             ).mappings()
             for row in waiting.all():
-                self.work.save(
+                self.work.write_item(
                     connection,
                     counter,
                     item_from_row(row),
@@ -480,7 +480,7 @@ class SQLServedModels(ServedModelsWriter):
                     ended_at=moment,
                 )
             sequence = counter.next()
-            item = self.work.insert(
+            item = self.work.append_item(
                 connection,
                 NewWork(
                     SERVING_QUEUE,
@@ -495,16 +495,18 @@ class SQLServedModels(ServedModelsWriter):
             )
             if retried and automatic_retries:
                 metadata = canonical_json({AUTOMATIC_RETRIES: automatic_retries})
-                item = self.work.save(connection, counter, item, moment, metadata_json=metadata)
+                item = self.work.write_item(connection, counter, item, moment, metadata_json=metadata)
             if payload:
                 return item
-            self.replace_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)
-            self.replace_serving_config(connection, served_counter, scenario, {})
+            self.write_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)
+            self.write_serving_config(connection, served_counter, scenario, {})
             traffic = self.tables.traffic_weights
             connection.execute(delete(traffic).where(traffic.c.scenario == scenario))
-            return self.work.save(connection, counter, item, moment, state="finished", result={}, ended_at=moment)
+            return self.work.write_item(
+                connection, counter, item, moment, state="finished", result={}, ended_at=moment
+            )
 
-    def replace_routes(
+    def write_routes(
         self,
         connection: Connection,
         counter: SequenceCounter,
@@ -526,7 +528,7 @@ class SQLServedModels(ServedModelsWriter):
         self.schedule_unreferenced(connection, counter, set(previous.values()) - set(models.values()), stop_after)
         counter.next()
 
-    def replace_serving_config(
+    def write_serving_config(
         self, connection: Connection, counter: SequenceCounter, scenario: str, serving_config: Mapping[str, JsonValue]
     ) -> None:
         """Make ``serving_config`` the scenario's override in the caller's transaction; an empty one removes it."""
@@ -590,14 +592,14 @@ class SQLServedModels(ServedModelsWriter):
             result: dict[str, JsonValue] = {}
             with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
                 if current is not None and current.id == item.id:
-                    self.replace_routes(connection, served_counter, item.scenario, models, moment + stop_delay_seconds)
-                    self.replace_serving_config(connection, served_counter, item.scenario, serving_config)
+                    self.write_routes(connection, served_counter, item.scenario, models, moment + stop_delay_seconds)
+                    self.write_serving_config(connection, served_counter, item.scenario, serving_config)
                     result = {name: dict(served.to_json()) for name, served in models.items()}
                 else:
                     self.schedule_unreferenced(
                         connection, served_counter, set(models.values()), moment + stop_delay_seconds
                     )
-            return self.work.save(
+            return self.work.write_item(
                 connection,
                 counter,
                 held,
@@ -635,7 +637,7 @@ class SQLServedModels(ServedModelsWriter):
                 ).rowcount
                 if deleted:
                     served_counter.next()
-                return self.work.save(
+                return self.work.write_item(
                     connection,
                     counter,
                     held,
@@ -693,11 +695,11 @@ class SQLServedModels(ServedModelsWriter):
                 served = self.tables.served_model
                 routes = connection.execute(select(served).where(served.c.scenario == current.scenario)).mappings()
                 staying = {row["name"]: route for row in routes if (route := served_from_row(row)) in kept}
-                self.replace_routes(connection, served_counter, current.scenario, staying, moment + stop_delay_seconds)
+                self.write_routes(connection, served_counter, current.scenario, staying, moment + stop_delay_seconds)
                 if current.state != "finished" or not current.payload:
                     continue
                 sequence = counter.next()
-                recovery = self.work.insert(
+                recovery = self.work.append_item(
                     connection,
                     NewWork(
                         SERVING_QUEUE,
@@ -710,7 +712,9 @@ class SQLServedModels(ServedModelsWriter):
                     sequence,
                     moment,
                 )
-                self.work.save(connection, counter, recovery, moment, metadata_json=canonical_json({"recovery": True}))
+                self.work.write_item(
+                    connection, counter, recovery, moment, metadata_json=canonical_json({"recovery": True})
+                )
 
     def checked(self, connection: Connection, control_lease_number: int) -> None:
         current = self.lease.number_in(connection)
@@ -772,7 +776,7 @@ class SQLServedModels(ServedModelsWriter):
             connection.execute(insert(table).values(scenario=key.scenario, name=key.name, **served.to_json()))
             counter.next()
 
-    def remove(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
+    def delete(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
         table = self.tables.served_model
         condition = and_(table.c.scenario == key.scenario, table.c.name == key.name)
         with self.database.write(SERVED_SEQUENCE) as (connection, counter):
@@ -840,7 +844,7 @@ class SQLControlLease(ControlLease):
             return None
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
-    def store(self, connection: Connection, state: ControlLeaseState, *, existed: bool) -> ControlLeaseState:
+    def write_state(self, connection: Connection, state: ControlLeaseState, *, existed: bool) -> ControlLeaseState:
         values = {"instance_id": state.instance_id, "number": state.number, "expires_at": state.expires_at}
         if existed:
             connection.execute(update(self.table).where(self.table.c.id == 1).values(**values))
@@ -861,7 +865,7 @@ class SQLControlLease(ControlLease):
                 else:
                     return None
                 state = ControlLeaseState(instance_id, number, moment + self.lease_seconds)
-                return self.store(connection, state, existed=held is not None)
+                return self.write_state(connection, state, existed=held is not None)
         except IntegrityError:
             # Another instance took the first lease in the same moment: its row is there now, so this take lost.
             return None
@@ -872,7 +876,7 @@ class SQLControlLease(ControlLease):
             held = self.held(connection)
             if held is None or held.instance_id != instance_id or held.expires_at < moment:
                 return None
-            return self.store(
+            return self.write_state(
                 connection, ControlLeaseState(instance_id, held.number, moment + self.lease_seconds), existed=True
             )
 
@@ -882,7 +886,7 @@ class SQLControlLease(ControlLease):
             held = self.held(connection)
             if held is None or held.instance_id != instance_id or held.expires_at < moment:
                 return False
-            self.store(connection, ControlLeaseState(instance_id, held.number, moment), existed=True)
+            self.write_state(connection, ControlLeaseState(instance_id, held.number, moment), existed=True)
             return True
 
     def number_in(self, connection: Connection) -> int:
@@ -956,7 +960,7 @@ class SQLWorkQueue(WorkQueue):
         found = connection.execute(query).mappings().first()
         return None if found is None else item_from_row(found)
 
-    def save(
+    def write_item(
         self, connection: Connection, counter: SequenceCounter, item: WorkItem, moment: float, **changes: object
     ) -> WorkItem:
         """Write ``changes`` to ``item`` as the change ``moment``, with the next change sequence."""
@@ -985,7 +989,7 @@ class SQLWorkQueue(WorkQueue):
             raise WorkLeaseLostError(f"worker {worker_id!r} does not hold {queue}/{item_id}")
         return item
 
-    def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
+    def append(self, work: NewWork, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
         payload = canonical_json(dict(work.payload))
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
@@ -994,7 +998,7 @@ class SQLWorkQueue(WorkQueue):
                 if canonical_json(dict(existing.payload)) != payload:
                     raise WorkConflictError(f"{work.queue}/{work.id} exists with a different payload")
                 return existing
-            return self.insert(connection, work, counter.next(), moment)
+            return self.append_item(connection, work, counter.next(), moment)
 
     def request(
         self,
@@ -1021,7 +1025,7 @@ class SQLWorkQueue(WorkQueue):
                 wanted = moment if available_at is None else available_at
                 if queued.available_at <= wanted:
                     return queued
-                return self.save(connection, counter, queued, moment, available_at=wanted)
+                return self.write_item(connection, counter, queued, moment, available_at=wanted)
             sequence = counter.next()
             work = NewWork(
                 queue,
@@ -1032,9 +1036,9 @@ class SQLWorkQueue(WorkQueue):
                 serial_key=serial_key,
                 available_at=available_at,
             )
-            return self.insert(connection, work, sequence, moment)
+            return self.append_item(connection, work, sequence, moment)
 
-    def insert(self, connection: Connection, work: NewWork, sequence: int, moment: float) -> WorkItem:
+    def append_item(self, connection: Connection, work: NewWork, sequence: int, moment: float) -> WorkItem:
         """Insert ``work`` as a queued item created at ``moment`` with the change sequence ``sequence``."""
         connection.execute(
             insert(self.table).values(
@@ -1133,7 +1137,7 @@ class SQLWorkQueue(WorkQueue):
             if found is None:
                 return None
             chosen = item_from_row(found)
-            return self.save(
+            return self.write_item(
                 connection,
                 counter,
                 chosen,
@@ -1150,15 +1154,19 @@ class SQLWorkQueue(WorkQueue):
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.save(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
+            return self.write_item(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return item if item.state == "running" else self.save(connection, counter, item, moment, state="running")
+            return (
+                item
+                if item.state == "running"
+                else self.write_item(connection, counter, item, moment, state="running")
+            )
 
-    def add_progress(
+    def append_progress(
         self,
         queue: str,
         item_id: str,
@@ -1175,7 +1183,7 @@ class SQLWorkQueue(WorkQueue):
                 return item
             if number != len(item.progress):
                 raise ValueError(f"progress number {number} skips {len(item.progress)}")
-            return self.save(connection, counter, item, moment, progress=(*item.progress, dict(progress)))
+            return self.write_item(connection, counter, item, moment, progress=(*item.progress, dict(progress)))
 
     def finish(
         self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
@@ -1183,7 +1191,7 @@ class SQLWorkQueue(WorkQueue):
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.save(
+            return self.write_item(
                 connection,
                 counter,
                 item,
@@ -1210,7 +1218,7 @@ class SQLWorkQueue(WorkQueue):
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
             again = retryable and self.has_attempts_left(item)
-            return self.save(
+            return self.write_item(
                 connection,
                 counter,
                 item,
@@ -1226,7 +1234,7 @@ class SQLWorkQueue(WorkQueue):
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.save(
+            return self.write_item(
                 connection,
                 counter,
                 item,
@@ -1244,7 +1252,7 @@ class SQLWorkQueue(WorkQueue):
             item = self.row(connection, queue, item_id, lock=True)
             if item is None or not item.final:
                 return item
-            return self.save(
+            return self.write_item(
                 connection, counter, item, moment, state="queued", result=None, ended_at=None, available_at=moment
             )
 
@@ -1255,7 +1263,7 @@ class SQLWorkQueue(WorkQueue):
             item = self.row(connection, queue, item_id, lock=True)
             if item is None or item.final:
                 return item
-            return self.save(
+            return self.write_item(
                 connection,
                 counter,
                 item,
@@ -1267,7 +1275,7 @@ class SQLWorkQueue(WorkQueue):
                 ended_at=moment,
             )
 
-    def set_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
+    def write_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
         require_text(name, "name")
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.row(connection, queue, item_id, lock=True)
@@ -1275,7 +1283,7 @@ class SQLWorkQueue(WorkQueue):
                 name in item.metadata and canonical_json(item.metadata[name]) == canonical_json(value)
             ):
                 return item
-            return self.save(
+            return self.write_item(
                 connection, counter, item, time.time(), metadata_json=canonical_json({**item.metadata, name: value})
             )
 
@@ -1296,7 +1304,7 @@ class SQLWorkQueue(WorkQueue):
             for item in expired:
                 again = self.has_attempts_left(item)
                 changed.append(
-                    self.save(
+                    self.write_item(
                         connection,
                         counter,
                         item,
@@ -1310,7 +1318,7 @@ class SQLWorkQueue(WorkQueue):
                 )
             return tuple(changed)
 
-    def get(self, queue: str, item_id: str) -> WorkItem | None:
+    def read(self, queue: str, item_id: str) -> WorkItem | None:
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
 

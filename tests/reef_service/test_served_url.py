@@ -67,7 +67,7 @@ def test_the_recipe_evaluation_token_is_its_own_and_opens_the_evaluation_routes_
     """The recipe's evaluation calls run candidate code: the service hands them a token of their own, which the app
     accepts on the evaluation routes alone, never a service token. With auth off there is none."""
     from reef.service import assembly
-    from reef.service.deploy.service_config import ServiceConfig
+    from reef.service.deploy.service_config import ServiceSettings
 
     seen: dict[str, object] = {}
 
@@ -83,7 +83,7 @@ def test_the_recipe_evaluation_token_is_its_own_and_opens_the_evaluation_routes_
 
     monkeypatch.setattr(assembly, "build_dispatcher", build_dispatcher)
     monkeypatch.setattr(assembly, "create_app", create_app)
-    assembly.build_app(ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), tokens=tokens))
+    assembly.build_app(ServiceSettings(recipe="recipe", agent_record_dir=str(tmp_path), tokens=tokens))
     if tokens:
         assert isinstance(seen["recipe_token"], str) and seen["recipe_token"] not in tokens
         assert seen["evaluation_tokens"] == seen["recipe_token"] and seen["tokens"] == tokens

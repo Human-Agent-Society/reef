@@ -46,7 +46,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
-from reef.train.slime_backend.distill.algorithm import DistillSettings, settings_from_args
+from reef.train.slime_backend.distill.algorithm import DistillAlgorithmSettings, settings_from_args
 from reef.train.slime_backend.vocab_parallel import gather_log_probs_at_ids, global_log_sum_exp, native_topk_ids
 
 #: The actor's backup tags: Slime's own copy of the training weights, and the teacher's.
@@ -157,7 +157,7 @@ class SeparateCheckpoint(TeacherWeights):
         actor._switch_model(ACTOR_TAG)
 
 
-def teacher_weights(settings: DistillSettings) -> TeacherWeights:
+def teacher_weights(settings: DistillAlgorithmSettings) -> TeacherWeights:
     """The weights the settings' teacher runs on."""
     if settings.teacher == "separate":
         return SeparateCheckpoint(settings.teacher_checkpoint)
@@ -386,7 +386,9 @@ def student_topk(
     return list(result["distill_teacher_topk_ids"]), list(result["distill_teacher_topk_log_probs"])
 
 
-def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: DistillSettings | None = None) -> None:
+def compute_teacher_rows(
+    actor: Any, rollout_data: dict[str, Any], settings: DistillAlgorithmSettings | None = None
+) -> None:
     """Score every sample's teacher sequence with the teacher and fill the batch's ``distill_teacher_*`` keys.
 
     The teacher's weights (:mod:`.weights`) are switched in for the pass and

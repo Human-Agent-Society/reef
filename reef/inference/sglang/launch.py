@@ -10,6 +10,7 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from reef.execution.executor.placement import GpuBundles
 from reef.inference.process import (
     PORT_CONFLICT_ATTEMPTS,
     PORT_CONFLICT_SPREAD,
@@ -19,7 +20,7 @@ from reef.inference.process import (
     check_server_owner,
     ports_in_use,
 )
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.engine import ReefSGLangEngine
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
 from reef.inference.sglang.process import launch_router, node_address_and_port, wait_ready
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 SGLANG_PLUGIN_NAME = "reef"
 
 
-def engine_environment(config: SGLangConfig) -> dict[str, str]:
+def engine_environment(config: SGLangSettings) -> dict[str, str]:
     configured = config.env_vars.get("SGLANG_PLUGINS", os.environ.get("SGLANG_PLUGINS", ""))
     plugins = [name.strip() for name in configured.split(",") if name.strip()]
     return {
@@ -58,7 +59,7 @@ class SGLangEngineGroup(EngineGroup):
     ``router`` is the host and port of the router that every engine registers with.
     """
 
-    def __init__(self, config: SGLangConfig, placement: Any, router: tuple[str, int]) -> None:
+    def __init__(self, config: SGLangSettings, placement: GpuBundles, router: tuple[str, int]) -> None:
         self.config, self.placement = config, placement
         self.router = router
         self.all_engines: list[Any] = [None] * config.engine_count
@@ -103,7 +104,7 @@ class SGLangEngineGroup(EngineGroup):
 
     def _launch_actor(self, index: int) -> Any:
         """Start the actor of engine ``index`` on the bundle and the GPUs reserved for it."""
-        pg, bundles, devices = self.placement
+        devices = self.placement.gpu_ids
         width = self.config.gpus_per_engine
         offset = index * width
         if offset + width > len(devices):
@@ -112,8 +113,8 @@ class SGLangEngineGroup(EngineGroup):
         if [int(device) for device in devices[offset : offset + width]] != list(range(base_gpu, base_gpu + width)):
             raise ValueError("SGLang engines require contiguous GPUs within each node")
         strategy = PlacementGroupSchedulingStrategy(
-            placement_group=pg,
-            placement_group_bundle_index=bundles[offset],
+            placement_group=self.placement.group,
+            placement_group_bundle_index=self.placement.bundle_indices[offset],
             placement_group_capture_child_tasks=True,
         )
         return (
@@ -141,7 +142,7 @@ class SGLangCluster:
     router; ``endpoint`` is then the router's URL, which serves every engine.
     """
 
-    def __init__(self, config: SGLangConfig, placement: Any) -> None:
+    def __init__(self, config: SGLangSettings, placement: GpuBundles) -> None:
         self.config, self.placement = config, placement
         self.group: SGLangEngineGroup | None = None
         self.routers: list[Any] = []

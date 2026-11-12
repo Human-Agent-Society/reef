@@ -24,7 +24,7 @@ from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
-from reef.train.tinker_backend.config import TinkerConfig
+from reef.train.tinker_backend.config import TinkerSettings
 from reef.train.tinker_backend.objectives import TinkerObjective
 from reef.train.tinker_backend.parameters import rollout_settings
 from reef.train.tinker_backend.rollout import SamplerChat
@@ -336,7 +336,7 @@ TASK_OBJECTIVE = f"{__name__}:RewardObjective"
 @pytest.mark.unit
 def test_a_task_job_of_two_tasks_with_one_name_is_refused(tmp_path):
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
     )
     component.start_jobs()
     try:
@@ -368,7 +368,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
     monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
     client = Client()
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), client, sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), client, sampler=Sampler()
     )
     component.start_jobs()
     try:
@@ -406,7 +406,7 @@ def test_a_task_job_reports_its_rollout_tokens_and_a_resumed_job_keeps_them(tmp_
     )
     monkeypatch.setattr(component_module, "run_train_tasks", lambda tasks, settings, chat, **options: counted)
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
     )
     component.start_jobs()
     try:
@@ -438,7 +438,7 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
     task = harbor_task(tmp_path, "add")
     method = {"objective": TASK_OBJECTIVE}
     trajectory = grouped(tmp_path).samples[0]
-    without_sampler = TinkerTrainingComponent(MODEL, TinkerConfig(state_dir=str(tmp_path / "a")), Client())
+    without_sampler = TinkerTrainingComponent(MODEL, TinkerSettings(state_dir=str(tmp_path / "a")), Client())
     without_sampler.start_jobs()
     try:
         with pytest.raises(ValueError, match="no sampler"):
@@ -455,7 +455,7 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
     finally:
         without_sampler.close()
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "b")), Client(), sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "b")), Client(), sampler=Sampler()
     )
     component.start_jobs()
     try:
@@ -506,7 +506,7 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
 
     monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=sampler
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=sampler
     )
     component.start_jobs()
     try:
@@ -533,7 +533,7 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
 @pytest.mark.unit
 def test_a_task_job_without_an_objective_is_refused(tmp_path):
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
     )
     try:
         with pytest.raises(ValueError, match="needs the objective parameter"):
@@ -547,7 +547,7 @@ def test_a_task_job_without_an_objective_is_refused(tmp_path):
 def test_a_sampler_that_never_answers_fails_the_warm_up_at_its_deadline(tmp_path, monkeypatch):
     monkeypatch.setattr(component_module, "SAMPLER_WARM_TIMEOUT_S", 0.0)
     component = TinkerTrainingComponent(
-        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=ColdSampler(cold=5)
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "state")), Client(), sampler=ColdSampler(cold=5)
     )
     try:
         with pytest.raises(TimeoutError, match="starting"):

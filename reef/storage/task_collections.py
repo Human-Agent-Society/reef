@@ -41,7 +41,7 @@ class TaskCollection:
     has no benchmark, and a client can add them later. ``collections`` names other collections of the same owner,
     and does not have ``name``. ``average`` is ``task`` or ``benchmark``: how an evaluation on the collection
     computes its mean score (``EvaluationCollection``).
-    Purpose: a client stores it (``DataStore.put_collection``); the collection routes and an evaluation on the
+    Purpose: a client stores it (``DataStore.write_collection``); the collection routes and an evaluation on the
     collection read its benchmarks (``collection_benchmarks``).
     """
 

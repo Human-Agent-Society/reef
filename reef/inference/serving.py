@@ -70,7 +70,7 @@ class ServingEngines(ABC):
 
     Values: ``base_url`` is the engines' HTTP(S) address, known without opening them. ``open`` attaches to the
     engines that run, or starts them when none run (``OpenedEngines``); a runtime calls it at most once.
-    ``watched`` is whether the runtime checks their health (``check_health``, which raises when they failed).
+    ``check_health`` raises when the engines failed; the runtime calls it on a schedule after ``open``.
     ``close`` releases what ``open`` took and stops no engine that serves requests.
 
     Purpose: a ``SavedWeightServingRuntime`` holds one and opens it in ``InferenceRuntime.open``. A process that
@@ -81,16 +81,12 @@ class ServingEngines(ABC):
     @abstractmethod
     def base_url(self) -> str: ...
 
-    @property
-    def watched(self) -> bool:
-        return False
-
     @abstractmethod
     def open(self) -> OpenedEngines: ...
 
+    @abstractmethod
     def check_health(self) -> None:
-        """Raise when the engines failed; engines that are not ``watched`` have no check."""
-        return
+        """Raise when the engines failed."""
 
     def close(self) -> None:
         """Release what ``open`` took; the default holds nothing."""
@@ -142,7 +138,7 @@ class SavedWeightServingRuntime(InferenceRuntime):
     first replaces the engines that died since the last one
     (``InferenceBackend.recover``), while the engines are paused.
 
-    When ``engines`` are ``watched``, a thread checks their health every
+    After ``open``, a thread checks the engines' health every
     ``health_interval_s`` seconds. When the check fails, for example because
     the inference component restarted, ``recover_engines`` replaces the
     engines and loads what the runtime serves into them again, so the
@@ -192,7 +188,6 @@ class SavedWeightServingRuntime(InferenceRuntime):
                 backend.initialize_version(self._version)
             backend.resume()
             self._opened = backend
-        if self._engines.watched:
             self._watcher = threading.Thread(target=self.watch_engines, name="reef-serving-health", daemon=True)
             self._watcher.start()
 

@@ -72,7 +72,7 @@ def _initialize_local_repository(repository: Path, git: GitClient) -> None:
 
 
 #: The remote tracking ref naming the snapshot a workspace fetched last, a commit the remote already holds.
-FETCHED_RELEASE_REF = "refs/remotes/origin/reef-fetched"
+FETCHED_SNAPSHOT_REF = "refs/remotes/origin/reef-fetched"
 
 
 @dataclass(frozen=True)
@@ -335,7 +335,7 @@ class _GitWorkspace:
         """
         with self.lock:
             self.git("fetch", "origin", version)
-            self.git("update-ref", FETCHED_RELEASE_REF, "FETCH_HEAD")
+            self.git("update-ref", FETCHED_SNAPSHOT_REF, "FETCH_HEAD")
             return self.git("rev-parse", "FETCH_HEAD")
 
     def show_file(self, version: str, path: str) -> str:
@@ -551,7 +551,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             try:
                 resolved_snapshot = self._workspace.fetch_version(selector)
             except ArtifactPublicationError as exc:
-                raise ArtifactNotFoundError(f"release does not exist: {revision}") from exc
+                raise ArtifactNotFoundError(f"snapshot does not exist: {revision}") from exc
         return self._manifest.snapshot(resolved_snapshot)
 
     def artifact_ref_name(self, artifact_id: str) -> str:
@@ -646,7 +646,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                 source={"kind": "root"},
                 metadata={**root.storage_metadata, **dict(metadata)},
             )
-            # Identical roots registered in the same second still need distinct release IDs.
+            # Identical roots registered in the same second still need distinct snapshot revisions.
             commit = self._workspace.commit(f"register scenario {uuid.uuid4().hex}")
             self.bind_artifact_ids(self.stored_snapshot(commit))
             try:
@@ -774,7 +774,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             return self._manifest.snapshot(commit)
 
     def _cache_snapshot(self, revision: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
-        """Fill a just-published release's cache entry from the staged tree it was committed from.
+        """Fill a just-published snapshot's cache entry from the staged tree it was committed from.
 
         The staged files hold the committed bytes, so the entry links them
         instead of cloning the snapshot and pulling its LFS objects back. An

@@ -12,7 +12,7 @@ packages that do not depend on each other need it, and it carries no I/O.
 ``job_data`` and ``evaluation`` hold the values and candidate contracts shared
 by runtimes and training; ``weight_layout`` holds the values that
 ``reef.train`` and ``reef.inference`` both read; ``requirements`` validates training-request requirements
-and reads their release-chain records.
+and reads their snapshot-chain records.
 ``training_request`` validates TRAIN bodies at admission and holds the queued
 request carried by a job's data. ``reasoning`` splits a sampled reply into its
 reasoning and its answer for ``reef.inference.chat`` and ``reef.tinker.sampling``;

@@ -1,6 +1,6 @@
 """A CPU stand-in for the SGLang engines: the control surface Reef drives, as Ray actors.
 
-Selected with ``inference.backend: tests.support._stub_engine:create_inference``.
+Selected with ``inference.backend: tests.support.stub_engine:create_inference``.
 It borrows the deployment's reservation like SGLang does, accepts Reef's
 adapter files, and records every adapter it was asked to load so a test can
 check what Reef served.
@@ -12,14 +12,12 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from reef.execution.executor import ExecutorConfig, WorkerSpec
-from reef.execution.executor.placement import DeploymentResources
+from reef.execution.executor import ExecutorLaunch, WorkerSpec
 from reef.execution.executor.ray import RayExecutor
 from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
 from reef.inference.interfaces import InferenceBackend
 from reef.inference.sglang.backend import SGLangInferenceBackend
 
-PROTOCOL = "reef-test-engine-v1"
 CONTROL_NAME = "reef-test-engine"
 
 
@@ -123,23 +121,21 @@ class StubControl:
 class StubEngineService(InferenceService):
     """Start the control actor in the deployment's Ray session on the reserved inference bundles."""
 
-    connection_protocol = PROTOCOL
-
     def __init__(self, config: Mapping[str, Any]) -> None:
         self.config = dict(config)
         self._control: RayExecutor | None = None
         self._closed = False
 
-    def start(self, resources: DeploymentResources) -> InferenceConnection:
-        if not isinstance(resources, InferenceResources) or resources.inference_placement is None:
-            raise ValueError("the stub engine borrows the deployment's inference reservation")
+    def start(self, resources: InferenceResources) -> InferenceConnection:
         placement = resources.inference_placement
+        if placement is None:
+            raise ValueError("the stub engine borrows the deployment's inference reservation")
         if len(placement.bundle_indices) != int(self.config["num_gpus"]):
             raise ValueError("the stub engine expects one reserved bundle per inference GPU")
         self._control = RayExecutor(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend=RayExecutor,
-                workers=(WorkerSpec(worker_cls="tests.support._stub_engine:StubControl", args=(self.config,)),),
+                workers=(WorkerSpec(worker_cls="tests.support.stub_engine:StubControl", args=(self.config,)),),
                 # Ray workers import this module by name; give them the driver's import path.
                 options={
                     "num_cpus": 1,
@@ -150,7 +146,7 @@ class StubEngineService(InferenceService):
                 launch_timeout_s=120,
             )
         )
-        return InferenceConnection(self.connection_protocol, RayExecutor.from_workers(self._control.workers))
+        return InferenceConnection(RayExecutor.from_workers(self._control.workers))
 
     def backend(self, connection: InferenceConnection) -> InferenceBackend:
         return SGLangInferenceBackend(connection.control)

@@ -6,10 +6,10 @@ import json
 import time
 
 import pytest
-from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, job_sized_stages, runtime_bindings
+from tests.support.trajectories import policy_trajectory
 
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings

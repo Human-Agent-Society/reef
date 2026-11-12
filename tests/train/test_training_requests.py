@@ -111,7 +111,7 @@ def test_a_new_pipeline_reads_a_stored_request_failure_and_a_consumed_request_le
 def test_retrying_a_request_written_before_artifact_identity_keeps_its_item():
     queue = memory_coordination().work_queue
     legacy = {"text": "one", "session": "s-1", "artifact_id": "r-1", "requires": []}
-    original = queue.add(
+    original = queue.append(
         NewWork(TRAINING_REQUESTS_QUEUE, "one", "s", training_request_kind("s"), legacy, serial_key="s")
     )
     training_requests = TrainingRequestQueue(queue).of("s")

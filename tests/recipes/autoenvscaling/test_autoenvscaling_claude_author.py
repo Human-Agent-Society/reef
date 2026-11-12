@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     NoChecks,
     autoenvscaling,
     generating_config,

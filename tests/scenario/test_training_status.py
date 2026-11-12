@@ -19,10 +19,10 @@ from types import SimpleNamespace
 from typing import Literal
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._threshold_processor import ThresholdJobData
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.samples import made_task
+from tests.support.threshold_processor import ThresholdJobData
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.job_data import JobOutcome

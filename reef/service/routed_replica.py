@@ -21,7 +21,7 @@ from reef.observability.operations import OperationMetrics
 from reef.recipe import Recipe
 from reef.service.deploy.routing.policy import RouterManagementClient, RouterPolicyError
 from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.inference_service import ServedModelsCache
 from reef.service.lifecycle import PendingWrites
 from reef.service.routed_inference import InferenceRetryPolicy, RoutedInference, RoutedRecords, RoutedScenario
@@ -124,7 +124,7 @@ class ReplicaRouter:
 
 def add_replica_routing(
     app: web.Application,
-    settings: ServiceConfig,
+    settings: ServiceSettings,
     recipe: Recipe,
     records: ReplicaRecords,
     environ: Mapping[str, str] | None = None,

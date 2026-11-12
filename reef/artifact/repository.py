@@ -186,7 +186,7 @@ class RepositoryBackend(ArtifactRepository):
 class StagedSnapshotRepositoryBackend(RepositoryBackend):
     """Optional storage contract for publication followed by head promotion.
 
-    ``publish(advance_head=False)`` must store resolvable release bytes and
+    ``publish(advance_head=False)`` must store resolvable snapshot bytes and
     metadata without moving the head. ``commit_snapshot`` then promotes that
     snapshot without publishing its bytes again.
     """
@@ -195,7 +195,7 @@ class StagedSnapshotRepositoryBackend(RepositoryBackend):
     def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         """Advance a staged durable snapshot after the scenario commits it.
 
-        Implementations must accept an already-current release so recovery can
+        Implementations must accept an already-current snapshot so recovery can
         repeat an interrupted post-commit mirror update without publishing new
         bytes. They must reject an unrelated current head.
         """
@@ -432,11 +432,11 @@ class Repository(ArtifactRepository):
         self._current_artifact = current_artifact
         self._checkpoint_artifact = checkpoint_artifact
         # Guards every mutation of the (current, checkpoint) head pair so the
-        # two refs can only move as one atomic release record. Reads stay
+        # two refs can only move as one atomic record. Reads stay
         # lock-free: a ref read is atomic under the GIL and readers must not
         # be serialized behind a publish.
         self._head_lock = Lock()
-        # Non-checkpointed releases of pulled files remain process-local. Keep
+        # Non-checkpointed snapshots of pulled files remain process-local. Keep
         # every staged artifact addressable for snapshot and activation reads; a
         # single "latest local" slot would make an older snapshot dangle as
         # soon as the next snapshot is staged.
@@ -446,7 +446,7 @@ class Repository(ArtifactRepository):
         self._process_id = uuid.uuid4().hex
         self._temporary_directory = None
         if local_dir is None:
-            self._temporary_directory = tempfile.TemporaryDirectory(prefix="reef-artifact-releases-")
+            self._temporary_directory = tempfile.TemporaryDirectory(prefix="reef-artifact-snapshots-")
             self._local_root = Path(self._temporary_directory.name)
         else:
             self._local_root = Path(local_dir)
@@ -476,7 +476,7 @@ class Repository(ArtifactRepository):
             return None
         uri = self.backend.snapshot_uri(ref)
         if uri is not None and not uri.endswith("/"):
-            raise ValueError(f"the repository backend gave release URI {uri!r}, which does not end with '/'")
+            raise ValueError(f"the repository backend gave snapshot URI {uri!r}, which does not end with '/'")
         return uri
 
     @property
@@ -521,7 +521,7 @@ class Repository(ArtifactRepository):
     def install_checkpoint(
         self, ref: SnapshotRef, *, expected: SnapshotRef, expected_checkpoint: SnapshotRef, activate: bool
     ) -> None:
-        """Install an already-committed release as the checkpoint, the chain tip, without storage I/O. When
+        """Install an already-committed snapshot as the checkpoint, the chain tip, without storage I/O. When
         ``activate`` is true, also make it the active artifact (``current``)."""
         with self._head_lock:
             if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
@@ -639,7 +639,7 @@ class Repository(ArtifactRepository):
         *,
         parent: SnapshotRef,
     ) -> Artifact:
-        """Compose several components straight into a staged local release; one copy, not two."""
+        """Compose several components straight into a staged local snapshot; one copy, not two."""
         destination = self.local_root / self._process_id / uuid.uuid4().hex
         composed = compose_snapshot(components, directory=destination)
         return self.register_staged(step, composed, destination, parent=parent)

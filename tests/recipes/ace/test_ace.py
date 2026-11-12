@@ -11,10 +11,10 @@ import json
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_methods import QueueChat
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import PI_SEED, TreeArtifacts, build_harness_backend, runtime, step_services
+from tests.support.trajectories import recorded_trajectory
 
 from recipes.ace import ACE, ACESettings
 from reef.core.job_data import TrajectorySample

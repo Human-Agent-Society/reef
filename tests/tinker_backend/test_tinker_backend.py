@@ -40,7 +40,7 @@ from reef.train.local_jobs import CHECKPOINTS_FILE, RESULT_FILE
 from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import TinkerJobParameters, TinkerTrainingComponent
-from reef.train.tinker_backend.config import TinkerConfig
+from reef.train.tinker_backend.config import TinkerSettings
 from reef.train.tinker_backend.launch import TinkerDeployment, component_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
 from reef.train.tinker_backend.objectives import (
@@ -162,7 +162,7 @@ def client():
 
 @pytest.fixture
 def config(tmp_path):
-    return TinkerConfig(state_dir=str(tmp_path / "state"))
+    return TinkerSettings(state_dir=str(tmp_path / "state"))
 
 
 @pytest.fixture
@@ -860,8 +860,8 @@ def test_tinker_serves_its_releases_with_the_training_options_as_cli_text_gives_
 def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(tmp_path, objective):
     from dataclasses import dataclass
 
-    from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
     from tests.support.runtime_stubs import job_sized_stages
+    from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.core import AgentRecord, RequestType
@@ -881,7 +881,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
             return PipelineSpec(record2sample=ThresholdSamples, sample2job=ThresholdJobData)
 
     factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
-    settings = TinkerConfig(state_dir=str(tmp_path / "runtime"))
+    settings = TinkerSettings(state_dir=str(tmp_path / "runtime"))
 
     def build(client):
         component = TinkerTrainingComponent(MODEL, settings, client)
@@ -984,17 +984,19 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     from reef.dispatcher import Dispatcher
     from reef.service.app import create_app
     from reef.storage.sqlite import SQLiteScenarioStorage
-    from reef.train.pipeline import PipelineConfig
+    from reef.train.pipeline import PipelineSettings
 
     initial = tmp_path / "initial"
     initial.mkdir()
     UNTRAINED.write(initial)
     remote = RemoteClient()
     # A job and a batch size of the whole grid train it as one optimizer step.
-    component = TinkerTrainingComponent(MODEL, TinkerConfig(state_dir=str(tmp_path / "runtime"), batch_size=4), remote)
+    component = TinkerTrainingComponent(
+        MODEL, TinkerSettings(state_dir=str(tmp_path / "runtime"), batch_size=4), remote
+    )
     component.start_jobs()
     inference = TinkerInferenceRuntime(remote, base_model=MODEL)
-    step_grid = PipelineConfig.from_setting(
+    step_grid = PipelineSettings.from_setting(
         {
             "record2sample": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
             "sample2job": {"config": {"job_samples": 4}},

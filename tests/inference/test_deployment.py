@@ -10,8 +10,6 @@ from reef.inference.deployment import InferenceService
 
 
 class Receiver(InferenceService):
-    connection_protocol = "test-weights-v1"
-
     def __init__(self, config):
         self.config = config
 

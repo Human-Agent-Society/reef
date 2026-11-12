@@ -66,7 +66,7 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
         ref = self._storage.refs.get(revision)
         if ref is not None:
             return ref
-        raise ArtifactNotFoundError(f"release does not exist: {revision}")
+        raise ArtifactNotFoundError(f"snapshot does not exist: {revision}")
 
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._storage.lock:
@@ -117,7 +117,7 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
     def materialize(self, ref: SnapshotRef) -> Artifact:
         path = self._storage.paths.get(ref.revision)
         if path is None or not path.is_dir():
-            raise ArtifactMaterializationError(f"release does not exist: {ref.revision}")
+            raise ArtifactMaterializationError(f"snapshot does not exist: {ref.revision}")
         return Artifact(ref, None, local_path=path, metadata=self._storage.metadata.get(ref.revision))
 
     def publish(

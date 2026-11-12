@@ -481,13 +481,13 @@ class StoredGeneratorState(GeneratorState):
         self.store.write_state_document(key=key, document=document)
 
     def remove(self, key: str) -> None:
-        self.store.remove_state_document(key=key)
+        self.store.delete_state_document(key=key)
 
     def keys(self, prefix: str = "") -> tuple[str, ...]:
         return self.store.state_document_keys(prefix=prefix)
 
     def save_files(self, directory: Path) -> str:
-        return self.store.save_files(directory)
+        return self.store.write_files(directory)
 
     def files(self, digest: str) -> Path:
         return self.store.path(digest)
@@ -627,7 +627,7 @@ class GenerationRunner(BackgroundJobRunner):
                 directories = tuple(
                     write_harbor_task(task, Path(staging) / str(index)) for index, task in enumerate(generated)
                 )
-                generation = self.task_store.save_candidates(generation=job.generation, directories=directories)
+                generation = self.task_store.write_candidates(generation=job.generation, directories=directories)
         candidates = generation.candidates or ()
         for index in generation.pending_indices:
             candidate = candidates[index]

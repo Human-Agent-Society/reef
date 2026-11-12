@@ -37,7 +37,7 @@ from reef.service.deploy import orchestrator
 from reef.service.deploy.routing.cli import main as routing_cli
 from reef.service.deploy.routing.renderer import EXTERNAL_IMAGE_MESSAGE, MANAGEMENT_TOKEN_ENV, SELECTION_TOKEN_ENV
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.routing import RoutingSnapshot
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore
@@ -47,8 +47,8 @@ CHAT = {"model": "auto", "messages": [{"role": "user", "content": "hello"}]}
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 
 
-def external_settings(tmp_path: Path, manifest: Path | None, port: int = 50053) -> ServiceConfig:
-    return ServiceConfig(
+def external_settings(tmp_path: Path, manifest: Path | None, port: int = 50053) -> ServiceSettings:
+    return ServiceSettings(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),
         artifact_work_dir=str(tmp_path / "work"),

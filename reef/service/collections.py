@@ -54,7 +54,7 @@ def save_collection(data: DataAccess, owner: str, name: str, body: Mapping[str, 
     stored = {other.name: other for other in store.collections(owner)}
     # A new cycle goes through this collection, so the check from it finds every one.
     collection_benchmarks({**stored, name: collection}, name)
-    store.put_collection(owner, collection)
+    store.write_collection(owner, collection)
     return {"owner": owner, **collection.to_json()}
 
 
@@ -90,7 +90,7 @@ def delete_collection(data: DataAccess, owner: str, name: str) -> dict[str, Any]
     users = [other.name for other in store.collections(owner) if name in other.collections]
     if users:
         raise ValueError(f"the collections {users} name the collection {name!r}")
-    if not store.remove_collection(owner, name):
+    if not store.delete_collection(owner, name):
         raise CollectionNotFoundError(f"{owner!r} stores no collection {name!r}")
     return {"owner": owner, "name": name, "deleted": True}
 

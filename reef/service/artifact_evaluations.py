@@ -401,7 +401,7 @@ class EvaluationResults:
         failed (``max_failed_fraction``); add the rollouts that wait while fewer than ``max_concurrent_rollouts`` are
         not final; end the evaluation once all of them are in the queue and final."""
         with self.dispatcher.locked_scenario(scenario) as current:
-            stored = current.store.evaluations.get(evaluation_id)
+            stored = current.store.evaluations.read(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
                 return
             # Read under the lock: a retry changes the evaluation and its rollouts under it, and rollouts read
@@ -432,7 +432,7 @@ class EvaluationResults:
                 template = EvaluationRollout.from_item(items[0])
                 for position in range(len(items), len(items) + min(free, waiting)):
                     index, repeat = divmod(position, request.rollouts_per_task)
-                    self.queue.add(
+                    self.queue.append(
                         rollout_work(
                             replace(template, task_index=index, task_name=request.task_names[index], repeat=repeat)
                         )
@@ -471,7 +471,7 @@ class EvaluationResults:
         try:
             with self.dispatcher.locked_scenario(scenario) as current:
                 evaluations = current.store.evaluations
-                current_state = evaluations.get(evaluation_id)
+                current_state = evaluations.read(evaluation_id)
                 if current_state is not None and current_state.state == "queued":
                     evaluations.begin(evaluation_id)
                 if result is not None:
@@ -623,7 +623,7 @@ class ArtifactEvaluations:
         rollout that waits for ``max_concurrent_rollouts`` starts. An evaluation that ended stays as it is.
         """
         with self.dispatcher.locked_scenario(scenario) as current:
-            stored = current.store.evaluations.get(evaluation_id)
+            stored = current.store.evaluations.read(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
                 return stored
             # ``settle`` adds rollouts under this lock and adds none to a failed evaluation, so the listed rollouts
@@ -650,7 +650,7 @@ class ArtifactEvaluations:
         rollouts the queue no longer keeps (``WorkQueue.delete_final``).
         """
         with self.dispatcher.locked_scenario(scenario) as current:
-            stored = current.store.evaluations.get(evaluation_id)
+            stored = current.store.evaluations.read(evaluation_id)
             if stored is None:
                 return None
             request = stored.request
@@ -899,7 +899,7 @@ class ArtifactEvaluations:
         added: list[str] = []
         try:
             for rollout in rollouts[: request.max_concurrent_rollouts]:
-                self.queue.add(rollout_work(rollout))
+                self.queue.append(rollout_work(rollout))
                 added.append(rollout.item_id())
             with self.dispatcher.locked_scenario(scenario) as current:
                 stored = current.store.evaluations.create(
@@ -1078,7 +1078,7 @@ class ArtifactEvaluations:
         then the trajectories stitched from its calls."""
         if self.get(scenario, evaluation_id) is None:
             return None
-        item = self.queue.get(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, task_index, repeat))
+        item = self.queue.read(EVALUATIONS_QUEUE, rollout_item_id(evaluation_id, task_index, repeat))
         if item is None:
             return []
         if caller == "agent":
@@ -1123,7 +1123,7 @@ class ArtifactEvaluations:
     def get(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id`` of ``scenario``, or None."""
         with self.dispatcher.locked_scenario(scenario) as current:
-            return current.store.evaluations.get(evaluation_id)
+            return current.store.evaluations.read(evaluation_id)
 
     def status_json(self, scenario: str, evaluations: Sequence[StoredEvaluation]) -> list[dict[str, object]]:
         """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its

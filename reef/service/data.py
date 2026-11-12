@@ -130,7 +130,7 @@ def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait
         pending = {
             item_id
             for item_id in pending
-            if (item := queue.get(DATA_SYNC_QUEUE, item_id)) is not None and not item.final
+            if (item := queue.read(DATA_SYNC_QUEUE, item_id)) is not None and not item.final
         }
         if not pending or time.monotonic() >= deadline:
             break

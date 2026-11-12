@@ -104,7 +104,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
             for reference in item.references:
                 source = preceding.get(reference)
                 if source is None:
-                    stored_reference = current.records.get_for_audit(item.scenario, reference)
+                    stored_reference = current.records.read_for_audit(item.scenario, reference)
                     source = stored_reference.item if stored_reference is not None else current.used_record(reference)
                 if source is None or source.request_type is not RequestType.INFERENCE:
                     raise ReportValidationError(

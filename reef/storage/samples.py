@@ -56,7 +56,7 @@ class StoredSample:
     """One item that a scenario uses, as its trainers read it, with the train counts of each trainer.
 
     Values: ``sequence`` is the positive sequence of the scenario's use of the item (``DataStore.scenario_items``),
-    or the item's sequence when ``SampleStore.get`` read it. ``sample_id`` is the item's ID. ``split`` is the
+    or the item's sequence when ``SampleStore.read`` read it. ``sample_id`` is the item's ID. ``split`` is the
     item's split for the scenario: ``train``, or ``eval`` for an imported task that an evaluation runs. ``sample`` is
     the ``TrajectorySample`` or ``TaskSample`` of the item. ``train_counts`` maps each trainer (its component, or
     ``""`` for the only trainer of a scenario) to the positive number of its committed jobs that listed
@@ -221,7 +221,7 @@ class SampleStore:
         origin = item.metadata.get("origin")
         return origin if isinstance(origin, Mapping) and origin.get("scenario") == self.scenario else None
 
-    def get(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
+    def read(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
         """The samples of ``sample_ids`` that the scenario uses, in the order of their items. The store reads them
         ``MAX_QUERY_LIMIT`` at a time: a request can name tens of thousands of samples, and one read for each would
         hold the trainer's lock for minutes."""
@@ -243,7 +243,7 @@ class SampleStore:
     def task_paths(self, sample_ids: Sequence[str]) -> tuple[Path, ...]:
         """The task directories of the tasks of ``sample_ids`` that the scenario uses, in the order of their items.
 
-        It gives the directories that ``get`` gives for the same tasks, and reads ``TASK_PATH_READERS`` of them from
+        It gives the directories that ``read`` gives for the same tasks, and reads ``TASK_PATH_READERS`` of them from
         the task file store at the same time. An ID of a trajectory, or of an item that the scenario does not use,
         gives no directory.
         """
@@ -333,13 +333,13 @@ class TrainerSamples:
         """The samples that the trainer reads: its own, and the uploads and imported tasks (``SampleStore.page``)."""
         return self.store.page(after_sequence=after_sequence, limit=limit, kind=kind, trainer=self.trainer)
 
-    def get(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
-        return self.store.get(sample_ids)
+    def read(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
+        return self.store.read(sample_ids)
 
     def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         return self.store.imported_tasks(split)
 
-    def add_record_samples(
+    def write_record_samples(
         self,
         group: str | None,
         record_ids: Sequence[str],

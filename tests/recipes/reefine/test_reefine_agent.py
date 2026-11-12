@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from tests.recipes.reefine.reefine_support import TREE, Served, designed, reefine_step, step_workspace
+from tests.recipes.reefine.support import TREE, Served, designed, reefine_step, step_workspace
 from tests.support.harness_steps import step_services
 
 from recipes.beta.reefine import ReefineMethod

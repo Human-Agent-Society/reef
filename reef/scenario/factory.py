@@ -238,7 +238,7 @@ def recovered_trainer_states(
 class ScenarioFactory:
     """Register, assemble, and recover complete scenario instances.
 
-    Inference loads each selected release. ``served_models`` supplies the actual serving artifact for training.
+    Inference loads each selected snapshot. ``served_models`` supplies the actual serving artifact for training.
     """
 
     def __init__(
@@ -389,7 +389,7 @@ class ScenarioFactory:
             raise ValueError(f"invalid scenario metadata for {name!r}")
         if not components.single:
             # A registration names the components its snapshots bind. One made by a
-            # recipe serving a single component, or none, has releases with no
+            # recipe serving a single component, or none, has snapshots with no
             # component directories to carry forward; refuse rather than compose
             # the whole flat tree into every component.
             if registered_components is None:

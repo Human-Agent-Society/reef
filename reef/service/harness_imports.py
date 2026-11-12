@@ -86,13 +86,13 @@ class QueuedImports(HarnessImports):
         base_id = f"{HARNESS_SYNC_KIND}:{hashlib.sha256(encoded.encode()).hexdigest()}"
         item_id, number = base_id, 1
         # An item that ended answered an earlier import: the active tree may have moved since, so it is not reused.
-        while (earlier := self.queue.get(HARNESS_SYNC_QUEUE, item_id)) is not None and earlier.final:
+        while (earlier := self.queue.read(HARNESS_SYNC_QUEUE, item_id)) is not None and earlier.final:
             number += 1
             item_id = f"{base_id}:{number}"
-        self.queue.add(NewWork(HARNESS_SYNC_QUEUE, item_id, scenario, HARNESS_SYNC_KIND, work))
+        self.queue.append(NewWork(HARNESS_SYNC_QUEUE, item_id, scenario, HARNESS_SYNC_KIND, work))
         deadline = time.monotonic() + SYNC_WAIT_SECONDS
         while True:
-            item = self.queue.get(HARNESS_SYNC_QUEUE, item_id)
+            item = self.queue.read(HARNESS_SYNC_QUEUE, item_id)
             if item is not None and item.final:
                 return import_answer(item)
             if time.monotonic() >= deadline:

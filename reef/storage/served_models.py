@@ -90,7 +90,7 @@ class ServedModelsWriter(ServedModels):
     """Writes of serving work and routes, with the lease of the operation's owner.
 
     Control selects work with ``request``. Inference completes startup and cleanup with ``complete_request`` and ``complete_stop``.
-    Direct operations ``write``, ``remove``, ``schedule_stop`` and ``delete_stop`` check ``control_lease_number``.
+    Direct operations ``write``, ``delete``, ``schedule_stop`` and ``delete_stop`` check ``control_lease_number``.
     A stale control number raises ``ControlLeaseConflictError`` without a change. Reads require no lease.
     """
 
@@ -107,7 +107,7 @@ class ServedModelsWriter(ServedModels):
         """
 
     @abstractmethod
-    def remove(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
+    def delete(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
         """Remove the row of ``key``; return the removed value, or None when there was none."""
 
     @abstractmethod

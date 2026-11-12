@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any, Self
 from weakref import WeakKeyDictionary
 
-from tests.support._strategies import resolve_method, resolve_task_scorer
-from tests.support._trajectories import recorded_trajectory
+from tests.support.strategies import resolve_method, resolve_task_scorer
+from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact.artifact import ArtifactNotFoundError
 from reef.core.job_data import TrajectorySample
@@ -38,7 +38,7 @@ from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.harness_backend.services import StepServices
-from reef.train.pipeline import PipelineConfig
+from reef.train.pipeline import PipelineSettings
 
 #: The fake pi scores itself: its session event carries the rendered rules text, so a scorer can prefer a tree whose
 #: rules hold the marker.
@@ -152,7 +152,7 @@ def harness_recipe(
         pipeline_stages=(
             None
             if job_samples is None
-            else PipelineConfig.from_setting(
+            else PipelineSettings.from_setting(
                 {"sample2job": {"config": {"job_samples": job_samples}}},
                 spec=HarnessEvolutionRecipe.pipeline_spec(),
                 environ={},

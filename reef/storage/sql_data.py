@@ -285,7 +285,7 @@ class PendingCreate:
 class SQLDataStore(DataStore):
     """A data store in the tables of ``data_tables``.
 
-    A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``insert_new_items``
+    A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``write_new_items``
     (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_scenarios``. Every
     operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
@@ -326,7 +326,7 @@ class SQLDataStore(DataStore):
         self.group_lock = Lock()
         self.waiting: dict[tuple[str, frozenset[str]], list[PendingCreate]] = {}
 
-    def record_job_directory_use(self, key: str, time: float) -> None:
+    def write_job_directory_use(self, key: str, time: float) -> None:
         table = self.job_directory_table
         with self.transaction() as connection:
             connection.execute(delete(table).where(table.c.key == key))
@@ -350,7 +350,7 @@ class SQLDataStore(DataStore):
         remove a row between two of them."""
 
     @abstractmethod
-    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         """Insert the ``data_item`` rows ``values`` in one statement, each unless the owner has its ID already; return
         the sequence of each row that it inserted, by item ID.
 
@@ -456,7 +456,7 @@ class SQLDataStore(DataStore):
                     owner=partition.partition, segment_id=segment_id, created_at=time.time(), byte_count=len(data)
                 )
             )
-        partition.store.put(partition.partition, segment_id, data)
+        partition.store.write(partition.partition, segment_id, data)
         return places
 
     def stored_items(
@@ -683,7 +683,7 @@ class SQLDataStore(DataStore):
             for origin, generation in checked:
                 if current[origin] != generation:
                     raise ScenarioArchivedError(f"generation {generation!r} of {origin!r} is no longer current")
-            sequences = self.insert_new_items(connection, list(values.values()))
+            sequences = self.write_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
             uses = [
                 {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
@@ -692,7 +692,7 @@ class SQLDataStore(DataStore):
             ]
             if uses:
                 connection.execute(self.scenarios_table.insert().values(uses))
-            self.trajectory_nodes(owner).add_many(
+            self.trajectory_nodes(owner).append_many(
                 connection,
                 [
                     replace(calls[item_id], node_sequence=sequence)
@@ -836,7 +836,7 @@ class SQLDataStore(DataStore):
                 TaskCollection.from_json(json.loads(value)) for value in connection.execute(statement).scalars()
             )
 
-    def put_collection(self, owner: str, collection: TaskCollection) -> None:
+    def write_collection(self, owner: str, collection: TaskCollection) -> None:
         check_owner(owner)
         table = self.collections_table
         with self.transaction() as connection:
@@ -847,7 +847,7 @@ class SQLDataStore(DataStore):
                 )
             )
 
-    def remove_collection(self, owner: str, name: str) -> bool:
+    def delete_collection(self, owner: str, name: str) -> bool:
         check_owner(owner)
         table = self.collections_table
         with self.transaction() as connection:
@@ -1111,7 +1111,7 @@ class SQLDataStore(DataStore):
             select(generations.c.generation).where(generations.c.owner == owner, generations.c.scenario == scenario)
         ).scalar_one_or_none()
 
-    def remove_scenario(self, owner: str, scenario: str) -> int:
+    def delete_scenario(self, owner: str, scenario: str) -> int:
         check_owner(owner)
         items, uses = self.items_table, self.scenarios_table
         with self.transaction() as connection:
@@ -1509,7 +1509,7 @@ class SQLiteDataStore(SQLDataStore):
                 self.connection.exec_driver_sql("BEGIN IMMEDIATE")
                 yield self.connection
 
-    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         statement = (
             sqlite_insert(self.items_table)
             .values(list(values))
@@ -1609,7 +1609,7 @@ class PostgresDataStore(SQLDataStore):
         with self.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
             yield connection
 
-    def insert_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    def write_new_items(self, connection: Connection, values: Sequence[Mapping[str, Any]]) -> dict[str, int]:
         statement = (
             postgresql_insert(self.items_table)
             .values(list(values))

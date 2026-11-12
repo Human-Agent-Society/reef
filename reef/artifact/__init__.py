@@ -1,4 +1,4 @@
-"""Storage for the snapshot chain: every publication as an immutable release.
+"""Storage for the snapshot chain: every publication as an immutable snapshot.
 
 The package owns bytes and heads — persisted, staged, materialized on
 demand. *When* a head moves is the scenario committer's decision, one
@@ -8,11 +8,11 @@ level up. Boundaries this package holds:
   repository; the factory owns the scenario-name-to-backend mapping. Nothing
   here knows what a scenario, trainer, or commit history is;
   ``ArtifactSnapshotChain``'s caller decides transaction ordering.
-- Releases are immutable and heads move only by compare-and-swap
+- Snapshots are immutable and heads move only by compare-and-swap
   (``activate`` takes ``expected``; ``publish`` takes
   ``expected_parent``), so concurrent publication conflicts loudly
   (``ArtifactConflictError``) instead of losing a snapshot.
-- A ``local:`` release has identity but no durable bytes; activation and
+- A ``local:`` snapshot has identity but no durable bytes; activation and
   a new training start refuse it as a source (``SnapshotNotRestorableError``).
 
 Adding a storage backend: implement ``RepositoryBackend`` and expose it

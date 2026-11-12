@@ -115,7 +115,7 @@ def test_train_group_auto_resolves_before_create(gpus):
     group = SlimeTrainGroup(
         SimpleNamespace(reef_executor_backend="auto", reef_train_executor_options={}), 1, gpus, pg=None
     )
-    assert group._executor_config.backend is SlimeRayExecutor
+    assert group._executor_launch.backend is SlimeRayExecutor
     assert group._executor is None
 
 

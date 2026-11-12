@@ -257,7 +257,7 @@ def cancel_scenario_job(queue: WorkQueue, scenario: str, job_id: str) -> dict[st
     worker cancels the run at its next poll. The trainer reads the failed job and records its end. A job that ended
     stays as it is. Return None when ``scenario`` has no job ``job_id``.
     """
-    item = queue.get(JOBS_QUEUE, job_id)
+    item = queue.read(JOBS_QUEUE, job_id)
     if item is None or item.scenario != scenario:
         return None
     cancelled = queue.cancel(JOBS_QUEUE, job_id, JOB_CANCELLED_ERROR)
@@ -350,24 +350,24 @@ class JobQueueComponent(TrainingComponent):
         second, so one of the two finds the job."""
         if job.backend != self.name:
             raise ValueError(f"the job is for {job.backend!r}, not the {self.name!r} training component")
-        if self.queue.get(JOBS_QUEUE, job.job_id) is not None:
+        if self.queue.read(JOBS_QUEUE, job.job_id) is not None:
             return
         self.component.check_job(job)
         request: dict[str, JsonValue] | None = None
         if job.request_id is not None:
-            held = self.queue.get(TRAINING_REQUESTS_QUEUE, job.request_id)
+            held = self.queue.read(TRAINING_REQUESTS_QUEUE, job.request_id)
             given = {} if held is None else held.payload
             text, parameters = given.get("text", ""), given.get("parameters", {})
             request = {"id": job.request_id, "text": text, "parameters": parameters}
         payload = job_payload(job, request)
-        self.queue.add(NewWork(JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), payload))
+        self.queue.append(NewWork(JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), payload))
         if job.request_id is not None:
-            held = self.queue.get(TRAINING_REQUESTS_QUEUE, job.request_id)
+            held = self.queue.read(TRAINING_REQUESTS_QUEUE, job.request_id)
             if held is not None and REQUEST_FAILURE_KEY in held.metadata:
                 self.queue.cancel(JOBS_QUEUE, job.job_id, JOB_CANCELLED_ERROR)
 
     def status(self, job_id: str) -> JobStatus:
-        item = self.queue.get(JOBS_QUEUE, job_id)
+        item = self.queue.read(JOBS_QUEUE, job_id)
         if item is None:
             raise KeyError(job_id)
         return status_from_item(item)
@@ -389,7 +389,7 @@ class JobExperimentRecorder(ExperimentTracker):
 
     ``record(event)`` gives ``event`` to ``tracker``. Then, for an event of a training job, it sets
     ``metadata["experiment"]`` of the job's item to ``tracker.experiment_run(event.context).to_dict()``
-    (``WorkQueue.set_metadata``). Nothing is written when the tracker has no run for the event, or the queue
+    (``WorkQueue.write_metadata``). Nothing is written when the tracker has no run for the event, or the queue
     has no such item, such as for a job that its component runs in the trainer's own process. Each commit of a
     job (its submission, its checkpoints and its end) records the same run, so a write after the first changes
     nothing.
@@ -429,7 +429,7 @@ class JobExperimentRecorder(ExperimentTracker):
             return
         run = self.tracker.experiment_run(event.context)
         if run is not None:
-            self.queue.set_metadata(
+            self.queue.write_metadata(
                 JOBS_QUEUE, event.training_job_id, EXPERIMENT_METADATA_KEY, cast(JsonValue, run.to_dict())
             )
 
@@ -502,7 +502,7 @@ class TrainingJobWorker(QueueWorker):
                 for checkpoint in status.checkpoints:
                     if checkpoint.step in reported:
                         continue
-                    self.queue.add_progress(
+                    self.queue.append_progress(
                         JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(checkpoint), number=progress_count
                     )
                     reported.add(checkpoint.step)
@@ -511,14 +511,14 @@ class TrainingJobWorker(QueueWorker):
                     return {"state": "finished", "metrics": cast(JsonValue, dict(status.metrics))}
                 if status.state == "failed":
                     if status.metrics:
-                        self.queue.set_metadata(
+                        self.queue.write_metadata(
                             JOBS_QUEUE, item.id, FAILED_METRICS_KEY, cast(JsonValue, dict(status.metrics))
                         )
                     raise ItemFailedError(status.error or "the job failed")
                 if self.stopped.wait(self.poll_seconds):
                     raise WorkerStoppedError
                 # Control can cancel the job (a deleted scenario, a new training start): stop at the next poll.
-                held = self.queue.get(JOBS_QUEUE, item.id)
+                held = self.queue.read(JOBS_QUEUE, item.id)
                 if lease_lost.is_set() or held is None or held.worker_id != self.worker_id or held.final:
                     raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
         except WorkLeaseLostError:

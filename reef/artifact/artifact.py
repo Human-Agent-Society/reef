@@ -49,7 +49,7 @@ TRAINING_STARTS_METADATA_KEY = "training_starts"
 
 
 class ArtifactError(ReefError):
-    """Base class for artifact storage and release-chain errors."""
+    """Base class for artifact storage and snapshot-chain errors."""
 
 
 class ArtifactSourceError(ArtifactError):
@@ -172,7 +172,7 @@ class Artifact:
         """The named component of this snapshot, materialized.
 
         A snapshot without a manifest, or with one component, is that component
-        itself. A multi-component release keeps each component in a directory
+        itself. A multi-component snapshot keeps each component in a directory
         named after it; the view carries the component's own artifact ID and metadata.
         """
         materialized = self.materialize()
@@ -188,7 +188,7 @@ class Artifact:
         entry = manifest.entries[name]
         directory = materialized.local_path / manifest.relative_path(name)
         # A component the base seeded nothing for has no directory in the
-        # release (git keeps none for an empty tree); it is empty, not missing.
+        # snapshot (git keeps none for an empty tree); it is empty, not missing.
         # Only the leaf is created, and only inside a snapshot tree that is
         # there: a snapshot directory that is gone must not come back empty.
         if materialized.local_path.is_dir() and not directory.exists():

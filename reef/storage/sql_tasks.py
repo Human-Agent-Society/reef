@@ -130,7 +130,7 @@ class SQLTaskStore(TaskStore):
     def begin_generation(self, *, generation: int, source_record_ids: tuple[str, ...]) -> GenerationState:
         requested = GenerationState(generation=generation, source_record_ids=source_record_ids)
         with self.database._transaction(write=True) as connection:
-            self.database._insert_if_absent(
+            self.database._write_if_absent(
                 connection,
                 self.tables.generations,
                 {
@@ -146,11 +146,11 @@ class SQLTaskStore(TaskStore):
             raise TaskStoreError(f"generation {generation} of task store {self.name!r} has other source records")
         return state
 
-    def save_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
+    def write_candidates(self, *, generation: int, directories: tuple[Path, ...]) -> GenerationState:
         # Save the files before the rows, so that a saved candidate always has its files. The file
         # store can be slow or remote, so the copies run outside a database transaction.
         candidates = tuple(
-            TaskCandidate(directory.name, self.files.put(self.scenario, directory)) for directory in directories
+            TaskCandidate(directory.name, self.files.write(self.scenario, directory)) for directory in directories
         )
         with self.database._transaction(write=True) as connection:
             state = self.require_generation(connection, generation)
@@ -198,7 +198,7 @@ class SQLTaskStore(TaskStore):
                 if task.split != split:
                     raise TaskConflictError(f"task {name!r} is published to {task.split}, not {split}")
             if candidate["split"] is None:
-                self.set_outcome(connection, generation, index, split=split)
+                self.write_outcome(connection, generation, index, split=split)
             (published,) = self.published_tasks(connection, task_name=name)
         return published
 
@@ -213,7 +213,7 @@ class SQLTaskStore(TaskStore):
                 return
             if candidate["error"]:
                 raise TaskStoreError(f"candidate {index} of generation {generation} is rejected for another reason")
-            self.set_outcome(connection, generation, index, error=reason)
+            self.write_outcome(connection, generation, index, error=reason)
 
     def complete_generation(self, *, generation: int) -> GenerationState:
         with self.database._transaction(write=True) as connection:
@@ -277,7 +277,7 @@ class SQLTaskStore(TaskStore):
             connection.execute(state_documents.delete().where(self.matching(state_documents, document_key=key)))
             connection.execute(state_documents.insert().values(**self.key, document_key=key, document=document))
 
-    def remove_state_document(self, *, key: str) -> None:
+    def delete_state_document(self, *, key: str) -> None:
         state_documents = self.tables.state_documents
         with self.database._transaction(write=True) as connection:
             connection.execute(state_documents.delete().where(self.matching(state_documents, document_key=key)))
@@ -299,8 +299,8 @@ class SQLTaskStore(TaskStore):
             # The prefix test and the order are Python's, so every database gives the same keys.
             return tuple(sorted(key for key in keys if key.startswith(prefix)))
 
-    def save_files(self, directory: Path) -> str:
-        return self.files.put(self.scenario, directory)
+    def write_files(self, directory: Path) -> str:
+        return self.files.write(self.scenario, directory)
 
     def published_tasks(self, connection: Connection, **columns: object) -> tuple[StoredTask, ...]:
         """Read the published tasks of this store whose candidates have the given column values, in generation and
@@ -364,7 +364,7 @@ class SQLTaskStore(TaskStore):
             raise TaskStoreError(f"generation {generation} of task store {self.name!r} has no candidate {index}")
         return row
 
-    def set_outcome(self, connection: Connection, generation: int, index: int, **outcome: str) -> None:
+    def write_outcome(self, connection: Connection, generation: int, index: int, **outcome: str) -> None:
         """Write the ``split`` or ``error`` of one candidate."""
         candidates = self.tables.candidates
         connection.execute(

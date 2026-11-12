@@ -1544,7 +1544,7 @@ def test_the_evaluated_activation_needs_artifact_evaluation_in_either_order_and_
             assert settings["activation"] == settings["effective_activation"] == evaluated
 
             # A scenario names built-in rules only: the client does not choose which code the service imports.
-            plugin = {"module": "tests.support._activation_rule_plugin:ComponentRule", "config": {"component": "w"}}
+            plugin = {"module": "tests.support.activation_rule_plugin:ComponentRule", "config": {"component": "w"}}
             for refused in (plugin, "never", {"module": "evaluated", "config": {}}):
                 status, _ = await update(client, {"activation": refused})
                 assert status == 400, refused

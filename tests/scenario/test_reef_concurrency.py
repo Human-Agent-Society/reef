@@ -12,11 +12,12 @@ import time
 from pathlib import Path
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactConflictError, InMemoryRepositoryBackend, Repository, SnapshotRef
-from reef.core import AgentRecord, RequestType
+from reef.core import AgentRecord
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -46,27 +47,7 @@ def sft_inference(agent_record_id: str, artifact_id: str) -> AgentRecord:
     it. The tests set ``max_staleness`` to their job count instead: every
     record stays within the window of every later artifact.
     """
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload={
-            "tokens": [1, 2],
-            "loss_mask": [0, 1],
-            "rollout_log_probs": [-0.2],
-            "artifact_id": artifact_id,
-        },
-        agent_record_id=agent_record_id,
-    )
-
-
-def sft_report(agent_record_id: str, reference: str) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.REPORT,
-        payload={"score": 1.0, "references": [reference]},
-        agent_record_id=agent_record_id,
-        references=(reference,),
-    )
+    return token_inference(agent_record_id, artifact_id=artifact_id)
 
 
 def run_workers(thread_count: int, worker) -> list[Exception]:
@@ -155,7 +136,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
         for offset in range(pairs_per_thread):
             index = seed * pairs_per_thread + offset
             dispatcher.accept_record(sft_inference(f"i{index}", base_artifact_id))
-            dispatcher.accept_record(sft_report(f"r{index}", f"i{index}"))
+            dispatcher.accept_record(report(f"r{index}", f"i{index}"))
 
     errors = run_workers(thread_count, worker)
 
@@ -202,7 +183,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
 
     def worker(seed: int) -> None:
         dispatcher.accept_record(sft_inference(f"i{seed}", base_artifact_id))
-        dispatcher.accept_record(sft_report(f"r{seed}", f"i{seed}"))
+        dispatcher.accept_record(report(f"r{seed}", f"i{seed}"))
 
     errors = run_workers(4, worker)
 

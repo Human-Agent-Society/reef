@@ -45,7 +45,7 @@ def sample(
     reply, headers = outer.post("/v1/chat/completions", SCENARIO, body)
     elapsed = time.monotonic() - started
     receipt = headers["x-reef-agent-record-id"]
-    record = records.get(SCENARIO, receipt)
+    record = records.read(SCENARIO, receipt)
     if record is None or record.artifact_id is not None:
         raise RuntimeError(f"Missing or unexpected weight-bound routed record {receipt}")
     routing = record.payload["metadata"]["routing"]

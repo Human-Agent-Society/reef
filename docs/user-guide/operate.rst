@@ -316,7 +316,7 @@ After a step commits, ``/reef/status`` reports its scenario's
 ``error``. Repository revisions stay internal.
 The ``state`` is ``synchronized`` when the backend head names the chain tip,
 ``pending`` when updating it failed, or ``conflict`` when another writer moved it to an
-unrelated release. The committed step remains successful. Before another commit,
+unrelated snapshot. The committed step remains successful. Before another commit,
 Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
@@ -660,7 +660,7 @@ gives the necessary behavior. With a plugin backend, Reef does not use Git LFS
 and does not need its tools. Do not set ``storage.artifact-repository``: Reef
 refuses that configuration, because the plugin reads its own config.
 
-A change from one backend to another does not move releases. Keep the old
+A change from one backend to another does not move snapshots. Keep the old
 store readable while scenarios refer to its snapshots, or use a new deployment.
 With all backends, each scenario needs one Reef writer.
 

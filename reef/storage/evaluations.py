@@ -123,7 +123,7 @@ class EvaluationStore(ABC):
     request (``create``), starts a queued one when a run is free (``begin``),
     ends it when its rollouts end (``finish``, ``fail``), runs an ended one
     again when a client retries its rollouts (``reopen``), and reads the store
-    for the evaluation routes (``get``, ``newest``).
+    for the evaluation routes (``read``, ``newest``).
     """
 
     @abstractmethod
@@ -160,7 +160,7 @@ class EvaluationStore(ABC):
         its ``finished_at``; ``EvaluationStateConflictError`` for any other."""
 
     @abstractmethod
-    def get(self, evaluation_id: str) -> StoredEvaluation | None:
+    def read(self, evaluation_id: str) -> StoredEvaluation | None:
         """The evaluation ``evaluation_id``, or None when the store holds none."""
 
     @abstractmethod

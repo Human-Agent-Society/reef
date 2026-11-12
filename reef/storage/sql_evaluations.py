@@ -168,7 +168,7 @@ class SQLEvaluationStore(EvaluationStore):
             )
         return stored
 
-    def get(self, evaluation_id: str) -> StoredEvaluation | None:
+    def read(self, evaluation_id: str) -> StoredEvaluation | None:
         table = self.table.table
         with self.database._transaction(write=False) as connection:
             row = (

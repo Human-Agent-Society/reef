@@ -9,9 +9,9 @@ from typing import Any
 
 import pytest
 from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtime_bindings
+from tests.support.trajectories import policy_trajectory
 
 from reef.core.job_data import JobOutcome, TaskSample
 from reef.storage.samples import SampleKind
@@ -22,13 +22,13 @@ from reef.train.learning_rate import (
     LearningRateScheduleState,
     resolve_learning_rate_schedule_state,
 )
-from reef.train.pipeline import PipelineConfig
+from reef.train.pipeline import PipelineSettings
 from reef.train.types import JobData
 
 SFT = LearningRateSchedule("sft", 2e-5, warmup_steps=4, decay_style="cosine", decay_steps=8, min_learning_rate=2e-6)
 RL = LearningRateSchedule("rl", 1e-6, warmup_steps=2)
 #: The staged recipe's stages with jobs of one sample.
-ONE_SAMPLE_JOBS = PipelineConfig.from_setting(
+ONE_SAMPLE_JOBS = PipelineSettings.from_setting(
     {"sample2job": {"config": {"job_samples": 1}}}, spec=StagedRecipe.pipeline_spec(), environ={}
 )
 

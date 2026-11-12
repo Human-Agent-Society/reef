@@ -12,7 +12,7 @@ from reef.recipe.composite import CompositeRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.service.deploy.config_utils import DeployConfigError, config_value
 from reef.service.deploy.inference import http_service, local_inference_component
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 from reef.service.deploy.serving import ENGINES, NONE, prepare_engine_serving, serving_mode
 from reef.train.deployment import TrainingDeployment
 
@@ -76,7 +76,7 @@ NO_INFERENCE_REFUSED_SETTINGS = (
 )
 
 
-def validate_no_inference(settings: ServiceConfig) -> None:
+def validate_no_inference(settings: ServiceSettings) -> None:
     """Refuse what ``inference.backend: none`` cannot run: engines, colocation and anything that calls the model.
 
     The deployment trains on uploaded or imported data and serves no request.

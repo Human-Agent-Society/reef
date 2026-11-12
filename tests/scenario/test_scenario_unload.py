@@ -11,8 +11,9 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from tests.support._threshold_processor import threshold_pipeline
+from tests.support.polling import wait_until
 from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.threshold_processor import threshold_pipeline
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -121,20 +122,13 @@ def loaded_names(dispatcher: Dispatcher) -> list[str]:
     return [row["scenario"] for row in dispatcher.list_scenarios() if row["loaded"]]
 
 
-def wait_for(condition, timeout_seconds: float = 10.0) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while not condition():
-        assert time.monotonic() < deadline, "the condition did not become true"
-        time.sleep(0.01)
-
-
 def trained(dispatcher: Dispatcher, name: str, step: int) -> Scenario:
     """Accept one scored pair, and wait until the local worker commits the job of ``step``: its submission, its
     checkpoint and its end, scenario step ``3 * step``."""
     current = dispatcher.get_or_create_scenario(name)
     assert current is not None
     dispatcher.accept_records(scored_pair(name, step))
-    wait_for(lambda: current.scenario_step == 3 * step and not current.trainer.holds_untrained_records())
+    wait_until(lambda: current.scenario_step == 3 * step and not current.trainer.holds_untrained_records())
     return current
 
 
@@ -146,7 +140,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> Non
         artifacts = before.snapshot_queries.snapshot_rows(before.scenario_step)
 
         # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
-        wait_for(lambda: dispatcher.unload_if_idle("math"))
+        wait_until(lambda: dispatcher.unload_if_idle("math"))
         assert loaded_names(dispatcher) == []
         assert [row["scenario"] for row in dispatcher.list_scenarios()] == ["math"]
         assert dispatcher.build_training_status()["loaded_scenarios"] == 0
@@ -167,7 +161,7 @@ def test_idle_unload_runs_after_the_configured_idle_time(tmp_path) -> None:
     dispatcher = make_dispatcher(tmp_path, idle_unload_seconds=0.05)
     try:
         dispatcher.accept_record(scored_pair("math", 1)[0])
-        wait_for(lambda: loaded_names(dispatcher) == [])
+        wait_until(lambda: loaded_names(dispatcher) == [])
         assert dispatcher.get_or_create_scenario("math", allow_implicit_creation=False) is not None
     finally:
         dispatcher.close()

@@ -1,4 +1,4 @@
-"""Artifact-only operations for one ordered chain of immutable releases."""
+"""Artifact-only operations for one ordered chain of immutable snapshots."""
 
 from __future__ import annotations
 

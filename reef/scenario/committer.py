@@ -96,7 +96,7 @@ class ArtifactHeadSync:
 
 
 class ScenarioCommitter:
-    """Order one scenario's commits, activations, new training starts, imports, syncs and retries; delegate release
+    """Order one scenario's commits, activations, new training starts, imports, syncs and retries; delegate snapshot
     queries."""
 
     def __init__(
@@ -132,12 +132,12 @@ class ScenarioCommitter:
         self._lock = RLock()
         # A lone trainer's preparation holds the operation lock across proposer
         # calls and evaluation rollouts, neither of which changes committed
-        # releases. With several trainers a preparation runs outside it; the
+        # snapshots. With several trainers a preparation runs outside it; the
         # dispatcher still runs one step of the scenario at a time.
         # Readers share only the publication lock with commit and activation.
         # Writers must acquire the operation lock first; readers never take it.
         self._publication_lock = RLock()
-        #: Read-only release queries. They share the publication lock with commit and activation.
+        #: Read-only snapshot queries. They share the publication lock with commit and activation.
         self.snapshot_queries = ScenarioSnapshots(
             name=name,
             artifacts=artifacts,
@@ -204,7 +204,7 @@ class ScenarioCommitter:
     def component_on_record(self, component: str | None) -> str | None:
         """The trainer a record or receipt names: ``component`` with several, none with one.
 
-        A scenario of one trainer writes its commit records, release metadata,
+        A scenario of one trainer writes its commit records, snapshot metadata,
         consumption receipts and tracking as it did before components, so
         every write path names no component for it.
         """
@@ -286,7 +286,7 @@ class ScenarioCommitter:
         components = self._binding.components
         if not components.single:
             raise ReefError(
-                f"scenario {self._name!r} serves components {list(components.names)} but release "
+                f"scenario {self._name!r} serves components {list(components.names)} but snapshot "
                 f"{artifact.ref.revision!r} carries no component manifest"
             )
         name = components.names[0] if components.names else self.trainers[0].component
@@ -307,7 +307,7 @@ class ScenarioCommitter:
         missing = [name for name in components.names if name not in manifest.entries]
         if missing:
             raise ReefError(
-                f"scenario {self._name!r} serves components {list(components.names)} but release "
+                f"scenario {self._name!r} serves components {list(components.names)} but snapshot "
                 f"{artifact.ref.revision!r} binds {list(manifest.names)}"
             )
 
@@ -358,7 +358,7 @@ class ScenarioCommitter:
         return component, found[0]
 
     def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
-        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved release that minted it.
+        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved snapshot that minted it.
 
         With one component, ``component`` may be ``None``. With several,
         ``component`` is required. ``artifact_id`` is an opaque identity from
@@ -895,7 +895,7 @@ class ScenarioCommitter:
                 components=self.recorded_components(local_artifact, published_ref.revision),
             )
         except Exception:
-            # A lost append acknowledgment can leave a committed local release.
+            # A lost append acknowledgment can leave a committed local snapshot.
             # Its bytes must survive so retry can settle that exact record.
             if not any(row.snapshot == local_artifact.ref for row in self._store.history()):
                 artifacts.discard(local_artifact)
@@ -935,7 +935,7 @@ class ScenarioCommitter:
         except ArtifactNotFoundError:
             return None
         if stored.parent_revision != checkpoint.revision:
-            raise ArtifactConflictError(f"artifact {artifact_id!r} is already in release {stored.revision!r}")
+            raise ArtifactConflictError(f"artifact {artifact_id!r} is already in snapshot {stored.revision!r}")
         return stored
 
     def snapshot_metadata(
@@ -1039,7 +1039,7 @@ class ScenarioCommitter:
         """Stage the snapshot ``carried`` with ``component`` bound to ``content``, on the chain tip as its parent.
 
         The snapshot's own check runs on the staged snapshot; the carried
-        components were admitted when they were published. A refused release
+        components were admitted when they were published. A refused snapshot
         is discarded.
         """
         components = self._binding.components
@@ -1092,7 +1092,7 @@ class ScenarioCommitter:
         self.advance_to(record.step)
 
     def finish_recorded_retry(self, record: CommitRecord, prepared: PreparedCommit, trainer: Trainer) -> CommitRecord:
-        """Retry storage settlement, then complete the exact release already on record."""
+        """Retry storage settlement, then complete the exact snapshot already on record."""
         record = self._store.commit_step(expected_step=self._step, commit=record)
         previous = active_snapshot(self._store.history()[:-1], self.snapshot_queries.creation_artifact)
         self.finish_committed_step(

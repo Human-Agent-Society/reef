@@ -4,17 +4,13 @@ from __future__ import annotations
 
 from reef.inference.engine_control import EngineInferenceService
 from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangSettings
 from reef.inference.sglang.launch import engine_environment
 
-# Keep the existing wire identifier while removing its implementation dependency.
-INFERENCE_PROTOCOL = "slime-sglang-control-v2"
 
-
-class SGLangInferenceService(EngineInferenceService[SGLangConfig]):
+class SGLangInferenceService(EngineInferenceService[SGLangSettings]):
     """Own SGLang engines and the control actor; borrow the deployment allocation."""
 
-    connection_protocol = INFERENCE_PROTOCOL
     engine_name = "SGLang"
     control_worker_cls = "reef.inference.sglang.control:SGLangControl"
     backend_type = SGLangInferenceBackend

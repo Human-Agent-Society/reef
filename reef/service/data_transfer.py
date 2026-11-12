@@ -82,13 +82,13 @@ def start_transfer(data: DataAccess, owner: str, segment: str, body: Mapping[str
         if body.get("kind") is not None and body["kind"] not in KINDS:
             raise ValueError(f"an export's kind is one of {', '.join(KINDS)}")
     payload = cast(dict[str, JsonValue], {"owner": owner, **body})
-    item = data.queue.add(NewWork(DATA_QUEUE, f"{kind}:{uuid.uuid4().hex}", owner, kind, payload))
+    item = data.queue.append(NewWork(DATA_QUEUE, f"{kind}:{uuid.uuid4().hex}", owner, kind, payload))
     return transfer_json(item)
 
 
 def transfer_status(data: DataAccess, owner: str, segment: str, transfer_id: str) -> dict[str, Any]:
     """The status of the import or export ``transfer_id`` of ``owner``; ``ItemNotFoundError`` for another ID."""
-    item = data.queue.get(DATA_QUEUE, transfer_id)
+    item = data.queue.read(DATA_QUEUE, transfer_id)
     if item is None or item.kind != TRANSFER_KINDS[segment] or item.payload.get("owner") != owner:
         raise ItemNotFoundError(f"{owner!r} has no {segment[:-1]} {transfer_id!r}")
     return transfer_json(item)

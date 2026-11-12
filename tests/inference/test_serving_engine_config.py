@@ -14,7 +14,7 @@ from reef.inference.sglang import config as sglang_config
 from reef.inference.sglang.deployment import create_inference
 from reef.inference.sglang.launch import engine_environment
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 
 FULL = ArtifactFormat("full")
 ADAPTER = ArtifactFormat("adapter", 8, ("q_proj", "v_proj"))
@@ -144,9 +144,9 @@ def test_another_engine_name_gets_the_sglang_input():
 def test_vllm_input_keeps_vllm_option_names_and_the_pause_mode():
     values = engine_input("vllm", options={"max-model-len": 4096, "gpu-memory-utilization": 0.5})
     assert values["options"] == {"max_model_len": 4096, "gpu_memory_utilization": 0.5, "trust_remote_code": True}
-    config = VLLMConfig(**values)
+    config = VLLMSettings(**values)
     assert config.pause_mode == "in_place"
-    assert VLLMConfig(**engine_input("vllm", prefix_sharing=True)).pause_mode == "retract"
+    assert VLLMSettings(**engine_input("vllm", prefix_sharing=True)).pause_mode == "retract"
     assert engine_input("vllm", options={"trust-remote-code": False})["options"]["trust_remote_code"] is False
 
 

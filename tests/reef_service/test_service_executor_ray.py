@@ -11,7 +11,7 @@ import urllib.request
 
 import pytest
 
-from reef.execution.executor import Executor, ExecutorConfig, ExecutorFailedError, WorkerSpec
+from reef.execution.executor import Executor, ExecutorFailedError, ExecutorLaunch, WorkerSpec
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
 from reef.service.deploy.execution import validate_services
@@ -136,7 +136,7 @@ def test_killing_ray_owner_retires_its_service_process_group(tmp_path, ray_clust
         "ready": f"curl -sf http://127.0.0.1:{port}/",
     }
     executor = Executor.create(
-        ExecutorConfig(
+        ExecutorLaunch(
             backend="ray",
             workers=(
                 WorkerSpec(

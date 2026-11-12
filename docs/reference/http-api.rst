@@ -220,7 +220,7 @@ Headers
 +-----------------------------------+---------------------------------------------------------+
 | Header                            | Required for                                            |
 +===================================+=========================================================+
-| ``x-reef-scenario``               | inference, report, harness manifest, releases and       |
+| ``x-reef-scenario``               | inference, report, harness manifest, artifacts and      |
 |                                   | import. Names the workload a record belongs to.         |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
@@ -233,7 +233,7 @@ Headers
 |                                   | artifact, use ``?artifact_id=``.                        |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-tag-<name>``             | optional on inference: context stored under             |
-|                                   | ``metadata.tags``; see `Client release tags`_ below.    |
+|                                   | ``metadata.tags``; see `Client artifact tags`_ below.   |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
 |                                   | runs itself. It is served like any other call, but no   |
@@ -496,7 +496,7 @@ Batch imports and resume
 ``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each
 record uses the same three-field envelope as ``POST /reef/records``. The batch
 must contain 1 to 1000 records and fit within the 10 MiB request-body limit.
-All records share the request's scenario, release and tag headers. Put an
+All records share the request's scenario and tag headers. Put an
 inference before reports that reference it, including within the same batch.
 
 Reef validates the entire batch and persists it in one database transaction.
@@ -831,7 +831,7 @@ The data service makes an item for each artifact that a scenario lists
 (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
 ``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, artifact_id}``.
 Its ``source_uri`` comes from the artifact backend: a backend
-that keeps releases where other deployments can read them, such as an object
+that keeps snapshots where other deployments can read them, such as an object
 store, gives the URI of the snapshot's directory. The built-in ``git_lfs``
 backend gives none, so its items have a null ``source_uri``.
 
@@ -1498,8 +1498,8 @@ A request is not a record: it waits in the deployment's training request queue
 until a training commit consumes it, and the commit keeps it in its
 ``training_request`` metrics. It takes the user's ``text``,
 originating ``session`` and ``artifact_id``. These fields identify the session
-and release the request came from. The backend operates on the current
-committed state; it does not restore the originating release. The API
+and artifact the request came from. The backend operates on the current
+committed state; it does not restore the originating artifact. The API
 requires no inference receipts or score. ``samples`` names the samples that
 the request's job trains (see `Choose the samples that train
 <#choose-the-samples-that-train>`__). ``train_from`` names the artifact that
@@ -1621,7 +1621,7 @@ rules still determine whether the result becomes served.
 requests also report ``pending_requests`` (accepted requests that
 no commit consumed yet, read from the queue).
 Committed step metrics include ``training_request`` with the request
-id, text, session, release id and ``requires``; the snapshots row of a step
+id, text, session, artifact id and ``requires``; the snapshots row of a step
 that answered a request carries, for example:
 
 .. code:: json
@@ -1651,7 +1651,7 @@ Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after capacity eviction; reusing the id with
 different content returns HTTP 409. Without it, each submission gets a fresh
 id. Empty text, text longer than 4000 characters, missing or non-string
-session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
+session/artifact fields, or a request to an ``auto`` scenario returns HTTP 400.
 Text that carries a credential shaped literal or an instruction override
 phrasing is refused with HTTP 400 and a reason that names the rule, never
 the text; nothing is stored. The scenario must exist: an unknown scenario
@@ -2659,7 +2659,7 @@ field and checks it. An artifact without a setting is served with the
 deployment's model.
 
 You can change a setting at any time. The runtime applies it when inference
-next serves the scenario. A release that runs keeps its engine.
+next serves the scenario. An artifact that runs keeps its engine.
 
 An artifact that training makes names its training starts in its own metadata,
 ``training_starts``: the artifact ID of its training start, then that start's
@@ -3054,7 +3054,7 @@ The page shows why the step ran (the request, or a failure in the job data),
 ``method_summary``, the patch against the artifact the step ran on,
 the evaluation's numbers, ``method_notes`` and ``requires``. It also links
 the parent step and later training or sync operations. The selected artifact's
-page retains the legacy ``Active release`` label. A step that made an artifact that was never activated
+page reads ``Active selection``. A step that made an artifact that was never activated
 (``activated: false``) reads ``Waiting for activation``. The row itself is in
 a ``<script type="application/json">`` block at the end of the page. A step
 outside the catalog, or one that is not a number of at most nine digits, is

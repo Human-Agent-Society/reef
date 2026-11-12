@@ -49,7 +49,7 @@ from reef.service.assembly import (
     serving_recipe,
 )
 from reef.service.auth import evaluation_token_for
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import ServedModelsCache, build_inference_app
 from reef.service.routed_replica import ReplicaRecords, add_replica_routing
@@ -69,20 +69,20 @@ class ComponentApp(ABC):
     """
 
     @abstractmethod
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application: ...
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application: ...
 
 
 class ControlApp(ComponentApp):
     """Control: the Reef HTTP API except the data routes."""
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         return build_app(settings, environ=environ, components=frozenset({"control"}))
 
 
 class InferenceApp(ComponentApp):
     """The inference service owns runtime startup and serves requests from published routes."""
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         recipe = serving_recipe(settings, environ)
         runtime = recipe.runtime
         coordination = open_service_coordination(settings)
@@ -154,7 +154,7 @@ class DataApp(ComponentApp):
     """The data service: a dispatcher that loads each scenario on demand, for the checks of a write and for the
     reads, and runs the data workers."""
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         return create_data_app(
             build_dispatcher(settings, environ=environ, components=frozenset({"data"})),
             tokens=settings.tokens,
@@ -166,7 +166,7 @@ class HarnessApp(ComponentApp):
     """The harness service: a dispatcher that loads each scenario on demand, without activating it, and serves the
     routes that a harness client calls."""
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({"harness"}))
         if not dispatcher.recipe.harness_adapter:
             dispatcher.close()
@@ -188,7 +188,7 @@ class TrainingApp(ComponentApp):
     the data store, which keeps the data directory of each job.
     """
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         recipe = serving_recipe(settings, environ)
         if isinstance(recipe, CompositeRecipe):
             recipe = recipe.with_served_endpoint(
@@ -267,7 +267,7 @@ class QueueServiceApp(ComponentApp):
     def __init__(self, name: str) -> None:
         self.name = name
 
-    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+    def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
         app = service_application(settings.tokens)
 
@@ -292,7 +292,7 @@ COMPONENT_APPS: dict[str, ComponentApp] = {
 
 def build_component_app(
     component: str,
-    settings: ServiceConfig,
+    settings: ServiceSettings,
     *,
     environ: Mapping[str, str] | None = None,
 ) -> web.Application:

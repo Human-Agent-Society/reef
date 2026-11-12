@@ -11,7 +11,7 @@ from reef.storage.job_data import JobDataKind
 from reef.train.algos.schedule import StepScheduling
 from reef.train.learning_rate import LEARNING_RATE_DECAY_STYLES, LearningRateSchedule
 from reef.train.task_rollouts import RolloutSettings
-from reef.train.tinker_backend.config import TinkerServiceConfig
+from reef.train.tinker_backend.config import TinkerServiceSettings
 from reef.train.tinker_backend.objectives import resolve_tinker_objective
 
 
@@ -67,7 +67,7 @@ class TinkerJobParameters:
         resolve_tinker_objective(self.objective).validate_scheduling(self.scheduling)
 
     @classmethod
-    def from_parameters(cls, parameters: Mapping[str, Any], config: TinkerServiceConfig) -> TinkerJobParameters:
+    def from_parameters(cls, parameters: Mapping[str, Any], config: TinkerServiceSettings) -> TinkerJobParameters:
         """``parameters`` over the defaults of ``config``. ``ValueError``: a key is unknown, or a value is malformed."""
         unknown = set(parameters) - set(cls.__dataclass_fields__)
         if unknown:

@@ -1,6 +1,6 @@
-"""Read scenario releases and their committed training metadata.
+"""Read scenario snapshots and their committed training metadata.
 
-Release queries share the committer's publication lock. They never acquire
+Snapshot queries share the committer's publication lock. They never acquire
 its operation lock, so long-running training preparation cannot block serving.
 """
 
@@ -161,7 +161,7 @@ class ScenarioSnapshots:
             return tuple(reversed(rows))
 
     def manifests(self, scenario_step: int) -> dict[str, Mapping[str, str]]:
-        """The ``artifact_id`` of each component, by release, for every snapshot whose manifest is known.
+        """The ``artifact_id`` of each component, by snapshot revision, for every snapshot whose manifest is known.
 
         A training record that made a snapshot and an activation that
         published one carry their manifest; the creation's is read from the
@@ -279,7 +279,7 @@ class ScenarioSnapshots:
         return {name: manifest[name] for name in components if name in manifest}
 
     def served_history(self, scenario_step: int, component: str, components: tuple[str, ...]) -> tuple[str, ...]:
-        """The artifacts of ``component`` that the active releases of the scenario bound, oldest first, with no two
+        """The artifacts of ``component`` that the active snapshots of the scenario bound, oldest first, with no two
         neighbors equal: the creation's, then each activating record's. Empty for a store without a durable history."""
         records = self.records()
         if not records:
@@ -398,7 +398,7 @@ class ScenarioSnapshots:
         return None
 
     def artifact_for_version(self, revision: str) -> Artifact:
-        """Materialize a scenario release for a read-only content serve.
+        """Materialize a scenario snapshot for a read-only content serve.
 
         The read-side counterpart of ``activate``: the same snapshot lookup,
         but no head moves and no commit is written; the caller only wants the
@@ -418,7 +418,9 @@ class ScenarioSnapshots:
         try:
             return self._artifacts.resolve(ref)
         except ArtifactError as exc:
-            raise ArtifactNotFoundError(f"scenario {self._name!r} cannot restore release {revision!r}: {exc}") from exc
+            raise ArtifactNotFoundError(
+                f"scenario {self._name!r} cannot restore snapshot {revision!r}: {exc}"
+            ) from exc
 
     @staticmethod
     def snapshot_row(

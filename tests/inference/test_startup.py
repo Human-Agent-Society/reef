@@ -9,7 +9,7 @@ import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -443,7 +443,7 @@ def test_a_redeploy_stops_the_held_start_and_the_next_control_round_keeps_it(sto
     # The held start stops within seconds, not when the engine would have started.
     held.join(5)
     assert not held.is_alive()
-    stopped = control.coordination.work_queue.get(SERVING_QUEUE, first.id)
+    stopped = control.coordination.work_queue.read(SERVING_QUEUE, first.id)
     assert (stopped.state, stopped.error) == ("failed", serving.REPLACED)
     # A control round compares the payloads without the redeploy number, so it keeps the redeploy request.
     control.publisher.run_once()

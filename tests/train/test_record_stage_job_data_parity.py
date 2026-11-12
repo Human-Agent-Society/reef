@@ -21,11 +21,11 @@ from pathlib import Path
 from typing import Any, Self
 
 import pytest
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, job_sized_stages
 from tests.support.samples_service import make_samples
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.trajectories import policy_trajectory
 
 from recipes.beta.coral.recipe import CoralRecipe
 from recipes.sdpo import SDPOReport

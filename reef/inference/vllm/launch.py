@@ -7,12 +7,13 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from reef.execution.executor.placement import GpuBundles
 from reef.inference.process import EngineGroup, EngineStartup
-from reef.inference.vllm.config import VLLMConfig
+from reef.inference.vllm.config import VLLMSettings
 from reef.inference.vllm.engine import ReefVLLMEngine
 
 
-def engine_environment(config: VLLMConfig) -> dict[str, str]:
+def engine_environment(config: VLLMSettings) -> dict[str, str]:
     """Ray must leave device visibility alone: every engine names its own GPUs."""
     return {
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1",
@@ -29,7 +30,7 @@ class VLLMEngineGroup(EngineGroup):
     group, one bundle index per GPU and the physical GPU ids in bundle order.
     """
 
-    def __init__(self, config: VLLMConfig, placement: Any) -> None:
+    def __init__(self, config: VLLMSettings, placement: GpuBundles) -> None:
         self.config = config
         self.placement = placement
         self.all_engines: list[Any] = [None] * config.engine_count
@@ -41,9 +42,8 @@ class VLLMEngineGroup(EngineGroup):
         return [engine for engine in self.all_engines if engine is not None]
 
     def gpu_ids(self, index: int) -> tuple[int, ...]:
-        _, _, devices = self.placement
         width = self.config.gpus_per_engine
-        selected = devices[index * width : (index + 1) * width]
+        selected = self.placement.gpu_ids[index * width : (index + 1) * width]
         if len(selected) != width:
             raise ValueError("inference placement is smaller than its vLLM engines")
         return tuple(int(device) for device in selected)
@@ -74,10 +74,9 @@ class VLLMEngineGroup(EngineGroup):
         return pending
 
     def _launch_actor(self, index: int) -> Any:
-        pg, bundles, _ = self.placement
         strategy = PlacementGroupSchedulingStrategy(
-            placement_group=pg,
-            placement_group_bundle_index=bundles[index * self.config.gpus_per_engine],
+            placement_group=self.placement.group,
+            placement_group_bundle_index=self.placement.bundle_indices[index * self.config.gpus_per_engine],
             placement_group_capture_child_tasks=True,
         )
         return (

@@ -1,11 +1,11 @@
 import logging
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 
 import pytest
+from tests.support.polling import wait_until
 
 from reef.core.errors import RuntimeConfigError
 from reef.core.plugins import PluginConfigError
@@ -72,7 +72,7 @@ def job(
 @pytest.mark.unit
 def test_an_attempt_that_its_worker_gave_back_does_not_count(open_coordination):
     queue = open_coordination(max_attempts={"jobs": 2}).queue
-    queue.add(job("a"), now=0)
+    queue.append(job("a"), now=0)
     # A service that restarts three times gives the item back three times.
     for restart in range(3):
         queue.take("jobs", f"w{restart}", ["training_job:tinker"], now=restart)
@@ -91,8 +91,8 @@ def test_an_attempt_that_its_worker_gave_back_does_not_count(open_coordination):
 @pytest.mark.unit
 def test_a_worker_takes_the_oldest_item_it_accepts_and_finishes_it_under_its_lease(open_coordination):
     queue = open_coordination().queue
-    queue.add(job("a"), now=0)
-    queue.add(job("b", kind="training_job:slime", serial_key=None), now=0)
+    queue.append(job("a"), now=0)
+    queue.append(job("b", kind="training_job:slime", serial_key=None), now=0)
 
     assert queue.take("jobs", "w1", ["training_job:other"], now=1) is None
     taken = queue.take("jobs", "w1", ["training_job:tinker", "training_job:slime"], now=1)
@@ -100,10 +100,10 @@ def test_a_worker_takes_the_oldest_item_it_accepts_and_finishes_it_under_its_lea
     assert taken.worker_id == "w1" and taken.lease_expires_at == 11 and taken.attempt_count == 1
 
     queue.start("jobs", "a", "w1", now=2)
-    queue.add_progress("jobs", "a", "w1", {"step": 1}, number=0, now=2)
-    queue.add_progress("jobs", "a", "w1", {"step": 1}, number=0, now=2)  # a continuing worker reports again safely
+    queue.append_progress("jobs", "a", "w1", {"step": 1}, number=0, now=2)
+    queue.append_progress("jobs", "a", "w1", {"step": 1}, number=0, now=2)  # a continuing worker reports again safely
     with pytest.raises(ValueError, match="skips"):
-        queue.add_progress("jobs", "a", "w1", {"step": 3}, number=2, now=2)
+        queue.append_progress("jobs", "a", "w1", {"step": 3}, number=2, now=2)
     with pytest.raises(WorkLeaseLostError):
         queue.finish("jobs", "a", "w2", {"ok": True})
     done = queue.finish("jobs", "a", "w1", {"ok": True}, now=3)
@@ -114,18 +114,18 @@ def test_a_worker_takes_the_oldest_item_it_accepts_and_finishes_it_under_its_lea
 @pytest.mark.unit
 def test_adding_is_idempotent_by_id_and_rejects_a_different_payload(open_coordination):
     queue = open_coordination().queue
-    first = queue.add(job("a"))
-    assert queue.add(job("a")) == first
+    first = queue.append(job("a"))
+    assert queue.append(job("a")) == first
     with pytest.raises(WorkConflictError):
-        queue.add(NewWork("jobs", "a", "s", "training_job:tinker", {"input": "other"}))
+        queue.append(NewWork("jobs", "a", "s", "training_job:tinker", {"input": "other"}))
 
 
 @pytest.mark.unit
 def test_items_with_one_serial_key_run_one_at_a_time_in_order(open_coordination):
     queue = open_coordination().queue
-    queue.add(job("first"), now=0)
-    queue.add(job("second"), now=0)
-    queue.add(job("other", scenario="t", serial_key="t"), now=0)
+    queue.append(job("first"), now=0)
+    queue.append(job("second"), now=0)
+    queue.append(job("other", scenario="t", serial_key="t"), now=0)
 
     taken = [queue.take("jobs", "w", ["training_job:tinker"], now=1) for _ in range(3)]
     assert [item.id if item else None for item in taken] == ["first", "other", None]
@@ -136,7 +136,7 @@ def test_items_with_one_serial_key_run_one_at_a_time_in_order(open_coordination)
 @pytest.mark.unit
 def test_an_expired_lease_returns_the_item_and_a_late_worker_loses_it(open_coordination):
     queue = open_coordination(max_attempts={"jobs": 2}).queue
-    queue.add(job("a"), now=0)
+    queue.append(job("a"), now=0)
     queue.take("jobs", "w1", ["training_job:tinker"], now=0)
     assert queue.extend_lease("jobs", "a", "w1", now=5).lease_expires_at == 15
 
@@ -152,7 +152,7 @@ def test_an_expired_lease_returns_the_item_and_a_late_worker_loses_it(open_coord
 @pytest.mark.unit
 def test_a_retryable_failure_requeues_until_the_attempts_run_out(open_coordination):
     queue = open_coordination(max_attempts={"jobs": 2}).queue
-    queue.add(job("a"), now=0)
+    queue.append(job("a"), now=0)
     queue.take("jobs", "w", ["training_job:tinker"], now=0)
     retried = queue.fail("jobs", "a", "w", "transient", retryable=True, now=1)
     assert retried.state == "queued" and retried.error == "transient"
@@ -174,7 +174,7 @@ def test_a_request_reuses_the_queued_item_of_its_key_and_ended_items_go_after_th
 
     assert queue.delete_final(finished_before=4) == 0
     assert queue.delete_final(finished_before=5) == 1
-    assert queue.get("data", first.id) is None and queue.get("data", second.id) is not None
+    assert queue.read("data", first.id) is None and queue.read("data", second.id) is not None
     # The next request after a deletion gets a new ID: no ID is used twice.
     queue.take("data", "w1", ["record_copy"], now=6)
     third = queue.request("data", "s", "record_copy", "record_copy:s", {}, now=7)
@@ -224,10 +224,10 @@ def warnings_of(caplog) -> list[str]:
 def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, error, attempts, state):
     with closing(SQLiteCoordinationDatabase(None)) as database:
         queue = SQLWorkQueue(database, max_attempts={"jobs": attempts})
-        queue.add(job("a"))
+        queue.append(job("a"))
         with caplog.at_level(logging.WARNING, logger="reef.execution.workers"):
             assert FailingWorker(queue, error).run_once()
-        item = queue.get("jobs", "a")
+        item = queue.read("jobs", "a")
         assert item.state == state
         assert warnings_of(caplog) == (
             [f"work item jobs/a of scenario s failed: {item.error}"] if state == "failed" else []
@@ -249,9 +249,9 @@ def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, err
 def test_a_worker_stores_an_error_message_with_surrounding_spaces(error, stored):
     with closing(SQLiteCoordinationDatabase(None)) as database:
         queue = SQLWorkQueue(database, max_attempts={"jobs": 1})
-        queue.add(job("a"))
+        queue.append(job("a"))
         assert FailingWorker(queue, error).run_once()
-        item = queue.get("jobs", "a")
+        item = queue.read("jobs", "a")
         assert (item.state, item.error) == ("failed", stored)
 
 
@@ -259,11 +259,11 @@ def test_a_worker_stores_an_error_message_with_surrounding_spaces(error, stored)
 def test_a_worker_logs_an_expired_item_that_has_no_attempts_left(caplog):
     with closing(SQLiteCoordinationDatabase(None)) as database:
         queue = SQLWorkQueue(database, lease_seconds=10, max_attempts={"jobs": 1})
-        queue.add(job("a"), now=0)
+        queue.append(job("a"), now=0)
         queue.take("jobs", "stopped-worker", ["training_job:tinker"], now=0)
         with caplog.at_level(logging.WARNING, logger="reef.execution.workers"):
             assert not FailingWorker(queue, ItemFailedError("unused")).run_once()
-        assert queue.get("jobs", "a").state == "failed"
+        assert queue.read("jobs", "a").state == "failed"
         assert warnings_of(caplog) == ["work item jobs/a of scenario s failed: the worker's lease expired"]
 
 
@@ -291,27 +291,21 @@ class WaitingWorker(QueueWorker):
                 self.running.discard(item.id)
 
 
-def wait_until(condition) -> None:
-    deadline = time.monotonic() + 5
-    while not condition():
-        if time.monotonic() > deadline:
-            raise AssertionError("the condition did not become true in 5 s")
-        time.sleep(0.01)
-
-
 @pytest.mark.unit
 def test_a_worker_runs_at_most_its_slots_of_items_at_once(tmp_path):
     with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
         queue = SQLWorkQueue(database, lease_seconds=10)
         for item_id in "abcde":
-            queue.add(job(item_id, serial_key=None))
+            queue.append(job(item_id, serial_key=None))
         worker = WaitingWorker(queue, slots=3)
         worker.start()
         try:
-            wait_until(lambda: len(worker.running) == 3)
-            assert [queue.get("jobs", item_id).state for item_id in "de"] == ["queued", "queued"]
+            wait_until(lambda: len(worker.running) == 3, timeout_seconds=5)
+            assert [queue.read("jobs", item_id).state for item_id in "de"] == ["queued", "queued"]
             worker.release.set()
-            wait_until(lambda: all(queue.get("jobs", item_id).state == "finished" for item_id in "abcde"))
+            wait_until(
+                lambda: all(queue.read("jobs", item_id).state == "finished" for item_id in "abcde"), timeout_seconds=5
+            )
         finally:
             worker.stop()
         assert worker.most_running == 3
@@ -322,13 +316,13 @@ def test_a_stopped_worker_returns_every_item_in_progress_to_the_queue(tmp_path):
     with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
         queue = SQLWorkQueue(database, lease_seconds=10)
         for item_id in "ab":
-            queue.add(job(item_id, serial_key=None))
+            queue.append(job(item_id, serial_key=None))
         worker = WaitingWorker(queue, slots=2)
         worker.start()
-        wait_until(lambda: len(worker.running) == 2)
+        wait_until(lambda: len(worker.running) == 2, timeout_seconds=5)
         worker.stop()
         assert worker.item_threads == []
-        assert [queue.get("jobs", item_id).state for item_id in "ab"] == ["queued", "queued"]
+        assert [queue.read("jobs", item_id).state for item_id in "ab"] == ["queued", "queued"]
 
 
 @pytest.mark.unit
@@ -341,7 +335,7 @@ def test_a_worker_needs_a_positive_integer_of_slots(slots):
 @pytest.mark.unit
 def test_an_item_waits_for_its_available_time_and_readers_follow_changes_in_order(open_coordination):
     queue = open_coordination().queue
-    queue.add(NewWork("samples", "pass-1", "s", "record_selection", {}, available_at=50), now=0)
+    queue.append(NewWork("samples", "pass-1", "s", "record_selection", {}, available_at=50), now=0)
     assert queue.take("samples", "w", ["record_selection"], now=10) is None
     assert queue.take("samples", "w", ["record_selection"], now=50).id == "pass-1"
 
@@ -353,7 +347,7 @@ def test_an_item_waits_for_its_available_time_and_readers_follow_changes_in_orde
 @pytest.mark.unit
 def test_an_item_records_when_a_worker_first_took_it_and_when_it_ended(open_coordination):
     queue = open_coordination(max_attempts={"jobs": 2}).queue
-    added = queue.add(job("a"), now=1)
+    added = queue.append(job("a"), now=1)
     assert (added.created_at, added.started_at, added.ended_at) == (1, None, None)
     queue.take("jobs", "w1", ["training_job:tinker"], now=2)
     retried = queue.fail("jobs", "a", "w1", "transient", retryable=True, now=3)
@@ -363,12 +357,12 @@ def test_an_item_records_when_a_worker_first_took_it_and_when_it_ended(open_coor
     done = queue.finish("jobs", "a", "w2", {}, now=5)
     assert (done.started_at, done.ended_at) == (2, 5)
 
-    queue.add(job("b", serial_key=None), now=6)
+    queue.append(job("b", serial_key=None), now=6)
     queue.take("jobs", "w1", ["training_job:tinker"], now=7)
     assert queue.requeue_expired(now=100)[0].ended_at is None
     queue.take("jobs", "w1", ["training_job:tinker"], now=101)
     assert queue.requeue_expired(now=200)[0].ended_at == 200
-    queue.add(job("c", serial_key=None), now=8)
+    queue.append(job("c", serial_key=None), now=8)
     cancelled = queue.cancel("jobs", "c", "cancelled")
     assert cancelled.started_at is None and cancelled.ended_at is not None
 
@@ -376,18 +370,18 @@ def test_an_item_records_when_a_worker_first_took_it_and_when_it_ended(open_coor
 @pytest.mark.unit
 def test_a_reader_sets_metadata_on_any_item_and_an_equal_value_changes_nothing(open_coordination):
     queue = open_coordination().queue
-    assert queue.set_metadata("jobs", "missing", "experiment", {"run_id": "r"}) is None
-    queue.add(job("a"), now=0)
+    assert queue.write_metadata("jobs", "missing", "experiment", {"run_id": "r"}) is None
+    queue.append(job("a"), now=0)
     queue.take("jobs", "w", ["training_job:tinker"], now=1)
     done = queue.finish("jobs", "a", "w", {"ok": True}, now=2)
 
     # A final item takes metadata too; its state, result and times stay.
-    noted = queue.set_metadata("jobs", "a", "experiment", {"run_id": "r"})
+    noted = queue.write_metadata("jobs", "a", "experiment", {"run_id": "r"})
     assert noted.metadata == {"experiment": {"run_id": "r"}}
     assert (noted.state, noted.result, noted.ended_at) == ("finished", {"ok": True}, 2)
     assert noted.changed_sequence > done.changed_sequence
-    assert queue.set_metadata("jobs", "a", "experiment", {"run_id": "r"}) == noted
-    assert queue.set_metadata("jobs", "a", "other", 1).metadata == {"experiment": {"run_id": "r"}, "other": 1}
+    assert queue.write_metadata("jobs", "a", "experiment", {"run_id": "r"}) == noted
+    assert queue.write_metadata("jobs", "a", "other", 1).metadata == {"experiment": {"run_id": "r"}, "other": 1}
     # Retention counts from the end, not from the last metadata change.
     assert queue.delete_final(finished_before=3) == 1
 
@@ -433,7 +427,7 @@ def test_served_models_writes_need_the_current_control_lease_number(open_coordin
     assert table.due_stops(29) == () and table.due_stops(30) == (ScheduledStop(served, 30),)
     table.delete_stop(served, control_lease_number=3)
     assert table.due_stops(100) == ()
-    assert table.remove(ScenarioModel("s"), control_lease_number=3) == served
+    assert table.delete(ScenarioModel("s"), control_lease_number=3) == served
     assert not table.is_referenced(served)
 
 
@@ -477,7 +471,7 @@ def test_control_takeover_waits_for_the_serving_request_transaction(open_coordin
 def test_two_workers_never_hold_one_item(open_coordination):
     queue = open_coordination().queue
     for index in range(20):
-        queue.add(NewWork("evaluations", f"rollout-{index}", "s", "evaluation_rollout", {"k": index}), now=0)
+        queue.append(NewWork("evaluations", f"rollout-{index}", "s", "evaluation_rollout", {"k": index}), now=0)
     taken: list[str] = []
     lock = threading.Lock()
 
@@ -538,8 +532,8 @@ def test_new_selection_waits_for_held_engine_work_but_rejects_its_obsolete_route
     old = queue.take(SERVING_QUEUE, "first", [SERVING_KIND], now=1)
     waiting = table.request("s", {"artifact_id": "b"}, control_lease_number=lease.number, now=2)
     newest = table.request("s", {"artifact_id": "c"}, control_lease_number=lease.number, now=3)
-    assert queue.get(SERVING_QUEUE, waiting.id).state == "failed"
-    assert queue.get(SERVING_QUEUE, old.id).state == "assigned"
+    assert queue.read(SERVING_QUEUE, waiting.id).state == "failed"
+    assert queue.read(SERVING_QUEUE, old.id).state == "assigned"
     assert queue.take(SERVING_QUEUE, "second", [SERVING_KIND], now=4) is None
     obsolete = table.complete_request(
         old,
@@ -658,7 +652,7 @@ def test_replaced_routes_stop_only_when_unreferenced_and_cleanup_keeps_a_newer_s
     assert table.due_stops(100) == ()
     table.request("t", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=4)
     stop = table.due_stops(14)[0]
-    queue.add(NewWork(SERVING_QUEUE, "stop-1", "t", STOP_SERVING_KIND, {}, serial_key=SERVING_QUEUE), now=14)
+    queue.append(NewWork(SERVING_QUEUE, "stop-1", "t", STOP_SERVING_KIND, {}, serial_key=SERVING_QUEUE), now=14)
     item = queue.take(SERVING_QUEUE, "worker", [STOP_SERVING_KIND], now=14)
     table.schedule_stop(ScheduledStop(served, 30), control_lease_number=lease.number)
     table.complete_stop(item, "worker", stop, now=15)
@@ -683,7 +677,7 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     previous = ServedArtifact("previous-c", "http://engine", "previous-c")
     table.write(ScenarioModel("queued"), previous, control_lease_number=lease.number)
     table.write(ScenarioModel("failed"), previous, control_lease_number=lease.number)
-    queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
+    queue.append(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
     owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=3)
 
     table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(), now=4)
@@ -712,7 +706,7 @@ def test_a_new_owner_keeps_the_routes_whose_engines_still_serve_until_it_serves_
         table.request(scenario, {"artifact_id": served.artifact_id}, control_lease_number=lease.number, now=0)
         running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
         table.complete_request(running, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=2)
-    queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
+    queue.append(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=3)
     owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=3)
 
     table.recover_completed(owner, "worker", stop_delay_seconds=10, kept=(live,), now=4)
@@ -728,7 +722,7 @@ def test_startup_and_cleanup_completion_require_the_current_runtime_owner(open_c
     lease = stores.lease.acquire("control", now=0)
     table, queue = stores.served, stores.queue
     served = ServedArtifact("a", "http://engine", "a")
-    queue.add(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=0)
+    queue.append(NewWork(INFERENCE_OWNER_QUEUE, "owner", "runtime", INFERENCE_OWNER_QUEUE), now=0)
     owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=0)
     table.request("s", {"artifact_id": "a"}, control_lease_number=lease.number, now=0)
     startup = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
@@ -750,7 +744,7 @@ def test_startup_and_cleanup_completion_require_the_current_runtime_owner(open_c
 
     stop = ScheduledStop(ServedArtifact("old", "http://engine", "old"), 14)
     table.schedule_stop(stop, control_lease_number=lease.number)
-    queue.add(NewWork(SERVING_QUEUE, "stop", "s", STOP_SERVING_KIND, serial_key=SERVING_QUEUE), now=14)
+    queue.append(NewWork(SERVING_QUEUE, "stop", "s", STOP_SERVING_KIND, serial_key=SERVING_QUEUE), now=14)
     cleanup = queue.take(SERVING_QUEUE, "worker", [STOP_SERVING_KIND], now=14)
     with pytest.raises(WorkLeaseLostError, match="later attempt"):
         table.complete_stop(cleanup, "worker", stop, owner=owner, now=15)
@@ -779,9 +773,9 @@ def test_replacing_an_artifact_at_the_same_endpoint_does_not_stop_that_endpoint(
 @pytest.mark.unit
 def test_queue_pages_and_counts_are_scoped_and_newest_first(open_coordination):
     queue = open_coordination().queue
-    first = queue.add(job("a", serial_key=None), now=0)
-    second = queue.add(job("b", serial_key=None), now=0)
-    queue.add(job("other", scenario="other", serial_key=None), now=0)
+    first = queue.append(job("a", serial_key=None), now=0)
+    second = queue.append(job("b", serial_key=None), now=0)
+    queue.append(job("other", scenario="other", serial_key=None), now=0)
     queue.cancel("jobs", "a", "stopped")
     assert [item.id for item in queue.page("jobs", scenario="s", limit=1)] == ["b"]
     assert [item.id for item in queue.page("jobs", scenario="s", before_sequence=second.created_sequence)] == ["a"]
@@ -798,7 +792,7 @@ def test_the_log_of_each_attempt_reads_in_pages_and_goes_with_its_item(open_coor
     from reef.storage.work_queue import WorkLogLine
 
     queue = open_coordination().queue
-    queue.add(job("a"), now=0)
+    queue.append(job("a"), now=0)
     queue.take("jobs", "w", ["training_job:tinker"], now=1)
     queue.append_log("jobs", "a", 1, [WorkLogLine(n, 1.0 + n, "INFO", "reef.test", f"line {n}") for n in range(3)])
     queue.append_log("jobs", "a", 2, [WorkLogLine(0, 9.0, "ERROR", "reef.test", "second attempt")])
@@ -817,8 +811,8 @@ def test_the_log_of_each_attempt_reads_in_pages_and_goes_with_its_item(open_coor
 
 def test_a_producer_queues_a_final_item_again_and_it_gets_one_more_attempt(open_coordination):
     queue = open_coordination(max_attempts={"jobs": 1}).queue
-    queue.add(job("a"), now=0)
-    queue.add(job("b", serial_key=None), now=0)
+    queue.append(job("a"), now=0)
+    queue.append(job("b", serial_key=None), now=0)
     queue.take("jobs", "w", ["training_job:tinker"], now=1)
     failed = queue.fail("jobs", "a", "w", "the sandbox stopped", retryable=False, now=2)
 

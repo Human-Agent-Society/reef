@@ -616,14 +616,14 @@ class EvaluationRolloutWorker(QueueWorker):
         that the rollout fails and does not score 0."""
         item_id = f"{SERVE_ARTIFACT_KIND}:{uuid.uuid4().hex}"
         payload: dict[str, JsonValue] = {"selection": dict(rollout.selection), "component": rollout.component}
-        self.queue.add(NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload))
+        self.queue.append(NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload))
         deadline = time.monotonic() + SERVE_WAIT_S
         while time.monotonic() < deadline:
             if self.stopped.is_set():
                 raise WorkerStoppedError
             if lease_lost.is_set():
                 raise WorkLeaseLostError("the evaluation worker lost its lease")
-            item = self.queue.get(SERVING_QUEUE, item_id)
+            item = self.queue.read(SERVING_QUEUE, item_id)
             if item is not None and item.final:
                 if item.state != "finished":
                     raise ReefError(f"inference could not serve artifact {rollout.artifact_id}: {item.error}")

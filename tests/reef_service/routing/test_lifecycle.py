@@ -49,7 +49,7 @@ from reef.service.deploy.routing.reef_lifecycle_client import (
     RoutingControlError,
 )
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import (
     INFERENCE_FINALIZATION,
     REQUEST_ACCEPTANCE,
@@ -1307,7 +1307,7 @@ def test_an_open_with_two_slow_healthy_providers_opens_on_its_first_attempt(tmp_
     """The reviewed case: sequential provider checks outlast the old budget of only Scenario previews (11 s here)."""
     policy = RoutingDeploymentSettings(deployment_id="unit-routing", selection_timeout_seconds=1)
     controller = RoutingDeploymentController(
-        ServiceConfig(recipe="base", routing_deployment=policy, inference_timeout_s=6),
+        ServiceSettings(recipe="base", routing_deployment=policy, inference_timeout_s=6),
         FakeRuntime([]),
         registry_root=tmp_path / "registry",
     )
