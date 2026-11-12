@@ -222,8 +222,8 @@ class Exchange:
     JSON request body; ``headers`` the request headers other than ``Authorization``; ``status`` the HTTP status;
     ``response_headers`` the answer's headers with lowercase names; ``content`` the answer's bytes. ``sent`` and
     ``ended`` are ``time.monotonic`` readings when the request was sent and when its answer ended.
-    Purpose: ``ReefClient.post`` makes it, and so gives these headers; the constructor checks no field. The checks
-    read the value, and the wire log keeps it.
+    Purpose: ``ReefClient.post`` makes it from its request and the ``HttpAnswer`` of ``send``, whose construction
+    checked these header names and readings. The checks read the value, and the wire log keeps it.
 
     The accessors below read a successful chat-completion answer, buffered or streamed. Each raises
     ``AssertionError`` with the label when the answer is of the other kind, has no single receipt or ``meta_info``,
@@ -297,16 +297,41 @@ class Exchange:
         return dict(carried[0])
 
 
+@dataclass(frozen=True)
+class HttpAnswer:
+    """The complete answer to one HTTP request, with the clock readings of that request.
+
+    Values: ``status`` is the HTTP status; ``headers`` maps each header name of the answer, in lowercase, to its
+    value; ``content`` is all the bytes of its body. ``sent`` and ``ended`` are ``time.monotonic`` readings, from
+    before the request went out and from after the body ended, so ``ended`` is not before ``sent``. Construction
+    checks the header names and the order of the readings.
+    Purpose: ``ReefClient.send`` returns one for each request. ``post`` puts its values into an ``Exchange`` with
+    the request, and ``control`` checks the status and reads the content.
+    """
+
+    status: int
+    headers: dict[str, str]
+    content: bytes
+    sent: float
+    ended: float
+
+    def __post_init__(self) -> None:
+        if any(name != name.lower() for name in self.headers):
+            raise ValueError(f"the header names of an answer are lowercase, not {sorted(self.headers)}")
+        if self.ended < self.sent:
+            raise ValueError(f"an answer ends before its request was sent: sent {self.sent}, ended {self.ended}")
+
+
 class ReefClient:
     """Requests to one Reef app with its service token, each appended to a JSON-lines wire log.
 
     Values: ``session`` is an open aiohttp session without default headers; ``base_url`` is the app's
-    ``http://host:port``; ``token`` is the app's service token, which goes only into request headers, never into the
-    log; ``wire_log`` receives one JSON object per exchange: the request without its ``Authorization`` header, and
-    the complete answer, SSE bytes included.
-    Purpose: each qualification profile makes one client for its app; ``post`` sends one request and returns its
-    ``Exchange``. With ``first_content``, a future that is not done yet, ``post`` sets it to the moment the first
-    generated text arrives.
+    ``http://host:port``; ``token`` is the app's service token, which goes only into the ``Authorization`` header,
+    never into the log; ``wire_log`` is a file in an existing directory. It receives one JSON object per request:
+    the label, method, path, other headers and JSON body of the request, the status, headers and complete content of
+    the answer, SSE bytes included, and ``sent`` and ``ended``, ``time.monotonic`` readings that order the requests.
+    Purpose: each qualification profile makes one client for its app. ``post`` sends one inference request and
+    returns its ``Exchange``; ``control`` sends one request of the public control API and returns its JSON answer.
     """
 
     def __init__(self, session: ClientSession, base_url: str, token: str, wire_log: Path) -> None:
@@ -314,6 +339,57 @@ class ReefClient:
         self.base_url = base_url
         self.token = token
         self.wire_log = wire_log
+
+    async def send(
+        self,
+        label: str,
+        method: str,
+        path: str,
+        body: Mapping[str, JsonValue] | None,
+        headers: Mapping[str, str],
+        first_content: asyncio.Future[float] | None = None,
+    ) -> HttpAnswer:
+        """Send one request, append it with its complete answer to the wire log, and return the answer.
+
+        ``body`` is the JSON body. None sends no body, and the log keeps that apart from an empty object.
+        ``headers`` are the request headers other than ``Authorization``. ``first_content``, a future that is not
+        done yet, is set to the moment the first generated text arrives.
+        """
+        sent = time.monotonic()
+        async with self.session.request(
+            method, self.base_url + path, json=body, headers={**headers, "Authorization": f"Bearer {self.token}"}
+        ) as response:
+            content = bytearray()
+            async for chunk in response.content.iter_any():
+                content.extend(chunk)
+                if first_content is not None and not first_content.done() and GENERATED_CONTENT.search(chunk):
+                    first_content.set_result(time.monotonic())
+            answer = HttpAnswer(
+                response.status,
+                {name.lower(): value for name, value in response.headers.items()},
+                bytes(content),
+                sent,
+                time.monotonic(),
+            )
+        try:
+            text: dict[str, str] = {"response_text": answer.content.decode()}
+        except UnicodeDecodeError:
+            text = {"response_base64": base64.b64encode(answer.content).decode()}
+        line = {
+            "label": label,
+            "method": method,
+            "path": path,
+            "request_headers": dict(headers),
+            "request_body": body,
+            "status": answer.status,
+            "response_headers": answer.headers,
+            **text,
+            "sent": sent,
+            "ended": answer.ended,
+        }
+        with self.wire_log.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(line, sort_keys=True) + "\n")
+        return answer
 
     async def post(
         self,
@@ -324,45 +400,32 @@ class ReefClient:
         headers: Mapping[str, str] | None = None,
         first_content: asyncio.Future[float] | None = None,
     ) -> Exchange:
-        extra = dict(headers or {})
-        sent = time.monotonic()
-        async with self.session.post(
-            self.base_url + path, json=dict(body), headers={**extra, "Authorization": f"Bearer {self.token}"}
-        ) as response:
-            content = bytearray()
-            async for chunk in response.content.iter_any():
-                content.extend(chunk)
-                if first_content is not None and not first_content.done() and GENERATED_CONTENT.search(chunk):
-                    first_content.set_result(time.monotonic())
-            exchange = Exchange(
-                label,
-                path,
-                dict(body),
-                extra,
-                response.status,
-                {name.lower(): value for name, value in response.headers.items()},
-                bytes(content),
-                sent,
-                time.monotonic(),
-            )
+        """Send one inference request, with ``first_content`` as ``send`` takes it; return its ``Exchange``."""
+        sent_body, extra = dict(body), dict(headers or {})
+        answer = await self.send(label, "POST", path, sent_body, extra, first_content)
+        return Exchange(
+            label, path, sent_body, extra, answer.status, answer.headers, answer.content, answer.sent, answer.ended
+        )
+
+    async def control(
+        self, label: str, method: str, path: str, body: dict[str, JsonValue] | None = None, *, status: int = 200
+    ) -> dict[str, JsonValue]:
+        """Send one request of the public control API and return its answer, which must have the HTTP ``status``.
+
+        An answer with a ``status`` below 400 must be a JSON object. A refusal that the caller expects is plain
+        text: the result is then ``{"error": <the answer's text>}``.
+        """
+        answer = await self.send(label, method, path, body, {})
+        text = answer.content.decode(errors="replace")
+        assert answer.status == status, f"{label}: HTTP {answer.status}, expected {status}: {text[:400]!r}"
+        if status >= 400:
+            return {"error": text}
         try:
-            text: dict[str, str] = {"response_text": exchange.content.decode()}
-        except UnicodeDecodeError:
-            text = {"response_base64": base64.b64encode(exchange.content).decode()}
-        line = {
-            "label": label,
-            "path": path,
-            "request_headers": extra,
-            "request_body": exchange.body,
-            "status": exchange.status,
-            "response_headers": dict(exchange.response_headers),
-            **text,
-            "sent": sent,
-            "ended": exchange.ended,
-        }
-        with self.wire_log.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(line, sort_keys=True) + "\n")
-        return exchange
+            value = json.loads(text)
+        except ValueError:
+            value = None
+        assert isinstance(value, dict), f"{label}: the answer is not a JSON object: {text[:400]!r}"
+        return value
 
 
 def check_words(checkpoint: Checkpoint, text: str, word_count: int, label: str) -> tuple[str, ...]:

@@ -1,31 +1,22 @@
 """GPU qualification of Reef's native engines, traffic splits, logprobs, engine recovery, public deployment lifecycle
 and Semantic Router routing.
 
-``run_qualification`` serves two synthetic checkpoints with disjoint words: A on the native engine behind Reef's
-remote inference component, and B on the other engine as a raw OpenAI provider. The ``features`` profile serves A
-as a published artifact through the production full-weight runtime, whose component keeps each request on its
-weights, and checks the inference app's splits, pins, rollouts and records. Its engine shares prefixes: the last
-check counts the cached prompt tokens of A's requests, loads B into that engine during an A request, and counts
-them again for B's requests. ``routing`` puts both engines behind a real Semantic Router. A router target takes
-OpenAI chat requests, which a component that serves published weights refuses; there the component's engine
-answers with its base model, A, as a plain endpoint without a weight-serving runtime. ``recovery`` starts the
-native engine only. It removes the component's engines before the runtime's first activation, and again while they
-serve B as a published artifact: each time the runtime's health watcher must restore them, the second time with B
-under its runtime load ID. ``lifecycle`` changes what a scenario serves through Reef's public API only, with a real
-dispatcher and its serving worker, in two scenarios. The first serves the weights A and B at the same time, both on
-the native engine: two inference components, each with its own engines, behind the runtime that the remote serving
-factory builds for ``inference.remote.slot-urls``. It creates the scenario with A, imports B, and serves B beside
-A: each answers by its named route from its own component, under its own runtime load ID, also while the other
-answers. Its updates then split the traffic 50/50, give all of it to B, and give it back to A; none of them loads
-anything. An update without A ends A's route, and the serving worker releases A's component after the grace time,
-while B serves. An update with A again loads it into that component, under a new runtime load ID. An update that
-names a third weight artifact is refused, as two components serve two. Last, the run removes the engines of A's
-component, its one change that is no public request: the watcher of A's runtime must restore A under its runtime
-load ID, while B serves unchanged. Then both components stop, and a harness scenario on B's raw provider serves two
-harness artifacts at the same time: it imports the second, splits the traffic 50/50, gives one artifact all the
-traffic, and stops serving the other. A run writes its results into a new output directory, keeps credentials in
-memory, and stops only the processes that it started.
-``python -m tests.smoke.native_inference`` runs it from a shell; ``--help`` lists the options.
+``run_qualification`` serves two synthetic checkpoints with disjoint words, A and B, and checks one profile:
+
+- ``features`` serves A as a published artifact on the native engine, behind Reef's remote inference component and
+  the production full-weight runtime, and B on the other engine as a raw OpenAI provider. ``FeatureChecks`` checks
+  the inference app's splits, pins, rollouts, logprobs and records, and the engine's prefix cache across a load.
+- ``routing`` puts both engines behind a real Semantic Router. A router target takes OpenAI chat requests, which a
+  component that serves published weights refuses; there the component's engine answers with its base model, A,
+  as a plain endpoint without a weight-serving runtime.
+- ``recovery`` starts the native engine only. ``RecoveryChecks`` removes the component's engines before the
+  runtime's first activation and again while they serve B: each time the runtime's health watcher restores them.
+- ``lifecycle`` changes what a scenario serves through Reef's public API only, with a real dispatcher and its
+  serving worker. ``LifecycleChecks`` runs its two scenarios: the weights A and B on two inference components of
+  the native engine, then two harness artifacts on B's raw provider.
+
+A run writes its results into a new output directory, keeps credentials in memory, and stops only the processes
+that it started. ``python -m tests.smoke.native_inference`` runs it from a shell; ``--help`` lists the options.
 """
 
 from __future__ import annotations
@@ -48,7 +39,7 @@ import time
 import traceback
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -77,7 +68,7 @@ from tests.smoke.inference_features import (
     replay_records,
     write_records,
 )
-from tests.smoke.inference_lifecycle import ControlClient, NoTraining, SeededWeights
+from tests.smoke.inference_lifecycle import NoTraining, SeededWeights
 from tests.smoke.inference_recovery import ObservedEngines, ServingLog, ended_checks, first_check, serving_log
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
@@ -307,13 +298,7 @@ class Credentials:
 
     @classmethod
     def generate(cls) -> Credentials:
-        return cls(
-            control=secrets.token_urlsafe(32),
-            inference=secrets.token_urlsafe(32),
-            service=secrets.token_urlsafe(32),
-            management=secrets.token_urlsafe(32),
-            selection=secrets.token_urlsafe(32),
-        )
+        return cls(**{token.name: secrets.token_urlsafe(32) for token in fields(cls)})
 
     def values(self) -> tuple[str, ...]:
         return (self.control, self.inference, self.service, self.management, self.selection)
@@ -323,8 +308,7 @@ class RunLayout:
     """The files of one run under ``root``, the run's output directory.
 
     Values: ``models``, ``logs``, ``records``, ``dispatcher`` and ``router`` are directories, and ``wire``,
-    ``control``, ``records_file``, ``report`` and ``error`` are files, each a fixed name under ``root``.
-    ``component_work`` gives each inference component its own work directory under ``root``.
+    ``records_file``, ``report`` and ``error`` are files, each a fixed name under ``root``.
     """
 
     def __init__(self, root: Path) -> None:
@@ -335,18 +319,9 @@ class RunLayout:
         self.dispatcher = root / "dispatcher"
         self.router = root / "router"
         self.wire = root / "wire.jsonl"
-        self.control = root / "control.jsonl"
         self.records_file = root / "records.jsonl"
         self.report = root / "report.json"
         self.error = root / "error.txt"
-
-    def create(self) -> None:
-        for directory in (self.root, self.models, self.logs):
-            directory.mkdir(parents=True, exist_ok=True)
-
-    def component_work(self, name: str) -> Path:
-        """The work directory of the inference component that runs as the owned process ``name``."""
-        return self.root / f"{name}-work"
 
 
 # -- Processes ---------------------------------------------------------------------------------------------------
@@ -548,14 +523,6 @@ def engine_urls(component_log: Path) -> list[str]:
     return [str(url) for url in ENGINE_URL_LINE.findall(component_log.read_text(errors="replace"))]
 
 
-def engine_url(component_log: Path) -> str:
-    """The private engine address that the component logged when it last started engines; observation only."""
-    urls = engine_urls(component_log)
-    if not urls:
-        raise RuntimeError("the component log names no engine address")
-    return urls[-1]
-
-
 def metric_total(metrics: str, name: str) -> float | None:
     """The sum of the samples named ``name`` in the Prometheus text ``metrics``; None when it has no such sample."""
     values = [
@@ -735,10 +702,12 @@ def provider_command(engine: str, model: Path, port: int) -> list[str]:
 
 @dataclass
 class Run:
-    """The state of one run: its inputs, files, report, credentials, processes, checkpoints and native runtime.
+    """The state of one run: its inputs, files, report, credentials, processes, checkpoints, oracle and runtime.
 
-    ``runtime`` is set once the native runtime exists, so that cleanup shuts it down before its components stop.
-    The lifecycle profile sets it to None again once the runtime has shut down and its components have stopped.
+    ``native`` and ``provider`` are the written checkpoints A and B, and ``oracle`` scores both: ``qualify`` makes
+    the run once they exist. ``runtime`` is set once the native runtime exists, so that cleanup shuts it down before
+    its components stop. The lifecycle profile sets it to None again once the runtime has shut down and its
+    components have stopped.
     """
 
     inputs: QualificationInputs
@@ -746,30 +715,20 @@ class Run:
     report: QualificationReport
     credentials: Credentials
     processes: OwnedProcesses
-    oracle: LogprobOracle | None = None
-    native: Checkpoint | None = None
-    provider: Checkpoint | None = None
+    native: Checkpoint
+    provider: Checkpoint
+    oracle: LogprobOracle
     runtime: InferenceRuntime | None = None
-
-    def checkpoints(self) -> tuple[Checkpoint, Checkpoint]:
-        if self.native is None or self.provider is None:
-            raise RuntimeError("the checkpoints are not written yet")
-        return self.native, self.provider
-
-    def scores(self) -> LogprobOracle:
-        if self.oracle is None:
-            raise RuntimeError("the logprob oracle is not loaded yet")
-        return self.oracle
 
 
 @dataclass(frozen=True)
 class Engines:
-    """The started engines: the component at ``component_url`` with the native engine of A, and the raw provider of
-    B at ``provider_url``. ``runtime`` serves A as a published artifact; it is None when the engine answers with its
+    """The started engines: the native engine of A on the component of ``service``, and the raw provider of B at
+    ``provider_url``. ``runtime`` serves A as a published artifact; it is None when the engine answers with its
     base model only (the ``routing`` profile)."""
 
+    service: RemoteInferenceService
     runtime: FullWeightServingRuntime | None
-    component_url: str
     provider_url: str
 
 
@@ -782,10 +741,9 @@ def native_service(run: Run, component_url: str, *, artifact_serving: bool) -> R
     published artifact, and the engine keeps no prefix cache.
     """
     engine = run.inputs.native_engine
-    native = run.checkpoints()[0]
     config = serving_engine_config(
         engine,
-        model_path=str(native.directory),
+        model_path=str(run.native.directory),
         num_gpus=1,
         tensor_parallel_size=1,
         options=NATIVE_OPTIONS[engine],
@@ -815,8 +773,7 @@ def native_runtime(
     """The production full-weight runtime of the native engine on the component of ``engines``, as the remote
     serving factory builds it: the engine's own handler with the inference token, and the component's control
     client. Its watcher checks the engines every ``health_interval_s`` seconds: by default, never within a run."""
-    native = run.checkpoints()[0]
-    model_path = str(native.directory)
+    model_path = str(run.native.directory)
     service = engines.service
     handler_class = InferenceHandler.resolve_class(
         BUILTIN_ENGINES[service.engine].handler, setting="inference handler"
@@ -843,30 +800,15 @@ async def start_component_process(run: Run, name: str) -> tuple[str, OwnedProces
     native engine and gives its engines one GPU. No engine runs yet.
     """
     port = free_port()
-    process = run.processes.start(
-        name,
-        [
-            sys.executable,
-            "-m",
-            "reef.inference.remote",
-            "--engine",
-            run.inputs.native_engine,
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--work-dir",
-            str(run.layout.component_work(name)),
-            "--ray-num-gpus",
-            "1",
-        ],
-        environment={
-            **os.environ,
-            DEFAULT_CONTROL_TOKEN_ENV: run.credentials.control,
-            DEFAULT_INFERENCE_TOKEN_ENV: run.credentials.inference,
-        },
-        grace_s=120,
-    )
+    command = [sys.executable, "-m", "reef.inference.remote", "--engine", run.inputs.native_engine]
+    command += ["--host", "127.0.0.1", "--port", str(port)]
+    command += ["--work-dir", str(run.layout.root / f"{name}-work"), "--ray-num-gpus", "1"]
+    environment = {
+        **os.environ,
+        DEFAULT_CONTROL_TOKEN_ENV: run.credentials.control,
+        DEFAULT_INFERENCE_TOKEN_ENV: run.credentials.inference,
+    }
+    process = run.processes.start(name, command, environment=environment, grace_s=120)
     await wait_for_port(port, process, COMPONENT_LISTEN_TIMEOUT_S)
     return f"http://127.0.0.1:{port}", process
 
@@ -874,13 +816,12 @@ async def start_component_process(run: Run, name: str) -> tuple[str, OwnedProces
 async def start_component(run: Run, *, artifact_serving: bool) -> RemoteInferenceService:
     """Start Reef's remote inference component, and return the control client for its native engine.
 
-    No engine runs yet. The engine facts are recorded here, so that a failed engine start still reports what it
-    ran; ``start_order`` lists the engines that started, which the caller appends to.
+    No engine runs yet. The engine facts are recorded here, with the engine configuration as resolved in this
+    environment, so that a failed engine start still reports what it ran.
     """
     url, component = await start_component_process(run, SLOT_COMPONENTS[0])
     service = native_service(run, url, artifact_serving=artifact_serving)
     run.report.facts["engines"] = {
-        "start_order": [],
         "native": {
             "engine": run.inputs.native_engine,
             "request_pinning": artifact_serving,
@@ -894,23 +835,21 @@ async def start_component(run: Run, *, artifact_serving: bool) -> RemoteInferenc
 async def start_provider(run: Run) -> str:
     """Start the raw provider of B and wait until it lists its model; return its base URL.
 
-    The engine facts must exist. They receive the provider's command and models, and its entry in ``start_order``.
+    The engine facts must exist. They receive the provider's command before the start, and its models once it
+    lists them.
     """
     provider_engine = run.inputs.provider_engine
-    provider = run.checkpoints()[1]
-    engine_facts = run.report.facts["engines"]
-    provider_facts: dict[str, Any] = engine_facts.setdefault("provider", {"engine": provider_engine})
     # The port is taken last, so that no engine started before takes it.
     port = free_port()
     url = f"http://127.0.0.1:{port}"
-    command = provider_command(provider_engine, provider.directory, port)
-    provider_facts["command"] = command
+    command = provider_command(provider_engine, run.provider.directory, port)
+    provider_facts: dict[str, Any] = {"engine": provider_engine, "command": command}
+    run.report.facts["engines"]["provider"] = provider_facts
     # The raw provider loads no Reef scheduler hook.
     environment = {key: value for key, value in os.environ.items() if key != REEF_SGLANG_PLUGIN_ENV}
     process = run.processes.start("provider", command, environment=environment, grace_s=60)
     async with ClientSession() as session:
         provider_facts["models"] = await wait_for_models(session, url, PROVIDER_MODEL, process, ENGINE_START_TIMEOUT_S)
-    engine_facts["start_order"].append(f"raw {provider_engine} provider")
     return url
 
 
@@ -921,13 +860,9 @@ async def start_engines(run: Run, *, artifact_serving: bool) -> Engines:
     caller activates an artifact. Without it, the engine answers with its base model and no runtime exists.
     SGLang always starts first, because it sizes its memory from what is free when it starts.
     """
-    native_engine = run.inputs.native_engine
     service = await start_component(run, artifact_serving=artifact_serving)
     runtime = native_runtime(run, ComponentEngines(service)) if artifact_serving else None
     run.runtime = runtime
-    engine_facts = run.report.facts["engines"]
-    order: list[str] = engine_facts["start_order"]
-    engine_facts["provider"] = {"engine": run.inputs.provider_engine}
 
     def open_engine() -> None:
         if runtime is None:
@@ -938,30 +873,70 @@ async def start_engines(run: Run, *, artifact_serving: bool) -> Engines:
             runtime.set_owner_sequence(1)
             runtime.open()
 
-    async def open_native() -> None:
+    if run.inputs.native_engine == "sglang":
         await asyncio.to_thread(open_engine)
-        order.append(f"native {native_engine} on the component")
-
-    if native_engine == "sglang":
-        await open_native()
         provider_url = await start_provider(run)
     else:
         provider_url = await start_provider(run)
-        await open_native()
-    return Engines(runtime, service.settings.url, provider_url)
+        await asyncio.to_thread(open_engine)
+    return Engines(service, runtime, provider_url)
 
 
 @asynccontextmanager
-async def serving(app: web.Application) -> AsyncIterator[str]:
-    """Serve ``app`` on a free loopback port for the block; yield its base URL."""
+async def serving(run: Run, app: web.Application) -> AsyncIterator[ReefClient]:
+    """Serve ``app`` on a free loopback port for the block; yield a client of it with the run's service token."""
     runner = web.AppRunner(app)
     try:
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", 0)
         await site.start()
-        yield f"http://127.0.0.1:{runner.addresses[0][1]}"
+        url = f"http://127.0.0.1:{runner.addresses[0][1]}"
+        async with ClientSession(timeout=ClientTimeout(total=REQUEST_TIMEOUT_S)) as session:
+            yield ReefClient(session, url, run.credentials.service, run.layout.wire)
     finally:
         await runner.cleanup()
+
+
+@asynccontextmanager
+async def inference_app(run: Run, runtime: FullWeightServingRuntime) -> AsyncIterator[tuple[ReefClient, Coordination]]:
+    """Serve Reef's inference app for the engines of ``runtime`` during the block; yield a client of it, and the
+    in-memory coordination store in which the caller publishes its routes. The records go to the run's store."""
+    coordination = memory_coordination()
+    storage = SQLiteScenarioStorage(run.layout.records)
+    try:
+        app = build_inference_app(
+            coordination.served_models,
+            storage,
+            DeploymentEngineClients(runtime, provider_key=None, timeout_seconds=INFERENCE_TIMEOUT_S),
+            tokens=run.credentials.service,
+            timeout_seconds=INFERENCE_TIMEOUT_S,
+        )
+        async with serving(run, app) as client:
+            yield client, coordination
+    finally:
+        storage.close()
+        coordination.close()
+
+
+async def engine_load_ids(service: RemoteInferenceService) -> list[str]:
+    """The runtime load IDs that the component of ``service`` reports for its engines, one for each engine; a read
+    only."""
+    backend = RemoteInferenceBackend(service.control, service)
+    return list(await asyncio.to_thread(backend.runtime_load_ids))
+
+
+async def remove_engines(service: RemoteInferenceService) -> tuple[float, float]:
+    """Remove the engines of the component of ``service``; return the moments of the call and of its answer.
+
+    The removal is the component's control operation ``DELETE engines``, sent as the engines' owner with the
+    runtime's own control client. The component stops its engine stack and stays, so the GPU engines are lost.
+    Nothing here starts engines, loads a checkpoint or calls a runtime: its health watcher alone must restore them.
+    """
+    called = time.monotonic()
+    # The service's own ``close`` gives the component this long to stop its engines.
+    answer = await asyncio.to_thread(service.control.call, "DELETE", "engines", timeout_s=HEALTH_TIMEOUT_S)
+    assert answer == {"ok": True}, f"the component at {service.settings.url} answered {answer!r}"
+    return called, time.monotonic()
 
 
 def chat_body(
@@ -1101,6 +1076,44 @@ class RequestChecks:
         model = None if named else arm.artifact_id
         return await self.chat(label, arm, chat_body(PLAIN_PROMPT, stream=stream, model=model), named=named)
 
+    async def answers(self, label: str, arm: Arm) -> None:
+        """``arm`` answers a buffered request that names no artifact, and a streamed request to its named route."""
+        await self.chat(f"{label}: no artifact named, buffered", arm, chat_body(PLAIN_PROMPT, stream=False))
+        await self.explicit_request(f"{label}: named route, streamed", arm, stream=True, named=True)
+
+    async def named_routes(self, label: str, *arms: Arm) -> None:
+        """Each of ``arms`` answers by its named route, buffered and then streamed, one request after the other."""
+        for arm in arms:
+            for stream in (False, True):
+                await self.explicit_request(
+                    f"{label}: {mode(stream)} named route of {arm.name}", arm, stream=stream, named=True
+                )
+
+    async def split_conversations(
+        self, label: str, arms: Sequence[Arm], weights: Mapping[str, int]
+    ) -> dict[str, tuple[str, int]]:
+        """Hold a conversation of two turns with each of ``arms``, the two artifacts that share the traffic by the
+        split ``weights``; return each one's first message and its bucket, by the arm's name.
+
+        No request names an artifact: the bucket of the first message selects the arm, the second turn must stay
+        with it, and each record must store the split and the bucket.
+        """
+        conversations = {arm.name: self.conversation(arm, weights) for arm in arms}
+        for arm, stream in zip(arms, (False, True), strict=True):
+            text, bucket = conversations[arm.name]
+            traffic = ExpectedTraffic(weights, bucket)
+            first = await self.chat(
+                f"{label} conversation of {arm.name}, turn 1", arm, chat_body(text, stream=stream), traffic=traffic
+            )
+            history = [{"role": "user", "content": text}, {"role": "assistant", "content": first.text()}]
+            await self.chat(
+                f"{label} conversation of {arm.name}, turn 2",
+                arm,
+                chat_body("Continue.", stream=not stream, history=history),
+                traffic=traffic,
+            )
+        return conversations
+
     def check_answer(self, arm: Arm, exchange: Exchange, *, recorded: bool) -> None:
         label = exchange.label
         exchange.require_success()
@@ -1112,7 +1125,7 @@ class RequestChecks:
             assert RECORD_HEADER not in exchange.response_headers, f"{label}: an unrecorded call has a receipt"
             assert b"agent_record_id" not in exchange.content, f"{label}: an unrecorded call has a receipt"
         check_words(arm.checkpoint, exchange.text(), exchange.body["max_tokens"], label)
-        oracle = self.run.scores()
+        oracle = self.run.oracle
         token_ids = check_logprobs(oracle, arm.checkpoint, exchange, native_facade=arm.native_facade)
         self.sampled.setdefault(arm.name, set()).update(token_ids)
         if arm.native_facade:
@@ -1150,8 +1163,10 @@ class RequestChecks:
         The engine is the one that the component with the log ``component_log`` started last; None selects the
         run's first component.
         """
-        url = engine_url(component_log or self.run.layout.logs / f"{SLOT_COMPONENTS[0]}.log") + "/metrics"
-        async with self.client.session.get(url) as response:
+        urls = engine_urls(component_log or self.run.layout.logs / f"{SLOT_COMPONENTS[0]}.log")
+        if not urls:
+            raise RuntimeError("the component log names no engine address")
+        async with self.client.session.get(urls[-1] + "/metrics") as response:
             assert response.status == 200, f"the engine's metrics answered HTTP {response.status}"
             return await response.text()
 
@@ -1169,20 +1184,17 @@ class RequestChecks:
             )
         return queries, hits
 
-    async def cached_request(self, label: str, arm: Arm, component_log: Path | None = None) -> dict[str, Any]:
+    async def cached_request(self, label: str, arm: Arm, component_log: Path | None = None) -> int:
         """Send ``CACHE_PROMPT`` to ``arm``'s named route while no other request runs on its engine; return the
-        prompt's token count and ``cached_tokens``, the prompt tokens that the engine reused from its prefix cache.
+        prompt tokens that the engine reused from its prefix cache.
 
-        SGLang reports the reused tokens in the answer's ``meta_info``. vLLM's counters give them: around the
-        request, the looked-up tokens must grow by exactly this prompt, which neither an engine without a cache
-        nor a second request gives, and the found tokens grow by the reused ones. vLLM's answer may also carry the
-        count in its usage (``answer_usage_cached_tokens``, else None); it must then be the same. The counters are
-        those of the engine that serves ``arm``: ``component_log`` is the log of its component, and None selects
-        the run's first component (``engine_metrics``).
+        SGLang reports them in the answer's ``meta_info``. vLLM's counters give them: around the request, the
+        looked-up tokens must grow by exactly this prompt, which neither an engine without a cache nor a second
+        request gives. ``component_log`` selects the engine that serves ``arm``, as in ``engine_metrics``. The
+        checkpoints ignore their context, so only these counts show the cache's hits and resets.
         """
         body = chat_body(CACHE_PROMPT, stream=False)
-        prompt_tokens = len(self.run.scores().prompt_ids(body["messages"]))
-        measured: dict[str, Any] = {"prompt_tokens": prompt_tokens}
+        prompt_tokens = len(self.run.oracle.prompt_ids(body["messages"]))
         if self.run.inputs.native_engine == "sglang":
             exchange = await self.chat(label, arm, body, named=True)
             cached = exchange.meta_info().get("cached_tokens")
@@ -1201,10 +1213,17 @@ class RequestChecks:
             usage = exchange.meta_info().get("usage") or {}
             reported = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
             assert reported is None or reported == cached, f"{label}: usage names {reported} cached tokens"
-            measured["answer_usage_cached_tokens"] = reported
         assert 0 <= cached <= prompt_tokens, f"{label}: {cached} cached tokens of a {prompt_tokens}-token prompt"
-        measured["cached_tokens"] = cached
-        return measured
+        return cached
+
+    async def cache_after_load(self, label: str, arm: Arm, component_log: Path | None = None) -> list[int]:
+        """Send the cache prompt to ``arm`` twice after its load (``cached_request``): the first request must reuse
+        no prompt token, because these engines did not see the prompt under this load, and the second some. Return
+        the reused tokens of the two requests, in order."""
+        first = await self.cached_request(f"{label}: first cache-prompt request", arm, component_log)
+        second = await self.cached_request(f"{label}: second cache-prompt request", arm, component_log)
+        assert first == 0 and second > 0, f"{label}: reused {first} prompt tokens, then {second}"
+        return [first, second]
 
     # -- Records
 
@@ -1241,14 +1260,7 @@ class FeatureChecks(RequestChecks):
     ``session_records`` holds the record IDs of the session-key requests.
     """
 
-    def __init__(
-        self,
-        run: Run,
-        client: ReefClient,
-        coordination: Coordination,
-        native: Arm,
-        provider: Arm,
-    ) -> None:
+    def __init__(self, run: Run, client: ReefClient, coordination: Coordination, native: Arm, provider: Arm) -> None:
         super().__init__(run, client, coordination)
         self.native = native
         self.provider = provider
@@ -1268,22 +1280,7 @@ class FeatureChecks(RequestChecks):
         """A 50/50 split: both arms, conversation stickiness, session-key stickiness and a rollout."""
         weights = {self.native.artifact_id: 50, self.provider.artifact_id: 50}
         self.set_weights(weights)
-        conversations = {arm.name: self.conversation(arm, weights) for arm in (self.native, self.provider)}
-        for arm, stream in ((self.native, False), (self.provider, True)):
-            text, bucket = conversations[arm.name]
-            first = await self.chat(
-                f"50/50 {arm.name} conversation, turn 1",
-                arm,
-                chat_body(text, stream=stream),
-                traffic=ExpectedTraffic(weights, bucket),
-            )
-            history = [{"role": "user", "content": text}, {"role": "assistant", "content": first.text()}]
-            await self.chat(
-                f"50/50 {arm.name} conversation, turn 2",
-                arm,
-                chat_body("Continue.", stream=not stream, history=history),
-                traffic=ExpectedTraffic(weights, bucket),
-            )
+        conversations = await self.split_conversations("50/50", (self.native, self.provider), weights)
         session = {SESSION_KEY_HEADER: "qualification-session"}
         answered = []
         for index, stream in enumerate((False, True)):
@@ -1303,10 +1300,7 @@ class FeatureChecks(RequestChecks):
         assert answered[0] == answered[1], f"one session key reached two arms: {answered}"
         text = conversations[self.provider.name][0]
         await self.chat(
-            "50/50 rollout of a provider-bucket conversation",
-            self.native,
-            chat_body(text, stream=False),
-            rollout=True,
+            "50/50 rollout of a provider-bucket conversation", self.native, chat_body(text, stream=False), rollout=True
         )
         self.run.report.passed("50/50 split reaches both arms and keeps conversations")
         return conversations
@@ -1371,8 +1365,6 @@ class FeatureChecks(RequestChecks):
                 "new_request_ended": round(follow.ended - long.sent, 4),
                 "stream_ended": round(long.ended - long.sent, 4),
             },
-            new_request_ended_before_stream=follow.ended < long.ended,
-            stream_tokens=LONG_TOKENS,
         )
 
     async def long_stream(
@@ -1448,21 +1440,17 @@ class FeatureChecks(RequestChecks):
             "concurrent requests of both arms stay on their artifacts", overlapping_native_provider_pairs=overlapping
         )
 
-    async def prefix_cache(self, runtime: FullWeightServingRuntime, successor: Checkpoint) -> None:
+    async def prefix_cache(self, runtime: FullWeightServingRuntime, pause_mode: str, successor: Checkpoint) -> None:
         """The native engine shares a prompt's prefix among the requests of one artifact, never across a load.
 
-        Two requests on A read the cache: the first reuses nothing, the second reuses the prompt. Then the runtime
-        activates ``successor``, B, as a new artifact on the same engine while a long A stream of that prompt
-        generates. The component ends the stream on A before the load, and Reef refuses a new A request meanwhile
-        and afterwards, without a record. The first B request of the same prompt must reuse nothing, and the
-        second must reuse the prompt again. No checkpoint reads its context, so no output shows a stale cache
-        entry: the cached-token counts do.
+        ``pause_mode`` is the mode in the engine's configuration; an engine shares prefixes only with ``retract``.
+        The runtime activates ``successor``, B, as a new artifact on the same engine while a long A stream of the
+        cache prompt generates. The load must wait for that stream: Reef must refuse a new A request before the
+        stream ends, and again after the load. Under each load, the first request of the cache prompt must reuse
+        nothing (``cache_after_load``).
         """
-        pause_mode = self.run.report.facts["engines"]["native"]["engine_config"]["pause_mode"]
         assert pause_mode == "retract", f"the native engine pauses {pause_mode}, so it shares no prefixes"
-        cold = await self.cached_request("prefix cache: first request on A", self.native)
-        warm = await self.cached_request("prefix cache: second request on A", self.native)
-        assert cold["cached_tokens"] == 0 and warm["cached_tokens"] > 0, f"A reused {cold}, then {warm}"
+        before_load = await self.cache_after_load("prefix cache on A", self.native)
         artifact = Artifact.local(successor.directory)
 
         async def activate() -> tuple[str, float]:
@@ -1501,18 +1489,11 @@ class FeatureChecks(RequestChecks):
         loaded_arm = Arm("native after the load", served.artifact_id, successor, native_facade=True)
         # A's row stays as it is: the engine refuses its model name from now on.
         self.publish({ACTIVE: served, served.artifact_id: served})
-        first = await self.cached_request("prefix cache: first request on B", loaded_arm)
-        second = await self.cached_request("prefix cache: second request on B", loaded_arm)
-        assert first["cached_tokens"] == 0 and second["cached_tokens"] > 0, f"B reused {first}, then {second}"
+        after_load = await self.cache_after_load("prefix cache on B", loaded_arm)
         self.run.report.passed(
             "the prefix cache serves one artifact: a load waits for the requests in flight, then clears it",
             pause_mode=pause_mode,
-            cached_tokens_from=(
-                "meta_info.cached_tokens of each answer"
-                if self.run.inputs.native_engine == "sglang"
-                else f"the engine's {CACHE_HITS_METRIC} around each request"
-            ),
-            requests={"A first": cold, "A second": warm, "B first": first, "B second": second},
+            cached_tokens={"A": before_load, "B after its load": after_load},
             in_flight_signal=signal_name,
             seconds_from_stream_start={
                 "signal": round(observed - long.sent, 4),
@@ -1522,7 +1503,6 @@ class FeatureChecks(RequestChecks):
                 "activation_returned": round(loaded - long.sent, 4),
             },
             requests_answered_before_admission_closed=admitted,
-            stream_tokens=LONG_TOKENS,
             loaded_route=served.to_json(),
         )
 
@@ -1538,7 +1518,7 @@ class FeatureChecks(RequestChecks):
 
 
 async def qualify_features(run: Run) -> None:
-    native, provider = run.checkpoints()
+    native, provider = run.native, run.provider
     engines = await start_engines(run, artifact_serving=True)
     runtime = engines.runtime
     if runtime is None:
@@ -1546,7 +1526,7 @@ async def qualify_features(run: Run) -> None:
     artifact = Artifact.local(native.directory)
     load_id = await asyncio.to_thread(runtime.activate_checkpoint, artifact, scenario=SCENARIO)
     native_served = runtime.served_artifact(artifact.artifact_id, SCENARIO)
-    if native_served is None or native_served.url != engines.component_url:
+    if native_served is None or native_served.url != engines.service.settings.url:
         raise RuntimeError(f"the native activation established no component route: {native_served!r}")
     if parse_full_weight_name(native_served.model_name) != (str(native.directory), load_id):
         raise RuntimeError(f"the native route does not name its load: {native_served.model_name!r}")
@@ -1559,33 +1539,14 @@ async def qualify_features(run: Run) -> None:
         "native_runtime_load_id": load_id,
         "provider": provider_served.to_json(),
     }
-    coordination = memory_coordination()
-    storage = SQLiteScenarioStorage(run.layout.records)
-    try:
-        app = build_inference_app(
-            coordination.served_models,
-            storage,
-            DeploymentEngineClients(runtime, provider_key=None, timeout_seconds=INFERENCE_TIMEOUT_S),
-            tokens=run.credentials.service,
-            timeout_seconds=INFERENCE_TIMEOUT_S,
-        )
-        async with (
-            serving(app) as url,
-            ClientSession(timeout=ClientTimeout(total=REQUEST_TIMEOUT_S)) as session,
-        ):
-            client = ReefClient(session, url, run.credentials.service, run.layout.wire)
-            checks = FeatureChecks(run, client, coordination, native_arm, provider_arm)
-            checks.publish(
-                {ACTIVE: native_served, native_arm.artifact_id: native_served, provider_id: provider_served}
-            )
-            await checks.logprobs()
-            conversations = await checks.split()
-            await checks.weights_and_pins(conversations)
-            await checks.concurrency()
-            await checks.prefix_cache(runtime, provider)
-    finally:
-        storage.close()
-        coordination.close()
+    async with inference_app(run, runtime) as (client, coordination):
+        checks = FeatureChecks(run, client, coordination, native_arm, provider_arm)
+        checks.publish({ACTIVE: native_served, native_arm.artifact_id: native_served, provider_id: provider_served})
+        await checks.logprobs()
+        conversations = await checks.split()
+        await checks.weights_and_pins(conversations)
+        await checks.concurrency()
+        await checks.prefix_cache(runtime, engines.service.engine_config["pause_mode"], provider)
     records = replay_records(run.layout.records, SCENARIO)
     write_records(run.layout.records_file, records)
     checks.verify_records(records)
@@ -1617,16 +1578,9 @@ class RecoveryChecks(RequestChecks):
         self.runtime = runtime
         self.engines = engines
         self.log = log
-        startup = run.checkpoints()[0]
-        startup_id = f"artifact:startup-load-{revision_of(startup).removeprefix('sha256:')[:16]}"
-        self.startup = Arm("startup load", startup_id, startup, native_facade=True)
+        startup_id = f"artifact:startup-load-{revision_of(run.native).removeprefix('sha256:')[:16]}"
+        self.startup = Arm("startup load", startup_id, run.native, native_facade=True)
         self.component_log = run.layout.logs / "component.log"
-
-    async def load_ids(self) -> list[str]:
-        """The runtime load IDs that the component reports for its engines, one for each engine."""
-        service = self.engines.service
-        backend = RemoteInferenceBackend(service.control, service)
-        return list(await asyncio.to_thread(backend.runtime_load_ids))
 
     async def at_rest(self, label: str) -> None:
         """Wait for ``QUIET_CHECKS`` more health checks. The watcher must make each one, each one must pass, and
@@ -1645,32 +1599,24 @@ class RecoveryChecks(RequestChecks):
         bound = runtime.served_artifact_id is not None or not runtime.awaits_first_activation
         assert not bound, f"{label}: the runtime has a binding: it serves {runtime.served_artifact_id!r}"
         assert runtime.recovery_pending, f"{label}: the runtime does not wait for an activation to resume generation"
-        held = await self.load_ids()
+        held = await engine_load_ids(self.engines.service)
         assert held == [runtime.base_version], f"{label}: the engines hold the runtime loads {held}"
         refused = await self.refusal(f"{label}: request for the startup load", self.startup, PLAIN_PROMPT)
         assert refused is not None, f"{label}: the paused engines answered a request"
 
     async def removal(self, label: str, served: Arm | None) -> dict[str, Any]:
-        """Remove the component's engines, and wait until the runtime's watcher has restored them.
+        """Remove the component's engines (``remove_engines``), and wait until the runtime's watcher has restored
+        them; return the failed check's error, the moments of the removal and the restoration, the refused
+        requests of ``served``, and the number of engine stacks that the component has started.
 
-        The removal is the component's control operation ``DELETE engines``, sent as the engines' owner with the
-        runtime's own control client. The component stops its engine stack, so the GPU engines are lost. Nothing
-        here starts engines or calls the runtime. One health check of the watcher must fail, and its recovery must
-        succeed at the first attempt: the next check passes, the component has started one more engine stack, and
-        the runtime has logged one warning and no error.
-
-        With ``served``, an artifact that the runtime served before the removal, Reef must refuse the requests for
-        its route until the watcher resumes generation, and its first answer ends the wait. A new stack holds the
-        base model: Reef must refuse each request for the startup load's route too. Return what was measured.
+        One health check of the watcher must fail, and its recovery must succeed at the first attempt, with one
+        more engine stack, one warning and no error. ``served`` is None, or an artifact that the runtime served
+        before the removal. Reef must refuse the requests for its route until the watcher resumes generation, and
+        each request for the startup load's route meanwhile, although a new stack holds that load.
         """
         first, logged = len(self.engines.checks), len(self.log.lines)
         stacks = engine_urls(self.component_log)
-        control = self.engines.service.control
-        called = time.monotonic()
-        # The service's own ``close`` gives the component this long to stop its engines.
-        answer = await asyncio.to_thread(control.call, "DELETE", "engines", timeout_s=HEALTH_TIMEOUT_S)
-        removed = time.monotonic()
-        assert answer == {"ok": True}, f"{label}: the component answered {answer!r}"
+        called, removed = await remove_engines(self.engines.service)
         refused = 0
         answered: float | None = None
         if served is not None:
@@ -1697,7 +1643,6 @@ class RecoveryChecks(RequestChecks):
         assert len(started) == len(stacks) + 1, f"{label}: the engine stacks {stacks} became {started}"
         failure, success = self.engines.checks[failed], self.engines.checks[restored]
         return {
-            "control_operation": "DELETE engines",
             "failed_health_check": failure.error,
             "seconds_from_call": {
                 "engines_removed": round(removed - called, 3),
@@ -1706,14 +1651,13 @@ class RecoveryChecks(RequestChecks):
                 "health_check_passed": round(success.ended - called, 3),
             },
             "refused_requests_of_served_route": refused,
-            "engine_stacks_started": started,
+            "engine_stacks_started": len(started),
         }
 
     async def before_activation(self) -> None:
-        """Before its first activation, the runtime's watcher only replaces lost engines.
+        """Before its first activation, the runtime's watcher only replaces lost engines: the new engines stay
+        paused under the startup load, and the runtime binds no artifact.
 
-        The runtime knows no artifact yet. Its watcher checks the engines and logs nothing while they are healthy.
-        After their removal it starts new engines, which stay paused under the startup load, and is at rest again.
         The run publishes a route for the startup load, which Reef never does, to show that no request generates.
         """
         runtime = self.runtime
@@ -1730,30 +1674,23 @@ class RecoveryChecks(RequestChecks):
             removal=removal,
         )
 
-    async def serves(self, label: str, arm: Arm, load_id: str) -> dict[str, Any]:
+    async def serves(self, label: str, arm: Arm, load_id: str) -> list[int]:
         """The engines hold ``load_id`` only, and ``arm`` answers with its words, logprobs and receipts: by the
         default route and by its named route, buffered and streamed. Reef still refuses the startup load's route.
-        The first request of ``CACHE_PROMPT`` must reuse nothing, because these engines did not see it under this
-        load, and the second must reuse the prompt. Return the two cache measurements."""
-        held = await self.load_ids()
+        The engines' prefix cache is empty at first: return the result of ``cache_after_load``."""
+        held = await engine_load_ids(self.engines.service)
         assert held == [load_id], f"{label}: the engines hold the runtime loads {held}, not {load_id}"
-        await self.chat(f"{label}: default route, buffered", arm, chat_body(PLAIN_PROMPT, stream=False))
-        await self.explicit_request(f"{label}: named route, streamed", arm, stream=True, named=True)
+        await self.answers(label, arm)
         stale = await self.refusal(f"{label}: request for the startup load", self.startup, PLAIN_PROMPT)
         assert stale is not None, f"{label}: the startup load's route answered"
-        first = await self.cached_request(f"{label}: first request of the cache prompt", arm)
-        second = await self.cached_request(f"{label}: second request of the cache prompt", arm)
-        assert first["cached_tokens"] == 0 and second["cached_tokens"] > 0, f"{label}: reused {first}, then {second}"
-        return {"first": first, "second": second}
+        return await self.cache_after_load(label, arm)
 
     async def after_activation(self, successor: Checkpoint) -> None:
         """The watcher restores removed engines to the activated artifact, under its runtime load ID.
 
-        The runtime activates ``successor``, B, into the engines that started with A, and B answers. Then the run
-        removes the engines and calls nothing else: the watcher alone must start new engines, load B again under
-        the same runtime load ID, and resume. The runtime's route for B is the same as before, B answers again,
-        and the new engines' prefix cache is empty at first. No checkpoint reads its context, so a wrong load
-        shows by its words, and a stale cache entry by the cached-token counts.
+        The runtime activates ``successor``, B, into the engines that started with A. Then the run removes the
+        engines and calls nothing else: the watcher alone must start new engines, load B again under the same
+        runtime load ID and route, and resume. A wrong load would show by its words.
         """
         runtime = self.runtime
         artifact = Artifact.local(successor.directory)
@@ -1775,39 +1712,24 @@ class RecoveryChecks(RequestChecks):
             route=served.to_json(),
             runtime_load_id=load_id,
             removal=removal,
-            cache_prompt_requests={"after the activation": activated, "after the restoration": restored},
+            cached_tokens={"after the activation": activated, "after the restoration": restored},
         )
 
 
 async def qualify_recovery(run: Run) -> None:
-    successor = run.checkpoints()[1]
     service = await start_component(run, artifact_serving=True)
     engines = ObservedEngines(service)
     runtime = native_runtime(run, engines, health_interval_s=WATCHER_INTERVAL_S)
     run.runtime = runtime
     runtime.set_owner_sequence(1)
-    coordination = memory_coordination()
-    storage = SQLiteScenarioStorage(run.layout.records)
     with serving_log() as log:
         opened = time.monotonic()
         try:
             await asyncio.to_thread(runtime.open)
-            run.report.facts["engines"]["start_order"].append(f"native {service.engine} on the component")
-            app = build_inference_app(
-                coordination.served_models,
-                storage,
-                DeploymentEngineClients(runtime, provider_key=None, timeout_seconds=INFERENCE_TIMEOUT_S),
-                tokens=run.credentials.service,
-                timeout_seconds=INFERENCE_TIMEOUT_S,
-            )
-            async with (
-                serving(app) as url,
-                ClientSession(timeout=ClientTimeout(total=REQUEST_TIMEOUT_S)) as session,
-            ):
-                client = ReefClient(session, url, run.credentials.service, run.layout.wire)
+            async with inference_app(run, runtime) as (client, coordination):
                 checks = RecoveryChecks(run, client, coordination, runtime, engines, log)
                 await checks.before_activation()
-                await checks.after_activation(successor)
+                await checks.after_activation(run.provider)
             failed = sum(check.error is not None for check in engines.checks)
             assert failed == 2 and len(log.lines) == 2, (
                 f"{failed} health checks failed and the runtime logged {len(log.lines)} lines for two removals: "
@@ -1830,8 +1752,6 @@ async def qualify_recovery(run: Run) -> None:
                 ],
                 "logged": [asdict(line) for line in log.lines],
             }
-            storage.close()
-            coordination.close()
     records = replay_records(run.layout.records, SCENARIO)
     write_records(run.layout.records_file, records)
     checks.check_records(records)
@@ -1880,12 +1800,6 @@ class NativeSlot:
             raise TypeError(f"the slot at {self.url} runs no component engines, but {type(engines).__name__}")
         return engines.service
 
-    async def load_ids(self) -> list[str]:
-        """The runtime load IDs that the component reports for its engines, one for each engine; a read only."""
-        service = self.service
-        backend = RemoteInferenceBackend(service.control, service)
-        return list(await asyncio.to_thread(backend.runtime_load_ids))
-
     def bind(self, arm: Arm, route: ServedArtifact) -> str:
         """Expect ``arm`` in this slot from now on, under the runtime load ID that its published ``route`` names;
         return that ID.
@@ -1908,13 +1822,11 @@ async def start_checkpoint_slots(run: Run) -> tuple[CheckpointSlotsRuntime, list
     each; return the runtime and its slots, the first component's first.
 
     The remote serving factory builds the runtime from an ordinary runtime section, which names the first component
-    as ``url`` and the second in ``slot-urls``. Building it starts no engine, and nothing here opens it: the serving
-    worker of the dispatcher that gets the runtime does. Both components run the native engine on the run's one GPU,
-    each in its own local Ray session. The engine facts are recorded here, so that a failed engine start still
-    reports what it ran.
+    as ``url`` and the second in ``slot-urls``. Building it must start no engine, and nothing here opens it: the
+    serving worker of the dispatcher that gets the runtime does. The engine facts are recorded here, so that a
+    failed engine start still reports what it ran.
     """
     engine = run.inputs.native_engine
-    native = run.checkpoints()[0]
     started = [await start_component_process(run, name) for name in SLOT_COMPONENTS]
     urls = [url for url, process in started]
     config = {
@@ -1934,7 +1846,7 @@ async def start_checkpoint_slots(run: Run) -> tuple[CheckpointSlotsRuntime, list
         DEFAULT_CONTROL_TOKEN_ENV: run.credentials.control,
         DEFAULT_INFERENCE_TOKEN_ENV: run.credentials.inference,
     }
-    runtime = RuntimeRegistry().build(config, model_path=str(native.directory), environ=environ)
+    runtime = RuntimeRegistry().build(config, model_path=str(run.native.directory), environ=environ)
     if not isinstance(runtime, CheckpointSlotsRuntime):
         raise TypeError(f"the factory built a {type(runtime).__name__} for two components, not checkpoint slots")
     run.runtime = runtime
@@ -1943,7 +1855,6 @@ async def start_checkpoint_slots(run: Run) -> tuple[CheckpointSlotsRuntime, list
         for child, (url, process) in zip(runtime.slots, started, strict=True)
     ]
     run.report.facts["engines"] = {
-        "start_order": [],
         "native": {
             "engine": engine,
             "request_pinning": True,
@@ -1996,19 +1907,15 @@ class ScenarioState:
 class LifecycleChecks(RequestChecks):
     """The requests and checks of the lifecycle profile, against one Reef app with its dispatcher.
 
-    Values: ``control`` sends the public control requests; ``component`` is the scenario component whose artifacts
-    the scenario serves.
+    Values: ``component`` is the scenario component whose artifacts the scenario serves.
     Purpose: ``public_app`` makes one for each scenario of the profile. It changes what the scenario serves only
-    through ``control``. It reads the coordination store to wait for the serving worker and to compare the routes,
-    the traffic weights and the scheduled stops, and never writes to it. Its one other change is a fault:
-    ``restored_after_removal`` removes the engines of one inference component.
+    through the public control requests of ``client``. It reads the coordination store to wait for the serving
+    worker and to compare the routes, the traffic weights and the scheduled stops, and never writes to it. Its one
+    other change is a fault: ``restored_after_removal`` removes the engines of one inference component.
     """
 
-    def __init__(
-        self, run: Run, client: ReefClient, coordination: Coordination, control: ControlClient, component: str
-    ) -> None:
+    def __init__(self, run: Run, client: ReefClient, coordination: Coordination, component: str) -> None:
         super().__init__(run, client, coordination)
-        self.control = control
         self.component = component
 
     # -- The scenario's state
@@ -2044,17 +1951,28 @@ class LifecycleChecks(RequestChecks):
     async def serve(self, label: str, served: Mapping[str, int]) -> dict[str, ServedArtifact]:
         """Make ``served`` the artifacts that the scenario serves of the component, with their weights, by a public
         update; return the routes that the serving worker then published."""
-        answer = await self.control.request(
+        answer = await self.client.control(
             label, "POST", f"/reef/scenarios/{SCENARIO}/update", {"served": dict(served), "component": self.component}
         )
         assert answer.get("served") == dict(served), f"{label}: the update answered {answer}"
         return await self.wait_for_routes(label, served)
 
+    async def import_artifact(self, label: str, source: Path, known: Sequence[str]) -> str:
+        """Import the directory ``source`` as an artifact of the component by a public request; return its ID,
+        which must be none of ``known``, the IDs of the scenario's artifacts before the import."""
+        imported = await self.client.control(
+            label, "POST", f"/reef/scenarios/{SCENARIO}/artifacts", {"source": source.as_uri()}, status=201
+        )
+        artifact_id = str(imported["artifact_id"])
+        added = artifact_id not in known and imported.get("component") == self.component
+        assert added, f"{label}: the import answered {imported}"
+        return artifact_id
+
     async def scenario_state(self, label: str) -> ScenarioState:
         path = f"/reef/scenarios/{SCENARIO}"
-        settings = await self.control.request(f"{label}: settings", "GET", f"{path}/settings")
-        artifacts = await self.control.request(f"{label}: artifacts", "GET", f"{path}/artifacts")
-        operations = await self.control.request(f"{label}: operations", "GET", f"{path}/operations")
+        settings = await self.client.control(f"{label}: settings", "GET", f"{path}/settings")
+        artifacts = await self.client.control(f"{label}: artifacts", "GET", f"{path}/artifacts")
+        operations = await self.client.control(f"{label}: operations", "GET", f"{path}/operations")
         store = self.coordination.served_models
         request = store.current_request(SCENARIO)
         return ScenarioState(
@@ -2091,76 +2009,34 @@ class LifecycleChecks(RequestChecks):
 
     # -- Requests
 
-    async def answers(self, label: str, arm: Arm) -> None:
-        """``arm`` answers a buffered request that names no artifact, and a streamed request to its named route."""
-        await self.chat(f"{label}: no artifact named, buffered", arm, chat_body(PLAIN_PROMPT, stream=False))
-        await self.explicit_request(f"{label}: named route, streamed", arm, stream=True, named=True)
-
-    async def split_conversations(
-        self, label: str, arms: Sequence[Arm], weights: Mapping[str, int]
-    ) -> dict[str, tuple[str, int]]:
-        """Hold a conversation of two turns with each of ``arms``, the two artifacts that share the traffic by the
-        split ``weights``; return each one's first message and its bucket, by the arm's name.
-
-        No request names an artifact: the bucket of the first message selects the arm, and the second turn must
-        stay with it. The first arm's turns are buffered and then streamed, the second arm's streamed and then
-        buffered. Each record must store the split and the bucket.
-        """
-        conversations = {arm.name: self.conversation(arm, weights) for arm in arms}
-        for arm, stream in zip(arms, (False, True), strict=True):
-            text, bucket = conversations[arm.name]
-            traffic = ExpectedTraffic(weights, bucket)
-            first = await self.chat(
-                f"{label} conversation of {arm.name}, turn 1", arm, chat_body(text, stream=stream), traffic=traffic
-            )
-            history = [{"role": "user", "content": text}, {"role": "assistant", "content": first.text()}]
-            await self.chat(
-                f"{label} conversation of {arm.name}, turn 2",
-                arm,
-                chat_body("Continue.", stream=not stream, history=history),
-                traffic=traffic,
-            )
-        return conversations
-
-    async def cache_after_load(self, label: str, arm: Arm, component_log: Path) -> dict[str, JsonValue]:
-        """Send the cache prompt to ``arm`` twice after its load: the first request must reuse no prompt token, and
-        the second some. ``component_log`` is the log of the component that serves ``arm`` (``cached_request``).
-        Return what each request measured."""
-        first = await self.cached_request(f"{label}: first cache-prompt request", arm, component_log)
-        second = await self.cached_request(f"{label}: second cache-prompt request", arm, component_log)
-        assert first["cached_tokens"] == 0 and second["cached_tokens"] > 0, f"{label}: reused {first}, then {second}"
-        return {"first": first, "second": second}
-
-    async def still_cached(self, label: str, slots: Sequence[NativeSlot]) -> dict[str, JsonValue]:
+    async def still_cached(self, label: str, slots: Sequence[NativeSlot]) -> dict[str, int]:
         """Send the cache prompt once to the checkpoint of each of ``slots`` that serves one. Each request must
         reuse prompt tokens: the component's engines still hold the prefix cache of the checkpoint's earlier
-        requests. Return what each request measured, by the checkpoint's name."""
-        measured: dict[str, JsonValue] = {}
+        requests. Return the reused tokens of each request, by the checkpoint's name."""
+        reused: dict[str, int] = {}
         for slot in slots:
             if slot.arm is None:
                 continue
-            reused = await self.cached_request(f"{label}: cache prompt of {slot.arm.name}", slot.arm, slot.log)
-            assert reused["cached_tokens"] > 0, f"{label}: {slot.arm.name} reused no prompt token: {reused}"
-            measured[slot.arm.name] = reused
-        return measured
+            tokens = await self.cached_request(f"{label}: cache prompt of {slot.arm.name}", slot.arm, slot.log)
+            assert tokens > 0, f"{label}: {slot.arm.name} reused no prompt token"
+            reused[slot.arm.name] = tokens
+        return reused
 
     async def component_holds(self, label: str, slot: NativeSlot) -> None:
         """The component of ``slot`` reports the slot's runtime load ID for its one engine, and has started the
         slot's engine stacks and no other. The check only reads."""
-        held, started = await slot.load_ids(), engine_urls(slot.log)
+        held, started = await engine_load_ids(slot.service), engine_urls(slot.log)
         assert held == [slot.load_id], f"{label}: the engines at {slot.url} hold {held}, not {slot.load_id}"
         assert started == slot.stacks, f"{label}: the component at {slot.url} started {started}, not {slot.stacks}"
 
     async def slots_hold(
         self, label: str, runtime: CheckpointSlotsRuntime, slots: Sequence[NativeSlot], served: Mapping[str, int]
     ) -> dict[str, ServedArtifact]:
-        """Check that the published routes, ``runtime`` and the components agree with what ``slots`` expect while
-        the scenario serves ``served``, weight artifacts with their weights; return the published routes.
+        """Check that ``runtime`` and the components hold what ``slots`` expect, and that the store publishes the
+        routes of ``served``, weight artifacts with their weights; return the published routes.
 
-        Each slot with a checkpoint gives one route: the checkpoint on the slot's component, under the slot's
-        runtime load ID. Those must be the bindings of ``runtime``, which must give the same route for each one,
-        and the store must hold the routes of ``served`` among them, the active one also as ``ACTIVE``. Each
-        component must hold what its slot expects (``component_holds``). The check only reads.
+        ``runtime`` must bind the checkpoint of each slot that has one, also a checkpoint that left ``served`` and
+        is not released yet. The check only reads.
         """
         expected = {
             slot.arm.artifact_id: ServedArtifact(
@@ -2194,25 +2070,21 @@ class LifecycleChecks(RequestChecks):
 
     async def serves_unchanged(
         self, label: str, runtime: CheckpointSlotsRuntime, slot: NativeSlot, route: ServedArtifact
-    ) -> tuple[Exchange, dict[str, JsonValue]]:
-        """The checkpoint of ``slot``, which has all the traffic, serves as it did when ``route`` was its route;
-        return the exchange of its first request here, and what its cache-prompt request measured.
-
-        The checkpoint answers a request that names no artifact. Then it answers the cache prompt by its named
-        route, and its component's engines must still hold that prompt in their prefix cache. The store must
-        publish the checkpoint and ``runtime`` must bind it as ``route``, and its component must hold what the
-        slot expects (``component_holds``).
+    ) -> Exchange:
+        """The checkpoint of ``slot``, which has all the traffic, serves as it did when ``route`` was its route:
+        published and bound as ``route``, under the slot's runtime load ID, from the slot's engines and with their
+        prefix cache. Return the exchange of the first of its two requests here, which names no artifact.
         """
         arm = slot.arm
         assert arm is not None, f"{label}: the slot at {slot.url} must hold a checkpoint"
         exchange = await self.chat(f"{label}: no artifact named", arm, chat_body(PLAIN_PROMPT, stream=False))
-        cache = await self.still_cached(label, [slot])
+        await self.still_cached(label, [slot])
         published = dict(self.coordination.served_models.read_scenario(SCENARIO)).get(arm.artifact_id)
         binding = runtime.bindings.get(arm.artifact_id)
         same = published == route and binding == route
         assert same, f"{label}: {arm.name} is published as {published} and bound as {binding}, not as {route}"
         await self.component_holds(label, slot)
-        return exchange, cache
+        return exchange
 
     # -- Checks
 
@@ -2224,15 +2096,13 @@ class LifecycleChecks(RequestChecks):
         served: Mapping[str, int],
         artifact_ids: Sequence[str],
         text: str,
-    ) -> dict[str, JsonValue]:
+    ) -> dict[str, int]:
         """Give one of the two checkpoints of ``slots`` all the traffic by the public update ``served``, which
-        keeps the other at weight 0; return the published routes and what the cache-prompt requests measured.
+        keeps the other at weight 0; return the prompt tokens that each checkpoint then reused (``still_cached``).
 
         Nothing may load: each component must keep its checkpoint under its runtime load ID, in the engines that
-        it had, with the cache prompt in its prefix cache. ``text`` starts a conversation that a 50/50 split gave
-        to the checkpoint at weight 0. The selected checkpoint must answer it now, as it answers each request that
-        names no artifact, and the records store no traffic metadata: one weight above 0 is no split. The other
-        checkpoint still answers by its named route.
+        it had. ``text`` starts a conversation that a 50/50 split gave to the checkpoint at weight 0. The selected
+        checkpoint must answer it now, and its record stores no traffic metadata: one weight above 0 is no split.
         """
         await self.serve(label, served)
         await self.slots_hold(label, runtime, slots, served)
@@ -2244,13 +2114,10 @@ class LifecycleChecks(RequestChecks):
             f"{label}: conversation that the split gave to {other.name}", selected, chat_body(text, stream=True)
         )
         await self.answers(f"{label}, {selected.name}", selected)
-        for stream in (False, True):
-            await self.explicit_request(
-                f"{label}: {mode(stream)} named route of {other.name}", other, stream=stream, named=True
-            )
-        cache = await self.still_cached(label, slots)
-        routes = await self.slots_hold(f"{label}, after the requests", runtime, slots, served)
-        return {"routes": {name: route.to_json() for name, route in routes.items()}, "cache_prompt_requests": cache}
+        await self.named_routes(label, other)
+        reused = await self.still_cached(label, slots)
+        await self.slots_hold(f"{label}, after the requests", runtime, slots, served)
+        return reused
 
     async def released_after_grace(
         self,
@@ -2265,11 +2132,10 @@ class LifecycleChecks(RequestChecks):
 
         ``asked`` is the time of the update that removed the checkpoint. ``stop`` is the stop that the update
         scheduled: the checkpoint's route, and the time from which the worker may stop it. Both times are those of
-        ``time.time``. The wait reads the store and the runtime and sends requests: it never stops the checkpoint,
-        changes the stop or drives the worker. Until the stop is due, the runtime must keep the checkpoint bound.
-        The worker then releases the slot and deletes the stop, in this order. Meanwhile the checkpoint's named
-        route answers 404, and the checkpoint of ``staying`` answers with its binding, runtime load ID, engines and
-        prefix cache unchanged (``serves_unchanged``).
+        ``time.time``. The wait never stops the checkpoint, changes the stop or drives the worker: it polls. The
+        runtime must bind the checkpoint at each poll before the stop is due, and the release lies between the
+        last poll that found it bound and the first that found the stop gone. Meanwhile the checkpoint's named
+        route must answer 404, and the checkpoint of ``staying`` must serve unchanged (``serves_unchanged``).
         """
         retired, kept = leaving.arm, staying.arm
         assert retired is not None and kept is not None, "each slot must hold a checkpoint when the wait starts"
@@ -2314,36 +2180,25 @@ class LifecycleChecks(RequestChecks):
     async def restored_after_removal(
         self, runtime: CheckpointSlotsRuntime, losing: NativeSlot, staying: NativeSlot
     ) -> dict[str, JsonValue]:
-        """Remove the engines of the slot ``losing``, and wait until the health watcher of its runtime has restored
-        its checkpoint; return what the wait measured, with times in seconds after the removal's call.
+        """Remove the engines of the slot ``losing`` (``remove_engines``), and wait until the health watcher of its
+        runtime has restored its checkpoint; return what the wait measured, with times in seconds after the
+        removal's call.
 
-        The removal is the control operation ``DELETE engines`` of that slot's component, sent as the engines'
-        owner with the slot's own control client, as the recovery profile sends it. The component stops its engine
-        stack, and stays. Nothing else here changes anything: no call starts engines, loads a checkpoint, reaches
-        the runtime or writes to the store. The watcher alone must find the loss at a health check, start engines,
-        load the checkpoint again and resume. The runtimes must log one warning for it, on a watcher's thread, and
-        no error.
-
-        Until then Reef must refuse each request for the lost checkpoint's named route, without a receipt, and
-        its first answer ends the wait. After each refusal the checkpoint of ``staying`` must serve unchanged
-        (``serves_unchanged``), with two requests. Such a round lies within the outage that the run saw when the
-        next request for the lost checkpoint was refused too; at least one round must. The requests for the lost
-        checkpoint carry the plain prompt, so the new engines' prefix cache has not seen the cache prompt.
+        Nothing else here calls the runtime or writes to the store: the watcher alone must restore the checkpoint,
+        and the runtimes must log one warning for it and no error. Reef must refuse each request for the lost
+        checkpoint's named route until its first answer, which ends the wait. After each refusal the checkpoint of
+        ``staying`` must serve unchanged (``serves_unchanged``), with two requests. Such a round lies within the
+        outage that the run saw when the next request for the lost checkpoint was refused too; at least one round
+        must, and the result counts the requests of those rounds only. The requests for the lost checkpoint carry
+        the plain prompt, so the new engines' prefix cache has not seen the cache prompt.
         """
         lost, kept = losing.arm, staying.arm
         assert lost is not None and kept is not None, "each slot must hold a checkpoint when the engines go"
         kept_route = runtime.bindings[kept.artifact_id]
         refusals: list[Exchange] = []
-        rounds: list[tuple[Exchange, dict[str, JsonValue]]] = []
-        warning_seen: float | None = None
+        rounds: list[Exchange] = []
         with serving_log() as log:
-            called = time.monotonic()
-            # The service's own ``close`` gives the component this long to stop its engines.
-            answer = await asyncio.to_thread(
-                losing.service.control.call, "DELETE", "engines", timeout_s=HEALTH_TIMEOUT_S
-            )
-            removed = time.monotonic()
-            assert answer == {"ok": True}, f"the component at {losing.url} answered {answer!r}"
+            called, removed = await remove_engines(losing.service)
             while True:
                 label = f"after the removal of {lost.name}'s engines, round {len(rounds)}"
                 refused = await self.refusal(f"{label}: the named route of {lost.name}", lost, PLAIN_PROMPT)
@@ -2353,8 +2208,6 @@ class LifecycleChecks(RequestChecks):
                 waited = time.monotonic() - called
                 assert waited < RECOVERY_TIMEOUT_S, f"{label}: {lost.name} is still refused after {waited:.0f} s"
                 rounds.append(await self.serves_unchanged(label, runtime, staying, kept_route))
-                if warning_seen is None and log.lines:
-                    warning_seen = time.monotonic()
                 await asyncio.sleep(REFUSED_RETRY_S)
             answered = time.monotonic()
         lines = list(log.lines)
@@ -2365,75 +2218,47 @@ class LifecycleChecks(RequestChecks):
             return round(moment - called, 3)
 
         # The last round ended before the lost checkpoint answered, not before another refusal: it does not count.
-        within: list[JsonValue] = []
-        for earlier, (exchange, cache), later in zip(refusals[:-1], rounds[:-1], refusals[1:], strict=True):
+        within = rounds[:-1]
+        for earlier, exchange, later in zip(refusals[:-1], within, refusals[1:], strict=True):
             between = earlier.ended <= exchange.sent and exchange.ended <= later.sent
             assert between, f"{exchange.label}: not between two refusals of {lost.name}"
-            within.append(
-                {
-                    "refused_before": after_call(earlier.ended),
-                    "request_sent": after_call(exchange.sent),
-                    "request_answered": after_call(exchange.ended),
-                    "receipt": exchange.receipt(),
-                    "cache_prompt_request": cache[kept.name],
-                    "refused_after": after_call(later.ended),
-                }
-            )
         assert within, (
             f"{lost.name} answered after {len(refusals)} refusals: the run saw no request of {kept.name} between "
             f"two of them"
         )
         return {
-            "control_operation": "DELETE engines",
             "component": losing.url,
             "watcher_interval_seconds": losing.runtime.health_interval_s,
             "seconds_from_call": {
                 "engines_removed": after_call(removed),
                 "first_refusal": after_call(refusals[0].ended),
-                # The end of the first round that found the watcher's warning for the failed health check in the
-                # log: the watcher logged it during that round or the wait before it. None when no round found it.
-                "watcher_warning_seen": None if warning_seen is None else after_call(warning_seen),
                 "last_refusal": after_call(refusals[-1].ended),
                 "served_route_answered": after_call(answered),
             },
             "refused_requests_of_served_route": len(refusals),
             "staying_checkpoint": kept.name,
             "requests_of_staying_checkpoint_between_two_refusals": 2 * len(within),
-            "rounds_of_staying_checkpoint_between_two_refusals": within,
+            "seconds_from_call_of_their_rounds": {
+                "first_round_sent": after_call(within[0].sent),
+                "last_round_answered": after_call(within[-1].ended),
+            },
             "runtime_log": [asdict(line) for line in lines],
         }
 
     async def native_weights(
         self, runtime: CheckpointSlotsRuntime, slots: Sequence[NativeSlot], native: Checkpoint, successor: Checkpoint
     ) -> list[str]:
-        """The public lifecycle of two weight artifacts that serve at the same time on the native engine. Return
-        the IDs of the scenario's weight artifacts: A, B and the capacity fixture.
+        """The public lifecycle of two weight artifacts that serve at the same time on the native engine: A, with
+        the weights ``native``, and B, with ``successor``. Return the IDs of the scenario's weight artifacts: A, B
+        and the capacity fixture.
 
-        ``slots`` are the two components of ``runtime``. Each step but the last is a public request. The creation
-        serves A: the serving worker opens both components and loads A into the first. After its import, B must
-        load into the second under its own runtime load ID, while A's route, load and engines stay as they were.
-        Then each answers by its named route with its own words while the other answers, and each component's
-        prefix cache serves its own checkpoint.
-
-        Three updates then move the traffic: a 50/50 split, all of it to B, and all of it back to A. None may load
-        anything: both checkpoints keep their routes, runtime load IDs, engines and prefix caches. An update
-        without A ends its route at once. The serving worker must release A's component only after the grace time,
-        while B serves unchanged; the component keeps its engines. An update that names A again must load it into
-        that component under a new runtime load ID, with an empty prefix cache, and leave B as it was. Then the
-        scenario imports the capacity fixture, a copy of B, as a third artifact: two components serve no three
-        artifacts, so an update that names all three must be refused and change nothing.
-
-        The last step is a fault, and no public request: the run removes the engines of A's component
-        (``restored_after_removal``). The health watcher of A's runtime must restore A under the runtime load ID
-        that it had, in one new engine stack with an empty prefix cache. B must serve during A's outage with its
-        route, runtime load ID, engines and prefix cache unchanged, and the scenario's public state, routes and
-        traffic weights must be the same before and after.
-
-        After the worker opened the components, engines start only once more: A's, for that restoration.
+        ``slots`` are the two components of ``runtime``. Each step passes one report check, whose name says what
+        must change and what must stay. All but the last are public requests. The last step is a fault: the run
+        removes the engines of A's component (``restored_after_removal``). After the serving worker opened the
+        components, engines start only once more: A's, for that restoration.
         """
-        path = f"/reef/scenarios/{SCENARIO}"
         first, second = slots
-        created = await self.control.request(
+        created = await self.client.control(
             "create the scenario", "POST", "/reef/scenarios", {"name": SCENARIO}, status=201
         )
         root_id = str(created["artifact_id"])
@@ -2444,28 +2269,20 @@ class LifecycleChecks(RequestChecks):
         root_load = first.bind(root, root_route)
         # The serving worker opened both components before it loaded A, so each one has started its engines by now.
         # They must keep these.
-        order: list[str] = self.run.report.facts["engines"]["start_order"]
-        for name, slot in zip(SLOT_COMPONENTS, slots, strict=True):
+        for slot in slots:
             slot.stacks = engine_urls(slot.log)
             assert len(slot.stacks) == 1, f"the component at {slot.url} started the engine stacks {slot.stacks}"
-            order.append(f"native {self.run.inputs.native_engine} on {name}")
-        stacks = {slot.url: slot.stacks for slot in slots}
         await self.slots_hold("after the creation", runtime, slots, alone)
         await self.selection("after the creation", alone, [root_id])
         await self.answers("A after the creation", root)
         self.run.report.passed(
             "a public scenario creation serves the root weights A on the first component, and the second holds its "
             "startup load",
-            route=root_route.to_json(),
             runtime_load_ids={slot.url: slot.load_id for slot in slots},
-            engine_stacks_started=stacks,
+            engine_stacks_started={slot.url: slot.stacks for slot in slots},
         )
 
-        imported = await self.control.request(
-            "import B", "POST", f"{path}/artifacts", {"source": successor.directory.as_uri()}, status=201
-        )
-        successor_id = str(imported["artifact_id"])
-        assert successor_id != root_id and imported.get("component") == self.component, f"the import: {imported}"
+        successor_id = await self.import_artifact("import B", successor.directory, [root_id])
         beside = Arm("B", successor_id, successor, native_facade=True)
         artifact_ids = [root_id, successor_id]
         state = await self.selection("after the import of B", alone, artifact_ids)
@@ -2505,15 +2322,13 @@ class LifecycleChecks(RequestChecks):
             for arm, slot in zip(arms, slots, strict=True)
         }
         await self.answers("A beside B", root)
-        routes = await self.slots_hold("A and B after their requests", runtime, slots, together)
+        await self.slots_hold("A and B after their requests", runtime, slots, together)
         self.run.report.passed(
             "a public update serves B beside A: each on its own component under its own runtime load ID, with named "
             "routes that answer at the same time and its own prefix cache",
-            routes={name: route.to_json() for name, route in routes.items()},
             runtime_load_ids={root.name: root_load, beside.name: successor_load},
             overlapping_request_pairs_of_a_and_b=overlapping,
-            cache_prompt_requests=cache,
-            engine_stacks_started=stacks,
+            cached_tokens=cache,
         )
 
         # The next three updates move the traffic between two bound checkpoints. The slots expect no change, so
@@ -2523,30 +2338,29 @@ class LifecycleChecks(RequestChecks):
         await self.slots_hold("at 50/50", runtime, slots, halves)
         await self.selection("at 50/50", halves, artifact_ids)
         conversations = await self.split_conversations("50/50", arms, halves)
-        routes = await self.slots_hold("after the 50/50 conversations", runtime, slots, halves)
+        await self.slots_hold("after the 50/50 conversations", runtime, slots, halves)
         self.run.report.passed(
             "a public update splits the traffic 50/50 between A and B: each keeps its conversations, its component "
             "and its runtime load ID",
-            routes={name: route.to_json() for name, route in routes.items()},
             conversation_buckets={name: bucket for name, (text, bucket) in conversations.items()},
         )
 
         promoted = {root_id: 0, successor_id: 100}
-        promotion = await self.all_traffic(
+        cache = await self.all_traffic(
             "the promotion of B", runtime, slots, promoted, artifact_ids, conversations[root.name][0]
         )
         self.run.report.passed(
             "a public update promotes B to all the traffic and loads nothing: A still answers by its named route, "
             "and both prefix caches stay",
-            **promotion,
+            cached_tokens=cache,
         )
-        rollback = await self.all_traffic(
+        cache = await self.all_traffic(
             "the rollback to A", runtime, slots, together, artifact_ids, conversations[beside.name][0]
         )
         self.run.report.passed(
             "a public update rolls the traffic back to A and loads nothing: B still answers by its named route, "
             "and both prefix caches stay",
-            **rollback,
+            cached_tokens=cache,
         )
 
         # A leaves the routes. The serving worker must keep A's component bound for the grace time, in which a
@@ -2572,7 +2386,7 @@ class LifecycleChecks(RequestChecks):
         release = await self.released_after_grace(runtime, first, second, asked, stop)
         first.arm = None
         # The released component keeps its engines, which still hold A's load: the slot's load ID is unchanged.
-        routes = await self.slots_hold("after the release of A", runtime, slots, only)
+        await self.slots_hold("after the release of A", runtime, slots, only)
         unbound = runtime.served_artifact(root_id, SCENARIO)
         assert unbound is None, f"the runtime still serves A after its release, as {unbound}"
         await self.not_served("the named route of A after its release", root)
@@ -2583,9 +2397,7 @@ class LifecycleChecks(RequestChecks):
             "the grace time, while B serves unchanged; the component keeps its engines",
             grace_s=grace,
             **release,
-            routes={name: route.to_json() for name, route in routes.items()},
-            cache_prompt_requests=cache,
-            engine_stacks_started=stacks,
+            cached_tokens=cache,
         )
 
         # A serves again. The first component is the runtime's only free slot: it must load A under a new runtime
@@ -2601,30 +2413,20 @@ class LifecycleChecks(RequestChecks):
         reloaded = await self.cache_after_load("A after its second load", root, first.log)
         warm = await self.still_cached("B beside A's second load", [second])
         await self.answers("B beside A's second load", beside)
-        for stream in (False, True):
-            await self.explicit_request(
-                f"A after its second load: {mode(stream)} named route", root, stream=stream, named=True
-            )
+        await self.named_routes("after A's second load", root)
         routes = await self.slots_hold("A again beside B, after their requests", runtime, slots, again)
         self.run.report.passed(
             "a public update serves A again beside B: the released component loads A under a new runtime load ID "
             "into the engines that it kept, with an empty prefix cache, and B serves unchanged",
-            routes={name: route.to_json() for name, route in routes.items()},
             runtime_load_ids={"A": second_load, "A before its release": root_load, "B": successor_load},
-            cache_prompt_requests={root.name: reloaded, **warm},
-            engine_stacks_started=stacks,
+            cached_tokens={root.name: reloaded, **warm},
         )
 
         # A third weight artifact is more than the two components serve. The fixture only has to be a third
         # artifact: it is a copy of B with a marker file, and nothing loads it.
         fixture = self.run.layout.models / "capacity"
         await asyncio.to_thread(write_capacity_fixture, successor, fixture)
-        imported = await self.control.request(
-            "import the capacity fixture", "POST", f"{path}/artifacts", {"source": fixture.as_uri()}, status=201
-        )
-        fixture_id = str(imported["artifact_id"])
-        added = fixture_id not in artifact_ids and imported.get("component") == self.component
-        assert added, f"the import of the capacity fixture: {imported}"
+        fixture_id = await self.import_artifact("import the capacity fixture", fixture, artifact_ids)
         fixture_arm = Arm("the capacity fixture", fixture_id, successor, native_facade=True)
         artifact_ids = [*artifact_ids, fixture_id]
         state = await self.selection("after the import of the capacity fixture", again, artifact_ids)
@@ -2633,10 +2435,10 @@ class LifecycleChecks(RequestChecks):
         capacity = runtime.served_artifact_capacity
         over = {root_id: 0, successor_id: 100, fixture_id: 0}
         before = await self.scenario_state("before the refused update")
-        refused = await self.control.request(
+        refused = await self.client.control(
             "serve three weight artifacts",
             "POST",
-            f"{path}/update",
+            f"/reef/scenarios/{SCENARIO}/update",
             {"served": over, "component": self.component},
             status=400,
         )
@@ -2650,10 +2452,7 @@ class LifecycleChecks(RequestChecks):
         await self.slots_hold("after the refused update", runtime, slots, again)
         await self.not_served("the named route of the capacity fixture", fixture_arm)
         await self.answers("B after the refused update", beside)
-        for stream in (False, True):
-            await self.explicit_request(
-                f"A after the refused update: {mode(stream)} named route", root, stream=stream, named=True
-            )
+        await self.named_routes("after the refused update", root)
         cache = await self.still_cached("after the refused update", slots)
         await self.slots_hold("after the requests that follow the refused update", runtime, slots, again)
         self.run.report.passed(
@@ -2662,7 +2461,7 @@ class LifecycleChecks(RequestChecks):
             capacity=capacity,
             refusal=refusal,
             fixture={"artifact_id": fixture_id, "copy_of": beside.name, "marker": CAPACITY_MARKER},
-            cache_prompt_requests=cache,
+            cached_tokens=cache,
         )
 
         # The last step is a fault, and the profile's only change that is no public request: the run removes A's
@@ -2685,37 +2484,27 @@ class LifecycleChecks(RequestChecks):
         # A's requests since the removal carried the plain prompt: its new engines must reuse nothing at first.
         reloaded = await self.cache_after_load("A after its restoration", root, first.log)
         warm = await self.still_cached("B after the restoration of A", [second])
-        for arm in arms:
-            for stream in (False, True):
-                await self.explicit_request(
-                    f"after the restoration of A: {mode(stream)} named route of {arm.name}",
-                    arm,
-                    stream=stream,
-                    named=True,
-                )
+        await self.named_routes("after the restoration of A", *arms)
         await self.slots_hold("after the requests that follow the restoration of A", runtime, slots, again)
         self.run.report.passed(
             "the watcher of A's runtime restores A's removed engines: A serves again under its runtime load ID from "
             "one new engine stack with an empty prefix cache, and B served unchanged during the outage that the "
             "run saw",
             removal=removal,
-            routes={name: route.to_json() for name, route in restored.items()},
             runtime_load_ids={root.name: first.load_id, beside.name: second.load_id},
             engine_stacks_started={"A before the removal": lost_stacks, "A": started, "B": second.stacks},
-            cache_prompt_requests={root.name: reloaded, **warm},
+            cached_tokens={root.name: reloaded, **warm},
         )
         return artifact_ids
 
     async def harness_artifacts(self, provider_url: str, provider: Checkpoint, successor_tree: Path) -> list[str]:
-        """The public lifecycle of harness artifacts that serve at the same time: create the scenario with the root
-        harness A, import B from the directory ``successor_tree``, serve both in a 50/50 split, give B all the
-        traffic, and stop serving A. Return the IDs of A and B.
+        """The public lifecycle of two harness artifacts that serve at the same time: A, the scenario's root, and B,
+        imported from the directory ``successor_tree``. Return the IDs of A and B.
 
         A harness artifact loads no weights: the model of ``provider`` at ``provider_url`` answers for both, and
         the artifact ID of each answer and record tells them apart.
         """
-        path = f"/reef/scenarios/{SCENARIO}"
-        created = await self.control.request(
+        created = await self.client.control(
             "create the harness scenario", "POST", "/reef/scenarios", {"name": SCENARIO}, status=201
         )
         root_id = str(created["artifact_id"])
@@ -2725,16 +2514,9 @@ class LifecycleChecks(RequestChecks):
         assert routes == endpoint_routes(provider_url, alone), f"the routes of harness A alone are {routes}"
         await self.selection("after the creation of harness A", alone, [root_id])
         await self.answers("harness A after the creation", root)
-        self.run.report.passed(
-            "a public scenario creation serves the root harness A on the provider's model",
-            route=routes[ACTIVE].to_json(),
-        )
+        self.run.report.passed("a public scenario creation serves the root harness A on the provider's model")
 
-        imported = await self.control.request(
-            "import harness B", "POST", f"{path}/artifacts", {"source": successor_tree.as_uri()}, status=201
-        )
-        successor_id = str(imported["artifact_id"])
-        assert successor_id != root_id and imported.get("component") == self.component, f"the import: {imported}"
+        successor_id = await self.import_artifact("import harness B", successor_tree, [root_id])
         successor = Arm("harness B", successor_id, provider, native_facade=False)
         artifact_ids = [root_id, successor_id]
         state = await self.selection("after the import of harness B", alone, artifact_ids)
@@ -2760,7 +2542,6 @@ class LifecycleChecks(RequestChecks):
         self.run.report.passed(
             "a public update serves harness A and B at the same time: named routes, and a 50/50 split that keeps "
             "conversations",
-            routes={name: route.to_json() for name, route in routes.items()},
             conversation_buckets={name: bucket for name, (text, bucket) in conversations.items()},
         )
 
@@ -2775,8 +2556,7 @@ class LifecycleChecks(RequestChecks):
         )
         await self.explicit_request("0/100 named route of harness A", root, stream=True, named=True)
         self.run.report.passed(
-            "a public update to 0/100 gives harness B each request that names no artifact, and A answers by name",
-            routes={name: route.to_json() for name, route in routes.items()},
+            "a public update to 0/100 gives harness B each request that names no artifact, and A answers by name"
         )
 
         only = {successor_id: 100}
@@ -2791,8 +2571,7 @@ class LifecycleChecks(RequestChecks):
         assert after == before, f"the same update again changed the scenario from {before} to {after}"
         self.run.report.passed(
             "a public update without harness A stops its route and keeps it stored, and the same update again changes "
-            "nothing",
-            route=routes[ACTIVE].to_json(),
+            "nothing"
         )
         return artifact_ids
 
@@ -2833,17 +2612,8 @@ async def public_app(
     )
     try:
         app = create_app(dispatcher, tokens=run.credentials.service)
-        async with (
-            serving(app) as url,
-            ClientSession(timeout=ClientTimeout(total=REQUEST_TIMEOUT_S)) as session,
-        ):
-            yield LifecycleChecks(
-                run,
-                ReefClient(session, url, run.credentials.service, run.layout.wire),
-                coordination,
-                ControlClient(session, url, run.credentials.service, run.layout.control),
-                component,
-            )
+        async with serving(run, app) as client:
+            yield LifecycleChecks(run, client, coordination, component)
     finally:
         await asyncio.to_thread(dispatcher.close)
 
@@ -2860,7 +2630,7 @@ async def qualify_lifecycle(run: Run) -> None:
     from reef.recipe.harness import HarnessEvolutionRecipe
     from reef.train.harness_backend.settings import EvolutionSettings
 
-    native, provider = run.checkpoints()
+    native, provider = run.native, run.provider
     assert revision_of(native) != revision_of(provider), "the checkpoints A and B have the same weights"
     runtime, slots = await start_checkpoint_slots(run)
 
@@ -2983,7 +2753,7 @@ class RoutingChecks:
         exchange.receipt()
         checkpoint = self.checkpoints[expectation.target_id]
         check_words(checkpoint, exchange.text(), body["max_tokens"], label)
-        check_logprobs(self.run.scores(), checkpoint, exchange, native_facade=False)
+        check_logprobs(self.run.oracle, checkpoint, exchange, native_facade=False)
         found = private_fields_in(answer_values(exchange))
         if found:
             self.engine_fields[label] = found
@@ -3079,7 +2849,7 @@ class RoutingChecks:
 
 def routing_policy(run: Run, engines: Engines) -> tuple[dict[str, Any], str, str]:
     """The routing manifest's policy without its deployment section, and the native and provider target IDs."""
-    native, provider = run.checkpoints()
+    native, provider = run.native, run.provider
     native_target = f"native-{run.inputs.native_engine}-component"
     provider_target = f"raw-{run.inputs.provider_engine}-provider"
     policy = {
@@ -3090,7 +2860,7 @@ def routing_policy(run: Run, engines: Engines) -> tuple[dict[str, Any], str, str
                 # The component's engine serves its model under the model path.
                 "provider_model": str(native.directory),
                 "revision": revision_of(native),
-                "url": engines.component_url,
+                "url": engines.service.settings.url,
                 "role": "reef-component",
                 "api_key_env": COMPONENT_TOKEN_ENV,
             },
@@ -3133,7 +2903,6 @@ async def qualify_routing(run: Run) -> None:
     expected_sha256 = os.environ.get(ROUTER_SHA256_ENV, "")
     if expected_sha256 and binary_sha256 != expected_sha256:
         raise RuntimeError(f"the router binary has SHA-256 {binary_sha256}, not {expected_sha256}")
-    native, provider = run.checkpoints()
     # A router target is a plain endpoint: Reef knows no artifact behind it, so nothing serves published weights.
     engines = await start_engines(run, artifact_serving=False)
     policy, native_target, provider_target = routing_policy(run, engines)
@@ -3231,19 +3000,11 @@ async def qualify_routing(run: Run) -> None:
                 f"http://127.0.0.1:{router_port}", run.credentials.selection, settings.selection_timeout_seconds
             ),
         )
-        async with (
-            serving(app) as url,
-            ClientSession(timeout=ClientTimeout(total=REQUEST_TIMEOUT_S)) as session,
-        ):
+        async with serving(run, app) as client:
             # The app's startup checked that each target lists its model and that one preview per Scenario passes.
             run.report.passed("routing readiness")
-            checks = RoutingChecks(
-                run,
-                ReefClient(session, url, run.credentials.service, run.layout.wire),
-                snapshot,
-                runtime_hash,
-                {native_target: native, provider_target: provider},
-            )
+            targets = {native_target: run.native, provider_target: run.provider}
+            checks = RoutingChecks(run, client, snapshot, runtime_hash, targets)
             await checks.run_all(native_target, provider_target)
         after = await asyncio.to_thread(management.runtime_hashes)
         assert after.active_runtime_hash == runtime_hash, f"the router runtime changed during the run: {after!r}"
@@ -3278,80 +3039,73 @@ def sglang_scheduler_sha256() -> str | None:
 
 def base_facts(inputs: QualificationInputs) -> dict[str, Any]:
     """The facts that a report starts with: the inputs, the versions, and what the profile does not show."""
-    limitations = ["tiny synthetic checkpoints on one GPU; no performance or capacity claim"]
-    if inputs.profile == "features":
-        provider_engine: str | None = inputs.provider_engine
-        limitations += [
-            "the run writes served_models rows and traffic weights itself; control-plane publication is not exercised",
-            "two prepublished routes are not a public multi-artifact deployment",
-            "the checkpoints ignore their context, so a stale prefix-cache entry would change no output: the features "
-            "profile shows the cache's reset by cached-token counts only",
-        ]
-    elif inputs.profile == "recovery":
-        provider_engine = None
-        limitations += [
+    cache_counts = (
+        "the checkpoints ignore their context, so a prefix-cache entry of an earlier load or of other weights would "
+        "change no output: cached-token counts alone show the cache's hits and resets"
+    )
+    controlled_removal = (
+        "the run removes engines with the component's control operation DELETE engines, as their owner, and the "
+        "runtime's watcher restores them: not an engine actor or a server process that crashes, and not a component "
+        "that restarts"
+    )
+    limitations = {
+        "features": [
+            "the run writes served_models rows and traffic weights itself: control-plane publication is not "
+            "exercised, and two prepublished routes are not a public multi-artifact deployment",
+            cache_counts,
+        ],
+        "routing": [
+            "the router runs as the run's own subprocess: no managed lifecycle, container, policy update or SIGHUP, "
+            "and no deployment-image validation",
+            "the native target is the component's engine with its base model and without request pinning: a "
+            "component that serves published weights forwards no OpenAI chat request",
+        ],
+        "recovery": [
             f"the runtime's watcher checks the engines every {WATCHER_INTERVAL_S:g} s; a deployment's runtime checks "
             f"them every {HEALTH_INTERVAL_S:g} s",
-            "the run removes its engines with the component's control operation DELETE engines, as their owner: the "
-            "watcher restores lost engines, which is not an engine actor or a server process that crashes, and not a "
-            "component that restarts",
-            "the run writes served_models rows itself, also one for the startup load, which Reef never publishes; "
+            controlled_removal,
+            "the run writes served_models rows itself, also one for the startup load, which Reef never publishes: "
             "control-plane publication and the public deployment lifecycle are not exercised",
             "no raw provider runs and no Reef service restarts: no split, and no claim about stored serving state",
-            "the checkpoints ignore their context, so a stale prefix-cache entry would change no output: the recovery "
-            "profile shows the new engines' empty cache by cached-token counts only",
-        ]
-    elif inputs.profile == "lifecycle":
-        provider_engine = inputs.provider_engine
-        limitations += [
-            "the lifecycle profile changes what a scenario serves through the public API only, in two scenarios: "
-            "weight artifacts on the native engine, then harness artifacts on the raw provider",
-            "the weight scenario serves A and B at the same time on two inference components of the native engine. "
-            "The run starts both as processes that share the one GPU on purpose, each with its own local Ray "
-            "session and the engine's 0.2 memory fraction: no claim about GPU isolation, placement, capacity or "
-            "performance",
+            cache_counts,
+        ],
+        "lifecycle": [
+            "the two inference components of the weight scenario share the one GPU on purpose, each with its own "
+            "local Ray session and the engine's 0.2 memory fraction: no claim about GPU isolation, placement, "
+            "capacity or performance",
             f"the serving worker may release A's component {CACHE_SECONDS + LIFECYCLE_INFERENCE_TIMEOUT_S:g} s after "
             f"the update without A: {CACHE_SECONDS:g} s plus the runtime's request timeout, which the run sets to "
             f"{LIFECYCLE_INFERENCE_TIMEOUT_S:g} s where a deployment's default is 300 s. No request of A is in "
-            "flight when its route ends. The released component keeps its engines and their GPU memory: the run "
-            "shows no freed memory",
-            "the third weight artifact of the capacity check is a copy of B's checkpoint with a marker file: a third "
-            "artifact, not a third model, and no engine loads it. The run shows that an update which names three "
-            "weight artifacts is refused, and nothing about a runtime with more components",
-            "the weight scenario has one engine fault, which the run controls: it removes A's engines once with the "
-            "control operation DELETE engines of A's component, as their owner, while no request runs. The watcher "
-            "of A's runtime restores them. That is not an engine actor or a server process that crashes, not a "
-            "component that restarts, and not a fault of B's component or of both",
-            "A's weights are also the model that new engines start with, so A's words do not tell A's restored load "
-            "from the startup load of the new engines: the runtime load ID that A's component reports does",
-            "both components run on the one GPU of the run. B's requests between A's refused requests show what B "
-            "did during A's outage in this run: no general claim that a fault of one component leaves another "
-            "alone. One restoration measures neither how long a recovery takes nor how reliably it succeeds: it is "
-            "no durability benchmark",
+            "flight when its route ends, and the released component keeps its engines: the run shows no freed GPU "
+            "memory",
+            "the wait for A's release polls: A was bound at each poll before its stop was due, and the first poll "
+            "that found it released came after. The release is between two polls, and a poll reads the binding "
+            "before the clock: the run does not show that the release itself came after the stop was due",
+            "the third weight artifact of the capacity check is a copy of B's checkpoint with a marker file, which "
+            "no engine loads: a third artifact, not a third model, and no claim about a runtime with more components",
+            controlled_removal,
+            "the weight scenario has one such removal, of A's engines, while no request runs: not a fault of B's "
+            "component or of both. B's requests between A's refused requests show this run's outage only: no general "
+            "claim that a fault of one component leaves another alone, and no measure of how long a recovery takes "
+            "or how reliably it succeeds",
+            "A's weights are also the model that new engines start with: the runtime load ID that A's component "
+            "reports tells A's restored load from the startup load of the new engines, and A's words do not",
             "the native components stop before the raw provider starts: the two scenarios never serve at the same "
             "time",
             "both harness artifacts answer from the raw provider's one model, B: the run shows the artifact IDs, "
-            "routes, traffic split and records of two artifacts that serve at the same time, not two models that "
-            "serve at the same time, and nothing executes the harness trees",
+            "routes, traffic split and records of two artifacts, not two models, and nothing executes the harness "
+            "trees",
             "each scenario has its own dispatcher and serving worker in the test process, with an in-memory "
             "coordination store: no Reef service restarts, and no claim about stored serving state",
             "the run starts no training: the weight scenario must submit no training job, and nothing asks the "
             "harness scenario for an evolution step",
-            "the checkpoints ignore their context, so a prefix-cache entry of other weights would change no output: "
-            "the lifecycle profile shows each component's own cache by cached-token counts only",
-        ]
-    else:
-        provider_engine = inputs.provider_engine
-        limitations += [
-            "the routing profile runs the router as its own subprocess: no managed lifecycle, container, policy "
-            "update or SIGHUP, and no deployment-image validation",
-            "the routing profile's native target is the component's engine with its base model and without request "
-            "pinning: a component that serves published weights forwards no OpenAI chat request",
-        ]
+            cache_counts,
+        ],
+    }
     return {
         "profile": inputs.profile,
         "native_engine": inputs.native_engine,
-        "provider_engine": provider_engine,
+        "provider_engine": None if inputs.profile == "recovery" else inputs.provider_engine,
         "output": str(inputs.output),
         "python": sys.version.split()[0],
         "packages": package_versions(),
@@ -3359,20 +3113,28 @@ def base_facts(inputs: QualificationInputs) -> dict[str, Any]:
         "harness_sha256": {name: file_sha256(REPOSITORY / name) for name in HARNESS_FILES},
         "launcher": {name: os.environ[name] for name in LAUNCHER_ENV if os.environ.get(name)},
         "sampling": {"seed": SEED, "temperature": 1.0, "top_p": 1.0, "top_logprobs": TOP_ALTERNATIVES},
-        "limitations": limitations,
+        "limitations": [
+            "tiny synthetic checkpoints on one GPU; no performance or capacity claim",
+            *limitations[inputs.profile],
+        ],
     }
 
 
-async def qualify(run: Run) -> None:
-    """Run the profile, then shut down the runtime and stop every owned process, also after a failure.
+async def qualify(
+    inputs: QualificationInputs, layout: RunLayout, report: QualificationReport, credentials: Credentials
+) -> None:
+    """Write the checkpoints, run the profile of ``inputs``, then shut down the runtime and stop every owned process.
 
-    A cleanup that fails or leaves an owned process running fails the run; an earlier failure stays its error.
+    The cleanup also follows a failure, and ``report`` keeps its result in each case. A failure before the
+    checkpoints and their oracle exist has started no runtime and no process. A cleanup that fails or leaves an
+    owned process running fails the run; an earlier failure stays its error.
     """
+    processes = OwnedProcesses(layout.logs)
+    run: Run | None = None
     failure: BaseException | None = None
     try:
-        native, provider = await asyncio.to_thread(write_checkpoints, run.layout.models)
-        run.native, run.provider = native, provider
-        run.report.facts["checkpoints"] = {
+        native, provider = write_checkpoints(layout.models)
+        report.facts["checkpoints"] = {
             checkpoint.name: {
                 "words": list(checkpoint.words),
                 "word_logits": list(WORD_LOGITS),
@@ -3381,12 +3143,12 @@ async def qualify(run: Run) -> None:
             }
             for checkpoint in (native, provider)
         }
-        run.oracle = await asyncio.to_thread(LogprobOracle, (native, provider))
-        if run.inputs.profile == "features":
+        run = Run(inputs, layout, report, credentials, processes, native, provider, LogprobOracle((native, provider)))
+        if inputs.profile == "features":
             await qualify_features(run)
-        elif run.inputs.profile == "recovery":
+        elif inputs.profile == "recovery":
             await qualify_recovery(run)
-        elif run.inputs.profile == "lifecycle":
+        elif inputs.profile == "lifecycle":
             await qualify_lifecycle(run)
         else:
             await qualify_routing(run)
@@ -3396,16 +3158,16 @@ async def qualify(run: Run) -> None:
     finally:
         cleanup: dict[str, Any] = {}
         problems = []
-        if run.runtime is not None:
+        if run is not None and run.runtime is not None:
             try:
                 await asyncio.to_thread(run.runtime.shutdown)
             except Exception as exc:
                 cleanup["runtime_shutdown_error"] = f"{type(exc).__name__}: {exc}"
                 problems.append(f"the runtime did not shut down: {cleanup['runtime_shutdown_error']}")
-        cleanup["processes"] = await asyncio.to_thread(run.processes.stop_all)
+        cleanup["processes"] = await asyncio.to_thread(processes.stop_all)
         problems.extend(problem for outcome in cleanup["processes"] if (problem := OwnedProcess.problem(outcome)))
         cleanup["problems"] = problems
-        run.report.facts["cleanup"] = cleanup
+        report.facts["cleanup"] = cleanup
         if problems and failure is None:
             raise RuntimeError("cleanup failed: " + "; ".join(problems))
 
@@ -3425,17 +3187,17 @@ def run_qualification(inputs: QualificationInputs) -> dict[str, Any]:
     written, also after a failure or a termination signal; then every output file is checked for credentials.
     """
     layout = RunLayout(inputs.output)
-    layout.create()
+    for directory in (layout.models, layout.logs):
+        directory.mkdir(parents=True, exist_ok=True)
     report = QualificationReport()
     credentials = Credentials.generate()
-    run = Run(inputs, layout, report, credentials, OwnedProcesses(layout.logs))
     report.facts.update(base_facts(inputs))
     started = time.monotonic()
     interrupted: BaseException | None = None
     # A terminated run still stops its processes: the signal becomes an exception that unwinds the run.
     previous = signal.signal(signal.SIGTERM, interrupt)
     try:
-        asyncio.run(qualify(run))
+        asyncio.run(qualify(inputs, layout, report, credentials))
     except BaseException as exc:
         report.error = f"{type(exc).__name__}: {exc}"
         layout.error.write_text(traceback.format_exc(), encoding="utf-8")
