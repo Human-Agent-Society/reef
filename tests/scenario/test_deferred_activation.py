@@ -4,8 +4,8 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.component_trainers import _records
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples_service import make_samples
 

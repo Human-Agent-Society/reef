@@ -6,9 +6,9 @@ from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
+from tests.support.trajectories import policy_trajectory
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
 from recipes.tttd.objective import adaptive_entropic_advantages

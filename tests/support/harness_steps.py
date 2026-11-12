@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Any, Self
 from weakref import WeakKeyDictionary
 
-from tests.support._strategies import resolve_method, resolve_task_scorer
-from tests.support._trajectories import recorded_trajectory
+from tests.support.strategies import resolve_method, resolve_task_scorer
+from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact.artifact import ArtifactNotFound
 from reef.core.job_data import TrajectorySample

@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._activation_rule_plugin import ComponentRule
-from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.activation_rule_plugin import ComponentRule
 from tests.support.artifact_versions import inference, report
 from tests.support.harness_steps import IdleMethod, evolution_config
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
@@ -64,7 +64,7 @@ class _Process:
         return self.returncode
 
 
-def _example_owned(relative_path: str):
+def example_owned(relative_path: str):
     """An example-owned stack, skipped where the examples do not ship.
 
     The package job runs this suite against the installed distribution, so
@@ -81,10 +81,10 @@ def _example_owned(relative_path: str):
 
 
 #: The CPU in-process training deployment, whose component records the settings it was built with.
-LOCAL_TRAINING_BACKEND = "tests.support._training_deployment:LocalDeployment"
+LOCAL_TRAINING_BACKEND = "tests.support.training_deployment:LocalDeployment"
 
 
-def _settings(**overrides) -> ServiceConfig:
+def service_settings(**overrides) -> ServiceConfig:
     recipe_settings = dict(overrides.pop("recipe_settings", {}))
     values = {
         "host": "0.0.0.0",
@@ -119,8 +119,10 @@ def stub_repository(monkeypatch):
 
 
 def build(tmp_path: Path, **overrides) -> Dispatcher:
-    """``deploy.build_dispatcher`` of ``_settings(**overrides)``, with its records under ``tmp_path``."""
-    return deploy.build_dispatcher(_settings(agent_record_dir=str(tmp_path / "agent-record"), **overrides), environ={})
+    """``deploy.build_dispatcher`` of ``service_settings(**overrides)``, with its records under ``tmp_path``."""
+    return deploy.build_dispatcher(
+        service_settings(agent_record_dir=str(tmp_path / "agent-record"), **overrides), environ={}
+    )
 
 
 @pytest.mark.unit
@@ -242,7 +244,7 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
 @pytest.mark.parametrize(
     "relative_path",
     # example-owned stacks (the openclawrl config lives with its example, like recipes/tttd/examples/tttd/serve.yaml)
-    (_example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),),
+    (example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),),
 )
 def test_training_configs_leave_max_staleness_unset_and_make_checkpoint_budget_mandatory(
     relative_path, monkeypatch
@@ -275,7 +277,7 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", factory)
 
     dispatcher = deploy.build_dispatcher(
-        _settings(agent_record_dir=str(tmp_path / "agent-record")),
+        service_settings(agent_record_dir=str(tmp_path / "agent-record")),
         environ={},
     )
 
@@ -341,7 +343,7 @@ def test_a_sample2job_batch_size_is_an_unknown_stage_key(stub_repository, tmp_pa
     [
         (
             OPENCLAWRL_RECIPE,
-            {"module": "tests.support._activation_rule_plugin:ComponentRule", "config": {"component": "weights"}},
+            {"module": "tests.support.activation_rule_plugin:ComponentRule", "config": {"component": "weights"}},
             ComponentRule,
         ),
         # A recipe that trains no weights reads the section too.
@@ -424,7 +426,7 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
     from reef.service.deploy.serving import serving_runtime_config
     from reef.service.deploy.training import training_deployment_for
 
-    settings = _settings(
+    settings = service_settings(
         training_backend="slime",
         inference_backend="sglang",
         inference_num_gpus=1,
@@ -490,12 +492,7 @@ class AdapterInference(StubInferenceRuntime):
     """Serve each snapshot under its ``model.txt`` version; ``per_scenario_adapters`` reports a version per scenario."""
 
     def __init__(self, *, per_scenario_adapters: bool) -> None:
-        super().__init__()
-        self.adapters_per_scenario = per_scenario_adapters
-
-    @property
-    def per_scenario_adapters(self) -> bool:
-        return self.adapters_per_scenario
+        super().__init__(per_scenario_adapters=per_scenario_adapters)
 
     def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         return f"adapter:{scenario}:{self.served}"
@@ -931,7 +928,7 @@ def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("config_path", [_example_owned("recipes/opd/examples/math/serve.yaml")])
+@pytest.mark.parametrize("config_path", [example_owned("recipes/opd/examples/math/serve.yaml")])
 def test_opd_example_trains_an_adapter_against_the_teacher_engine(monkeypatch, config_path) -> None:
     from tests.support.config_helpers import load_deployment
 

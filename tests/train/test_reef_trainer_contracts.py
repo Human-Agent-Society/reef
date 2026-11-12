@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import pytest
-from tests.support._threshold_processor import ThresholdJobData
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent
 from tests.support.samples_service import make_samples
+from tests.support.threshold_processor import ThresholdJobData
 
 from reef.core import AgentRecord, RequestType
 from reef.evaluation import UpdateCandidate

@@ -14,8 +14,8 @@ import pytest
 import sqlalchemy
 import sqlalchemy.event
 from sqlalchemy import func, select
-from tests.support._trajectories import policy_trajectory
 from tests.support.conversations import conversation
+from tests.support.trajectories import policy_trajectory
 
 from reef.core.atif_payloads import canonical_json
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory

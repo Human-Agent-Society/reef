@@ -11,11 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._trajectories import policy_trajectory
 from tests.support.artifact_versions import ImportingComponent
 from tests.support.harness_steps import IdleMethod, harness_recipe
+from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.sources import ArtifactSources, DirectorySource

@@ -11,9 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import policy_trajectory
 from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
+from tests.support.trajectories import policy_trajectory
 
 from reef.train.component import JobStatus, TrainingJob
 from reef.train.slime_backend.component import SlimeJobRunner

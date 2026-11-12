@@ -2,7 +2,7 @@
 
 The component (``python -m reef.inference.remote``) runs in its own process
 with its own Ray session that declares two pretend GPUs, and starts the stub
-engine (``tests.support._stub_engine``). The test process is the control
+engine (``tests.support.stub_engine``). The test process is the control
 plane: it builds Tinker's training component and the serving runtime of its
 adapters as the HTTP service does and drives one
 TTTD step through the Dispatcher, then restarts. The Tinker SDK and the
@@ -36,7 +36,7 @@ from reef.train.jobs import JobLoopState
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL = "Qwen/Qwen3-8B"
 REAL = os.environ.get("REEF_TEST_TINKER_REAL") == "1" and bool(os.environ.get("TINKER_API_KEY"))
-ENGINE = "tests.support._stub_engine:create_inference"
+ENGINE = "tests.support.stub_engine:create_inference"
 TOKENS = {"REEF_REMOTE_CONTROL_TOKEN": "control-secret", "REEF_REMOTE_INFERENCE_TOKEN": "inference-secret"}
 SCENARIO = "erdos"
 

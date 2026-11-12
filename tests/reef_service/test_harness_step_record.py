@@ -14,7 +14,6 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-from tests.support._strategies import resolve_task_scorer
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import (
     COMPONENT,
@@ -29,6 +28,7 @@ from tests.support.harness_steps import (
     head_of,
     make_pi_binary,
 )
+from tests.support.strategies import resolve_task_scorer
 
 from reef.evaluation.harness import TaskEvaluationWorker
 from reef.evaluation.harness.runner import TaskRun

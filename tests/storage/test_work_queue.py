@@ -1,11 +1,11 @@
 import logging
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import dataclass
 
 import pytest
+from tests.support.polling import wait_until
 
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
@@ -287,14 +287,6 @@ class WaitingWorker(QueueWorker):
                 self.running.discard(item.id)
 
 
-def wait_until(condition) -> None:
-    deadline = time.monotonic() + 5
-    while not condition():
-        if time.monotonic() > deadline:
-            raise AssertionError("the condition did not become true in 5 s")
-        time.sleep(0.01)
-
-
 @pytest.mark.unit
 def test_a_worker_runs_at_most_its_slots_of_items_at_once(tmp_path):
     with closing(SQLiteCoordinationDatabase(tmp_path / "c")) as database:
@@ -304,10 +296,12 @@ def test_a_worker_runs_at_most_its_slots_of_items_at_once(tmp_path):
         worker = WaitingWorker(queue, slots=3)
         worker.start()
         try:
-            wait_until(lambda: len(worker.running) == 3)
+            wait_until(lambda: len(worker.running) == 3, timeout_seconds=5)
             assert [queue.get("jobs", item_id).state for item_id in "de"] == ["queued", "queued"]
             worker.release.set()
-            wait_until(lambda: all(queue.get("jobs", item_id).state == "finished" for item_id in "abcde"))
+            wait_until(
+                lambda: all(queue.get("jobs", item_id).state == "finished" for item_id in "abcde"), timeout_seconds=5
+            )
         finally:
             worker.stop()
         assert worker.most_running == 3
@@ -321,7 +315,7 @@ def test_a_stopped_worker_returns_every_item_in_progress_to_the_queue(tmp_path):
             queue.add(job(item_id, serial_key=None))
         worker = WaitingWorker(queue, slots=2)
         worker.start()
-        wait_until(lambda: len(worker.running) == 2)
+        wait_until(lambda: len(worker.running) == 2, timeout_seconds=5)
         worker.stop()
         assert worker.item_threads == []
         assert [queue.get("jobs", item_id).state for item_id in "ab"] == ["queued", "queued"]

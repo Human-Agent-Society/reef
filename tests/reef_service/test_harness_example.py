@@ -19,11 +19,11 @@ from types import ModuleType
 
 import pytest
 import yaml
-from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
 from tests.support.harness_service import backend_step, seed_root
 from tests.support.harness_steps import COMPONENT, TreeArtifacts, harness_backend
 from tests.support.records import memory_records
+from tests.support.trajectories import recorded_trajectory
 
 from reef.core.snapshot import SnapshotRef
 from reef.evaluation.activation import AlwaysActivate

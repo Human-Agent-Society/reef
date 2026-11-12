@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 import yaml
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     NAMES,
     REQUEST,
     NoChecks,

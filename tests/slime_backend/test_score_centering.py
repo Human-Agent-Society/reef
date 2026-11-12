@@ -7,7 +7,7 @@ import math
 from types import SimpleNamespace
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.algorithm import PolicyGradientWeight

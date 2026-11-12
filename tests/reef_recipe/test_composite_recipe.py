@@ -14,11 +14,11 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
 
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
@@ -280,7 +280,7 @@ _WEIGHTS_AND_HARNESS = {
     "weights": {"implementation": "recipes.sao.recipe:SAORecipe"},
     "harness": {"implementation": TREE},
 }
-_LOCAL_TRAINING = "tests.support._training_deployment:LocalDeployment"
+_LOCAL_TRAINING = "tests.support.training_deployment:LocalDeployment"
 
 
 @pytest.mark.unit
@@ -303,7 +303,7 @@ def test_composite_recipe_names_its_weight_training_component() -> None:
 
 @pytest.mark.unit
 def test_service_connects_the_training_component_of_a_composite_weight_component(tmp_path) -> None:
-    from tests.support._training_deployment import LocalRuntime
+    from tests.support.training_deployment import LocalRuntime
 
     from reef.service.assembly import _serving_recipe
     from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping

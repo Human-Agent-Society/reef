@@ -7,8 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import policy_trajectory, recorded_trajectory
 from tests.support.samples import made_task
+from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest

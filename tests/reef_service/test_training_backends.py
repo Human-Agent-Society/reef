@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.support._training_deployment import LocalDeployment
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT
+from tests.support.training_deployment import LocalDeployment
 
 from reef.core.errors import RuntimeConfigError
 from reef.service.assembly import _training_recipe, connect_training_component
@@ -25,7 +25,7 @@ from reef.service.deploy.inference import command_line_config
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
 
-BACKEND = "tests.support._training_deployment:LocalDeployment"
+BACKEND = "tests.support.training_deployment:LocalDeployment"
 RECIPE = "recipes.sao.recipe:SAORecipe"
 
 
@@ -107,7 +107,7 @@ def test_missing_or_ambiguous_backend_does_not_fall_back_to_slime(monkeypatch, p
 
 
 def test_a_component_factory_that_builds_no_training_component_is_refused(monkeypatch):
-    from tests.support._training_deployment import component_factory
+    from tests.support.training_deployment import component_factory
 
     from reef.inference.http import InferenceProxyRuntime
 

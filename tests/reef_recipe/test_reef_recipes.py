@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 import tests
-from tests.support._trajectories import policy_trajectory
 from tests.support.records import memory_records
 from tests.support.runtime_stubs import (
     STUB_ROOT,
@@ -15,6 +14,7 @@ from tests.support.runtime_stubs import (
     job_sized_stages,
     runtime_bindings,
 )
+from tests.support.trajectories import policy_trajectory
 
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
 from recipes.sao import SAOJobData, SAORecipe

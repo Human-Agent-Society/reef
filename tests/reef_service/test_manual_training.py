@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
 from contextlib import closing
 from dataclasses import dataclass, replace
 from functools import partial
@@ -13,13 +12,14 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._threshold_processor import threshold_pipeline
 from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
 from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeArtifacts, changed_rules, harness_recipe
+from tests.support.polling import became_true
 from tests.support.records import item_records, memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples_service import make_samples as produce_samples
 from tests.support.serving import wait_for_serving
+from tests.support.threshold_processor import threshold_pipeline
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 
 from reef.artifact.artifact import ArtifactNotFound
@@ -127,7 +127,7 @@ def stored_samples_of(dispatcher, *receipts):
         stored = dispatcher.stored_samples("s", after_sequence=0, limit=1000)
         return tuple(item.sample_id for item in stored if source_record_id(item.sample) in receipts)
 
-    assert _wait(lambda: len(stored_ids()) == len(receipts)), stored_ids()
+    assert became_true(lambda: len(stored_ids()) == len(receipts)), stored_ids()
     return stored_ids()
 
 
@@ -192,16 +192,7 @@ def open_dispatcher(tmp_path):
         dispatcher.close()
 
 
-def _wait(predicate, seconds=10.0):
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if predicate():
-            return True
-        time.sleep(0.05)
-    return False
-
-
-def _artifact_texts(dispatcher, scenario="s"):
+def artifact_texts(dispatcher, scenario="s"):
     rows = catalog(dispatcher.get_or_create_scenario(scenario))
     return [row.get("metrics", {}).get("training_request", {}).get("text") for row in rows]
 
@@ -211,7 +202,7 @@ def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
     return replace(harness_recipe(tmp_path, method, **fields), training_mode=mode)
 
 
-def _trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
+def recipe_trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
     """The recipe's trainer over an in-memory commit history whose base is the recipe's seed."""
     return recipe.build(
         "s", records, artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT), root=seed_root(recipe)
@@ -357,7 +348,7 @@ def test_auto_takes_a_request(tmp_path, open_dispatcher):
     assert scenario.training_mode == "auto"
     assert file_request(dispatcher, "one") == "one"
     # The request's step commits in auto mode: a request trains before the waiting samples.
-    assert _wait(lambda: _committed_row(dispatcher, "one") is not None)
+    assert became_true(lambda: committed_row(dispatcher, "one") is not None)
 
 
 def test_manual_runs_the_request_of_a_stage_that_reads_requests(records, build, training_requests):
@@ -669,9 +660,9 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     assert dispatcher.registry.reload("s").trainer.pipeline.training_mode == "auto"
     dispatcher.set_training_mode("s", "manual")
     file_request(dispatcher, "one")
-    assert _wait(lambda: _committed_skip(dispatcher, "one") == UNCHANGED)
+    assert became_true(lambda: committed_skip(dispatcher, "one") == UNCHANGED)
     # The step's job committed twice: its submission and its end.
-    assert _wait(lambda: dispatcher.get_or_create_scenario("s").scenario_step == 2)
+    assert became_true(lambda: dispatcher.get_or_create_scenario("s").scenario_step == 2)
     dispatcher.close()
     # A new process loads the committed state and the stored mode.
     restarted = open_dispatcher(harness_recipe(tmp_path, method))
@@ -685,7 +676,7 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     assert "keeps its default training mode" in caplog.text
 
 
-def _committed_row(dispatcher, text):
+def committed_row(dispatcher, text):
     """The metrics of the step that answered the request ``text``, newest first; a job's submission names the
     request too, and is passed over."""
     for row in dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
@@ -699,12 +690,12 @@ def _committed_row(dispatcher, text):
     return None
 
 
-def _committed_skip(dispatcher, text):
-    row = _committed_row(dispatcher, text)
+def committed_skip(dispatcher, text):
+    row = committed_row(dispatcher, text)
     return None if row is None else row.get("skipped")
 
 
-def _automatic_traces(dispatcher):
+def automatic_traces(dispatcher):
     """The trace count of every committed step that ran without a request."""
     return [
         metrics["traces"]
@@ -751,8 +742,8 @@ def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_fa
     dispatcher = open_dispatcher(recipe_in("manual", tmp_path, method, score=score))
     dispatcher.get_or_create_scenario("s")
     file_request(dispatcher, "broken scorer")
-    assert _wait(lambda: _committed_skip(dispatcher, "broken scorer") == "request failed")
-    row = _committed_row(dispatcher, "broken scorer")
+    assert became_true(lambda: committed_skip(dispatcher, "broken scorer") == "request failed")
+    row = committed_row(dispatcher, "broken scorer")
     assert row["failed_stage"] == "evaluating"
     assert row["error"] == "ValueError: the scorer could not read the rollout"
     assert row["method_notes"] == {"entries": 1}
@@ -774,15 +765,15 @@ def test_a_queue_of_failing_requests_drains_and_keeps_the_selected_mode(tmp_path
         assert entered.wait(5)
         file_request(dispatcher, "p2")
         release.set()
-        assert _wait(lambda: _committed_skip(dispatcher, "p1") == "request failed")
-        assert _wait(lambda: _committed_skip(dispatcher, "p2") == "request failed")
+        assert became_true(lambda: committed_skip(dispatcher, "p1") == "request failed")
+        assert became_true(lambda: committed_skip(dispatcher, "p2") == "request failed")
         assert calls == ["p1", "p2"]
-        assert _committed_row(dispatcher, "p2")["error"] == "RuntimeError: method outage"
+        assert committed_row(dispatcher, "p2")["error"] == "RuntimeError: method outage"
         current = dispatcher.get_or_create_scenario("s")
         assert current.trainer.pipeline.training_mode == "manual"
         assert current.pending_requests() == 0
         assert file_request(dispatcher, "p3") == "p3"
-        assert _wait(lambda: _committed_skip(dispatcher, "p3") == "request failed")
+        assert became_true(lambda: committed_skip(dispatcher, "p3") == "request failed")
     finally:
         release.set()
 
@@ -798,17 +789,17 @@ def test_a_failed_request_is_skipped_with_its_error_and_the_queue_moves_on(tmp_p
         file_request(dispatcher, "fine")
         file_request(dispatcher, "fine again")
         release.set()
-        assert _wait(lambda: _committed_skip(dispatcher, "fine again") == UNCHANGED)
+        assert became_true(lambda: committed_skip(dispatcher, "fine again") == UNCHANGED)
         # The skip row consumed the failed request without another method call; the fresh ones ran after it.
         assert calls == ["poison", "fine", "fine again"]
-        assert _committed_skip(dispatcher, "poison") == "request failed"
-        assert _committed_row(dispatcher, "poison")["error"] == "RuntimeError: poison method"
-        assert _committed_skip(dispatcher, "fine") == UNCHANGED
-        assert "error" not in _committed_row(dispatcher, "fine")
+        assert committed_skip(dispatcher, "poison") == "request failed"
+        assert committed_row(dispatcher, "poison")["error"] == "RuntimeError: poison method"
+        assert committed_skip(dispatcher, "fine") == UNCHANGED
+        assert "error" not in committed_row(dispatcher, "fine")
         current = dispatcher.get_or_create_scenario("s")
         assert current.pending_requests() == 0
         assert current.trainer.pipeline.failed_requests == {}
-        assert _wait(lambda: current.training_requests.get("poison").final)
+        assert became_true(lambda: current.training_requests.get("poison").final)
         assert current.trainer.pipeline.training_mode == "manual"
     finally:
         release.set()
@@ -826,7 +817,7 @@ def test_a_failed_request_is_skipped_alone_and_its_units_wait_for_the_next_reque
         dispatcher.accept_record(inference("a"))
         dispatcher.accept_record(report("a"))
         release.set()
-        assert _wait(lambda: _committed_skip(dispatcher, "poison") == "request failed")
+        assert became_true(lambda: committed_skip(dispatcher, "poison") == "request failed")
         # The skip row took no method call.
         assert calls == [("poison", ())]
         current = dispatcher.get_or_create_scenario("s")
@@ -858,7 +849,7 @@ def test_a_failed_request_is_skipped_alone_and_its_units_wait_for_the_next_reque
     # Recovery never replays the request that the skip row named; the next request names the exchange's
     # sample, which waited.
     file_request(restarted, "after", stored_samples_of(restarted, "a"))
-    assert _wait(lambda: _committed_skip(restarted, "after") == UNCHANGED)
+    assert became_true(lambda: committed_skip(restarted, "after") == UNCHANGED)
     assert seen == [("after", ("a",))]
     loaded = restarted.get_or_create_scenario("s")
     assert loaded.scenario_step == 4
@@ -890,9 +881,9 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
         assert not scenario.store.durable
         file_request(dispatcher, "poison")
         # The failed job's end is the last commit: its submission was the first.
-        assert _wait(lambda: scenario.scenario_step == 2)
+        assert became_true(lambda: scenario.scenario_step == 2)
         assert dispatcher.get_or_create_scenario("s") is scenario
-        skipped = _last_committed(scenario)
+        skipped = last_committed(scenario)
         assert skipped["skipped"] == "request failed"
         assert skipped["training_request"]["id"] == "poison"
         assert skipped["error"] == "RuntimeError: poison method"
@@ -900,17 +891,17 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
         assert entered.wait(5)
         assert calls == ["poison", "fine"]
         release.set()
-        assert _wait(lambda: scenario.scenario_step == 4)
-        assert _last_committed(scenario).get("skipped") == UNCHANGED
+        assert became_true(lambda: scenario.scenario_step == 4)
+        assert last_committed(scenario).get("skipped") == UNCHANGED
         assert scenario.pending_requests() == 0
         assert scenario.trainer.pipeline.failed_requests == {}
-        assert _wait(lambda: scenario.training_requests.get("poison").final)
+        assert became_true(lambda: scenario.training_requests.get("poison").final)
     finally:
         release.set()
         dispatcher.close()
 
 
-def _last_committed(scenario):
+def last_committed(scenario):
     committed = scenario.commit_status.get("last_committed_step")
     return {} if committed is None else committed.get("metrics") or {}
 
@@ -969,7 +960,7 @@ class _RequestJobRecipe(WeightTrainingRecipe):
         )
 
 
-def _job_events(dispatcher):
+def job_events(dispatcher):
     """The (request text, job event) of every committed row, oldest first."""
     rows = reversed(
         dispatcher.get_or_create_scenario("s").snapshot_queries.snapshot_rows(
@@ -997,7 +988,7 @@ def test_a_job_trainer_runs_each_request_as_a_job_and_a_failed_job_does_not_stop
         )
         dispatcher.accept_record(report(receipt))
     file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
-    assert _wait(lambda: _job_events(dispatcher)[:1] == [("one", "submitted")]), _job_events(dispatcher)
+    assert became_true(lambda: job_events(dispatcher)[:1] == [("one", "submitted")]), job_events(dispatcher)
     file_request(dispatcher, "two", stored_samples_of(dispatcher, "b"))
     expected = [
         ("one", "submitted"),
@@ -1006,7 +997,7 @@ def test_a_job_trainer_runs_each_request_as_a_job_and_a_failed_job_does_not_stop
         (None, "checkpoint"),
         (None, "finished"),
     ]
-    assert _wait(lambda: _job_events(dispatcher) == expected), _job_events(dispatcher)
+    assert became_true(lambda: job_events(dispatcher) == expected), job_events(dispatcher)
     # Each job trains one request with the samples that it names.
     assert [
         (job.request_id, [source_record_id(sample) for sample in read_job_data(job.data_dir).samples])
@@ -1092,7 +1083,7 @@ def test_each_job_lists_the_artifact_that_it_started_from(tmp_path, open_dispatc
     creation = start()
 
     def finished(count):
-        return _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == count)
+        return became_true(lambda: [event for _, event in job_events(dispatcher)].count("finished") == count)
 
     file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
     assert finished(1)
@@ -1136,7 +1127,7 @@ def test_a_request_that_names_train_from_starts_its_job_there_and_leaves_the_tra
         return scenario.artifact_status()[component_name]["training_start"]
 
     def finished(count):
-        return _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") == count)
+        return became_true(lambda: [event for _, event in job_events(dispatcher)].count("finished") == count)
 
     creation = training_start()
     file_request(dispatcher, "one", stored_samples_of(dispatcher, "a"))
@@ -1203,9 +1194,9 @@ def test_a_request_whose_start_the_component_refuses_fails_and_the_next_request_
 
     # The refused request ends with a skip row and no job; the request after it trains. The failed step reloads
     # the scenario, so the rows are read once the second job ran.
-    assert _wait(lambda: [job.request_id for job in component.submitted] == ["two"])
-    assert _wait(lambda: dispatcher.get_or_create_scenario("s").pending_requests() == 0)
-    skipped = _committed_row(dispatcher, "one")
+    assert became_true(lambda: [job.request_id for job in component.submitted] == ["two"])
+    assert became_true(lambda: dispatcher.get_or_create_scenario("s").pending_requests() == 0)
+    skipped = committed_row(dispatcher, "one")
     assert skipped["skipped"] == "request failed" and "these weights do not load" in skipped["error"]
 
 
@@ -1249,19 +1240,19 @@ def test_a_training_manager_decides_the_jobs_of_a_scenario_in_auto_mode(tmp_path
         scenario = dispatcher.get_or_create_scenario("s")
         samples = stored_samples_of(dispatcher, "a", "b")
         # Reef starts no job by its own rule, although the samples of a job wait: one sample, the stage's job size.
-        assert _wait(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
+        assert became_true(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
         [view] = dispatcher.manager_views()
         assert (view.scenario, view.job_samples, view.selection_serves, view.jobs) == ("s", 1, True, ())
         assert view.training_start is not None and component.submitted == []
 
         manager.open.set()
-        assert _wait(lambda: [event for _, event in _job_events(dispatcher)].count("finished") >= 1)
+        assert became_true(lambda: [event for _, event in job_events(dispatcher)].count("finished") >= 1)
         first = component.submitted[0]
         assert first.request_id.startswith(MANAGER_REQUEST_PREFIX) and first.sample_count == 1
         requests = [(record.metrics or {}).get("training_request") for record in scenario.store.history()]
         assert {request["session"] for request in requests if request} == {MANAGER_SESSION}
         # The trained sample no longer waits.
-        assert _wait(lambda: samples[0] not in dispatcher.manager_views()[0].untrained_samples)
+        assert became_true(lambda: samples[0] not in dispatcher.manager_views()[0].untrained_samples)
     finally:
         dispatcher.close()
 
@@ -1273,7 +1264,7 @@ def test_reef_runs_a_managers_actions_and_drops_a_request_above_its_job_limit(tm
     try:
         scenario = dispatcher.get_or_create_scenario("s")
         samples = stored_samples_of(dispatcher, "a", "b")
-        assert _wait(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
+        assert became_true(lambda: [view.untrained_samples for view in dispatcher.manager_views()] == [samples[:1]])
         [view] = dispatcher.manager_views()
         dispatcher.run_manager_action(view, Train(samples[:1], "first"), job_limit=1)
         dispatcher.run_manager_action(view, Train(samples[1:], "second"), job_limit=1)
@@ -1358,7 +1349,7 @@ def test_a_request_runs_past_the_step_budget_and_the_failure_streak(tmp_path, re
 
     recipe = recipe_in("manual", tmp_path, method, max_steps=1)
     head = ArtifactTextFiles("base", dict(recipe.seed.files))
-    trainer = _trainer(recipe, records)
+    trainer = recipe_trainer(recipe, records)
     file(training_requests, "one")
     file(training_requests, "two")
     rows = []
@@ -1381,7 +1372,7 @@ def test_a_request_runs_past_the_step_budget_and_the_failure_streak(tmp_path, re
     trainer.close()
 
     (tmp_path / "streak").mkdir()
-    trainer = _trainer(recipe_in("manual", tmp_path / "streak", method, max_failure_streak=1), records)
+    trainer = recipe_trainer(recipe_in("manual", tmp_path / "streak", method, max_failure_streak=1), records)
     backend = job_backend(trainer)
     state = HarnessState(failure_streak=1).to_json()
     automatic = backend.prepare_step(JobData("auto", ()), state, 0, head=head)
@@ -1572,7 +1563,7 @@ def test_manual_collects_the_failures_each_request_step_carries(tmp_path, open_d
             body = {"agent_record_id": "ask-1", "samples": list(samples), **train_body("do it")}
             response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
             assert response.status == 200, await response.text()
-            assert await asyncio.to_thread(_wait, lambda: len(evaluation_rows()) == 1)
+            assert await asyncio.to_thread(became_true, lambda: len(evaluation_rows()) == 1)
             assert calls == [("do it", ("fails-1",))]
             assert evaluation_rows() == [(1, 2, True)]
             # The next request step takes the two failures that it names and grows the evaluation on top of the
@@ -1584,7 +1575,7 @@ def test_manual_collects_the_failures_each_request_step_carries(tmp_path, open_d
             body = {"agent_record_id": "ask-2", "samples": list(samples), **train_body("again")}
             response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
             assert response.status == 200, await response.text()
-            assert await asyncio.to_thread(_wait, lambda: len(evaluation_rows()) == 2)
+            assert await asyncio.to_thread(became_true, lambda: len(evaluation_rows()) == 2)
             # Newest first: the second request step's row, then the first one's.
             assert evaluation_rows() == [(2, 4, True), (1, 2, True)]
             assert calls[1] == ("again", ("fails-2", "fails-3"))
@@ -1639,11 +1630,13 @@ def test_a_client_cancels_a_queued_request_and_the_job_of_a_request(tmp_path, op
         assert asyncio.run(cancel("missing"))[0] == 404
     finally:
         component.release.set()
-    assert _wait(lambda: _committed_skip(dispatcher, "two") == "request failed"), _job_events(dispatcher)
-    assert _committed_row(dispatcher, "two")["error"] == "cancelled by request"
+    assert became_true(lambda: committed_skip(dispatcher, "two") == "request failed"), job_events(dispatcher)
+    assert committed_row(dispatcher, "two")["error"] == "cancelled by request"
     # The queue moves on to the next request, and the cancelled one never got a job.
-    assert _wait(lambda: ("three", "submitted") in _job_events(dispatcher)), _job_events(dispatcher)
-    assert _wait(lambda: dispatcher.get_or_create_scenario("s").pending_requests() == 0)
-    assert _wait(lambda: [job.request_id for job in component.submitted] == ["one", "three"]), component.submitted
+    assert became_true(lambda: ("three", "submitted") in job_events(dispatcher)), job_events(dispatcher)
+    assert became_true(lambda: dispatcher.get_or_create_scenario("s").pending_requests() == 0)
+    assert became_true(
+        lambda: [job.request_id for job in component.submitted] == ["one", "three"]
+    ), component.submitted
     # A second cancel changes nothing.
     assert asyncio.run(cancel("two")) == (200, {"scenario": "s", "request_id": "two", "queued": False, "job": None})

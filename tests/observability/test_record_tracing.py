@@ -7,8 +7,9 @@ import time
 
 import pytest
 from tests.reef_service.test_sse_streams import FakeStream
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, finished_jobs
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -24,25 +25,6 @@ from reef.storage.observer import ObservedScenarioStorage, RecordObserver
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-
-
-def _inference(agent_record_id: str, scenario: str = "math", **payload) -> AgentRecord:
-    return AgentRecord.create(
-        scenario=scenario,
-        request_type=RequestType.INFERENCE,
-        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2], **payload},
-        agent_record_id=agent_record_id,
-    )
-
-
-def _report(agent_record_id: str, *references: str, scenario: str = "math", **payload) -> AgentRecord:
-    return AgentRecord.create(
-        scenario=scenario,
-        request_type=RequestType.REPORT,
-        payload={"score": 1.0, "references": list(references), **payload},
-        agent_record_id=agent_record_id,
-    )
-
 
 # -- configuration -----------------------------------------------------------
 
@@ -121,7 +103,7 @@ def test_disabled_tracing_builds_no_observer_and_needs_no_sdk() -> None:
 # -- OpenTelemetry exporter ----------------------------------------------------
 
 
-def _observer(**overrides):
+def observer_and_exporter(**overrides):
     pytest.importorskip("opentelemetry.sdk")
     from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -132,7 +114,7 @@ def _observer(**overrides):
     return observer, exporter
 
 
-def _spans(observer, exporter):
+def finished_spans(observer, exporter):
     observer.close()
     return {span.name: span for span in exporter.get_finished_spans()}
 
@@ -151,7 +133,7 @@ def test_enabled_tracing_builds_the_opentelemetry_observer() -> None:
 
 @pytest.mark.unit
 def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
-    observer, exporter = _observer()
+    observer, exporter = observer_and_exporter()
     from reef.observability.open_telemetry import record_span_context
 
     item = AgentRecord.create(
@@ -174,7 +156,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         artifact_id="artifact-3",
     )
     observer.record_accepted(item)
-    span = _spans(observer, exporter)["chat qwen"]
+    span = finished_spans(observer, exporter)["chat qwen"]
 
     expected = record_span_context("math", "i1")
     assert span.context.trace_id == expected.trace_id
@@ -232,10 +214,10 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
     ],
 )
 def test_streaming_records_export_provider_token_usage(body: str) -> None:
-    observer, exporter = _observer()
+    observer, exporter = observer_and_exporter()
     response = stream_record(FakeStream(), body.encode(), complete=True)
-    observer.record_accepted(_inference("stream", model="qwen", response=response))
-    attributes = _spans(observer, exporter)["chat qwen"].attributes
+    observer.record_accepted(token_inference("stream", model="qwen", response=response))
+    attributes = finished_spans(observer, exporter)["chat qwen"].attributes
 
     assert attributes["gen_ai.usage.input_tokens"] == 15
     assert attributes["gen_ai.usage.output_tokens"] == 5
@@ -252,18 +234,18 @@ def test_streaming_records_export_provider_token_usage(body: str) -> None:
     ],
 )
 def test_streaming_records_without_usage_do_not_invent_token_counts(body: str) -> None:
-    observer, exporter = _observer()
-    observer.record_accepted(_inference("stream", model="qwen", response={"stream": True, "body": body}))
-    attributes = _spans(observer, exporter)["chat qwen"].attributes
+    observer, exporter = observer_and_exporter()
+    observer.record_accepted(token_inference("stream", model="qwen", response={"stream": True, "body": body}))
+    attributes = finished_spans(observer, exporter)["chat qwen"].attributes
     assert "gen_ai.usage.input_tokens" not in attributes
     assert "gen_ai.usage.output_tokens" not in attributes
 
 
 @pytest.mark.unit
 def test_captured_usage_takes_precedence_over_stream_body() -> None:
-    observer, exporter = _observer()
+    observer, exporter = observer_and_exporter()
     observer.record_accepted(
-        _inference(
+        token_inference(
             "stream",
             model="qwen",
             response={
@@ -273,16 +255,16 @@ def test_captured_usage_takes_precedence_over_stream_body() -> None:
             },
         )
     )
-    attributes = _spans(observer, exporter)["chat qwen"].attributes
+    attributes = finished_spans(observer, exporter)["chat qwen"].attributes
     assert attributes["gen_ai.usage.input_tokens"] == 15
     assert attributes["gen_ai.usage.output_tokens"] == 0
 
 
 @pytest.mark.unit
 def test_spans_carry_the_exchange_and_feedback_text() -> None:
-    observer, exporter = _observer()
+    observer, exporter = observer_and_exporter()
     observer.record_accepted(
-        _inference(
+        token_inference(
             "i1",
             model="qwen",
             system="be brief",
@@ -290,8 +272,8 @@ def test_spans_carry_the_exchange_and_feedback_text() -> None:
             response={"choices": [{"message": {"role": "assistant", "content": "hello"}}]},
         )
     )
-    observer.record_accepted(_report("r1", "i1", feedback={"note": "good"}))
-    spans = _spans(observer, exporter)
+    observer.record_accepted(report("r1", "i1", feedback={"note": "good"}))
+    spans = finished_spans(observer, exporter)
     assert json.loads(spans["chat qwen"].attributes["gen_ai.input.messages"]) == [
         {"role": "system", "content": "be brief"},
         {"role": "user", "content": "hi"},
@@ -304,13 +286,13 @@ def test_spans_carry_the_exchange_and_feedback_text() -> None:
 
 @pytest.mark.unit
 def test_feedback_joins_the_first_referenced_trace_and_links_the_rest() -> None:
-    observer, exporter = _observer()
+    observer, exporter = observer_and_exporter()
     from reef.observability.open_telemetry import record_span_context
 
-    observer.record_accepted(_inference("i1", model="qwen"))
-    observer.record_accepted(_inference("i2", model="qwen"))
-    observer.record_accepted(_report("r1", "i1", "i2", score=0.25, feedback="secret transcript"))
-    observer.record_accepted(_report("r2"))
+    observer.record_accepted(token_inference("i1", model="qwen"))
+    observer.record_accepted(token_inference("i2", model="qwen"))
+    observer.record_accepted(report("r1", "i1", "i2", score=0.25, feedback="secret transcript"))
+    observer.record_accepted(report("r2"))
     observer.close()
     spans = {span.attributes["reef.agent_record_id"]: span for span in exporter.get_finished_spans()}
 
@@ -332,7 +314,7 @@ def test_feedback_joins_the_first_referenced_trace_and_links_the_rest() -> None:
 
 @pytest.mark.unit
 def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
-    observer, exporter = _observer()
+    observer, exporter = observer_and_exporter()
     from reef.observability.open_telemetry import commit_span_context, record_span_context
 
     commit = CommitRecord(
@@ -421,10 +403,10 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
     storage = ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer)
     store = storage.open("math")
     try:
-        first = store.records.append_result(_inference("i1"))
-        retry = store.records.append_result(_inference("i1"))
+        first = store.records.append_result(token_inference("i1"))
+        retry = store.records.append_result(token_inference("i1"))
         assert first.inserted and not retry.inserted
-        assert store.records.append(_report("r1", "i1")).agent_record_id == "r1"
+        assert store.records.append(report("r1", "i1")).agent_record_id == "r1"
         assert store.records.get("math", "i1") is not None
         commit = CommitRecord(
             scenario="math",
@@ -461,9 +443,9 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
     )
     try:
         served = dispatcher.get_or_create_scenario("math").serving_artifact_id()
-        dispatcher.accept_record(_inference("i1", artifact_id=served))
-        dispatcher.accept_record(_inference("i1", artifact_id=served))
-        dispatcher.accept_record(_report("r1", "i1"))
+        dispatcher.accept_record(token_inference("i1", artifact_id=served))
+        dispatcher.accept_record(token_inference("i1", artifact_id=served))
+        dispatcher.accept_record(report("r1", "i1"))
         for _ in range(5000):
             if finished_jobs(dispatcher):
                 break
