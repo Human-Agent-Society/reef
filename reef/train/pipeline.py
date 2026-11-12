@@ -44,6 +44,7 @@ from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from itertools import batched
+from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import JobOutcome
@@ -124,6 +125,12 @@ class PipelineSettings:
     def with_record2sample_config(self, config: Mapping[str, Any]) -> PipelineSettings:
         """The same stages, with each key of ``config`` in place of that key of the record-to-sample stage's config."""
         return replace(self, record2sample=replace(self.record2sample, config={**self.record2sample.config, **config}))
+
+    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
+        """The directories under which the record-to-sample stage of these settings keeps ``scenario``'s state
+        (``Record2Sample.scenario_state_dirs``). The stage is not built."""
+        stage = self.record2sample
+        return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
 
     def build(self, context: PipelineContext) -> TrainingPipeline:
         """Build the pipeline of one scenario: each stage from its config, the job stage with the sample stage."""

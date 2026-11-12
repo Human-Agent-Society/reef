@@ -255,9 +255,6 @@ Common members
 |                                                   |                             | (default                       |
 |                                                   |                             | ``AcceptAnyArtifact()``)       |
 +---------------------------------------------------+-----------------------------+--------------------------------+
-| ``serving_status()``                              | ``Mapping | None``          | runtime-wide state for         |
-|                                                   |                             | ``/reef/status``               |
-+---------------------------------------------------+-----------------------------+--------------------------------+
 
 ``check_root_start(root)`` checks an item start before scenario registration.
 ``root`` is the recipe's ``ScenarioRoot``, with its artifact and source.

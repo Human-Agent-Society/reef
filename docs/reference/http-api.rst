@@ -3242,9 +3242,10 @@ step that skipped or rejected its candidate. An activation, a train-from, an
 import or a sync advances ``scenario_step`` without replacing the latest
 training outcome.
 
-``serving`` is runtime-wide but recipe-shaped, keyed by recipe name. A runtime
-that serves per-scenario adapters reports the engines' shared adapter
-residency there, under ``adapters``.
+``serving`` is runtime-wide and keyed by recipe name. The runtime of a
+weight-training recipe that serves per-scenario adapters reports the engines'
+shared adapter residency there, under ``adapters``. For a composite recipe,
+``adapters`` is under the name of the weight component.
 
 Status codes
 ------------
