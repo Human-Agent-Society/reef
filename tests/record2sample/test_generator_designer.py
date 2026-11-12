@@ -211,9 +211,21 @@ def test_the_reef_designer_posts_its_request_options_with_the_tags_and_keeps_the
     assert call["body"]["messages"][0]["role"] == "system"
     assert call["headers"]["x-reef-tag-role"] == "designer" and call["headers"]["x-reef-tag-generation"] == "2"
     assert call["headers"]["authorization"] == "Bearer t"
+    assert "x-reef-record-training" not in call["headers"], "a call keeps no sample unless it asks"
     report = reef.reports[0]["body"]
     assert report_id == "rep-1" and report["references"] == ["rec-1"] and report["score"] == 0.5
     assert report["metadata"] == {"generation": 2, "role": "designer"}, "the role tells a processor the report apart"
+
+
+def test_a_designer_call_that_records_its_sample_asks_with_the_header() -> None:
+    reef = StandInReef()
+    try:
+        ReefDesigner(reef_url=reef.url).answer(
+            designer_messages(request()), scenario="spade", model="m", tags={}, is_recording_training=True
+        )
+    finally:
+        reef.close()
+    assert reef.inferences[0]["headers"]["x-reef-record-training"] == "1"
 
 
 def test_the_responses_designer_sends_instructions_and_typed_input_and_joins_the_output_text() -> None:

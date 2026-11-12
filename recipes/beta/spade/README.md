@@ -11,9 +11,11 @@
 
 ```text
 beta/spade/
-  generation.py   the experience section (results sorted by regret into the frontier, the mastered and the out of reach), a generation's records
+  generation.py   the experience section (results sorted by regret into the frontier, the mastered and the out of reach), the Designer's score and advantages, a generation's records
   generator.py    SpadeTaskGenerator: the Designer's generations through the generator service
+  slime/          SpadeObjective: trains a task job's rollouts and the Designer replies that it carries, on Slime
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
+  examples/slime/serve.yaml    a Slime deployment that also trains the Designer, with the paper's Qwen3-4B settings
 ```
 
 SPADE is a task generator. The deployment selects it in `pipeline.record2sample.config.generator`. The built-in generated-task recipe (`reef.recipe.generated_tasks:GeneratedTaskRecipe`) runs the tasks and trains on them. Its stages and their settings are described in [generated tasks](../../../docs/reference/configuration.rst#generated-tasks).
@@ -25,7 +27,7 @@ SPADE is a task generator. The deployment selects it in `pipeline.record2sample.
 1. `generate` makes `count` Designer proposals across the configured `skills`. Each prompt includes the previous generation's results as SPADE's experience section.
 2. `validate` writes the task under the service's tasks root, runs Harbor's oracle and nop agents, and removes the task again. The reference solution must score 1. Doing nothing must score below 1. A duplicate task is invalid. After a reload cancels a generation, a rerun replaces a task with the same name from the earlier attempt.
 3. The recipe saves each valid task with its train/eval split. Later it hands the training tasks to the training component as task jobs. The component runs each task `rollout.rollouts_per_task` times on the plain arm and trains on the rollouts. The recipe runs no eval tasks.
-4. When every training task of the generation has a result, `record_results` runs each train task that ran and that has `solution/hint.txt` `hint_plays` more times through the generator service, on the `hint` arm, with that file appended to the instruction. Hint rollouts measure only. It then reports the regret of each train proposal against its Designer receipt. A refused proposal, or one whose task ran no rollouts, scores 0. Eval proposals and tasks that could not run get no Designer report and do not go into the experience. This can happen after later generations started.
+4. When every training task of the generation has a result, `record_results` runs each train task that ran and that has `solution/hint.txt` `hint_plays` more times through the generator service, on the `hint` arm, with that file appended to the instruction. Hint rollouts measure only. It then reports the score of each train proposal against its Designer receipt (see [Designer training](#designer-training)). A refused proposal, or one whose task ran no rollouts, scores 0. Eval proposals and tasks that could not run get no Designer report and do not go into the experience. This can happen after later generations started.
 
 Regret is the mean hint reward minus the mean plain reward. Without hint rollouts, regret is 0. The mean plain reward determines the task's band: mastered above 0.9, out of reach below 0.1, and frontier otherwise. The next prompt lists frontier tasks by regret, highest first.
 
@@ -36,9 +38,9 @@ The generator keeps its own state in the same task store, as state documents, an
 | Document | Content |
 | --- | --- |
 | `open/<generation>` | the proposals of a generation that `record_results` has not closed, named by the recipe's generation number |
-| `report/<number>` | each proposal, refusal, and measurement of a closed generation, named by SPADE's own number of the generation |
+| `report/<number>` | each proposal, refusal, and measurement of a closed generation, the recipe's generation number, the score of each task, and the Designer advantages, named by SPADE's own number of the generation |
 
-After a restart, the generator reads the last report to recover the experience, closes open generations when their results arrive, and numbers new generations after the reports and open generations.
+After a restart, the generator reads the last report to recover the experience, closes open generations when their results arrive, and numbers new generations after the reports, the open generations, and the recipe's generation. With `train_designer`, `designer_advantages` reads the report whose `recipe_generation` is the generation asked for, whatever its key.
 
 The documents are rows of the table `task_state_document` in the scenario's database, under the store name `generated-tasks`. With SQLite storage, the database of a scenario is `<storage.agent-record-dir>/<SHA-256 of the scenario name>.sqlite3`. To read the report of SPADE's generation 0:
 
@@ -60,8 +62,15 @@ The generator's `config` keys:
 | `turn_limit` | 12 | the turn limit the Designer writes for |
 | `grounding_path` | none | a text file added to the Designer prompt |
 | `hint_plays` | 2 | plays of the hint arm; 0 turns it off |
-| `designer_report` | true | report each proposal's regret against the Designer's receipt |
+| `designer_report` | true | report each proposal's score against the Designer's receipt |
 | `served_model` | the deployment's | the model the Designer and the hint plays ask for |
+| `plateau_low`, `plateau_high` | 0.4, 0.6 | the band of mean plain rewards where the plateau reward is 1 |
+| `plateau_ramp` | 0.25 | the width over which the plateau reward falls from 1 to 0 on each side of the band |
+| `plateau_weight` | 0.0 | the weight of the plateau reward in the score |
+| `regret_weight` | 1.0 | the weight of the floored regret in the score |
+| `regret_scale` | 1.0 | the regret that counts as 1 in the score |
+| `max_designer_scale` | 50 | the largest scale of the Designer's advantages |
+| `train_designer` | false | keep each Designer reply's sample, and give the recipe the advantages that train the replies |
 
 The generator takes no `state_dir`: a config that still has the key is refused. The generator does not read the files of an earlier `state_dir`, so a scenario that upgrades starts with no experience, and an open generation of the earlier version gets no feedback. The task store keeps every generation and task.
 
@@ -86,7 +95,64 @@ With `rounds: 0` the recipe generates nothing; it trains only on the train tasks
 
 Thinking stays off because a thinking model's rollout never assembles into one sample: the agent's history carries earlier turns without their thinking, so the second turn's prompt no longer extends the first turn's tokens. With thinking off, Qwen3's generation prompt still ends with an empty think block that the history drops; `scaffold_tolerance` (in `recipe.config.job_parameters.rollout`) lets the assembly realign those masked tokens. A tasks root under a path Docker shares with the host (on macOS, under the home directory) is required, or the verifier's reward file never reaches the host.
 
-Each task job runs its rollouts at the weights the job starts from, so a task group holds rollouts of one weight version. The Designer's own training, its regret as the reward of its proposals, follows.
+Each task job runs its rollouts at the weights the job starts from, so a task group holds rollouts of one weight version. The Designer can train in the same jobs; see [Designer training](#designer-training).
+
+## Designer training
+
+The Designer trains on its own replies in the task jobs of a later generation. Two settings turn it on:
+
+- `train_designer: true` in the generator's `config`. Each Designer call then asks the generator service to keep the reply's sampled tokens, their log-probs and the sampling distribution in its inference record.
+- `designer_delay` of 1 or more in `pipeline.record2sample.config`. The replies of generation g then train in the first task job of round g + `designer_delay`. The tasks of that round wait until generation g has its advantages. When the generator gives them, the samples service saves each reply's sample in the task store, and control reads them from there, so the two can run in separate processes. The replies of the last `designer_delay` generations of a run have no such round: they stay in the task store, and a run that continues with more rounds trains them. See [generated tasks](../../../docs/reference/configuration.rst#generated-tasks) for the rules of the stage.
+
+The Designer's score of a train task that ran follows the reference code:
+
+```text
+score = plateau_weight * plateau(win rate) + regret_weight * min(1, max(0, regret / regret_scale))
+```
+
+The win rate is the task's mean plain reward. `plateau` is 1 on [`plateau_low`, `plateau_high`] and falls linearly to 0 over `plateau_ramp` on each side. The defaults score the regret alone, clipped to [0, 1]. The generator reports this score against the Designer's receipt.
+
+The advantage of a reply is `scale * (score - mean)`. `mean` is the mean score of the generation's replies of the same skill. `scale` is the number of training rollouts of the generation's measured tasks divided by the number of those tasks, at most `max_designer_scale`. Only the replies whose train task ran rollouts get an advantage: refused proposals, eval proposals and tasks that could not run get none. The generation report keeps the advantages, so the recipe reads the same values after a restart.
+
+Each reply trains from the sample that its served call kept, so the Designer must be the served model under training (no `generator.designer-url`). The Designer's calls must name `temperature`, `top_p` and `top_k`, in the request or in the serving engine's `sampling_defaults`, and set no `min_p`, penalty or logit bias, so that the record names the distribution of the sample. The Slime example has not run end to end yet.
+
+### On Slime
+
+Task jobs of a SPADE run name the objective `spade` (`recipes.beta.spade.slime:SpadeObjective`). Slime rolls each task out. The plays of each task are centered by SPADE's rule: the reward minus the task's mean, over the population deviation (`np.std`) plus 1e-8. The job's delayed samples are the Designer replies of an earlier generation, with the advantages that the generator gave them. They train in the job's first optimizer step, before the plays, one reply to a row. Slime trims the last plays when the step is full, as SPADE does.
+
+Slime options for this objective:
+
+- `--advantage-estimator` grpo, gspo or cispo, and no `--normalize-advantages` or `--custom-advantage-function-path`.
+- `--n-samples-per-prompt` of at least 2.
+- `--use-tis`, with no `--custom-tis-function-path` and no `--use-rollout-logprobs`.
+- `--use-dynamic-batch-size`, and no `--use-score-centering`.
+- `--global-batch-size` of at most `(rollout-batch-size - 1) * n-samples-per-prompt + 1`, the fewest rollouts that a first rollout holds.
+- `--rollout-batch-size` of at least 2, and at least the number of tasks plus `max(1, ceil(replies / n-samples-per-prompt))`, so that one rollout is one step. A job that carries no reply still leads with one group of padding rows.
+- `--rollout-temperature`, `--rollout-top-p` and `--rollout-top-k` equal to the distribution of the Designer's calls.
+
+The deployment refuses these options when it loads, and the training component refuses a job that breaks them. A job carries at most `min(global-batch-size, (rollout-batch-size - 1) * n-samples-per-prompt)` replies, each sampled from the rollout distribution. Control leaves the other replies out when it builds the job's data, with a warning in the log, so the job still trains its tasks.
+
+For example, 24 tasks, 24 replies and n = 8 need a rollout batch size of 27. With a global batch size of 192, the step trains the 24 replies and the first 168 plays. A job that carries fewer replies, such as the first job of a run, which carries none, fills the rollout with its first tasks again, as every task job fills its last rollout. Those plays come last, so the step does not train them, but they count toward their tasks' win rates and the Designer's scale.
+
+Checkpoint retention ranks a job's checkpoint by the mean reward of its plays. Slime's own raw reward metrics count the Designer rows as reward 0.
+
+```bash
+export REEF_TOKEN=reef-local REEF_SPADE_STATE_DIR="$PWD/work/spade"
+reef serve -c recipes/beta/spade/examples/slime/serve.yaml
+```
+
+### Declared divergences
+
+The Slime example follows the reference code's Qwen3-4B paper run in its score, its band, its weights and its optimizer settings. These parts differ:
+
+- The win rate uses the 8 plays of one task job, not 32 plays over 4 steps. So the scale is 8, not 32.
+- The Designer's replies train one task job after their generation, not 4 steps after it.
+- The hint plays run after the task job, on the artifact that the job published.
+- The hint is part of the Designer's reply, so it trains with the reply.
+- Both roles sample at temperature 0.6 with top_p 1 and top_k -1, the distribution that the trainer reads. The reference code samples both roles at temperature 0.6, top_p 0.95 and top_k 20, and its trainer reads temperature 1.0.
+- A play that fails in the infrastructure leaves its task's group. The reference code counts a failed play as -1.
+- The score has no learning progress or frontier term. The paper runs set both weights to 0.
+- The generator's defaults score the regret alone. The example sets the paper's weights and band.
 
 ## Generate from selected records
 

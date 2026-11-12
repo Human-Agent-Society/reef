@@ -127,6 +127,14 @@ methods. Each has a default for a handler or runtime without serving fields:
   changed. After it, the worker reads the scenario's route again with
   ``served_artifact``, so the runtime may move the scenario to another engine.
 
+``InferenceHandler.inference_with_sample(artifact, path, payload)`` answers a
+call that sends ``x-reef-record-training`` (`Headers <http-api.rst#headers>`__):
+the provider response with the engine's exact sample as its ``training`` block
+(``reef.core.training_capture.sample_training``), which the inference service
+keeps in the record and never returns to the client. The default raises
+``ValueError``, which the service answers with 400. The token-native chat
+handlers of SGLang and vLLM give the sample of a buffered chat call.
+
 An ``InferenceHandler`` whose engines scale to zero can report the state of
 the engine behind a route with ``engine_state(served)``: ``"warm"``,
 ``"starting"``, ``"idle"`` or None (RFC #1269). The startup status of a ready
@@ -633,7 +641,8 @@ independently after a restart. The contract and its values are in
 ``reef.storage.tasks``.
 
 To open a store, call ``task_storage.open(name)``. Each record-to-sample stage
-uses its own ``name``.
+uses its own ``name``. The generated-task recipe's sample-to-job stage reads the
+store of its record-to-sample stage, where the Designer replies wait.
 
 A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
 The scenario factory gives ``session.tasks`` to ``Recipe.build_trainers``,
@@ -701,11 +710,12 @@ its split. The published tasks are the candidates with a split. A
      - Return the local directory of a candidate, a published task or a
        ``save_files`` call, for example for ``read_harbor_task`` or
        ``TaskRolloutRunner.run``. Do not change it.
-   * - ``write_document(key=..., document=...)``, ``documents()``
-     - Save a text document under a non-empty key, or return every document by
-       key. Each key holds one document; another document under a used key
-       raises ``TaskStoreError``. The store does not read a document: the stage
-       that writes the store keeps its own state about its tasks here.
+   * - ``write_document(key=..., document=...)``, ``documents(prefix="")``, ``document(key)``
+     - Save a text document under a non-empty key, return every document by
+       key whose key starts with ``prefix``, or return the document of one key
+       (None without one). Each key holds one document; another document under
+       a used key raises ``TaskStoreError``. The store does not read a document:
+       the stage that writes the store keeps its own state about its tasks here.
    * - ``write_state_document(key=..., document=...)``,
        ``remove_state_document(key=...)``, ``state_document(key)``,
        ``state_document_keys(prefix="")``
@@ -1407,6 +1417,13 @@ is optional. It receives the results of one earlier ``generate`` call, named by
 restart. A second call for the same generation must have no effect. The
 default keeps nothing. The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, calls these methods.
+
+``designer_advantages(generation: int) -> Mapping[str, float]`` is optional. With
+``designer_delay`` above 0, the recipe calls it after ``record_results`` of the
+same generation returned. It maps the inference record ID of each Designer reply
+of the generation that trains to its advantage, a finite number; a reply without
+a key does not train. A second call for the same generation, also after a
+restart, must give the same answer. The default trains no reply.
 See `Training pipeline <../developer-guide/processors.rst#task-generation-contract>`__
 for the round and its failure behavior.
 
@@ -1464,9 +1481,21 @@ Job data
    )
 
 ``Sample = TrajectorySample | TaskSample``. Every processor returns a frozen
-``JobData(data_id, samples, request=None)`` with an ordered tuple of samples.
+``JobData(data_id, samples, request=None, delayed=())`` with an ordered tuple of samples.
 One job's data holds samples of one kind. ``request`` is keyword-only and carries
 an optional explicit training request; request-only job data may be empty.
+``delayed`` is keyword-only: a tuple of ``DelayedSample(trajectory, advantage)``
+values (``reef.core.job_data``) that train beside the rollouts of a task job,
+such as SPADE's Designer replies of an earlier generation. It rides only with
+task samples. Each trajectory holds the exact sample that an engine drew: its
+tokens, loss mask, sampled log-probs, ``distribution`` (a
+``reef.core.training_capture.SamplingDistribution``) and artifact; ``advantage``
+is a finite number. A training component trains the delayed samples that its
+``TrainingComponent.delayed_sample_limit(parameters)`` keeps, a
+``DelayedSampleLimit(count, distribution)``, and its ``check_job`` refuses others.
+The default limit is None: the component trains no delayed sample. A recipe
+whose task jobs carry delayed samples gives the limit to its stages
+(``PipelineContext.delayed_sample_limit``), so they build only data that trains.
 The pipeline returns the same pending job data until its id is acknowledged.
 Reef submits one training job for each value. The training component cuts the
 samples into its own optimizer batches.
@@ -1664,6 +1693,16 @@ objective set what the component may do with the job's data:
 - ``supports_multiple_epochs`` (default ``False``) says whether passes after
   the first are valid. Those passes train off-policy against log-probs
   computed once, which a clipped ratio tolerates.
+
+Two more attributes of a ``SlimeObjective`` apply to task jobs on the ``slime``
+loss family:
+
+- ``advantage_rule`` (default None) is a ``GroupAdvantageRule``
+  (``reef.train.algos.group_advantages``) that turns the rewards of each task's
+  rollouts into advantages. None keeps Slime's own reward step.
+- ``carries_samples`` (default ``False``) says whether a task job trains the job
+  data's delayed samples in its first optimizer step. Such an objective declares
+  its ``advantage_rule``.
 
 A job's optional ``scheduling`` parameter is a ``StepScheduling``
 (``reef.train.algos.schedule``) as an object:

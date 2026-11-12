@@ -77,7 +77,10 @@ class Generator(ABC):
         index: int,
         tags: Mapping[str, str],
         model: str | None = None,
-    ) -> ProposedTask: ...
+        is_recording_training: bool = False,
+    ) -> ProposedTask:
+        """Ask the Designer for one task; with ``is_recording_training`` the Designer call's record keeps its exact
+        sample (``x-reef-record-training``), so that a recipe can train the Designer on it."""
 
     @abstractmethod
     async def report_proposal(
@@ -190,6 +193,7 @@ class HttpGenerator(Generator):
         index: int,
         tags: Mapping[str, str],
         model: str | None = None,
+        is_recording_training: bool = False,
     ) -> ProposedTask:
         if any(record.scenario != scenario for record in request.inputs.source_records):
             raise GeneratorError("source records must belong to the proposal's scenario")
@@ -205,6 +209,8 @@ class HttpGenerator(Generator):
         }
         if model is not None:
             body["model"] = model
+        if is_recording_training:
+            body["record_training"] = True
         result = await self.job_result(await self.call("POST", "/proposals", body=body))
         try:
             task = task_from_document(result["task"]) if result.get("task") is not None else None

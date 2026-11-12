@@ -843,8 +843,10 @@ the response, and a scenario that does not train serves it under its release
 id.
 
 ``rollout_log_probs`` are the sampled tokens' log probabilities that a
-training component's own task rollouts record; serving records none. They
-must mean the same thing as the trainer's. Sampling runs through::
+training component's own task rollouts record; serving records none, except
+for a call with ``x-reef-record-training`` (see `Headers
+<http-api.rst#headers>`__). They must mean the same thing as the trainer's.
+Sampling runs through::
 
    raw logits -> penalties, logit_bias -> / temperature -> [A] -> top-k, top-p, min-p -> [B] -> sample
 
@@ -872,8 +874,10 @@ this check.
 Chat template arguments
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Serving records the provider exchange only. The training component renders
-each recorded call with the model's chat template, and must render it as the
+Serving records the provider exchange only, except for a call with
+``x-reef-record-training`` (see `Headers <http-api.rst#headers>`__), whose
+record also keeps the engine's token IDs. The training component renders each
+other recorded call with the model's chat template, and must render it as the
 serving engine did. Give the training component the same chat template
 arguments that the engine renders with: the handler's
 ``chat_template_kwargs``, or the arguments that the clients send.
@@ -2082,6 +2086,9 @@ which are not records.
    ``pipeline.record2sample.config.generation_deadline_seconds`` : 1800
        seconds that all attempts of one generation may take
 
+   ``pipeline.record2sample.config.designer_delay`` : 0
+       rounds after which the Designer replies of a generation train, in the first task job of the later round; 0 trains no Designer reply
+
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no rollouts; the saved train tasks run later, and their results are kept in the store.
 The task files go in the task file store; see `Choose the task file store
@@ -2097,6 +2104,15 @@ names no state directory; the built-in generators refuse a ``state_dir`` key.
 See `the task generation contract
 <../developer-guide/processors.rst#task-generation-contract>`__ for the state
 that a generator gets.
+
+With ``designer_delay`` d above 0, the task jobs also train the Designer's replies:
+
+- When the generator has taken the results of generation g, it gives the advantage of each Designer reply of g that trains (``TaskGenerator.designer_advantages``). The samples service makes each reply's delayed sample from its inference record and saves the replies in the task store. It holds the records until then.
+- The tasks of round g + d wait for these replies. The first task job that holds a task of that round carries the replies of g, with their advantages, beside its tasks. A round that published no train task passes them to the next round that did. Control reads the replies from the task store, so it can run in another process.
+- A carrying job that fails, or that a new training start cancels, does not train them again. A reply whose data is more than ``max_staleness`` versions behind does not train.
+- Each reply trains from the sample that its served call kept, so the generator must ask for it (SPADE's ``train_designer``). A reply without its sample is skipped. The operational metrics count the saved replies and the skipped records.
+- The last d generations of a run have no carrying round. Their replies stay in the task store, so a run that continues with more rounds trains them.
+- The training component and the task jobs' objective must train delayed samples beside a task job's rollouts; the deployment refuses ``designer_delay`` otherwise. A job carries only the replies that the component trains: those sampled from its rollout distribution, up to the number that one job takes (``TrainingComponent.delayed_sample_limit``). The others are left out with a warning in the log.
 
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
 The defaults keep every task in train.

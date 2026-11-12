@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.core.job_data import DelayedSampleLimit
 from reef.core.reports import ReportBase
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
@@ -24,7 +25,8 @@ class PipelineContext:
 
     Values: ``training_mode`` is ``auto`` or ``manual``. ``job_parameters``
     maps a subset of the sample kinds to mappings that encode as JSON; the
-    value keeps its own copies. The constructor refuses other values.
+    value keeps its own copies. ``delayed_sample_limit`` is a
+    ``DelayedSampleLimit`` or None. The constructor refuses other values.
     Purpose: ``Trainer.build`` makes it. The pipeline and each stage's
     ``from_config`` read it.
     """
@@ -46,10 +48,15 @@ class PipelineContext:
     #: mapping that encodes as JSON, which Reef does not read; the recipe gives them. Empty for a trainer without a job
     #: loop. ``Sample2Job.job_parameters`` reads them.
     job_parameters: Mapping[SampleKind, Mapping[str, Any]] = field(default_factory=dict)
+    #: The delayed samples that one task job of the training component trains, or None when it trains none: a recipe
+    #: whose task jobs carry delayed samples gives ``TrainingComponent.delayed_sample_limit`` here.
+    delayed_sample_limit: DelayedSampleLimit | None = None
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
+        if self.delayed_sample_limit is not None and not isinstance(self.delayed_sample_limit, DelayedSampleLimit):
+            raise TypeError("delayed_sample_limit must be a DelayedSampleLimit or None")
         if not isinstance(self.job_parameters, Mapping) or set(self.job_parameters) - set(SAMPLE_KINDS):
             raise ValueError(f"job_parameters maps sample kinds {list(SAMPLE_KINDS)} to parameters")
         for parameters in self.job_parameters.values():

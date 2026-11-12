@@ -8,11 +8,13 @@ ends, its ``JobOutcome`` is what the training pipeline learns about it.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
+from reef.core.training_capture import SamplingDistribution
 from reef.core.training_request import TrainingRequest
 
 
@@ -28,8 +30,10 @@ class TrajectorySample:
 
     The document is the single source of trajectory data. Reef-specific feedback, captured provider records and
     the training fields live in ``extra.reef``. A sample that a record-to-sample stage makes carries no tokens: the
-    training component renders it (``reef.core.chat_rendering``) and writes the tokens into ``training``. A task
-    rollout of a training component carries the exact tokens that its engine sampled. Full ATIF validation and
+    training component renders it (``reef.core.chat_rendering``) and writes the tokens into ``training``. The one
+    exception is a served call that kept its exact sample (``x-reef-record-training``): its record holds the
+    sampled tokens, and a recipe that trains it later makes a ``DelayedSample`` with them. A task rollout of a
+    training component carries the exact tokens that its engine sampled. Full ATIF validation and
     algorithm-required fields belong to the consumer.
     """
 
@@ -126,6 +130,110 @@ class TaskSample:
             raise TypeError("task metadata must be a mapping")
 
 
+@dataclass(frozen=True)
+class DelayedSample:
+    """A trajectory made by an earlier job's policy that trains in a later task job, with its advantage.
+
+    Values: ``trajectory`` is a ``TrajectorySample`` whose ``training`` holds the exact sample: ``tokens``, a
+    non-empty list of ints; ``loss_mask``, a list of 0 and 1 over the last ``len(loss_mask)`` tokens, shorter than
+    ``tokens``, with at least one 1; ``rollout_log_probs``, one finite float per ``loss_mask`` entry, the log-probs
+    under which the engine sampled the response; ``distribution``, the ``SamplingDistribution`` that the engine
+    sampled from, as ``to_dict`` writes it; and an ``artifact_id`` (the trajectory's). ``advantage`` is a finite
+    float, the advantage that the job trains the sample with, set by the recipe that made it.
+    Purpose: a recipe makes the value for ``JobData.delayed``, such as SPADE's Designer replies of the previous
+    generation, and a training component that carries samples trains it beside the job's task rollouts.
+    """
+
+    trajectory: TrajectorySample
+    advantage: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.trajectory, TrajectorySample):
+            raise TypeError("DelayedSample.trajectory must be a TrajectorySample")
+        if isinstance(self.advantage, bool) or not isinstance(self.advantage, (int, float)):
+            raise TypeError("DelayedSample.advantage must be a number")
+        if not math.isfinite(self.advantage):
+            raise ValueError("DelayedSample.advantage must be finite")
+        object.__setattr__(self, "advantage", float(self.advantage))
+        training = self.trajectory.training
+        tokens = training.get("tokens")
+        mask = training.get("loss_mask")
+        log_probs = training.get("rollout_log_probs")
+        if not isinstance(tokens, list) or not tokens or not all(isinstance(token, int) for token in tokens):
+            raise ValueError("a delayed sample needs its sampled tokens")
+        if not isinstance(mask, list) or not 0 < len(mask) < len(tokens) or any(value not in (0, 1) for value in mask):
+            raise ValueError("a delayed sample needs a loss mask of 0 and 1 over its response")
+        if 1 not in mask:
+            raise ValueError("a delayed sample needs at least one trained token")
+        if (
+            not isinstance(log_probs, list)
+            or len(log_probs) != len(mask)
+            or not all(
+                isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+                for value in log_probs
+            )
+        ):
+            raise ValueError("a delayed sample needs one finite sampled log-prob per response token")
+        if self.trajectory.artifact_id is None:
+            raise ValueError("a delayed sample must name the artifact that sampled it")
+        try:
+            SamplingDistribution.from_dict(training.get("distribution"))
+        except ValueError as exc:
+            raise ValueError(f"a delayed sample needs its sampling distribution: {exc}") from exc
+
+    @property
+    def distribution(self) -> SamplingDistribution:
+        """The distribution that the engine sampled the trajectory from, ``training.distribution``."""
+        return SamplingDistribution.from_dict(self.trajectory.training.get("distribution"))
+
+    def to_dict(self) -> dict[str, Any]:
+        """The value as JSON values, an entry of ``JobData.to_dict``; ``from_dict`` reads it back to an equal value."""
+        return {"trajectory": trajectory_entry(self.trajectory), "advantage": self.advantage}
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> DelayedSample:
+        """Read the value that ``to_dict`` wrote; ``KeyError``, ``TypeError`` or ``ValueError`` for another value."""
+        return cls(trajectory_of(value["trajectory"]), value["advantage"])
+
+
+@dataclass(frozen=True)
+class DelayedSampleLimit:
+    """The delayed samples that one task job of a training component trains: how many, and from which distribution.
+
+    Values: ``count`` is a positive int, the most delayed samples that one job's data may hold. ``distribution`` is
+    the ``SamplingDistribution`` that every delayed sample must come from: the one that the component trains under,
+    so that the sample's recorded log-probs are those of its own sampler. The constructor refuses other values.
+    Purpose: ``TrainingComponent.delayed_sample_limit`` gives it for the parameters of a task job. A recipe whose task
+    jobs carry delayed samples refuses a deployment without it and gives it to its stages
+    (``PipelineContext.delayed_sample_limit``), which build only the samples that it keeps (``trainable``). The
+    component's ``check_job`` refuses a job outside it (``check``).
+    """
+
+    count: int
+    distribution: SamplingDistribution
+
+    def __post_init__(self) -> None:
+        if isinstance(self.count, bool) or not isinstance(self.count, int) or self.count < 1:
+            raise ValueError(f"a delayed sample limit needs a positive count, got {self.count!r}")
+        if not isinstance(self.distribution, SamplingDistribution):
+            raise TypeError("DelayedSampleLimit.distribution must be a SamplingDistribution")
+
+    def trainable(self, samples: Sequence[DelayedSample]) -> tuple[DelayedSample, ...]:
+        """The first ``count`` of ``samples`` that come from ``distribution``, in order."""
+        return tuple(sample for sample in samples if sample.distribution == self.distribution)[: self.count]
+
+    def check(self, samples: Sequence[DelayedSample]) -> None:
+        """Raise ``ValueError`` unless ``samples`` are at most ``count`` samples, each from ``distribution``."""
+        if len(samples) > self.count:
+            raise ValueError(f"a task job trains at most {self.count} delayed samples, not {len(samples)}")
+        for sample in samples:
+            if sample.distribution != self.distribution:
+                raise ValueError(
+                    f"a delayed sample of {sample.distribution} cannot train under {self.distribution}: its "
+                    "recorded log-probs are not those of the job's sampler"
+                )
+
+
 #: One sample of job data: a trajectory that trains as it is, or a Harbor task that the training component rolls
 #: out. The record-to-sample stage makes samples, ``job_samples`` and ``buffer_size`` count them, and
 #: ``JobData.samples`` holds them.
@@ -148,16 +256,19 @@ class JobData:
     ``samples`` is a tuple of ``TrajectorySample`` and ``TaskSample`` values in
     the order of the sample-to-job stage; it can be empty, for a harness step
     that runs a request with no held samples. ``request`` is the training request that
-    the data carries, or None. The constructor refuses other sample types.
+    the data carries, or None. ``delayed`` is a tuple of ``DelayedSample`` values
+    that train beside the job's task rollouts; it is empty unless ``samples`` is
+    a non-empty tuple of tasks only. The constructor refuses other sample types.
     Purpose: ``Sample2Job.make_job_data`` makes it, and the training component
     (``TrainingJob.data``) or the harness backend reads it. The consuming
-    algorithm decides which sample kinds it supports and refuses the others
-    explicitly.
+    algorithm decides which sample kinds it supports, and whether it trains
+    delayed samples, and refuses the others explicitly.
     """
 
     data_id: str
     samples: tuple[Sample, ...] = ()
     request: TrainingRequest | None = field(default=None, kw_only=True)
+    delayed: tuple[DelayedSample, ...] = field(default=(), kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.data_id, str) or not self.data_id:
@@ -169,6 +280,10 @@ class JobData:
         for index, sample in enumerate(self.samples):
             if not isinstance(sample, (TrajectorySample, TaskSample)):
                 raise TypeError(f"JobData.samples[{index}] must be a TrajectorySample or TaskSample")
+        if not isinstance(self.delayed, tuple) or not all(isinstance(item, DelayedSample) for item in self.delayed):
+            raise TypeError("JobData.delayed must be a tuple of DelayedSample values")
+        if self.delayed and (not self.samples or not all(isinstance(sample, TaskSample) for sample in self.samples)):
+            raise ValueError("JobData.delayed rides only with task samples")
 
     def to_dict(self) -> dict[str, Any]:
         """The value as JSON values; ``from_dict`` reads them back to an equal value.
@@ -181,14 +296,7 @@ class JobData:
         samples: list[dict[str, Any]] = []
         for sample in self.samples:
             if isinstance(sample, TrajectorySample):
-                samples.append(
-                    {
-                        "kind": "trajectory",
-                        "trajectory": dict(sample.trajectory),
-                        "group_id": sample.group_id,
-                        "source_agent_record_ids": list(sample.source_agent_record_ids),
-                    }
-                )
+                samples.append(trajectory_entry(sample))
             else:
                 samples.append(
                     {
@@ -199,7 +307,10 @@ class JobData:
                     }
                 )
         request = None if self.request is None else {"id": self.request.id, **self.request.to_dict()}
-        return {"data_id": self.data_id, "samples": samples, "request": request}
+        value: dict[str, Any] = {"data_id": self.data_id, "samples": samples, "request": request}
+        if self.delayed:
+            value["delayed"] = [item.to_dict() for item in self.delayed]
+        return value
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> JobData:
@@ -207,17 +318,13 @@ class JobData:
 
         Raise ``ValueError`` for a malformed value: a missing key, a value of
         the wrong type, an unknown sample kind, or a sample or request that fails
-        its own checks.
+        its own checks. A value without ``delayed`` has no delayed samples.
         """
         try:
             samples: list[Sample] = []
             for entry in value["samples"]:
                 if entry["kind"] == "trajectory":
-                    samples.append(
-                        TrajectorySample(
-                            entry["trajectory"], entry["group_id"], tuple(entry["source_agent_record_ids"])
-                        )
-                    )
+                    samples.append(trajectory_of(entry))
                 elif entry["kind"] == "task":
                     samples.append(
                         TaskSample(
@@ -235,9 +342,25 @@ class JobData:
                     request_id=request_value["id"],
                 )
             )
-            return cls(value["data_id"], tuple(samples), request=request)
+            delayed = tuple(DelayedSample.from_dict(entry) for entry in value.get("delayed", ()))
+            return cls(value["data_id"], tuple(samples), request=request, delayed=delayed)
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValueError(f"malformed job data: {exc!r}") from exc
+
+
+def trajectory_entry(sample: TrajectorySample) -> dict[str, Any]:
+    """The JSON entry of one trajectory sample in ``JobData.to_dict``, which ``trajectory_of`` reads back."""
+    return {
+        "kind": "trajectory",
+        "trajectory": dict(sample.trajectory),
+        "group_id": sample.group_id,
+        "source_agent_record_ids": list(sample.source_agent_record_ids),
+    }
+
+
+def trajectory_of(entry: Mapping[str, Any]) -> TrajectorySample:
+    """The trajectory sample of an entry that ``trajectory_entry`` wrote."""
+    return TrajectorySample(entry["trajectory"], entry["group_id"], tuple(entry["source_agent_record_ids"]))
 
 
 def trajectories(data: JobData) -> tuple[TrajectorySample, ...]:

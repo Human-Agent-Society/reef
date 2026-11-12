@@ -239,8 +239,13 @@ class TaskStore(ABC):
         """
 
     @abstractmethod
-    def documents(self) -> Mapping[str, str]:
-        """Return ``D``: every saved document by its key."""
+    def documents(self, *, prefix: str = "") -> Mapping[str, str]:
+        """Return ``D`` restricted to the keys that start with ``prefix``: every saved document by its key when
+        ``prefix`` is empty."""
+
+    @abstractmethod
+    def document(self, key: str) -> str | None:
+        """Return ``D(key)``, or None when no document has the key."""
 
     @abstractmethod
     def write_state_document(self, *, key: str, document: str) -> None:

@@ -17,6 +17,7 @@ from reef.service.routed_inference import RoutedAttempt, RoutedInference
 from reef.service.routes.payload import read_object
 from reef.service.routing import RoutingAdapter, RoutingRequestError
 from reef.service.streaming import receipt_sse_events, stream_record
+from reef.service.wire import RECORD_TRAINING_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,10 @@ async def serve_routed_chat(
             raise RoutingRequestError("routing is unavailable", code="routing_unpublished", status=503)
         if request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true"):
             raise RoutingRequestError("routed deployments do not serve rollout calls", code="unsupported_rollout")
+        if request.headers.get(RECORD_TRAINING_HEADER, "").strip().lower() in ("1", "true"):
+            raise RoutingRequestError(
+                "an external provider gives no exact sample to record", code="unsupported_record_training"
+            )
         scenario = routing.check_request(request.headers.items(), request.path)
         client_payload = await read_object(request, strict=True)
         decision = await routed.select_route(routing, scenario, client_payload)

@@ -134,7 +134,7 @@ class StandInGenerator(Generator):
         self.task_rollouts: dict[str, int] = {}
 
     async def propose(
-        self, request: DesignerRequest, *, scenario, generation, index, tags, model=None
+        self, request: DesignerRequest, *, scenario, generation, index, tags, model=None, is_recording_training=False
     ) -> ProposedTask:
         self.proposals.append(
             {
@@ -144,6 +144,7 @@ class StandInGenerator(Generator):
                 "index": index,
                 "tags": dict(tags),
                 "model": model,
+                "is_recording_training": is_recording_training,
             }
         )
         if self.fail_after is not None and len(self.proposals) > self.fail_after:

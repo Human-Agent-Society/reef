@@ -254,3 +254,14 @@ class TaskGenerator(Plugin, ABC):
         records the delivery sends the same results again, so a second call for
         the same generation must change nothing. The default keeps nothing.
         """
+
+    def designer_advantages(self, generation: int) -> Mapping[str, float]:
+        """Return the advantage of each Designer reply of ``generation`` that trains, by its inference record ID.
+
+        The recipe calls this when its stage carries Designer replies (``designer_delay`` above 0), after
+        :meth:`record_results` of the same generation returned. Each key is the ID of an inference record of
+        the scenario that holds one Designer reply. Each value is a finite number: the advantage with which a
+        later task job trains that reply. A reply without a key does not train. A second call for the same
+        generation, also after a restart, must give the same answer. The default trains no reply.
+        """
+        return {}

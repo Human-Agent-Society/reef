@@ -38,6 +38,7 @@ from typing import Any, cast
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.job_data import DelayedSampleLimit
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.observability.base import (
@@ -331,6 +332,9 @@ class JobQueueComponent(TrainingComponent):
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         self.component.check_task_jobs(parameters)
+
+    def delayed_sample_limit(self, parameters: Mapping[str, Any]) -> DelayedSampleLimit | None:
+        return self.component.delayed_sample_limit(parameters)
 
     def check_artifact(self, files: ArtifactFiles) -> None:
         self.component.check_artifact(files)

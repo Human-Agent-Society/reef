@@ -5,16 +5,21 @@ the request carries what the agent did on the last generation's environments, so
 regret of Sec. 4.2 into the frontier (the hint turns losses into wins), the mastered (won without it) and
 the out of reach (lost even with it), so the next environment lands where the agent fails without a hint
 and passes with one. ``experience_text`` is that section of the prompt; the generic task designer in
-``reef.record2sample.generator`` carries it as data. The rest of this module is the bookkeeping of one generation,
-which ``SpadeTaskGenerator`` keeps as a report document in its state and reads back after a restart.
+``reef.record2sample.generator`` carries it as data. ``designer_score`` is the Designer's score of one task, the
+reference code's mix of a flat-top difficulty reward (``plateau_reward``) and the floored regret, and
+``centered_advantages`` turns a generation's scores into the advantages that train its replies. The rest of this
+module is the bookkeeping of one generation, which ``SpadeTaskGenerator`` keeps as a report document in its state
+and reads back after a restart.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import statistics
-from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from collections import defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import asdict, dataclass, field
 from typing import Literal
 
 from reef.core.prompts import untrusted_text
@@ -147,7 +152,15 @@ class ProposalRecord:
 
 @dataclass(frozen=True)
 class TaskMeasure:
-    """A task after both arms played: the rewards, the regret and the band."""
+    """A train task after both arms played: the rewards, the regret, the band, and the Designer's score of the task.
+
+    Values: ``name``, ``skill`` and ``digest`` are the task's; ``plain_rewards`` are the rewards of its training
+    rollouts and ``hint_rewards`` those of its hint plays, possibly none; ``record`` is its play record, whose
+    returns are the means of the two arms. ``score`` is a finite non-negative number, the ``designer_score`` that the
+    generator gave the task, 0.0 until it scores the task. The constructor refuses another ``score``.
+    Purpose: ``SpadeTaskGenerator.record_results`` makes one for each train task that ran; the generation report and
+    ``centered_advantages`` read it.
+    """
 
     name: str
     skill: str | None
@@ -155,6 +168,16 @@ class TaskMeasure:
     plain_rewards: tuple[float, ...]
     hint_rewards: tuple[float, ...]
     record: PlayRecord
+    score: float = 0.0
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.score, bool)
+            or not isinstance(self.score, (int, float))
+            or not math.isfinite(self.score)
+            or self.score < 0
+        ):
+            raise ValueError("a task's score must be a finite non-negative number")
 
     @property
     def regret(self) -> float:
@@ -167,16 +190,120 @@ class TaskMeasure:
 
 @dataclass(frozen=True)
 class GenerationRecord:
-    """What one generation produced, as its report document keeps it."""
+    """What one generation produced, as its report document keeps it.
+
+    Values: ``generation`` is SPADE's number of the generation; ``proposals`` holds each proposal and what became of
+    it, and ``measures`` each train task that ran; ``error`` is empty or names what stopped part of the generation.
+    ``recipe_generation`` is the recipe's number of the generation, or None for a report that does not know it.
+    ``designer_advantages`` maps the inference record ID of each Designer reply that trains to its advantage, a
+    finite number (``centered_advantages``); the constructor refuses another value.
+    Purpose: ``SpadeTaskGenerator.record_results`` makes it and keeps its ``generation_report``, and
+    ``saved_designer_advantages`` reads its advantages back.
+    """
 
     generation: int
     proposals: tuple[ProposalRecord, ...]
     measures: tuple[TaskMeasure, ...]
     error: str = ""
+    recipe_generation: int | None = None
+    designer_advantages: Mapping[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if any(
+            not isinstance(record_id, str)
+            or not record_id
+            or isinstance(advantage, bool)
+            or not isinstance(advantage, (int, float))
+            or not math.isfinite(advantage)
+            for record_id, advantage in self.designer_advantages.items()
+        ):
+            raise ValueError("designer_advantages must map record IDs to finite numbers")
 
     @property
     def experience(self) -> tuple[PlayRecord, ...]:
         return tuple(measure.record for measure in self.measures)
+
+
+def plateau_reward(win_rate: float, low: float, high: float, ramp: float) -> float:
+    """The reference code's flat-top difficulty reward of a task whose mean plain reward is ``win_rate``.
+
+    It is 1.0 on ``[low, high]`` and falls linearly to 0 over ``ramp`` on each side, so it is 0 at or below
+    ``low - ramp`` and at or above ``high + ramp``.
+    """
+    if win_rate < low:
+        return max(0.0, 1.0 - (low - win_rate) / ramp)
+    if win_rate > high:
+        return max(0.0, 1.0 - (win_rate - high) / ramp)
+    return 1.0
+
+
+@dataclass(frozen=True)
+class ScoreSettings:
+    """The weights and the plateau band of the Designer's score of a task (``designer_score``).
+
+    Values: every field is a finite number. ``plateau_low`` and ``plateau_high`` are in [0, 1] with
+    ``plateau_low <= plateau_high``; ``plateau_ramp`` and ``regret_scale`` are positive; ``plateau_weight`` and
+    ``regret_weight`` are non-negative, so every score is non-negative. The constructor refuses other values. The
+    defaults score a task by its regret alone, clipped to [0, 1]; the reference code's paper runs use the weights
+    0.6 and 0.4, ``regret_scale`` 0.15, and the band 0.2 to 0.4 with ramp 0.2 for Qwen3-4B, 0.4 to 0.6 with ramp
+    0.25 for Qwen3-30B-A3B.
+    Purpose: ``SpadeTaskGenerator`` reads it from its config and scores each task that ran with ``designer_score``.
+    """
+
+    plateau_low: float = 0.4
+    plateau_high: float = 0.6
+    plateau_ramp: float = 0.25
+    plateau_weight: float = 0.0
+    regret_weight: float = 1.0
+    regret_scale: float = 1.0
+
+    def __post_init__(self) -> None:
+        for name, value in asdict(self).items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} must be a finite number, got {value!r}")
+        if not 0 <= self.plateau_low <= self.plateau_high <= 1:
+            raise ValueError("the plateau band needs 0 <= plateau_low <= plateau_high <= 1")
+        if self.plateau_ramp <= 0 or self.regret_scale <= 0:
+            raise ValueError("plateau_ramp and regret_scale must be positive")
+        if self.plateau_weight < 0 or self.regret_weight < 0:
+            raise ValueError("plateau_weight and regret_weight must be non-negative")
+
+
+def designer_score(regret: float, win_rate: float, settings: ScoreSettings) -> float:
+    """The Designer's score of a task: the reference code's mix with the regret floor.
+
+    ``plateau_weight * plateau_reward(win_rate) + regret_weight * min(1, max(0, regret / regret_scale))``, with the
+    plateau band of ``settings``. ``win_rate`` is the task's mean plain reward and ``regret`` its mean hint reward
+    minus that.
+    """
+    plateau = plateau_reward(win_rate, settings.plateau_low, settings.plateau_high, settings.plateau_ramp)
+    regret_part = min(1.0, max(0.0, regret / settings.regret_scale))
+    return settings.plateau_weight * plateau + settings.regret_weight * regret_part
+
+
+def centered_advantages(
+    proposals: Sequence[ProposalRecord], measures: Sequence[TaskMeasure], *, max_scale: float
+) -> dict[str, float]:
+    """The advantage of each Designer reply of a generation that trains, by the ID of its inference record.
+
+    A reply trains when its proposal became a train task that ran rollouts, so it has a measure: refused, eval and
+    failed proposals get no entry. Its advantage is ``scale * (score - mean)``, where ``mean`` is the mean
+    ``score`` of the replies of its skill (the replies without a skill form one group), as the reference code
+    centers per skill without a deviation. ``scale = min(plays / replies, max_scale)``: ``plays`` is the number of
+    training rollouts of the measured tasks and ``replies`` the number of measured tasks. This is the reference
+    code's scale with one task job for each generation.
+    """
+    record_ids = {proposal.task_name: proposal.designer_record_id for proposal in proposals if proposal.task_name}
+    measured = [(record_ids[measure.name], measure) for measure in measures if measure.name in record_ids]
+    if not measured:
+        return {}
+    plays = sum(len(measure.plain_rewards) for _, measure in measured)
+    scale = min(plays / len(measured), max_scale)
+    by_skill: dict[str | None, list[float]] = defaultdict(list)
+    for _, measure in measured:
+        by_skill[measure.skill].append(measure.score)
+    means = {skill: statistics.fmean(scores) for skill, scores in by_skill.items()}
+    return {record_id: scale * (measure.score - means[measure.skill]) for record_id, measure in measured}
 
 
 def skill_tag(skill: str | None) -> dict[str, str]:
@@ -194,6 +321,7 @@ def generation_report(record: GenerationRecord) -> str:
     generation's prompts take."""
     document = {
         "generation": record.generation,
+        "recipe_generation": record.recipe_generation,
         "error": record.error,
         "proposals": [asdict(proposal) for proposal in record.proposals],
         "tasks": [
@@ -205,10 +333,12 @@ def generation_report(record: GenerationRecord) -> str:
                 "hint_rewards": list(measure.hint_rewards),
                 "regret": measure.regret,
                 "outcome": measure.outcome,
+                "score": measure.score,
             }
             for measure in record.measures
         ],
         "experience": [asdict(measure.record) for measure in record.measures],
+        "designer_advantages": dict(record.designer_advantages),
     }
     return json.dumps(document, indent=2) + "\n"
 

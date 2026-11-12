@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from reef.core import AgentRecord, RequestType
+from reef.core.job_data import DelayedSample
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 from reef.service.inference_service import provider_response
@@ -63,6 +64,32 @@ def test_policy_sample_uses_engine_native_response_training() -> None:
     assert sample.training.get("artifact_id", None) == "artifact-1"
     assert sample.training.get("turn_count", 1) == 1
     assert (sample.training.get("turn_count", 1) > 1) is False
+
+
+@pytest.mark.unit
+def test_a_served_call_that_recorded_its_sample_trains_as_a_delayed_sample() -> None:
+    distribution = {"temperature": 0.6, "top_p": 1.0, "top_k": -1}
+    item = _inference(
+        {
+            "messages": [{"role": "user", "content": "write an environment"}],
+            "artifact_id": "artifact-3",
+            "response": {
+                "choices": [{"message": {"role": "assistant", "content": "env"}}],
+                "training": {
+                    "tokens": [10, 11, 20, 21],
+                    "loss_mask": [1, 1],
+                    "rollout_log_probs": [-0.25, -0.5],
+                    "runtime_load_id": "e:3",
+                    "distribution": distribution,
+                },
+            },
+        }
+    )
+
+    sample = make_policy_trajectory(item, 0.5)
+
+    assert sample.training["distribution"] == distribution and sample.artifact_id == "artifact-3"
+    assert DelayedSample(sample, 0.5).trajectory is sample
 
 
 @pytest.mark.unit

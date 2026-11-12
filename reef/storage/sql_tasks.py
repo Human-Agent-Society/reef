@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String, Table, Text, and_, select
+from sqlalchemy import BigInteger, Boolean, Column, ForeignKey, MetaData, String, Table, Text, and_, func, select
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -261,13 +261,22 @@ class SQLTaskStore(TaskStore):
             elif existing != document:
                 raise TaskStoreError(f"document {key!r} is already saved with other text")
 
-    def documents(self) -> Mapping[str, str]:
+    def documents(self, *, prefix: str = "") -> Mapping[str, str]:
         documents = self.tables.documents
+        # SQLite's LIKE ignores case, so the key's first characters are compared with the prefix itself.
+        starts = func.substr(documents.c.document_key, 1, len(prefix)) == prefix
         with self.database._transaction(write=False) as connection:
             rows = connection.execute(
-                select(documents.c.document_key, documents.c.document).where(self.matching(documents))
+                select(documents.c.document_key, documents.c.document).where(self.matching(documents), starts)
             )
             return {row.document_key: row.document for row in rows}
+
+    def document(self, key: str) -> str | None:
+        documents = self.tables.documents
+        with self.database._transaction(write=False) as connection:
+            return connection.execute(
+                select(documents.c.document).where(self.matching(documents, document_key=key))
+            ).scalar()
 
     def write_state_document(self, *, key: str, document: str) -> None:
         if not key:

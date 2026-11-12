@@ -52,6 +52,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from reef.core.errors import INFERENCE_ABORT_ERROR, ReefError, UpstreamStatusError, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
+from reef.core.training_capture import DISTRIBUTION_KEYS
 from reef.core.values import JsonValue
 from reef.inference.interfaces import EngineClients, EngineState, InferenceArtifact, InferenceHandler, StartupSteps
 from reef.inference.provider_protocol import SSEFrameDecoder
@@ -64,7 +65,13 @@ from reef.service.streaming import (
     stream_record,
 )
 from reef.service.web import service_application
-from reef.service.wire import HeaderError, RequestHeaders, parse_request_headers, with_request_tags
+from reef.service.wire import (
+    RECORD_TRAINING_HEADER,
+    HeaderError,
+    RequestHeaders,
+    parse_request_headers,
+    with_request_tags,
+)
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.served_models import ServedModels
 
@@ -304,7 +311,8 @@ async def read_object(request: web.Request) -> dict[str, Any]:
 def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
     """``response`` as the client gets it and the record keeps it: without a ``training`` block, which an engine
     handler may return. Serving returns no training tensors; a training component computes the ones it needs. The
-    record names the artifact that answered by its ``artifact_id``."""
+    record names the artifact that answered by its ``artifact_id``. A call with ``x-reef-record-training`` is the one
+    exception: its record keeps the block (``InferenceReplica.record``), and the client still gets this value."""
     return {key: value for key, value in response.items() if key != "training"}
 
 
@@ -406,7 +414,8 @@ class InferenceReplica:
         """Append the record of one request that the artifact ``artifact_id`` answered; return its ID.
 
         The stored payload also names ``artifact_id``. With ``traffic``, ``metadata.traffic`` holds the bucket and the
-        weights.
+        weights. Its response keeps the engine's ``training`` block only when the call asked for it
+        (``RequestHeaders.is_recording_training``).
         """
         recorded = with_request_tags(payload, parsed)
         if traffic is not None:
@@ -421,7 +430,7 @@ class InferenceReplica:
             payload={
                 **recorded,
                 "artifact_id": artifact_id,
-                "response": provider_response(response),
+                "response": dict(response) if parsed.is_recording_training else provider_response(response),
             },
             artifact_id=artifact_id,
         )
@@ -552,21 +561,30 @@ class InferenceReplica:
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
-    async def forward(self, served: ServedArtifact, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """The answer of the engine of ``served`` to ``payload`` under the row's model name: 502 for an error status,
-        an unreachable engine or an answer that is no JSON object, 504 when the engine does not answer in time."""
+    async def forward(
+        self, served: ServedArtifact, path: str, payload: Mapping[str, Any], *, with_sample: bool = False
+    ) -> dict[str, Any]:
+        """The answer of the engine of ``served`` to ``payload`` under the row's model name, with its exact sample
+        when ``with_sample`` (``InferenceHandler.inference_with_sample``): 400 for an engine that gives none, 502 for
+        an error status, an unreachable engine or an answer that is no JSON object, 504 when the engine does not
+        answer in time."""
         handler = self.handler(served)
+        artifact = InferenceArtifact(served.artifact_id)
+        addressed = handler.address_model(payload, served.model_name)
         try:
-            return await asyncio.wait_for(
-                handler.inference(
-                    InferenceArtifact(served.artifact_id), path, handler.address_model(payload, served.model_name)
-                ),
-                timeout=self.timeout_seconds,
-            )
+            if with_sample:
+                answer = handler.inference_with_sample(artifact, path, addressed)
+            else:
+                answer = handler.inference(artifact, path, addressed)
+            return await asyncio.wait_for(answer, timeout=self.timeout_seconds)
         except (UpstreamStatusError, aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
         except TimeoutError as exc:
             raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
+        except ValueError as exc:
+            if not with_sample:
+                raise
+            raise web.HTTPBadRequest(text=f"the engine at {served.url} cannot record its sample: {exc}") from exc
 
     async def answer(
         self,
@@ -587,6 +605,10 @@ class InferenceReplica:
         except HeaderError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         payload = await read_object(request)
+        if parsed.is_recording_training and (not record or payload.get("stream") is True):
+            raise web.HTTPBadRequest(
+                text=f"{RECORD_TRAINING_HEADER} asks for a recorded call without stream; this call is neither"
+            )
         served, traffic = await self.resolve(
             parsed.scenario,
             payload,
@@ -602,13 +624,25 @@ class InferenceReplica:
             return await self.relay_stream(request, path, parsed, sent, served, record=record, traffic=traffic)
         for attempt in range(2):
             sent = self.request_payload(parsed.scenario, served, payload)
-            response = await self.forward(served, path, sent)
+            if parsed.is_recording_training and any(sent.get(name) is None for name in DISTRIBUTION_KEYS):
+                raise web.HTTPBadRequest(
+                    text=f"a call with {RECORD_TRAINING_HEADER} names {list(DISTRIBUTION_KEYS)}, "
+                    "or its scenario's serving config does, so that its record names the distribution it sampled"
+                )
+            response = await self.forward(served, path, sent, with_sample=parsed.is_recording_training)
             if not inference_aborted(response):
                 break
             if attempt == 1:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             retry_name = name if traffic is None else traffic.artifact_id
             served, _ = await self.resolve(parsed.scenario, payload, name=retry_name, refresh=True)
+        training = response.get("training")
+        if parsed.is_recording_training and not (isinstance(training, Mapping) and "distribution" in training):
+            raise web.HTTPBadRequest(
+                text=f"the engine of {served.artifact_id} gave no exact sample with its distribution to record: "
+                f"a call with {RECORD_TRAINING_HEADER} needs a token-native chat engine, one weight version for the "
+                "whole reply, and no min_p, penalty or logit bias"
+            )
         reply_headers = {ARTIFACT_HEADER: served.artifact_id}
         if record:
             try:

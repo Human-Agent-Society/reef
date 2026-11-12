@@ -5,7 +5,10 @@ normalizes the provider request, renders the prompt once, calls the selected
 engine's native generate route, and answers with the provider response. The
 response carries no training tensors: a training component renders a recorded
 call with its own chat template and computes the log probabilities that it
-needs with its own weights.
+needs with its own weights. The one exception is a call that asks to record
+its sample (``x-reef-record-training``): ``inference_with_sample`` adds the
+exact sample as a ``training`` block (``reef.core.training_capture``), which
+the inference service keeps in the record and never returns to the client.
 
 The engine-specific part is a :class:`NativeGenerateClient`: it shapes the
 native request and parses the native response into a
@@ -23,6 +26,7 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from reef.core.training_capture import sample_training, sampling_distribution
 from reef.core.values import JsonValue
 from reef.inference.anthropic import NATIVE_REQUEST_KEYS, anthropic_request, anthropic_response
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
@@ -642,8 +646,23 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         response, provider_response = await self._complete(artifact, call)
         return provider_response if call.anthropic else response
 
-    async def _complete(self, artifact: InferenceArtifact, call: ChatCall) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Run one buffered generation; return the OpenAI-shaped response and the provider-shaped one."""
+    async def inference_with_sample(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """The provider response of a chat call with its exact sample as the ``training`` block
+        (``reef.core.training_capture.sample_training``). The block is absent when the engine aborted the call or
+        when two weight versions drew its reply, which has no single policy to train under."""
+        if path not in {CHAT_COMPLETIONS_PATH, ANTHROPIC_MESSAGES_PATH}:
+            raise ValueError(f"only {CHAT_COMPLETIONS_PATH} and {ANTHROPIC_MESSAGES_PATH} record their sample")
+        call = self._chat_call(path, payload)
+        _, provider_response = await self._complete(artifact, call, with_sample=True)
+        return provider_response
+
+    async def _complete(
+        self, artifact: InferenceArtifact, call: ChatCall, *, with_sample: bool = False
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Run one buffered generation; return the OpenAI-shaped response and the provider-shaped one, which carries
+        the exact sample with ``with_sample`` (``inference_with_sample``)."""
         native = await super().inference(
             artifact,
             self._client.generate_path,
@@ -651,9 +670,19 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         )
         captured = self._client.parse(artifact, native)
         response = self._response_from_capture(call, captured, call.tool_parser)
-        if not call.anthropic:
-            return response, response
-        return response, anthropic_response(call.payload, response)
+        provider = anthropic_response(call.payload, response) if call.anthropic else response
+        load_ids = set(captured.token_runtime_load_ids)
+        if not with_sample or not captured.output_ids or len(load_ids) != 1:
+            return response, provider
+        sample = sample_training(
+            prompt_ids=call.prompt_ids,
+            output_ids=captured.output_ids,
+            rollout_log_probs=captured.rollout_log_probs,
+            runtime_load_id=load_ids.pop(),
+            finish_reason=captured.finish_reason,
+            distribution=sampling_distribution(call.sampling_params),
+        )
+        return response, {**provider, "training": sample}
 
     def _chat_call(self, path: str, payload: dict[str, Any]) -> ChatCall:
         """Normalize the provider request and render the prompt once for either endpoint."""

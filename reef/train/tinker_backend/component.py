@@ -241,7 +241,10 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             # A job from the base start reads ``base/`` as this process prepares it.
             self.start_at(self.prepared_base() if start == self._base else start)
         if job.kind == "task":
-            tasks = [item for item in read_job_data(job.data_dir, job.data_id).samples if isinstance(item, TaskSample)]
+            data = read_job_data(job.data_dir, job.data_id)
+            if data.delayed:
+                raise ValueError("Tinker trains no delayed samples: a task job trains only the rollouts of its tasks")
+            tasks = [item for item in data.samples if isinstance(item, TaskSample)]
             self.check_task_jobs(job.parameters)
             names = [task_name(task) for task in tasks]
             if len(set(names)) != len(names):
