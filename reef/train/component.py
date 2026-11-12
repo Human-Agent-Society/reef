@@ -12,7 +12,7 @@ checkpoints it saves, so a job that starts from a checkpoint continues it.
 A ``TrainingComponentFactory`` builds a component from the component config
 of a training deployment (``build_training_component``). The same factory states the backend's
 ``TrainingBackendFacts`` from that config, without a component (``training_backend_facts``): a service that does not
-run the component reads them.
+run the component reads them, and a new scenario's root snapshot holds the default start that they write.
 """
 
 from __future__ import annotations
@@ -261,18 +261,22 @@ class TrainingBackendFacts(ABC):
     Relation to the component: let ``component`` be the backend's ``TrainingComponent`` of the same settings. Then
     ``name``, ``artifact_format``, ``shares_scenarios`` and ``concurrent_jobs`` equal the component's,
     ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``default_start_inputs`` equals
-    ``component.default_start().inputs``, and ``check_root_start(root)`` raises exactly when
+    ``component.default_start_inputs``, and ``check_root_start(root)`` raises exactly when
     ``component.root_start(root)`` raises, with the same message. The component holds a value and answers these
-    members from it, so the two cannot differ.
+    members from it, so the two cannot differ. ``default_start().inputs`` equals ``default_start_inputs``, and
+    ``component.root_start`` accepts a root that holds ``default_start()``: the component starts training from the
+    files that the facts write.
 
     A member reads at most the settings, the files that a caller hands it (``check_root_start`` reads the root
     snapshot's files), and local paths that the settings name. No member calls the training service or a running
-    component. What needs one stays on ``TrainingComponent``: the files of the default start (``default_start``),
-    the start of a job (``root_start``, ``import_start``), ``check_artifact``, ``check_task_jobs``, ``check_job``,
-    ``changed_parts`` and the jobs themselves.
+    component. What needs one stays on ``TrainingComponent``: the start of a job (``root_start``,
+    ``import_start``), ``check_artifact``, ``check_task_jobs``, ``check_job``, ``changed_parts`` and the jobs
+    themselves.
 
-    Purpose: a service that does not run the backend's component, such as control or inference in a split
-    deployment, reads these members instead of building the component.
+    Purpose: the scenario factory writes the root snapshot of a new scenario from ``default_start`` and checks an
+    item root with ``check_root_start`` (``reef.scenario.live_objects``), so no training component makes a root.
+    A service that does not run the backend's component, such as inference in a split deployment, reads the other
+    members instead of building the component.
     """
 
     @property
@@ -302,6 +306,17 @@ class TrainingBackendFacts(ABC):
         """The ``inputs`` of the component's default start: the model and the settings that decide its content.
 
         A new scenario without an artifact item records them in its ``RootSource``.
+        """
+
+    @abstractmethod
+    def default_start(self) -> DefaultStart:
+        """The content of the component's part of a new scenario's root snapshot, when no artifact item starts it.
+
+        The value holds a few small text files that the settings decide, and ``default_start_inputs`` as its
+        ``inputs``. A backend whose artifacts are weights of a base model writes a base root
+        (``reef.artifact.base_root``) or a reference to the base model's commit
+        (``reef.artifact.sources.REFERENCE_FILE``), and no weight file. The backend's component starts a
+        scenario's first job from a root that holds these files (``TrainingComponent.root_start``).
         """
 
     @abstractmethod
@@ -343,32 +358,24 @@ class TrainingComponent(ABC):
         example a Tinker manifest that Tinker's sampler serves).
         """
 
-    @abstractmethod
-    def default_start(self) -> DefaultStart:
-        """The component's untrained checkpoint, laid out as one of its snapshots, and the configuration it comes from.
-
-        A scenario that is created without an artifact item holds it in its root snapshot, in the component that
-        this component trains. It has the layout of every other snapshot (``artifact_format``), so serving and
-        training read it as they read any snapshot. Its ``inputs`` name the model and the settings that decide its
-        content. Every service process can call this method, so a component whose model files cost a remote call
-        gives them as ``BaseModelFiles`` that make them on the first ``directory`` call.
-        """
-
     @property
+    @abstractmethod
     def default_start_inputs(self) -> Mapping[str, str]:
-        """The ``inputs`` of ``default_start``, read without its model files.
+        """The ``inputs`` of the backend's default start: the model and the settings that decide its content.
 
-        The default reads them from ``default_start()``. A component whose ``default_start`` makes files states
-        them from its configuration instead.
+        They equal ``TrainingBackendFacts.default_start_inputs`` of the same settings. The component writes no
+        default start: the backend's facts do (``TrainingBackendFacts.default_start``). ``is_own_base_root``
+        compares a base root's inputs with these.
         """
-        return self.default_start().inputs
 
     def root_start(self, root: ScenarioRoot) -> str:
         """The start of the first job of a trainer whose scenario has the root snapshot ``root``.
 
         The default is ``import_start`` of the root's files. A component that imports no snapshot
         overrides it, and raises ``ValueError`` for a root that it cannot start
-        from.
+        from. A root of a new scenario holds the default start of the backend's facts
+        (``TrainingBackendFacts.default_start``): for a backend of weights, a base root or a reference to the base
+        model, from which the component starts the job at the base model.
         """
         return self.import_start(root.local_directory())
 
@@ -584,22 +591,24 @@ class TrainingComponentFactory(ConfiguredFactory):
     :class:`TrainingComponent`; ``build_training_component`` calls it. ``facts`` receives the same arguments and
     returns the backend's :class:`TrainingBackendFacts` without building a component; ``training_backend_facts``
     calls it.
+
+    Every factory defines both. The facts are the one source of a new scenario's default start
+    (``TrainingBackendFacts.default_start``) and of the check of an item root (``check_root_start``): Reef asks no
+    component for a start's files, and a ``TrainingComponent`` has no ``default_start``. The component only starts
+    jobs from a root that holds those files (``TrainingComponent.root_start``).
     """
 
     @abstractmethod
     def __call__(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingComponent:
         """Build the training component that ``config`` describes."""
 
-    def facts(
-        self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]
-    ) -> TrainingBackendFacts | None:
+    @abstractmethod
+    def facts(self, config: Mapping[str, Any], model_path: str, environ: Mapping[str, str]) -> TrainingBackendFacts:
         """The facts of the component that ``__call__`` builds from the same arguments, without building it.
 
-        It starts nothing and imports no training framework. The default returns None, which means that the
-        backend states no facts from its configuration: a caller that needs them builds the component and reads
-        the members there. A backend whose component runs in another service than its readers overrides it.
+        It starts nothing and imports no training framework. Control writes a new scenario's root from them, and
+        the inference service reads them in place of a component.
         """
-        return None
 
 
 def training_component_factory_for(reference: str) -> TrainingComponentFactory:
@@ -624,12 +633,11 @@ def training_component_factory_for(reference: str) -> TrainingComponentFactory:
 
 def training_backend_facts(
     config: Mapping[str, Any], *, model_path: str, environ: Mapping[str, str] | None = None
-) -> TrainingBackendFacts | None:
-    """The facts of the training component of ``config``, without the component, or None when the backend states none.
+) -> TrainingBackendFacts:
+    """The facts of the training component of ``config``, without the component.
 
     ``config`` is a component config as ``build_training_component`` takes it: its ``type`` names the factory, whose
-    ``facts`` gets the parsed config. ``TypeError`` when the factory returns anything but a ``TrainingBackendFacts``
-    or None.
+    ``facts`` gets the parsed config. ``TypeError`` when the factory returns anything but a ``TrainingBackendFacts``.
     """
     reference = config.get("type")
     if not isinstance(reference, str) or not reference:
@@ -637,8 +645,8 @@ def training_backend_facts(
     factory = training_component_factory_for(reference)
     values = os.environ if environ is None else environ
     facts = factory.facts(factory.parse_config(config, values), model_path, values)
-    if facts is not None and not isinstance(facts, TrainingBackendFacts):
-        raise TypeError(f"training component type {reference!r} must state TrainingBackendFacts or None")
+    if not isinstance(facts, TrainingBackendFacts):
+        raise TypeError(f"training component type {reference!r} must state TrainingBackendFacts")
     return facts
 
 

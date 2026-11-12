@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 from aiohttp import web
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
@@ -64,7 +64,11 @@ def dispatcher_for(recipe: Recipe, live: LiveObjects, tmp_path) -> Dispatcher:
 def test_dispatcher_closes_the_component_and_runtime_after_all_scenarios_but_not_on_reload(tmp_path):
     events: list[str] = []
     component, runtime = owned_pair(events)
-    dispatcher = dispatcher_for(Recipe(), LiveObjects(runtime=runtime, training_component=component), tmp_path)
+    dispatcher = dispatcher_for(
+        Recipe(),
+        LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
+        tmp_path,
+    )
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
     dispatcher.registry.reload("math")
@@ -92,7 +96,11 @@ def test_dispatcher_closes_the_component_and_runtime_after_all_scenarios_but_not
 def test_dispatcher_releases_the_runtime_when_scenario_teardown_fails(tmp_path):
     events: list[str] = []
     component, runtime = owned_pair(events)
-    dispatcher = dispatcher_for(Recipe(), LiveObjects(runtime=runtime, training_component=component), tmp_path)
+    dispatcher = dispatcher_for(
+        Recipe(),
+        LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
+        tmp_path,
+    )
     scenario = dispatcher.get_or_create_scenario("math")
     original_close = scenario.close
 
@@ -161,7 +169,10 @@ def test_service_app_cleanup_closes_its_owned_runtime_once(monkeypatch, tmp_path
     monkeypatch.setattr(
         assembly,
         "_load_deployment",
-        lambda *args: (Recipe(), LiveObjects(runtime=runtime, training_component=component)),
+        lambda *args: (
+            Recipe(),
+            LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
+        ),
     )
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
 
@@ -182,7 +193,10 @@ def test_failed_service_assembly_releases_its_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(
         assembly,
         "_load_deployment",
-        lambda *args: (Recipe(), LiveObjects(runtime=runtime, training_component=component)),
+        lambda *args: (
+            Recipe(),
+            LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
+        ),
     )
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
     with pytest.raises(ValueError, match="training must be an object"):

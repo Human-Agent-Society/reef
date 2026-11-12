@@ -15,7 +15,7 @@ from tests.support.task_service_stubs import task_for
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import Artifact, DefaultStart
+from reef.artifact import Artifact
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPendingError, TrainingStartRefusedError
 from reef.core.job_data import JobOutcome
@@ -55,8 +55,9 @@ class FakeComponent(TrainingComponent):
     def concurrent_jobs(self) -> bool:
         return self.runs_concurrent_jobs
 
-    def default_start(self) -> DefaultStart:
-        return DefaultStart()
+    @property
+    def default_start_inputs(self) -> dict[str, str]:
+        return {}
 
     def root_start(self, root: ScenarioRoot) -> str:
         return "fake:base"

@@ -188,9 +188,11 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
     component, client, exporter, objective
 ):
     assert component.artifact_format == ArtifactFormat("full")
-    base = component.default_start()
-    assert read_reference(base.model_files.directory()) == HuggingFaceRevision(MODEL, COMMIT)
+    base = component.facts.default_start()
+    assert dict(base.files) == {REFERENCE_FILE: json.dumps(HuggingFaceRevision(MODEL, COMMIT).to_dict()) + "\n"}
     assert base.inputs == {"model": BASE, "service": SPINDLE}
+    # The base start holds the same reference, and a job from it starts the base's own weights.
+    assert read_reference(Path(component.base_start)) == HuggingFaceRevision(MODEL, COMMIT)
     assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
 
     status = train(component)
@@ -211,13 +213,12 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
 def test_a_new_base_commit_replaces_the_base_reference_in_the_state_dir(tmp_path, client, exporter):
     # The deployment restarts with a later commit of the same repo in its config.
     first = SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter)
-    first.prepared_base()
+    assert read_reference(Path(first.base_start)) == HuggingFaceRevision(MODEL, COMMIT)
     first.close_resources()
     later = "f" * 40
     component = SpindleFullTrainingComponent(MODEL, settings(tmp_path, base=f"hf://{MODEL}@{later}"), client, exporter)
     component.start_jobs()
-    files = component.default_start().model_files
-    assert read_reference(files.directory()) == HuggingFaceRevision(MODEL, later)
+    assert read_reference(Path(component.base_start)) == HuggingFaceRevision(MODEL, later)
     assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
 
 
@@ -249,7 +250,7 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
         component.check_artifact(DirectoryFiles(copy))
     # The base of this component is its reference to the base revision, so it takes no base root.
     (tmp_path / "base-root").mkdir()
-    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.default_start().inputs).to_text())
+    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.default_start_inputs).to_text())
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
         component.check_artifact(DirectoryFiles(tmp_path / "base-root"))
 

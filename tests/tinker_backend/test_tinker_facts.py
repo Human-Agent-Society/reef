@@ -17,10 +17,11 @@ from tests.tinker_backend.test_spindle_full import settings as spindle_settings
 from tests.tinker_backend.test_tinker_backend import MODEL, RemoteClient
 
 from reef.artifact import REFERENCE_FILE, Artifact, HuggingFaceRevision
+from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ArtifactFormat
 from reef.train.component import ScenarioRoot, TrainingBackendFacts, TrainingComponent, training_backend_facts
-from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerSettings
 from reef.train.tinker_backend.facts import SpindleFullFacts, TinkerFacts
@@ -46,6 +47,15 @@ def reference_root(directory: Path, revision: HuggingFaceRevision | None) -> Sce
     return ScenarioRoot(Artifact.local(directory), ITEM)
 
 
+def default_root(directory: Path, facts: TrainingBackendFacts) -> ScenarioRoot:
+    """The root of a new scenario: the files that ``facts.default_start()`` writes, in ``directory``."""
+    default = facts.default_start()
+    assert default.inputs == facts.default_start_inputs
+    directory.mkdir()
+    default.write(directory)
+    return ScenarioRoot(Artifact.local(directory), RootSource("default", inputs=default.inputs))
+
+
 def refusal(check, root: ScenarioRoot) -> str | None:
     """The message with which ``check`` refuses ``root``, or None when it accepts it."""
     try:
@@ -65,7 +75,7 @@ def assert_same_answers(
         component.shares_scenarios,
         component.concurrent_jobs,
     )
-    assert facts.default_start_inputs == component.default_start().inputs
+    assert facts.default_start_inputs == component.default_start_inputs
     for kind in ("trajectory", "task"):
         assert facts.parameters_schema(kind) == component.parameters_schema(kind)
     answers = [(refusal(facts.check_root_start, root), refusal(component.root_start, root)) for root in roots]
@@ -105,9 +115,12 @@ def test_the_tinker_facts_of_a_config_answer_as_the_component_of_the_same_config
                 TinkerCheckpoint("other/model", rank, "tinker://c/state", "tinker://c/s", service=service),
             ),
             reference_root(tmp_path / "empty", None),
+            default_root(tmp_path / "default", facts),
         ]
-        assert_same_answers(facts, component, roots, [True, False, False, False])
-        # The facts made no base start: only the component's first use calls the service.
+        assert_same_answers(facts, component, roots, [True, False, False, False, True])
+        assert dict(facts.default_start().files) == {BASE_FILE: BaseRoot(facts.default_start_inputs).to_text()}
+        # A job from the default start trains a new LoRA of the model. Nothing called the service.
+        assert component.start_at(Path(component.root_start(roots[-1]))) == FreshStart(MODEL)
         assert client.initializations == 0
     finally:
         component.close()
@@ -145,8 +158,12 @@ def test_the_spindle_facts_of_a_config_answer_as_the_component_of_the_same_confi
             reference_root(tmp_path / "base", revision),
             reference_root(tmp_path / "other", HuggingFaceRevision(SPINDLE_MODEL, "2" * 40)),
             reference_root(tmp_path / "files", None),
+            default_root(tmp_path / "default", facts),
         ]
-        assert_same_answers(facts, component, roots, [True, False, True, False, True])
+        assert_same_answers(facts, component, roots, [True, False, True, False, True, True])
+        # The default start is the reference to the base revision, and a job from it starts the base's own weights.
+        assert dict(facts.default_start().files) == {REFERENCE_FILE: json.dumps(revision.to_dict()) + "\n"}
+        assert component.start_at(Path(component.root_start(roots[-1]))) == FreshStart(SPINDLE_MODEL)
     finally:
         component.close()
 

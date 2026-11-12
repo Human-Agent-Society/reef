@@ -36,7 +36,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
@@ -308,9 +307,6 @@ class JobQueueComponent(TrainingComponent):
     @property
     def artifact_format(self) -> ArtifactFormat | None:
         return self.component.artifact_format
-
-    def default_start(self) -> DefaultStart:
-        return self.component.default_start()
 
     @property
     def default_start_inputs(self) -> Mapping[str, str]:

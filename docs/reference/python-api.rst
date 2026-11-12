@@ -343,14 +343,16 @@ The same module holds the functions that need a recipe and a live object:
   (``declared_components(recipe, scenario)``), with the kind
   of the weight component from the runtime (``served_weight_kind``) and its
   layout from the training component (``TrainingArtifactLayout``). A process
-  that holds ``training_facts`` gets a ``TrainingFactsLayout``: it answers
-  ``resolves_references`` and checks no import. The
+  that holds ``training_facts`` and no component gets a
+  ``TrainingFactsLayout``: it answers ``resolves_references`` and checks no
+  import. The
   declaration is ``recipe.build_components(scenario)``; for a composite, it is
   each child's one declared component under the child's component name.
 - ``default_start(recipe, live)`` gives the root content of a new scenario:
-  the training component's untrained checkpoint for a weight recipe, each
+  ``live.training_facts.default_start()`` for a weight recipe, each
   component's start under its directory for a composite, and
-  ``recipe.default_start()`` for any other recipe.
+  ``recipe.default_start()`` for any other recipe. No training component
+  makes it.
 - ``check_root_start(recipe, live, root)`` checks an item start; see below.
 - ``harness_models(recipe, live)`` and
   ``harness_served_model(recipe, live, scenario, component)`` give the models
@@ -1209,9 +1211,11 @@ without the file. ``base_root_of(files)`` reads it from ``ArtifactFiles`` and
 refuses an artifact that holds other files beside it. A reader refuses a file
 with another ``format``.
 
-Reef reads a base root but does not write one yet: a default start still
-holds the files that ``default_start()`` gives. The ``spindle_full`` backend
-has no base root. Its default start is a reference to the base revision.
+The default start of the Slime and the Tinker backends is a base root:
+``SlimeFacts.default_start()`` and ``TinkerFacts.default_start()`` write it,
+and a new scenario's root holds it. The ``spindle_full`` backend has no base
+root. Its default start is a reference to the base revision, which
+``SpindleFullFacts.default_start()`` writes.
 
 Record storage and audit
 ------------------------
@@ -2266,9 +2270,9 @@ Startup status is available through the inference service's
   files, a root snapshot's included, unless the engines serve its content
   already.
 
-A root snapshot made from the default start has the layout of every other
-snapshot of its component. An adapter runtime loads its untrained adapter,
-and the Tinker runtime samples its untrained adapter.
+A root snapshot that an earlier Reef made from the default start has the
+layout of every other snapshot of its component. An adapter runtime loads its
+untrained adapter, and the Tinker runtime samples its untrained adapter.
 
 Each runtime answers a base root (``base.json``, see `Artifact imports`_)
 with the base model and asks ``ArtifactWeights`` for nothing:
@@ -2305,12 +2309,15 @@ component also covers a restarted component), loads what it serves into them
 again (``reload_served``), and resumes.
 
 A weight recipe holds neither the ``TrainingComponent`` nor the
-``InferenceRuntime``. The process holds both beside the recipe:
+``InferenceRuntime``. The process holds both beside the recipe, with the
+facts of the training backend:
 
 .. code:: python
 
    recipe = SAORecipe()
-   live = LiveObjects(runtime=inference, training_component=training)
+   live = LiveObjects(runtime=inference, training_component=training, training_facts=facts)
+
+A ``LiveObjects`` value with a training component has the backend's facts.
 
 A training deployment's component factory returns the ``TrainingComponent``
 alone; a serving factory returns an ``InferenceRuntime``.
@@ -2319,14 +2326,16 @@ alone; a serving factory returns an ``InferenceRuntime``.
 ``RuntimeRegistry`` in ``reef.inference.registry`` define and build the second.
 ``TrainingComponentFactory.facts`` and ``training_backend_facts`` state a
 backend's ``TrainingBackendFacts`` from the same config without a component:
-its name, artifact format, default start inputs, parameters schema, root start
-check, and whether scenarios and jobs share it.
+its name, artifact format, default start and its inputs, parameters schema,
+root start check, and whether scenarios and jobs share it. Every factory
+defines ``facts``.
 The HTTP service builds the training component first, then the serving
 runtime that ``reef.service.deploy.serving.serving_runtime_config`` describes
 from the ``inference`` settings and the component's ``artifact_format``. The
 inference service of a split deployment reads the ``artifact_format`` of the
-facts and builds no component; it builds the component only for a backend
-whose ``facts`` returns ``None``.
+facts and builds no component. Control and the training service hold the
+facts beside the component, and control writes a new scenario's root from
+``facts.default_start()``.
 
 Each side owns its contracts. The inference contracts are the modules at the
 root of ``reef.inference``: ``interfaces`` (inference contracts and runtime
@@ -2389,22 +2398,22 @@ loop:
        files that an engine loads, such as Tinker's manifests. The serving
        assembly configures the engines from it and refuses a serving runtime
        that cannot load it.
-   * - ``default_start()``
-     - The component's untrained checkpoint as a ``DefaultStart``, laid out
-       as one of its snapshots, with the ``inputs`` that decide its content.
-       A scenario created without an artifact item holds it in its root
-       snapshot. Slime gives the ``hf_checkpoint`` directory, or with LoRA an
-       adapter whose weights are zero. Tinker gives the checkpoint of its
-       untrained adapter, which it makes only when a scenario's root needs it
-       or the training process runs jobs.
+   * - ``default_start_inputs``
+     - The ``inputs`` of the backend's default start, equal to the facts'.
+       The component writes no default start:
+       ``TrainingBackendFacts.default_start()`` does, from the configuration.
    * - ``root_start(root)``
      - The start of the first job of a trainer without committed state, a
        non-empty string. ``root`` is a ``ScenarioRoot``: the trainer's
        component of the scenario's root snapshot and the root's
        ``RootSource``. The default is ``import_start`` of the root's files.
-       Slime, which imports no snapshot, returns its startup weights when the
-       root's source is its default start with equal ``inputs``, and raises
-       ``ValueError`` naming both otherwise.
+       A root of a new scenario holds the facts' default start, and the job
+       then starts at the base model. Tinker starts a new LoRA from its
+       ``seed`` for a base root; with ``seed: null`` it saves one untrained
+       adapter in ``state_dir`` when the first such job runs, and each such
+       job restores it. Slime, which imports no snapshot, returns its startup
+       weights when the root's source is its default start with equal
+       ``inputs``, and raises ``ValueError`` naming both otherwise.
    * - ``submit(job)``
      - Record the job durably and return; the job runs in the background.
        Submitting a job ID again does nothing.

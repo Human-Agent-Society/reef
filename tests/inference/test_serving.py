@@ -212,7 +212,7 @@ def test_an_activation_loads_another_snapshot_and_the_default_start_loads_as_any
     first = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
     older = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "older"), "o"), scenario="math")
     assert older != first and serving.serving_adapter_runtime_load_id("math") == older
-    # A root snapshot made from the default start holds the untrained adapter, which loads under a version of its own.
+    # A root snapshot of an older Reef holds the untrained adapter, which loads under a version of its own.
     base = serving.activate_checkpoint(
         published_snapshot(saved_adapter(tmp_path / "untrained"), "base"), scenario="math"
     )

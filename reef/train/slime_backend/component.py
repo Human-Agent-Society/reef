@@ -52,10 +52,9 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.repository import DefaultStart, ModelDirectory
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
 from reef.core.job_data import TaskSample
-from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor import resolve
 from reef.storage.durable_files import read_json, write_json
 from reef.storage.job_data import JobDataKind
@@ -160,7 +159,7 @@ class SlimeJobs(LocalJobComponent):
     holds the jobs (see ``LocalJobComponent``) and ``reef-starts/rollout_<id>/``
     the start of each saved rollout: its ``start.json`` and, with LoRA, the
     published snapshot in ``release/adapter/``; ``reef-starts/base/`` is the
-    start of the untrained weights. ``SlimeTrainingComponent`` (the component
+    start of the startup weights, which holds its ``start.json`` alone. ``SlimeTrainingComponent`` (the component
     Reef calls) and ``SlimeJobRunner`` (the driver that trains a job) are the
     two subclasses, over the same directories. A subclass names the rollout
     whose weights the next job continues, ``held_rollout_id``. ``facts`` are the ``SlimeFacts`` of ``args``: the
@@ -174,7 +173,7 @@ class SlimeJobs(LocalJobComponent):
         root = self.root_of(args)
         self.root = root
         self.starts_root = root / "reef-starts"
-        # The start of the startup weights, the untrained checkpoint that the default start holds.
+        # The start of the startup weights, which the workers make from the model when they start.
         self.base_start_dir = self.starts_root / "base"
         if not (self.base_start_dir / START_STATE).exists():
             SlimeStart(None, None, {}, None).write(self.base_start_dir)
@@ -209,34 +208,18 @@ class SlimeJobs(LocalJobComponent):
         """The configuration that decides the startup weights: the model, and with LoRA the adapter's settings."""
         return dict(self.facts.default_start_inputs)
 
-    def default_start(self) -> DefaultStart:
-        """The startup weights as a snapshot: the model directory, or with LoRA an adapter whose weights are zero.
-
-        Full-weight artifacts are Hugging Face checkpoints, so the default start
-        is ``hf_checkpoint`` itself. LoRA artifacts hold the adapter in
-        ``adapter/``, so the default start holds the untrained adapter there:
-        every LoRA weight is zero, so it serves the startup weights unchanged.
-        """
-        inputs = self.default_start_inputs
-        if not self.lora:
-            return DefaultStart(model_files=ModelDirectory(Path(inputs["model"])), inputs=inputs)
-        from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_untrained_lora_adapter
-
-        artifact_dir = self.base_start_dir / "release"
-        if not (artifact_dir / ADAPTER_DIR).is_dir():
-            save_untrained_lora_adapter(self.args, artifact_dir / ADAPTER_DIR)
-        return DefaultStart(model_files=ModelDirectory(artifact_dir), inputs=inputs)
-
     @property
     def base_start(self) -> str:
         """The start of the startup weights, which the workers load when they first start."""
         return str(self.base_start_dir)
 
     def root_start(self, root: ScenarioRoot) -> str:
-        """The startup weights, when ``root`` holds the default start of this configuration; else ``ValueError``.
+        """The startup weights, when ``root`` came from the default start of this configuration; else ``ValueError``.
 
         Slime's workers load ``hf_checkpoint`` when they start and cannot load a snapshot, so they train a scenario
-        only when its root came from the same configured inputs.
+        only when its root came from the same configured inputs. The method reads the root's source and none of its
+        files: a base root (``SlimeFacts.default_start``) and a root that an older Reef wrote with the model's
+        files or an untrained adapter start the same job.
         """
         self.facts.check_root_start(root)
         return self.base_start

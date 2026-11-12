@@ -10,7 +10,7 @@ from typing import Any, Self
 
 import pytest
 import sqlalchemy.exc
-from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.runtime_stubs import StubFacts, StubTrainingComponent
 from tests.support.samples import open_sample_store
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
@@ -940,7 +940,10 @@ def training_recipe(**fields: Any) -> GeneratedTaskRecipe:
 def training_live(component: TrainingComponent | None = None) -> LiveObjects:
     """The live objects that ``training_recipe`` runs on: a proxy runtime and ``component``, a stub by default."""
     runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8000")
-    return LiveObjects(runtime=runtime, training_component=StubTrainingComponent() if component is None else component)
+    training_component = StubTrainingComponent() if component is None else component
+    return LiveObjects(
+        runtime=runtime, training_component=training_component, training_facts=StubFacts(training_component)
+    )
 
 
 def test_the_recipe_binds_the_objective_and_its_stages() -> None:

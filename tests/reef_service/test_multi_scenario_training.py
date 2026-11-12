@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import VERSION_FILE, StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import VERSION_FILE, StubFacts, StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -26,7 +26,7 @@ def training_dispatcher(
     dispatcher = Dispatcher(
         TestPolicyRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
-        live=LiveObjects(runtime=runtime, training_component=component),
+        live=LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

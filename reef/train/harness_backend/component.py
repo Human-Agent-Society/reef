@@ -40,7 +40,6 @@ from pathlib import Path
 from typing import Any, Self
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError, InternalError, ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.core.training_request import request_from_parameters
@@ -266,9 +265,9 @@ class HarnessTrainingComponent(LocalJobComponent):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.facts.parameters_schema(kind)
 
-    def default_start(self) -> DefaultStart:
-        """The seed tree, as ``HarnessEvolutionRecipe.default_start`` gives it."""
-        return DefaultStart(files=dict(self.facts.seed.files), inputs=self.facts.default_start_inputs)
+    @property
+    def default_start_inputs(self) -> Mapping[str, str]:
+        return self.facts.default_start_inputs
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Accept: an offline job runs the head tree on its train tasks."""

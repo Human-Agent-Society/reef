@@ -2744,8 +2744,9 @@ and the artifact stands for the base model with no adapter (`Artifact imports
 equal the inputs of this deployment's default start, which the ``source`` of
 a scenario's ``creation`` row shows. Another base model, rank or service
 answers HTTP 400 and names each input that differs. Serving such an artifact
-serves the base model. Reef does not write a base root yet, and no backend
-starts training from one yet.
+serves the base model, and training from it starts at the base model. A new
+scenario of these backends starts from a base root that Reef writes
+(`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
 
 A component without a layout, such as the records of a trainer that serves
 nothing, takes no import.

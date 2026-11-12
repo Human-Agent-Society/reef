@@ -383,8 +383,8 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         then on, so its requests sample the base model, and the result is ``base_version``. The adapter that
         the scenario served before stays resident without protection, for the requests that still name it,
         until its route stops (``stop_serving``) or another adapter needs its slot. Any other artifact loads
-        its adapter under a new version; a root snapshot that holds an untrained adapter loads in
-        the same way. Raise ``ReefError`` without ``scenario``.
+        its adapter under a new version; a root snapshot of an older Reef, which holds an untrained adapter,
+        loads in the same way. Raise ``ReefError`` without ``scenario``.
         A failed load can leave the scenario serving no adapter, when the new
         adapter took the slot of its own previous one; the residency manager
         records that, so requests then sample the base model.

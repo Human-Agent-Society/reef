@@ -25,7 +25,8 @@ from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import Artifact, ModelDirectory
+from reef.artifact import Artifact, DirectoryFiles
+from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.snapshot import RootSource
 from reef.core.trajectories import trajectory_reward
@@ -529,12 +530,21 @@ def test_a_queued_job_whose_start_the_workers_left_fails_when_it_runs(tmp_path, 
 
 
 @pytest.mark.unit
-def test_the_default_start_is_the_startup_model_and_the_base_start_names_the_startup_weights(tmp_path, stacks) -> None:
+def test_the_default_start_is_a_base_root_and_the_base_start_names_the_startup_weights(tmp_path, stacks) -> None:
     model = tmp_path / "model"
     model.mkdir()
     stack = stacks(tmp_path, hf_checkpoint=str(model))
-    base = stack.component.default_start()
-    assert (base.model_files, base.inputs) == (ModelDirectory(model.resolve()), {"model": str(model.resolve())})
+    inputs = {"model": str(model.resolve())}
+    default = stack.component.facts.default_start()
+    # The root holds the base file alone: no copy of the model and no weight file.
+    assert (dict(default.files), dict(default.inputs)) == ({BASE_FILE: BaseRoot(inputs).to_text()}, inputs)
+    root_dir = tmp_path / "root"
+    root_dir.mkdir()
+    default.write(root_dir)
+    stack.component.check_artifact(DirectoryFiles(root_dir))
+    root = ScenarioRoot(Artifact.local(root_dir), RootSource("default", inputs=default.inputs))
+    # The workers make the startup weights from the model, so a job from the base root starts at the base start.
+    assert stack.component.root_start(root) == stack.component.base_start
     assert SlimeStart.read(Path(stack.component.base_start)) == SlimeStart(None, None, {}, None)
     # The first job of a trainer starts from the startup weights, which the workers hold.
     stack.component.submit(

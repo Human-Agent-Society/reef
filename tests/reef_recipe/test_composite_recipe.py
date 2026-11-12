@@ -15,7 +15,7 @@ from typing import Any
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_jobs import harness_recipe
-from tests.support.runtime_stubs import StubTrainingComponent, job_sized_stages
+from tests.support.runtime_stubs import StubFacts, StubTrainingComponent, job_sized_stages
 from tests.support.samples import data_storage
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
@@ -235,8 +235,6 @@ def test_composite_recipe_merges_components_seeds_and_trainers(tmp_path: Path) -
         "harness/AGENTS.md": "seed",
         f"config/{CONFIG_FILE}": json.dumps({"request_defaults": {"temperature": 0.2}}),
     }
-    # No weight-training component: the base holds no model.
-    assert base.model_files is None and base.model_component is None
     assert scenario_report_type(recipe) is None
     trainers = build_trainers(
         recipe,
@@ -309,7 +307,7 @@ class _RootFiles(StubTrainingComponent):
 
 
 @pytest.mark.unit
-def test_each_component_of_an_item_root_is_checked_by_the_component_that_runs_its_jobs(tmp_path: Path) -> None:
+def test_each_component_of_an_item_root_is_checked_by_its_own_backend(tmp_path: Path) -> None:
     from recipes.sao.recipe import SAORecipe
 
     recipe = CompositeRecipe(
@@ -332,8 +330,13 @@ def test_each_component_of_an_item_root_is_checked_by_the_component_that_runs_it
         )
 
     weights, harness = _RootFiles("stub", "manifest.json"), _RootFiles("harness", "rules.md")
-    live = LiveObjects(runtime=engine_runtime(), training_component=weights, harness_component=harness)
-    # The weight training component checks the weights alone: the harness tree holds no manifest of its.
+    live = LiveObjects(
+        runtime=engine_runtime(),
+        training_component=weights,
+        training_facts=StubFacts(weights),
+        harness_component=harness,
+    )
+    # The facts of the weight backend check the weights alone: the harness tree holds no manifest of theirs.
     check_root_start(recipe, live, root("good", "manifest.json", "rules.md"))
     assert weights.checked == [["manifest.json"]]
     assert harness.checked == [["rules.md"]]
@@ -421,7 +424,7 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
     shared = live.training_component
     assert live.job_components() == (shared,)
     queued = StubTrainingComponent(name=shared.name)
-    moved = replace(live, training_component=queued)
+    moved = replace(live, training_component=queued, training_facts=StubFacts(queued))
     assert moved.job_components() == (queued,)
 
     # A flat weight recipe setting has no place at the top of a composite.

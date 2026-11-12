@@ -869,3 +869,20 @@ def test_a_composite_recipe_is_a_mapping_of_child_recipes() -> None:
                 composite_methods = methods
     assert composite_methods == COMPOSITE_RECIPE_METHODS
     assert fan_out == set()
+
+
+def test_only_configuration_writes_a_default_start() -> None:
+    # A new scenario's root comes from configuration (RFC #1390): a recipe's own ``default_start`` or the
+    # ``default_start`` of a training backend's facts. No training component, and no other class of ``reef``,
+    # defines the method, so no running component makes a root.
+    recipes = {("reef/recipe/base.py", "Recipe"), ("reef/recipe/harness.py", "HarnessEvolutionRecipe")}
+    others: list[tuple[str, str]] = []
+    for path in sorted((REPO_ROOT / "reef").rglob("*.py")):
+        relative = str(path.relative_to(REPO_ROOT))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            defines = any(isinstance(item, ast.FunctionDef) and item.name == "default_start" for item in node.body)
+            if defines and not node.name.endswith("Facts") and (relative, node.name) not in recipes:
+                others.append((relative, node.name))
+    assert others == []

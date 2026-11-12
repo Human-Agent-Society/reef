@@ -14,7 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent
 from tests.support.harness_jobs import evolution_config, runtime
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
+from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.training_deployment import LocalFacts, LocalServingFactory, facts_component_factory
 from tests.support.trajectories import policy_trajectory
 
@@ -117,7 +117,7 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
 ) -> None:
     config = replace(settings(tmp_path), task_file_dir=str(tmp_path / "task-files"))
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    deployment = (Recipe(), LiveObjects(training_component=component))
+    deployment = (Recipe(), LiveObjects(training_component=component, training_facts=StubFacts(component)))
     monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
     trajectory = policy_trajectory("sample", (1, 2), (1,), (-0.1,), 1.0, artifact_id="v1")
     coordination = assembly.open_service_coordination(config)
@@ -159,7 +159,7 @@ def test_a_training_worker_start_failure_closes_its_component_and_queue(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
 ) -> None:
     component = StubTrainingComponent()
-    deployment = (Recipe(), LiveObjects(training_component=component))
+    deployment = (Recipe(), LiveObjects(training_component=component, training_facts=StubFacts(component)))
     coordination = memory_coordination()
     monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ: deployment)
     monkeypatch.setattr(component_apps, "open_service_coordination", lambda settings: coordination)
@@ -441,7 +441,7 @@ def test_the_inference_service_serves_an_activated_artifact_without_a_training_c
 
     async def run() -> None:
         app = build_component_app("inference", deployment, environ={})
-        # The backend states its facts, so the inference service built the runtime and no component.
+        # The inference service built the runtime from the backend's facts, and no component.
         assert facts_component_factory.built == built_before
         control_runtime, inference_runtime = runtimes
         async with TestClient(TestServer(app)) as client:
@@ -496,27 +496,12 @@ def test_the_inference_service_of_a_tinker_deployment_builds_its_engines_from_th
 
 
 @pytest.mark.unit
-def test_the_inference_service_builds_the_component_of_a_backend_that_states_no_facts(tmp_path: Path) -> None:
-    marker = tmp_path / "component"
-    deployment = weight_settings(
-        tmp_path, {"backend": "tests.support.training_deployment:LocalDeployment", "options": {"marker": str(marker)}}
-    )
-
-    async def run() -> None:
-        app = build_component_app("inference", deployment, environ={})
-        assert marker.exists()
-        async with TestClient(TestServer(app)) as client:
-            assert (await client.get("/healthz")).status == 200
-
-    asyncio.run(run())
-    # The service owns the component that it built, and closes it.
-    assert Path(f"{marker}.closed").exists()
-
-
-@pytest.mark.unit
-def test_live_objects_hold_the_training_component_or_the_facts_of_its_backend() -> None:
-    with pytest.raises(ValueError, match="not both"):
-        LiveObjects(training_component=StubTrainingComponent(), training_facts=LocalFacts())
+def test_live_objects_hold_the_facts_of_the_training_backend_with_or_without_its_component() -> None:
+    with pytest.raises(ValueError, match="holds the facts of its backend too"):
+        LiveObjects(training_component=StubTrainingComponent())
+    with pytest.raises(ValueError, match="two backends"):
+        LiveObjects(training_component=StubTrainingComponent(name="other"), training_facts=LocalFacts())
+    assert LiveObjects(training_component=StubTrainingComponent(), training_facts=LocalFacts()).job_components()
     with pytest.raises(TypeError, match="training_facts"):
         LiveObjects(training_facts=StubTrainingComponent())
     recipe = TestPolicyRecipe()

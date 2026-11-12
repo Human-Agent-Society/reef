@@ -479,7 +479,7 @@ class ScenarioFactory:
         default.write(tree)
         if components.single:
             return Artifact.local(tree), source
-        # Files outside every component directory, a model laid out at the root say, belong to no component.
+        # Files outside every component directory belong to no component.
         stray = sorted(
             entry.name for entry in tree.iterdir() if entry.name not in components.names or not entry.is_dir()
         )

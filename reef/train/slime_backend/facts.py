@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
+from reef.artifact.base_root import BASE_FILE, BaseRoot
+from reef.artifact.repository import DefaultStart
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.job_data import JobDataKind
 from reef.train.component import ScenarioRoot, TrainingBackendFacts
@@ -76,8 +78,10 @@ class SlimeFacts(TrainingBackendFacts):
     The members are those of ``TrainingBackendFacts``. The snapshots hold full weights, or with LoRA the PEFT
     adapter of the rank, whose target modules carry the engines' names (``hf_lora_target_modules``). Slime's workers
     load ``hf_checkpoint`` when they start and cannot load a snapshot, so ``check_root_start`` accepts only a root
-    that came from the default start of the same ``default_start_inputs``. A component holds one job's weights at a
-    time, so neither scenarios nor the jobs of one scenario share it.
+    that came from the default start of the same ``default_start_inputs``. ``default_start`` is a base root of those
+    inputs (``reef.artifact.base_root``): the workers make the startup weights themselves, the model and with LoRA
+    the adapter that Megatron initializes, so the root holds no weight file. A component holds one job's weights at
+    a time, so neither scenarios nor the jobs of one scenario share it.
 
     Purpose: ``SlimeComponentFactory.facts`` makes one from the deployment's options (``from_arguments``);
     ``SlimeJobs`` makes one from its parsed arguments (``from_parsed``) and answers from it.
@@ -172,6 +176,11 @@ class SlimeFacts(TrainingBackendFacts):
             "lora_alpha": str(self.lora_alpha),
             "lora_target_modules": ",".join(sorted(hf_lora_target_modules(self.lora_target_modules))),
         }
+
+    def default_start(self) -> DefaultStart:
+        """A base root of ``default_start_inputs``: the startup weights are the model's, with no adapter."""
+        inputs = self.default_start_inputs
+        return DefaultStart(files={BASE_FILE: BaseRoot(inputs).to_text()}, inputs=inputs)
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
         return slime_parameters_schema(kind)

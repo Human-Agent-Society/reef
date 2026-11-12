@@ -173,7 +173,7 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
 def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     component = component_of(tmp_path, lambda workspace, services: None)
     assert component.artifact_format is None and component.shares_scenarios
-    assert component.default_start().files == dict(PI_SEED.files)
+    assert component.facts.default_start().files == dict(PI_SEED.files)
     # An imported start is a copy of the snapshot's tree, under its checksum, without the repository's own files.
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)

@@ -7,12 +7,15 @@ imports no Tinker SDK, so control and inference read the facts without one.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from reef.artifact.sources import HuggingFaceRevision, read_reference
+from reef.artifact.base_root import BASE_FILE, BaseRoot, read_base_root
+from reef.artifact.repository import DefaultStart
+from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, read_reference
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.job_data import JobDataKind
 from reef.tinker.checkpoint import MANIFEST
@@ -33,8 +36,11 @@ class TinkerFacts(TrainingBackendFacts):
     ``artifact_format`` is None. Each job trains from its own start, so scenarios and the jobs of one scenario
     share the component. ``validated(checkpoint)`` returns ``checkpoint`` when it is a LoRA of ``model`` and
     ``lora_rank`` that ``service`` holds, else raises ``ValueError``; ``checkpoint_in(directory)`` is the validated
-    checkpoint of the manifest in ``directory``. ``check_root_start`` accepts a root whose files hold such a
-    manifest.
+    checkpoint of the manifest in ``directory``. ``default_start`` is a base root of ``default_start_inputs``
+    (``reef.artifact.base_root``): a job from it trains a new LoRA of ``model``. ``base_root_in(directory)`` is
+    the base root that ``directory`` holds, or None; it raises ``ValueError`` for a base root of other inputs.
+    ``check_root_start`` accepts a root whose files are such a base root or hold a manifest that ``validated``
+    takes.
 
     Purpose: ``TinkerComponentFactory.facts`` makes one from the deployment's ``TinkerSettings`` (``of``);
     ``TinkerTrainingComponent`` makes one from the same settings and answers from it.
@@ -80,6 +86,11 @@ class TinkerFacts(TrainingBackendFacts):
             inputs["service"] = self.service
         return inputs
 
+    def default_start(self) -> DefaultStart:
+        """A base root of ``default_start_inputs``: the untrained LoRA leaves the base model's outputs unchanged."""
+        inputs = self.default_start_inputs
+        return DefaultStart(files={BASE_FILE: BaseRoot(inputs).to_text()}, inputs=inputs)
+
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
         return tinker_parameters_schema(kind)
 
@@ -98,8 +109,21 @@ class TinkerFacts(TrainingBackendFacts):
             raise ValueError(f"artifact is missing {MANIFEST}")
         return self.validated(TinkerCheckpoint.read(directory))
 
+    def base_root_in(self, directory: Path) -> BaseRoot | None:
+        """The base root that the artifact in ``directory`` is, or None for an artifact without ``BASE_FILE``.
+
+        Raise ``ValueError`` when the file is not readable, or when its inputs differ from
+        ``default_start_inputs``: it stands for another model, rank or service than this deployment's.
+        """
+        base = read_base_root(directory)
+        if base is not None:
+            base.check_inputs(self.default_start_inputs)
+        return base
+
     def check_root_start(self, root: ScenarioRoot) -> None:
-        self.checkpoint_in(root.local_directory())
+        directory = root.local_directory()
+        if self.base_root_in(directory) is None:
+            self.checkpoint_in(directory)
 
 
 @dataclass(frozen=True)
@@ -114,8 +138,10 @@ class SpindleFullFacts(TrainingBackendFacts):
     of one scenario share the component. ``validated(checkpoint)`` returns ``checkpoint`` when it holds all the
     parameters of ``model`` on ``service``, else raises ``ValueError``; ``checkpoint_in(directory)`` is the
     validated checkpoint of the manifest in ``directory``. ``check_base_files(directory)`` raises ``ValueError``
-    when ``directory`` refers to another revision than ``base``. ``check_root_start`` accepts a root whose files
-    hold a manifest that ``validated`` takes, and one without a manifest that refers to ``base`` or to nothing.
+    when ``directory`` refers to another revision than ``base``. ``default_start`` is the reference to ``base``
+    (``reef.artifact.sources.REFERENCE_FILE``), not a base root: the base's weights are a commit on the Hub.
+    ``check_root_start`` accepts a root whose files hold a manifest that ``validated`` takes, and one without a
+    manifest that refers to ``base`` or to nothing.
 
     Purpose: ``SpindleFullComponentFactory.facts`` makes one from the deployment's ``SpindleFullSettings``
     (``of``); ``SpindleFullTrainingComponent`` makes one from the same settings and answers from it.
@@ -158,6 +184,12 @@ class SpindleFullFacts(TrainingBackendFacts):
     @property
     def default_start_inputs(self) -> Mapping[str, str]:
         return {"model": self.base.uri, "service": str(self.service)}
+
+    def default_start(self) -> DefaultStart:
+        """The reference to the base revision, as every artifact of the backend refers to its weights."""
+        return DefaultStart(
+            files={REFERENCE_FILE: json.dumps(self.base.to_dict()) + "\n"}, inputs=self.default_start_inputs
+        )
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
         return tinker_parameters_schema(kind)

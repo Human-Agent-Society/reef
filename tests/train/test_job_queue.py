@@ -12,7 +12,6 @@ from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import DefaultStart
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData, TaskSample
 from reef.core.snapshot import SnapshotRef
@@ -66,8 +65,9 @@ class StepComponent(LocalJobComponent):
     def artifact_format(self) -> ArtifactFormat:
         return ArtifactFormat("full")
 
-    def default_start(self) -> DefaultStart:
-        return DefaultStart()
+    @property
+    def default_start_inputs(self) -> dict[str, str]:
+        return {}
 
     def root_start(self, root: ScenarioRoot) -> str:
         return "steps:base"

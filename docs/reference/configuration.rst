@@ -1507,8 +1507,9 @@ harness training component. A recipe component cannot be a composite. Reef
 refuses any other ``components`` object when it loads the configuration.
 
 A scenario's root snapshot keeps one directory per recipe component. Reef
-writes each recipe component's default start there: its seed, and the model
-snapshot under the directory of the recipe component that trains weights. A
+writes each recipe component's default start there: its seed, and the base
+root or the reference to the base model under the directory of the recipe
+component that trains weights. A
 recipe component whose recipe seeds nothing starts empty. Each recipe component's trainer runs as its own
 worker and commits into the same snapshot chain. Every step therefore
 checkpoints, and the recipe components share one ``training_mode``. Reef
