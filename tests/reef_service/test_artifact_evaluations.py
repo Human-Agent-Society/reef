@@ -791,6 +791,46 @@ def test_a_retry_of_a_cancelled_evaluation_also_starts_the_rollouts_that_waited(
     asyncio.run(run())
 
 
+def test_a_retry_of_an_evaluation_that_too_many_failures_stopped_runs_on(tmp_path: Path, monkeypatch) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    queue_retry = queue.retry
+    slow = iter([0.5])
+
+    def retry_with_a_pause(queue_name: str, item_id: str) -> WorkItem | None:
+        # The pause after the first rollout lets the results thread settle while the other rollouts are still failed.
+        item = queue_retry(queue_name, item_id)
+        time.sleep(next(slow, 0.0))
+        return item
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 6,
+                "max_failed_fraction": 0.5,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            for item in queue.items(EVALUATIONS_QUEUE, scenario="s"):
+                queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox refused the task", retryable=False)
+            assert (await finished(client, accepted["evaluation_id"]))["state"] == "failed"
+
+            monkeypatch.setattr(queue, "retry", retry_with_a_pause)
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+            await asyncio.sleep(0.5)
+            answer = await (await client.get(route, headers=AUTH)).json()
+            assert (answer["state"], answer["error"]) == ("running", None)
+            states = {item.state for item in queue.items(EVALUATIONS_QUEUE, scenario="s")}
+            assert states == {"queued"}
+
+    asyncio.run(run())
+
+
 def chat_call(attempt: int, index: int, messages: list[dict[str, str]], reply: str, status: int = 200):
     """A kept chat call of rollout (2, 0) that sent ``messages`` and got ``reply``, or an error when not 200."""
     response = (
