@@ -53,7 +53,7 @@ from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.trainer import PendingTrainingResult
-from reef.train.trainer_builder import SpecTrainerBuilder, TrainerSpec
+from reef.train.trainer_builder import TrainerSpec, build_trainers
 from reef.train.types import JobData, PreparedCommit, TrainingCommit
 
 NUM_GPUS = 0
@@ -81,13 +81,12 @@ def preparing_trainer(records: ItemRecordStore, **options) -> Trainer:
 @pytest.mark.unit
 def test_one_trainer_spec_is_bound_to_the_only_component_and_refused_for_several() -> None:
     spec = TrainerSpec(name="recipe", stages=PipelineSettings.from_setting(None, spec=PipelineSpec(), environ={}))
-    builder = SpecTrainerBuilder()
 
     def components(*names: str) -> ScenarioComponents:
         return ScenarioComponents({name: ComponentSpec() for name in names})
 
     def build(served: ScenarioComponents) -> tuple[ComponentTrainer, ...]:
-        return builder.build_trainers(spec, "math", memory_records("math"), components=served, algorithm_states={})
+        return build_trainers(spec, "math", memory_records("math"), components=served, algorithm_states={})
 
     for served, bound in ((components(), "records"), (components("weights"), "weights")):
         (component_trainer,) = build(served)

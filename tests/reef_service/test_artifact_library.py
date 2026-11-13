@@ -20,6 +20,7 @@ from reef.artifact.artifact import SnapshotRef
 from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.recipe import Recipe
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.data_service import DataWorker, copy_scenario_artifacts, data_jobs
@@ -296,8 +297,9 @@ def test_a_new_owner_gets_the_artifact_items_that_a_copy_made_for_the_default_ow
 
 
 def test_an_artifact_item_without_a_source_uri_is_listed_but_not_imported(tmp_path: Path) -> None:
-    # The in-memory repository names no URI, so its artifacts are in the library without a source_uri.
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    # The in-memory repository names no URI, so its artifacts are in the library without a source_uri. A recipe
+    # that only reads records serves no component, so the artifact has no kind.
+    dispatcher = dispatcher_for(tmp_path, Recipe())
 
     async def run() -> None:
         async with client_of(dispatcher, tmp_path) as client:

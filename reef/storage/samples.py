@@ -160,7 +160,7 @@ class SampleStore:
     ``state`` its training state.
 
     Purpose: ``ScenarioStorage.sample_store`` makes it for an open scenario. The listings and evaluations read it,
-    and the scenario factory's trainer builder gives each trainer its ``TrainerSamples`` (``for_trainer``).
+    and ``reef.train.trainer_builder.build_trainers`` gives each trainer its ``TrainerSamples`` (``for_trainer``).
     """
 
     data: DataStore

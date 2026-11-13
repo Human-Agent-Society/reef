@@ -30,13 +30,14 @@ from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream, RuntimeLoadMismatchError
 from reef.recipe import Recipe
+from reef.record2sample import NoSamples
 from reef.record2sample.service import SAMPLES_QUEUE
 from reef.scenario.live_objects import LiveObjects
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import TrainingCommit
-from reef.train.trainer_builder import SpecTrainerBuilder
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 
 
 class ContractInferenceHandler(InferenceHandler):
@@ -55,6 +56,11 @@ class WeightRecipe(Recipe):
 
     def default_start(self) -> DefaultStart:
         return DefaultStart(files={"model.txt": "base"})
+
+
+class ServedRecipeSamples(NoSamples):
+    """A record-to-sample stage that only the recipe of one test names, so the test can tell whose stages a trainer
+    runs."""
 
 
 class RegisterFailingBackend(InMemoryRepositoryBackend):
@@ -205,24 +211,19 @@ def test_a_release_header_on_a_report_neither_selects_nor_binds_the_scenarios_st
 
 @pytest.mark.unit
 def test_the_dispatcher_builds_a_scenarios_trainers_from_the_served_recipe(tmp_path) -> None:
-    selected: list[str] = []
-
-    class RecordingTrainers(SpecTrainerBuilder):
-        def build_trainers(self, specs, scenario, records, **arguments):
-            selected.append(specs.name)
-            return super().build_trainers(specs, scenario, records, **arguments)
-
+    stages = PipelineSettings.from_setting(None, spec=PipelineSpec(record2sample=ServedRecipeSamples), environ={})
     dispatcher = Dispatcher(
-        Recipe(name="tttd"),
+        Recipe(name="tttd", pipeline_stages=stages),
         InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
-        trainer_builder=RecordingTrainers(),
     )
 
-    dispatcher.get_or_create_scenario("discovery")
+    scenario = dispatcher.get_or_create_scenario("discovery")
 
-    assert selected == ["tttd"]
+    # The scenario's one trainer runs the stages that the served recipe names.
+    [component_trainer] = scenario.trainers
+    assert type(component_trainer.trainer.pipeline.record2sample) is ServedRecipeSamples
 
 
 @pytest.mark.unit

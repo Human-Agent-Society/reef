@@ -80,7 +80,6 @@ from reef.train.manager import (
     TrainFrom,
     TrainingManager,
 )
-from reef.train.trainer_builder import TrainerBuilder
 from reef.train.training_requests import RequestCancel, TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
@@ -143,7 +142,6 @@ class Dispatcher(
         work_retention_seconds: float = 7 * 24 * 3600.0,
         training_max_jobs: int = 1,
         training_manager: TrainingManager | None = None,
-        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         """``live``: the runtime, the job components, the data store and the served endpoint that this process
         built for ``recipe`` (``LiveObjects``); None is a process with none of them, which fits a recipe that only
@@ -196,9 +194,6 @@ class Dispatcher(
         (``ItemRecordStore``). Control runs the ``data_sync`` items that the data service adds after its writes
         (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
         which owns the task file store that the data store shares.
-
-        ``trainer_builder``: builds the trainers of each scenario. None builds each trainer from the
-        recipe's spec (``SpecTrainerBuilder``).
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
@@ -282,7 +277,6 @@ class Dispatcher(
             lifecycle=self,
             served_models=coordination.served_models,
             training_requests=TrainingRequestQueue(self.queue),
-            trainer_builder=trainer_builder,
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()

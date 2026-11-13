@@ -339,6 +339,12 @@ def live_objects(
     )
 
 
+def harness_live_objects(component: StubTrainingComponent, *, data_store: DataStore | None = None) -> LiveObjects:
+    """The live objects of a test deployment that evolves a harness: ``component`` as the harness training
+    component, and its facts (``StubFacts``). The deployment has no runtime."""
+    return LiveObjects(harness_component=component, harness_facts=StubFacts(component), data_store=data_store)
+
+
 def job_sized_stages(
     spec: PipelineSpec, section: Mapping[str, Any] | None = None, *, job_samples: int = 1
 ) -> PipelineSettings:

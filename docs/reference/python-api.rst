@@ -389,9 +389,11 @@ the recipe and the live objects
 ``report_type``, ``training_mode`` and, for a ``WeightTrainingRecipe``, its
 ``parameters_by_kind()``, with the training component of ``LiveObjects``. A ``CompositeRecipe`` gives
 one spec for each component, with the scenario's report contract
-(``scenario_report_type``, below). The factory's ``TrainerBuilder``
-(``reef.train.trainer_builder``) then builds one trainer for each spec with
-``Trainer.build``, and binds it to its snapshot component. A recipe that is
+(``scenario_report_type``, below). The factory then calls
+``reef.train.trainer_builder.build_trainers``, which builds one trainer for
+each spec with ``Trainer.build`` and binds it to its snapshot component.
+Nothing replaces this path: a deployment changes its trainers through its
+recipe and its live objects. A recipe that is
 not a composite has one trainer, so its scenario serves at most one component.
 
 ``check_root_start(recipe, live, root)`` checks an item start before scenario
@@ -805,13 +807,13 @@ To open a store, call ``task_storage.open(name)``. Each record-to-sample stage
 uses its own ``name``.
 
 A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
-The scenario factory gives ``session.tasks`` to its trainer builder, which
-gives it to ``Trainer.build``. For a composite recipe, the builder gives each
+The scenario factory gives ``session.tasks`` to ``build_trainers``, which
+gives it to ``Trainer.build``. For a composite recipe, ``build_trainers`` gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
 components never share a store. The scenario's imported tasks are not a task
 store: they are task items that the scenario uses. The factory reads them from
 the data store with the session's ``training_state`` as ``SampleStore``
-(RFC #1140). It gives them to its trainer builder as ``samples``. Each
+(RFC #1140). It gives them to ``build_trainers`` as ``samples``. Each
 trainer reads them as itself (``SampleStore.for_trainer``) from
 ``PipelineContext.samples``.
 
