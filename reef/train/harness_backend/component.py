@@ -21,7 +21,9 @@ A job's directory keeps ``outcome.json``: the job's outcome, with the count of j
 so the harness state follows the jobs that control committed: a job that ran but whose end no commit recorded
 changes no later job.
 Under ``EvolutionSettings.component_state_dir(scenario, component)`` the component keeps the history and job records
-of the backend, and ``progress.json`` while a job runs.
+of the backend. No other process reads these directories: the training worker copies a running job's progress into
+the job's queue item (``job_progress``) and stores an ended job's record directory in the artifact store
+(``job_records``), and the component itself moves a deleted scenario's directory aside (``archive_scenario``).
 
 The component builds itself (RFC #1390). ``HarnessTrainingComponent.from_settings`` builds the method, the scorer,
 the collector, the run executor and the agent settings that the ``evolution`` section names; the component then
@@ -33,7 +35,7 @@ from __future__ import annotations
 
 import json
 import shutil
-import threading
+import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -43,6 +45,7 @@ from typing import Any, Self
 from reef.core.errors import ConfigError, InternalError, ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.core.training_request import request_from_parameters
+from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
 from reef.evaluation.harness import (
     ComparePolicy,
@@ -67,7 +70,7 @@ from reef.storage.job_data import JobDataKind
 from reef.train.backend import ArtifactTextFiles
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingJob
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
-from reef.train.harness_backend.backend import HarnessBackend, JobLimits, JobProgress
+from reef.train.harness_backend.backend import HarnessBackend, JobLimits
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.facts import HARNESS_COMPONENT, HarnessFacts
 from reef.train.harness_backend.records import JobRecord
@@ -78,7 +81,6 @@ from reef.train.local_jobs import JOB_FILE, LocalJobComponent
 #: The backend's history and job records under the state directory of a scenario component.
 HISTORY_DIR = "history"
 JOB_RECORDS_DIR = "steps"
-PROGRESS_FILE = "progress.json"
 #: The outcome of a job and the harness state after it: written before the job's checkpoint, so a resumed job
 #: does not run the method again.
 OUTCOME_FILE = "outcome.json"
@@ -96,53 +98,6 @@ def job_component(job: TrainingJob) -> str:
 def previous_job(submitted: Mapping[str, Any]) -> str | None:
     """The previous job of the job file ``submitted``."""
     return submitted.get("previous_job_id")
-
-
-def read_job_progress(path: Path) -> JobProgress | None:
-    """The running job's progress that ``path`` holds, or ``None`` when no job runs."""
-    value = read_json(path)
-    return None if value is None else JobProgress.from_json(value)
-
-
-class ProgressFile:
-    """Writes the progress of ``backend``'s running job to ``path`` when it changed, looking every
-    ``interval_seconds``, in a thread.
-
-    Values: ``interval_seconds`` > 0. The thread runs from ``__enter__`` to ``__exit__``; ``__exit__`` removes the
-    file. Purpose: ``HarnessTrainingComponent`` runs one around each job, so another process, such as the one that
-    serves the request pages, reads where the job stands (``read_job_progress``).
-    """
-
-    def __init__(self, backend: HarnessBackend, path: Path, *, interval_seconds: float = 0.1) -> None:
-        if interval_seconds <= 0:
-            raise ValueError("interval_seconds must be positive")
-        self.backend = backend
-        self.path = path
-        self.interval_seconds = interval_seconds
-        self.stopped = threading.Event()
-        self.thread = threading.Thread(target=self.run, name="reef-harness-progress", daemon=True)
-
-    def __enter__(self) -> ProgressFile:
-        self.thread.start()
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.stopped.set()
-        self.thread.join()
-        self.path.unlink(missing_ok=True)
-
-    def run(self) -> None:
-        written: dict[str, Any] | None = None
-        while not self.stopped.wait(self.interval_seconds):
-            progress = self.backend.job_progress
-            value = None if progress is None else progress.to_json()
-            if value == written:
-                continue
-            if value is None:
-                self.path.unlink(missing_ok=True)
-            else:
-                write_json(self.path, value)
-            written = value
 
 
 class HarnessTrainingComponent(LocalJobComponent):
@@ -210,6 +165,8 @@ class HarnessTrainingComponent(LocalJobComponent):
         self.starts_root = root / "starts"
         #: Each scenario component's backend, made at its first job.
         self.backends: dict[tuple[str, str], HarnessBackend] = {}
+        #: The backend that runs each job now, by the job's ID.
+        self.running_backends: dict[str, HarnessBackend] = {}
 
     @classmethod
     def from_settings(cls, settings: HarnessSettings, models: HarnessModels, *, environ: Mapping[str, str]) -> Self:
@@ -279,6 +236,8 @@ class HarnessTrainingComponent(LocalJobComponent):
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         """The parts of the tree that the job changed: the parts of the paths of the diff from the start's tree to
         the checkpoint's."""
+        if checkpoint.artifact_path is None:
+            raise ValueError("the changed parts are read from the checkpoint's local tree")
         changes = HarnessTree.read(Path(start)).diff(HarnessTree.read(Path(checkpoint.artifact_path))).changes
         return frozenset(self.descriptor.layout.part_names(changes).values())
 
@@ -472,9 +431,9 @@ class HarnessTrainingComponent(LocalJobComponent):
         # The tree's checksum names the head: a job needs no artifact ID of its start.
         head = ArtifactTextFiles(tree.checksum(), dict(tree.files))
         tasks = parameters.get("evaluation_tasks")
-        progress = self.settings.evolution.component_state_dir(job.scenario, component) / PROGRESS_FILE
+        self.running_backends[job.job_id] = backend
         try:
-            with ProgressFile(backend, progress):
+            try:
                 prepared = backend.prepare_job(
                     data, state.to_json(), ended_jobs, head=head, seed_tasks=None if tasks is None else tuple(tasks)
                 )
@@ -494,6 +453,8 @@ class HarnessTrainingComponent(LocalJobComponent):
                 except BaseException:
                     backend.abort_job(prepared)
                     raise
+            finally:
+                self.running_backends.pop(job.job_id, None)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             # The catalog row of a failed job reads as a skip with an error, which published nothing.
@@ -522,6 +483,33 @@ class HarnessTrainingComponent(LocalJobComponent):
             "error": None,
         }
 
+    def job_progress(self, job_id: str) -> Mapping[str, JsonValue] | None:
+        """Where the running job stands, with the method's activity so far (``JobProgress.to_json``)."""
+        backend = self.running_backends.get(job_id)
+        progress = None if backend is None else backend.job_progress
+        return None if progress is None else progress.to_json()
+
+    def job_records(self, job_id: str) -> Path | None:
+        """The record directory that the ended job claimed, which its outcome names as ``step_record``; None
+        for a job with no outcome or no record directory."""
+        outcome = read_json(self.job_directory(job_id) / OUTCOME_FILE)
+        named = None if outcome is None else outcome["metrics"].get("step_record")
+        if not isinstance(named, str) or not Path(named).is_dir():
+            return None
+        return Path(named)
+
+    def archive_scenario(self, scenario: str) -> None:
+        """Close the backends of ``scenario`` and move its directory of history and job records to
+        ``archived/<scenario>-<time>`` beside it, so that a scenario of that name can be deleted twice."""
+        for key in [key for key in self.backends if key[0] == scenario]:
+            self.backends.pop(key).close()
+        directory = self.settings.evolution.scenario_state_dir(scenario)
+        if directory.exists():
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            destination = directory.parent / "archived" / f"{directory.name}-{stamp}-{uuid.uuid4().hex[:8]}"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(directory), str(destination))
+
     def close_resources(self) -> None:
         for backend in self.backends.values():
             backend.close()
@@ -532,9 +520,6 @@ __all__ = [
     "HARNESS_COMPONENT",
     "HISTORY_DIR",
     "JOB_RECORDS_DIR",
-    "PROGRESS_FILE",
     "HarnessTrainingComponent",
-    "ProgressFile",
     "job_component",
-    "read_job_progress",
 ]

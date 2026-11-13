@@ -512,7 +512,12 @@ def test_commit_preserves_experiment_metadata_and_isolates_tracker_failures(
         # The job's submission, its checkpoint and its end each report one event.
         assert [event.metrics for event in tracker.events] == [commit.metrics for commit in commits]
         assert [event.training_job_id for event in tracker.events] == [job.job_id] * 3
-        assert [event.checkpoint_path for event in tracker.events] == [None, str(runtime.checkpoint_root / "1"), None]
+        # Only the checkpoint's commit names a snapshot for a tracker that uploads checkpoints.
+        assert [None if event.checkpoint is None else event.checkpoint.ref for event in tracker.events] == [
+            None,
+            commits[1].snapshot,
+            None,
+        ]
         for event in tracker.events:
             assert event.context.backend == "stub"
             assert event.context.backend_config == {

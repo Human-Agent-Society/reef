@@ -1887,7 +1887,10 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
 - ``attempt_count``: how many times a training worker took the job, an
   integer from 0.
 - ``checkpoints``: the saved checkpoints that the job reported, in step
-  order, each ``{step, path, artifact_path, metrics, changed_parts}``.
+  order, each ``{step, path, content, metrics, changed_parts}``. ``path`` is a
+  directory of the training service. ``content`` is the name under which the
+  training service stored the checkpoint's files in the artifact backend;
+  Reef removes that content after it commits the checkpoint.
   ``changed_parts`` lists the parts of the scenario component that the
   checkpoint changed from the job's start, ``[]`` for a weight job.
 - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job
@@ -1930,7 +1933,7 @@ For example:
      "attempt_count": 1,
      "checkpoints": [
        {"step": 1, "path": "/jobs/4f2a9c1e/step-1",
-        "artifact_path": "/jobs/4f2a9c1e/step-1/artifact", "metrics": {"loss": 0.41},
+        "content": "4f2a9c1e:1", "metrics": {"loss": 0.41},
         "changed_parts": []}
      ],
      "result": {"state": "finished", "metrics": {"loss": 0.41}},

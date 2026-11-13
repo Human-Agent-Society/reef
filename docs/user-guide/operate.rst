@@ -451,22 +451,35 @@ component:
   backend when it takes the job. Give the training service the same
   ``storage.artifact-backend`` access as control, and its own
   ``storage.artifact-cache-dir``.
+* The training service stores the files of each saved checkpoint in the
+  artifact backend, and control commits them by name. Control reads no
+  directory of the training service and holds none of a checkpoint's bytes, so
+  the two share no volume for checkpoints. The training service therefore
+  needs write access to the artifact backend. An artifact import and a
+  harness sync are composed in the artifact backend too, and control reads
+  one component of a snapshot at a time, so the weights of a scenario with
+  several components do not pass through control. A checkpoint that no commit
+  took, such as one of a cancelled job, leaves the artifact backend when
+  control deletes the job's ended item
+  (``storage.work-retention-s``, 7 days by default).
 * An artifact import for ``tinker`` or ``spindle_full`` looks the checkpoint up
   on the backend's service. The training service does that, so such an import
   needs a running training service. It answers ``503`` when the training
   service gives no answer within 60 seconds.
 
-Control still publishes each checkpoint from the path that the training service
-reports, so both must reach the checkpoint directories.
-
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
 coding agent and the evaluation runs. Install the adapter's binary and the
-sandbox where the training service runs. The training service writes the step
-records and the running step's progress under ``evolution.state_dir``. Control
-reads them for the snapshot and request pages, so both must reach that
-directory, as they reach the artifact backend. Control builds no harness
-training component: it needs neither the adapter's binary nor the sandbox.
+sandbox where the training service runs. Only the training service reads and
+writes ``evolution.state_dir``. It copies the running step's progress into the
+step's job in the shared store, and it stores each ended step's record files in
+the artifact backend. Control reads both there for the snapshot and request
+pages. The record files stay as long as the scenario: Reef removes them from
+the artifact backend when you delete the scenario. When you delete a scenario, control asks the training service to move
+the scenario's directory under ``evolution.state_dir`` to ``archived/``; the
+request waits while no training service runs. Control builds no harness
+training component: it needs neither the adapter's binary nor the sandbox, and
+it shares no directory with the training service.
 
 .. _Harness clients:
 

@@ -23,7 +23,7 @@ import math
 import threading
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -281,8 +281,10 @@ class WorkQueue(ABC):
         """
 
     @abstractmethod
-    def delete_final(self, *, finished_before: float) -> int:
-        """Delete final items whose ``ended_at`` is before ``finished_before``; return how many.
+    def delete_final(self, *, finished_before: float, keep: Mapping[str, Collection[str]] | None = None) -> int:
+        """Delete final items whose ``ended_at`` is before ``finished_before``; return how many. ``keep`` maps a
+        queue to the IDs of its items that stay, for a caller that could not yet finish what it does before an
+        item goes.
 
         A reader of a final item, such as the trainer of a job, reads it within the retention that control keeps,
         so a deleted item is one that no reader needs.

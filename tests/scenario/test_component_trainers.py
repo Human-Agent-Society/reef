@@ -51,7 +51,7 @@ from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
-from reef.artifact.snapshot_chain import ArtifactSnapshotChain
+from reef.artifact.repository import Repository
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
@@ -1409,19 +1409,19 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
     wait_for_serving(dispatcher, "agent")
     # The serving of the weights read the creation's manifest; the test reads it as a process that has not.
     scenario.snapshot_queries.creation_components_read = False
-    original = ArtifactSnapshotChain.resolve
+    original = Repository.snapshot
     calls = {"failed": 0}
 
     reader = threading.current_thread()
 
-    def fail_once(self: ArtifactSnapshotChain, ref: SnapshotRef) -> Artifact:
-        # The serving worker resolves snapshots too; only the test's own read fails.
+    def fail_once(self: Repository, ref: SnapshotRef) -> Artifact:
+        # The serving worker reads snapshots too; only the test's own read of the manifest fails.
         if calls["failed"] == 0 and threading.current_thread() is reader:
             calls["failed"] += 1
             raise ArtifactNotFoundError("the remote is away")
         return original(self, ref)
 
-    monkeypatch.setattr(ArtifactSnapshotChain, "resolve", fail_once)
+    monkeypatch.setattr(Repository, "snapshot", fail_once)
     assert scenario.snapshot_queries.creation_components(0) is None
     # Not asked again at the same step (a page polls every few seconds; a remote read is a fetch)...
     assert scenario.snapshot_queries.creation_components(0) is None
@@ -1801,6 +1801,57 @@ def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
     _append_records(scenario, 3)
     assert append_commit(scenario, WEIGHTS) == [("i3", "r3")]
     assert submitted_jobs(training, 3)[-1].start == str(training.imported[-1])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("deleted", ["after the cycle", "inside the cycle"])
+def test_a_job_that_was_submitted_and_not_committed_is_cancelled_when_its_scenario_is_deleted(
+    tmp_path: Path, dispatchers: _Dispatchers, deleted: str
+) -> None:
+    """A trainer adds a job to the queue before the commit that records it. A delete of the scenario in between
+    finds the job in no trainer's state: the job must still not run, or it would store a checkpoint and its
+    record files for a scenario that is gone."""
+    training = WeightsJobComponent(tmp_path / "checkpoints")
+    factory = _repository(tmp_path)
+    dispatcher, _ = dispatchers.open(
+        training=training,
+        hold_local_cycles=True,
+        backend_factory=factory,
+        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+    )
+    scenario = loaded(dispatcher, 1)
+    # The training service answers the job's check and runs no job, so the job waits in the queue.
+    checks = TrainingCheckWorker(
+        training, dispatcher.queue, dispatcher.job_directory_store, factory, worker_id="checks", poll_seconds=0.01
+    )
+    checks.start()
+    try:
+        if deleted == "after the cycle":
+            # The cycle submitted the job and stopped before its commit.
+            assert checked_commit(scenario, WEIGHTS) is not None
+            (job,) = dispatcher.queue.items(JOBS_QUEUE)
+            assert job.state == "queued" and scenario.trainer_for(WEIGHTS).state["jobs"] == []
+            dispatcher.delete_scenario("agent")
+        else:
+            # The delete ends while the cycle is about to add the job to the queue.
+            queued = scenario.trainer_for(WEIGHTS).job_loop_required().component
+            submit = queued.submit
+
+            def delete_then_submit(job: TrainingJob) -> None:
+                dispatcher.delete_scenario("agent")
+                assert dispatcher.queue.items(JOBS_QUEUE) == ()
+                submit(job)
+
+            wait_for_job_check(scenario, WEIGHTS)
+            queued.submit = delete_then_submit  # type: ignore[method-assign]
+            dispatcher.open_local_cycles()
+            dispatcher.local_workers.process_step("agent", WEIGHTS)
+            (job,) = dispatcher.queue.items(JOBS_QUEUE)
+    finally:
+        checks.stop()
+    cancelled = dispatcher.queue.read(JOBS_QUEUE, job.id)
+    assert cancelled.state == "failed" and cancelled.error in ("the scenario was deleted", "cancelled")
+    assert training.submitted == []
 
 
 @pytest.mark.unit

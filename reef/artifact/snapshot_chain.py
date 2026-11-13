@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from reef.artifact.artifact import Artifact, SnapshotRef
-from reef.artifact.repository import Repository
+from reef.artifact.repository import Repository, StoredTree
 from reef.core.errors import ReefError
 
 
@@ -63,11 +63,17 @@ class ArtifactSnapshotChain:
     def stage(self, commit_number: int, artifact: Artifact, *, parent: SnapshotRef | None = None) -> Artifact:
         return self._repository.stage(commit_number, artifact, parent=self.checkpoint if parent is None else parent)
 
-    def stage_composed(
-        self, commit_number: int, components: Mapping[str, Artifact], *, parent: SnapshotRef | None = None
+    def stage_stored(
+        self,
+        commit_number: int,
+        files: StoredTree,
+        metadata: Mapping[str, object],
+        *,
+        parent: SnapshotRef,
+        owned_content: str | None = None,
     ) -> Artifact:
-        return self._repository.stage_composed(
-            commit_number, components, parent=self.checkpoint if parent is None else parent
+        return self._repository.stage_stored(
+            commit_number, files, metadata, parent=parent, owned_content=owned_content
         )
 
     def publish(

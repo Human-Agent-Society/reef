@@ -435,7 +435,7 @@ class Scenario:
         active = self.artifact_status()[component]["active"] if self.store.durable else None
         if active is not None:
             return active
-        return self.repository.resolve(self.current_snapshot()).component(component).artifact_id
+        return self.repository.selection(self.current_snapshot(), (component,)).components[component]
 
     def served_artifact_id(self) -> str | None:
         """The artifact that serves requests, or None before inference publishes a route.

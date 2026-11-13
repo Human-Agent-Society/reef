@@ -78,6 +78,15 @@ class ArtifactRepository(ABC):
     @abstractmethod
     def materialize(self, ref: SnapshotRef) -> Artifact: ...
 
+    def materialize_component(self, ref: SnapshotRef, name: str) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` with its files in a local directory, as
+        ``Artifact.component`` gives it.
+
+        This default materializes the whole snapshot. A repository whose snapshots hold large components makes
+        only the files of ``name`` local, so a reader of one component does not fetch the others.
+        """
+        return self.materialize(ref).component(name)
+
 
 class ArtifactValidator(ABC):
     """Artifact admission checks selected for one scenario."""
@@ -87,7 +96,11 @@ class ArtifactValidator(ABC):
 
 
 class Artifact:
-    """A concrete artifact bound to one scenario-scoped repository."""
+    """A concrete artifact bound to one scenario-scoped repository.
+
+    ``content`` is None, or the non-empty name of the stored content that holds the files of an unpublished
+    artifact (``Artifact.stored``); such an artifact has no ``local_path``.
+    """
 
     def __init__(
         self,
@@ -97,10 +110,14 @@ class Artifact:
         local_path: Path | None = None,
         metadata: Mapping[str, object] | None = None,
         artifact_id: str | None = None,
+        content: str | None = None,
     ) -> None:
+        if content is not None and (not isinstance(content, str) or not content or local_path is not None):
+            raise ValueError("content is the non-empty name of stored content, on an artifact with no local_path")
         self._ref = ref
         self._repository = repository
         self._local_path = None if local_path is None else Path(local_path)
+        self._content = content
         self._metadata = dict(metadata or {})
         stored_identity = self._metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
         if stored_identity is not None and (not isinstance(stored_identity, str) or not stored_identity):
@@ -122,6 +139,11 @@ class Artifact:
     @property
     def local_path(self) -> Path | None:
         return self._local_path
+
+    @property
+    def content(self) -> str | None:
+        """The name of the stored content that holds this unpublished artifact's files, or None."""
+        return self._content
 
     @property
     def metadata(self) -> Mapping[str, object]:
@@ -150,8 +172,9 @@ class Artifact:
         """
         if self._artifact_id is not None:
             return self._artifact_id
-        # Provider calls can carry a ref without local files or a repository.
-        materialized = self if self.repository is None else self.materialize()
+        # Provider calls can carry a ref without local files or a repository. An artifact that carries its
+        # metadata answers from it, and no file is fetched.
+        materialized = self if self.repository is None or self._metadata else self.materialize()
         if materialized._artifact_id is not None:
             return materialized._artifact_id
         manifest = materialized.components
@@ -173,8 +196,15 @@ class Artifact:
 
         A snapshot without a manifest, or with one component, is that component
         itself. A multi-component snapshot keeps each component in a directory
-        named after it; the view carries the component's own artifact ID and metadata.
+        named after it; the view carries the component's own artifact ID and metadata. A snapshot of several
+        components that is not local yet, and that carries its manifest, makes only this component local
+        (``ArtifactRepository.materialize_component``).
         """
+        known = self.components
+        if self.local_path is None and self.repository is not None and known is not None and not known.single:
+            if name not in known.entries:
+                raise ArtifactNotFoundError(f"snapshot {self.ref.revision!r} binds no component {name!r}")
+            return self.repository.materialize_component(self.ref, name)
         materialized = self.materialize()
         manifest = materialized.components
         if manifest is None:
@@ -234,6 +264,19 @@ class Artifact:
             metadata=stored_metadata,
         )
 
+    @classmethod
+    def stored(cls, content: str) -> Artifact:
+        """An unpublished artifact with a fresh ID whose files are the stored content ``content`` of its scenario's
+        repository backend (``RepositoryBackend.store_content``). It has no local path: the process that makes it
+        need not hold the files."""
+        token = uuid.uuid4().hex
+        return cls(
+            SnapshotRef(revision=f"{LOCAL_SNAPSHOT_PREFIX}{token}", parent_revision=None),
+            None,
+            metadata={ARTIFACT_ID_METADATA_KEY: f"artifact:{token}"},
+            content=content,
+        )
+
     def with_repository(self, repository: ArtifactRepository) -> Artifact:
         return Artifact(
             self.ref,
@@ -241,6 +284,7 @@ class Artifact:
             local_path=self.local_path,
             metadata=self.metadata,
             artifact_id=self._artifact_id,
+            content=self.content,
         )
 
     def materialize(self) -> Artifact:
@@ -300,4 +344,5 @@ def with_training_starts(artifact: Artifact, starts: tuple[str, ...]) -> Artifac
         artifact.repository,
         local_path=artifact.local_path,
         metadata={**artifact.storage_metadata, TRAINING_STARTS_METADATA_KEY: list(starts)},
+        content=artifact.content,
     )

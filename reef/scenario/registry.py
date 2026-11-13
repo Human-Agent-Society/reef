@@ -473,11 +473,19 @@ class ScenarioRegistry:
             self.last_used_at.pop(scenario, None)
         return dropped
 
+    def require_archivable(self) -> None:
+        """Raise ``NotImplementedError`` when the repository backend cannot archive a scenario's registration, so a
+        delete refuses before it changes anything."""
+        factory = self._backend_factory
+        if not isinstance(factory, CachedRepositoryBackendFactory) or not factory.archives_registrations:
+            raise NotImplementedError("this repository backend cannot archive a scenario")
+
     def archive_registration(self, scenario: str) -> tuple[str, ...]:
         """Move the scenario's durable registration aside and forget its cached backend; what was archived."""
-        if not isinstance(self._backend_factory, CachedRepositoryBackendFactory):
+        factory = self._backend_factory
+        if not isinstance(factory, CachedRepositoryBackendFactory) or not factory.archives_registrations:
             raise NotImplementedError("this repository backend cannot archive a scenario")
-        return self._backend_factory.archive_registration(scenario)
+        return factory.archive_registration(scenario)
 
     def forget_lock(self, scenario: str) -> None:
         """Release the per-scenario lock's slot once nothing holds it; a later create makes a fresh one."""

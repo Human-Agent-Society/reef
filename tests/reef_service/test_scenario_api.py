@@ -7,7 +7,12 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.runtime_stubs import StubTrainingComponent
 
-from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact import (
+    ArtifactPublicationError,
+    GitLFSRepositoryBackend,
+    GitLFSRepositoryBackendFactory,
+    InMemoryRepositoryBackend,
+)
 from reef.core import ScenarioNotFoundError
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
@@ -114,6 +119,55 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
     again = value.get_or_create_scenario("delivery")
     assert again is not None and again is not created
     assert again.repository.require_current_artifact().revision == first_snapshot or again.commit_number == 0
+
+
+class FailingDiscard(InMemoryRepositoryBackend):
+    """An artifact store that does not answer the first discard of all content."""
+
+    failures = 1
+
+    def discard_all_content(self) -> None:
+        if type(self).failures:
+            type(self).failures -= 1
+            raise ArtifactPublicationError("the artifact store did not answer")
+        super().discard_all_content()
+
+
+def test_a_delete_refuses_before_it_changes_anything_and_a_failed_delete_is_finished_by_the_same_call(
+    tmp_path, monkeypatch
+) -> None:
+    factory = FailingDiscard.factory(directory=tmp_path / "artifacts")
+    value = Dispatcher(
+        Recipe(),
+        factory,
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
+    )
+    created = value.get_or_create_scenario("delivery")
+    assert created is not None
+    factory("delivery").store_content("job:records", tmp_path / "artifacts")
+    # A backend that cannot archive a registration, such as a remote Git repository, refuses first.
+    monkeypatch.setattr(type(factory), "archives_registrations", False)
+    with pytest.raises(NotImplementedError, match="cannot archive a scenario"):
+        value.delete_scenario("delivery")
+    assert value.get_or_create_scenario("delivery", allow_implicit_creation=False) is created
+    monkeypatch.undo()
+    assert not GitLFSRepositoryBackendFactory(
+        GitLFSRepositoryBackend,
+        "https://example.invalid/artifacts.git",
+        work_dir=tmp_path / "w",
+        cache_dir=tmp_path / "c",
+    ).archives_registrations
+
+    # The store does not answer the discard: the scenario keeps its storage and its registration.
+    with pytest.raises(ArtifactPublicationError, match="did not answer"):
+        value.delete_scenario("delivery")
+    assert value.has_scenario("delivery")
+    assert factory("delivery").materialize_content("job:records").is_dir()
+    # The same call again finishes the delete, and no content stays.
+    assert value.delete_scenario("delivery")["scenario"] == "delivery"
+    assert not value.has_scenario("delivery")
+    value.close()
 
 
 def test_delete_scenario_refuses_names_that_are_paths() -> None:

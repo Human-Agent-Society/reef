@@ -27,6 +27,7 @@ from tests.support.runtime_stubs import (
 from tests.support.samples import data_storage, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.stored_checkpoints import store_checkpoints
 from tests.support.trajectories import policy_trajectory
 
 from recipes.sao import SAORecipe
@@ -596,7 +597,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             "math",
             session.records,
             pipeline_factory=lambda context: sao_processor(context, job_samples=1),
-            job_loop=JobLoop(component, scenario="math"),
+            job_loop=JobLoop(store_checkpoints(component, "math", None), scenario="math"),
             job_parameters=SAORecipe().parameters_by_kind(),
             root=STUB_ROOT,
             algorithm_state=algorithm_state,

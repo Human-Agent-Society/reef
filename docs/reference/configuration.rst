@@ -759,9 +759,10 @@ The HTTP service uploads each published snapshot to the component as files:
   beside the base model. Only ``inference.backend: sglang`` serves LoRA
   adapters.
 
-The HTTP service reads each snapshot from the checkpoint directory. With
-multi-node training, put the checkpoint directory on storage that the HTTP
-service's host can read.
+The training service stores each checkpoint in the artifact backend from the
+checkpoint directory, and every other service reads it from the artifact
+backend. With multi-node training, put the checkpoint directory on storage that
+the training service's host can read.
 
 Reef starts only its own inference, training and HTTP services.
 PRM and user-simulation services are independently deployed by OpenClawRL;
@@ -2771,7 +2772,9 @@ it. Its ``url`` is the URL that the open W&B run gives. An offline run gives
 none: the URL is then ``https://wandb.ai/<entity>/<project>/runs/<run_id>``,
 where the run is once it is synced, with the configured ``entity``. Without a
 configured ``entity``, the URL of an offline run is ``null``.
-Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
+With ``upload_checkpoints: true``, Reef reads the files of each committed
+checkpoint from the artifact backend and uploads them as a W&B artifact.
+Otherwise a run names its checkpoints by their artifact IDs only.
 
 Import, initialization, logging, summary, and upload failures are reported in
 the service log and never fail a training step or its commit.

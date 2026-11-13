@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.artifact.artifact import Artifact, ArtifactRepository
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.snapshot import SnapshotRef
 from reef.observability.base import (
@@ -44,6 +45,13 @@ class RecordingTracker(ExperimentTracker):
 
     def close(self) -> None:
         self.close_count += 1
+
+
+class NoFiles(ArtifactRepository):
+    """A repository that no test asks for files."""
+
+    def materialize(self, ref: SnapshotRef) -> Artifact:
+        raise AssertionError("an event names its checkpoint and reads no file")
 
 
 class FailingTraceObserver(RecordObserver):
@@ -94,7 +102,8 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         backend="stub",
         backend_config={"objective": "policy"},
     )
-    correlation = observer.prepare(context, checkpoint_path="/checkpoint/1")
+    repository = NoFiles()
+    correlation = observer.prepare(context, repository=repository)
     record = replace(training_record(), metrics={**correlation, "score": 0.8})
     append_commit = inner.append_commit
 
@@ -119,7 +128,9 @@ def test_only_successful_storage_notifications_report_and_retries_preserve_conte
         assert event.metrics["experiment/run_id"] == "run-0"
         assert event.produced_artifacts.components == landed.selection.components
         assert event.training_job_id == "job-1"
-        assert event.checkpoint_path == "/checkpoint/1"
+        # The event names the committed snapshot, which a tracker reads from the artifact store when it uploads.
+        assert event.checkpoint is not None
+        assert (event.checkpoint.ref, event.checkpoint.repository) == (landed.snapshot, repository)
         assert observer.run_step == 1
     finally:
         store.close()
@@ -148,7 +159,7 @@ def test_train_from_retries_rotate_once_and_tracker_errors_do_not_fail_storage(t
         commit_number=1,
         source_artifacts=ArtifactSelection({"weights": seed.revision}),
     )
-    correlation = observer.prepare(context, checkpoint_path=None)
+    correlation = observer.prepare(context, repository=None)
     assert correlation == ({} if failing else {"experiment/run_id": "run-0"})
     first = training_record()
 
