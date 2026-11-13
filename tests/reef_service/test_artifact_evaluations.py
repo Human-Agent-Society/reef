@@ -594,9 +594,7 @@ def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_bench
 
 
 def test_an_evaluation_with_num_samples_runs_that_many_tasks_chosen_by_their_names(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(
-        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
-    )
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
 
     async def run() -> None:
         # No worker runs: the test reads the accepted requests only.
