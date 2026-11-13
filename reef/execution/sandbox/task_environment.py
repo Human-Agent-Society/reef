@@ -2,7 +2,8 @@
 
 A Harbor task environment is the ``-e`` type of ``harbor run``, or the ``environment.type`` of a trial. Harbor starts
 it, builds the task's image in it, runs the agent and the verifier there, and stops it. This module names the
-environment types and checks what the host needs for each; it starts nothing.
+environment types, checks what the host needs for each, and gives the Harbor environment config of a task's trial in
+each (``environment_config``); it starts nothing.
 
 An executor is a different thing: a ``ProgramExecutor`` (:mod:`reef.execution.sandbox.process`) launches one program, such as
 a harness's pinned binary, and ``ExecutorEnvironment`` (:mod:`reef.execution.sandbox.environment`) adapts one to Harbor's
@@ -20,8 +21,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from pathlib import Path
+from typing import NotRequired, TypedDict
 
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 
@@ -32,6 +36,16 @@ HARBOR_TASK_ENVIRONMENTS: tuple[str, ...] = ("docker", *REMOTE_TASK_ENVIRONMENTS
 #: ``harbor/environments/e2b.py`` lines 32 to 39); without one of them Harbor marks the environment missing.
 HARBOR_E2B_NAMES = ("ALL_TRAFFIC", "AsyncSandbox", "AsyncTemplate", "FileType", "SandboxNetworkOpts", "Template")
 DOCKER_PROBE_TIMEOUT_S = 5.0
+#: Harbor's time limits for a task whose ``task.toml`` names none, in seconds.
+HARBOR_BUILD_TIMEOUT_S = 600
+HARBOR_VERIFIER_TIMEOUT_S = 600
+#: What a cloud sandbox of a trial lives beyond the time limits that ``environment_config`` adds up: the agent's setup
+#: within Harbor's default limit, and the file transfers.
+SANDBOX_LIFETIME_MARGIN_S = 3600
+#: Harbor's default lifetime of an E2B and of a Modal sandbox, in seconds; a lifetime Reef computes is never longer.
+SANDBOX_LIFETIME_MAX_S = 24 * 60 * 60
+#: The Harbor environment class of an ``e2b`` trial: Harbor's own, with its sandbox deleted at its timeout.
+HARBOR_E2B_ENVIRONMENT = "reef.execution.sandbox.harbor_e2b:KillOnTimeoutE2BEnvironment"
 
 
 class ReadinessProbe(ABC):
@@ -268,21 +282,128 @@ def task_environment_probes(
     return TASK_ENVIRONMENT_PROBES[checked_task_environment(environment)].probes(credential_hint)
 
 
+class HarborEnvironmentConfig(TypedDict):
+    """The ``environment`` section of a Harbor trial config, as ``environment_config`` makes it.
+
+    Values: ``type`` is the Harbor environment type that the caller selected. ``import_path`` is present if and only
+    if ``type`` is ``e2b``, and then it is ``HARBOR_E2B_ENVIRONMENT``. ``kwargs`` is present if and only if it is not
+    empty. Its keys are ``sandbox_timeout_secs``, on ``e2b`` and ``modal``, an integer number of seconds at most
+    ``SANDBOX_LIFETIME_MAX_S``; and ``modal_vm_runtime``, on ``modal`` only, True.
+    Purpose: ``environment_config`` makes one, and two callers read it. The task rollout runner gives the whole value
+    to an in-process Harbor trial as its environment config, through reef-eval's overrides. Harbor then makes the
+    class of ``import_path`` when the value has one, and the class of ``type`` otherwise. The generator's check reads
+    ``import_path`` and ``kwargs`` for the ``-e`` and ``--ek`` options of its ``harbor run`` child. The config that
+    Harbor's command line makes from those options has the import path and no ``type``.
+    """
+
+    type: str
+    import_path: NotRequired[str]
+    kwargs: NotRequired[dict[str, bool | int]]
+
+
+def environment_config(
+    environment: str, task_path: Path, agent: Mapping[str, object] | None = None
+) -> HarborEnvironmentConfig:
+    """The Harbor environment config of a trial of the task ``task_path`` in the Harbor environment type
+    ``environment``, with the Harbor agent config ``agent``.
+
+    ``agent`` has the field names of Harbor's ``AgentConfig``. None is an agent that sets no time limit of its own,
+    such as the ``oracle`` and ``nop`` agents of the generator's checks.
+
+    It is ``{"type": environment}`` for any type but ``e2b`` and ``modal``. For those two it adds:
+
+    - ``import_path`` on ``e2b``: ``HARBOR_E2B_ENVIRONMENT``, Harbor's E2B environment with its sandbox deleted at its
+      timeout (:mod:`reef.execution.sandbox.harbor_e2b`). Harbor's own class leaves the timeout to the service, and a
+      self-hosted service can pause the sandbox instead. Harbor makes the class of ``import_path`` and does not read
+      ``type`` then. That class is an ``e2b`` environment too.
+    - ``kwargs.modal_vm_runtime`` on ``modal``: True when the task has ``environment/docker-compose.yaml`` and its
+      ``task.toml`` asks for no GPU. Modal's default runtime puts each Compose service on the host network, and
+      Compose refuses that for a service that names its networks. The VM runtime keeps the task's networks and their
+      DNS aliases, but it has no GPUs.
+    - ``kwargs.sandbox_timeout_secs`` on both, when the agent has a time limit: the lifetime of the sandbox. As in
+      Harbor's trial, the agent's time limit is ``agent["override_timeout_sec"]``, or the task's when that override
+      is absent, None or 0. The task's is the ``timeout_sec`` of the ``[agent]`` table of ``task.toml``. The lifetime
+      is the sum of the task's build time limit, ``agent["override_setup_timeout_sec"]`` when the agent config sets
+      it, the agent's time limit and the task's verifier time limit, plus ``SANDBOX_LIFETIME_MARGIN_S``. Harbor stops
+      the sandbox when the trial ends. This lifetime ends the sandbox of a trial whose process was killed, which no
+      one stops. A trial whose agent has no time limit keeps Harbor's default.
+
+    The lifetime has two limits. First, it is at most ``SANDBOX_LIFETIME_MAX_S``, Harbor's default. A trial whose time
+    limits add up to more than that loses its sandbox at one day, as it does with Harbor's default. Second, the
+    lifetime reads no other trial setting. It ignores ``agent["max_timeout_sec"]``, which only shortens the trial. It
+    does not read Harbor's timeout multipliers or a verifier override, because no caller of this function passes one
+    to Harbor.
+
+    The config holds no task resource: Harbor reads the task's CPU, memory and time limits from its ``task.toml``.
+
+    On ``e2b`` and ``modal``, Harbor's ``AgentConfig`` reads the two agent time limits, as it does for the trial. So
+    a value that Harbor accepts counts here, such as a numeric string, and a value that Harbor refuses raises that
+    model's ``ValueError``. No other field of ``agent`` is read or checked, and ``agent`` is not changed.
+    """
+    if environment not in ("e2b", "modal"):
+        return {"type": environment}
+    # Imported here: only a cloud trial needs Harbor's trial models. Only the two time limits go to the model. The
+    # trial validates the other fields itself, after the caller has filled their placeholders.
+    from harbor.models.trial.config import AgentConfig
+
+    agent_fields = agent or {}
+    agent_limits = AgentConfig.model_validate(
+        {
+            name: agent_fields[name]
+            for name in ("override_timeout_sec", "override_setup_timeout_sec")
+            if name in agent_fields
+        }
+    )
+    task = tomllib.loads((task_path / "task.toml").read_text())
+    task_environment = task.get("environment", {})
+    config: HarborEnvironmentConfig = {"type": environment}
+    kwargs: dict[str, bool | int] = {}
+    if environment == "e2b":
+        config["import_path"] = HARBOR_E2B_ENVIRONMENT
+    elif (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
+        kwargs["modal_vm_runtime"] = True
+    # Harbor 0.25.0 (``Trial._compute_agent_timeout_sec``): the override, or the task's limit; None is no limit.
+    agent_timeout_seconds = agent_limits.override_timeout_sec or task.get("agent", {}).get("timeout_sec")
+    if agent_timeout_seconds is not None:
+        trial_seconds = (
+            task_environment.get("build_timeout_sec", HARBOR_BUILD_TIMEOUT_S)
+            # Without a setup time limit of the agent config, the margin covers Harbor's default.
+            + (agent_limits.override_setup_timeout_sec or 0)
+            + agent_timeout_seconds
+            + task.get("verifier", {}).get("timeout_sec", HARBOR_VERIFIER_TIMEOUT_S)
+        )
+        # The one-day limit applies before the rounding: Harbor accepts an agent time limit of infinity, and
+        # math.ceil refuses infinity.
+        kwargs["sandbox_timeout_secs"] = math.ceil(
+            min(trial_seconds + SANDBOX_LIFETIME_MARGIN_S, SANDBOX_LIFETIME_MAX_S)
+        )
+    if kwargs:
+        config["kwargs"] = kwargs
+    return config
+
+
 __all__ = [
     "DOCKER_PROBE_TIMEOUT_S",
+    "HARBOR_BUILD_TIMEOUT_S",
+    "HARBOR_E2B_ENVIRONMENT",
     "HARBOR_E2B_NAMES",
     "HARBOR_TASK_ENVIRONMENTS",
+    "HARBOR_VERIFIER_TIMEOUT_S",
     "PROBED_TASK_ENVIRONMENTS",
+    "SANDBOX_LIFETIME_MARGIN_S",
+    "SANDBOX_LIFETIME_MAX_S",
     "TASK_ENVIRONMENT_PROBES",
     "DockerProbe",
     "DockerTaskEnvironment",
     "E2BTaskEnvironment",
     "EnvironmentVariableProbe",
+    "HarborEnvironmentConfig",
     "ModalTaskEnvironment",
     "ModuleNamesProbe",
     "ModuleProbe",
     "ProbedTaskEnvironment",
     "ReadinessProbe",
     "checked_task_environment",
+    "environment_config",
     "task_environment_probes",
 ]

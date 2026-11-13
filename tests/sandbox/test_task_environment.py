@@ -1,7 +1,9 @@
-"""The Harbor task environments and the readiness probes that ``reef.execution.sandbox.task_environment`` owns."""
+"""The Harbor task environments that ``reef.execution.sandbox.task_environment`` owns: their readiness probes, and
+the environment config of a trial with Reef's E2B environment class."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
 import sys
@@ -19,6 +21,7 @@ from reef.execution.sandbox.task_environment import (
     ModuleNamesProbe,
     ModuleProbe,
     checked_task_environment,
+    environment_config,
     task_environment_probes,
 )
 
@@ -103,3 +106,123 @@ def test_a_probe_answers_with_a_reason_and_never_raises(tmp_path: Path) -> None:
     docker.chmod(docker.stat().st_mode | stat.S_IXUSR)
     reason = DockerProbe(docker=str(docker), timeout_s=0.2).missing()
     assert reason.startswith(f"{docker} version did not answer:"), reason
+
+
+#: A task with time limits, resources and an environment variable of its own.
+E2B_TASK_TOML = """\
+[agent]
+timeout_sec = 900
+
+[verifier]
+timeout_sec = 300
+
+[environment]
+build_timeout_sec = 120
+cpus = 2
+memory_mb = 4096
+
+[environment.env]
+TASK_SETTING = "from-the-task"
+"""
+
+
+def harbor_e2b_environments(tmp_path: Path, agent: dict[str, object] | None = None) -> dict[str, object]:
+    """Reef's E2B environment and Harbor's, made by Harbor's factory for one task as a trial makes them.
+
+    ``reef`` has the config of ``environment_config`` for the Harbor agent config ``agent``; ``harbor`` has the same
+    config without its ``import_path``, which is Harbor's own class. Both have the same session, trial environment and
+    network allowlist.
+    """
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.task.config import NetworkMode, NetworkPolicy
+    from harbor.models.task.task import Task
+    from harbor.models.trial.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    task_path = tmp_path / "task"
+    (task_path / "environment").mkdir(parents=True)
+    (task_path / "environment" / "Dockerfile").write_text("FROM python:3.12-slim\nWORKDIR /app\n")
+    (task_path / "tests").mkdir()
+    (task_path / "tests" / "test.sh").write_text("#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n")
+    (task_path / "instruction.md").write_text("Write nothing.\n")
+    (task_path / "task.toml").write_text(E2B_TASK_TOML)
+    task = Task(task_path)
+    reef_config = environment_config("e2b", task_path, agent)
+    configs = {
+        "reef": reef_config,
+        "harbor": {key: value for key, value in reef_config.items() if key != "import_path"},
+    }
+    return {
+        name: EnvironmentFactory.create_environment_from_config(
+            config=EnvironmentConfig.model_validate({**config, "env": {"TRIAL_SETTING": "from-the-trial"}}),
+            environment_dir=task.paths.environment_dir,
+            environment_name=task.short_name,
+            session_id="t__env",
+            trial_paths=TrialPaths(tmp_path / name),
+            task_env_config=task.config.environment.model_copy(deep=True),
+            network_policy=NetworkPolicy(network_mode=NetworkMode.ALLOWLIST, allowed_hosts=["pypi.org"]),
+        )
+        for name, config in configs.items()
+    }
+
+
+@pytest.mark.unit
+def test_an_e2b_trial_gets_reefs_class_on_harbors_template_with_the_tasks_limits(tmp_path: Path) -> None:
+    pytest.importorskip("e2b")
+    from harbor.environments.e2b import E2BEnvironment
+    from harbor.environments.factory import EnvironmentFactory
+    from harbor.models.trial.config import EnvironmentConfig
+
+    from reef.execution.sandbox.harbor_e2b import KillOnTimeoutE2BEnvironment
+
+    environments = harbor_e2b_environments(tmp_path)
+    reef, harbor = environments["reef"], environments["harbor"]
+    assert type(reef) is KillOnTimeoutE2BEnvironment and type(harbor) is E2BEnvironment
+    assert reef.type() == harbor.type() == "e2b"
+    # Harbor's private names: the same template, so one that Harbor's class built is used and none is built again.
+    assert reef.environment_id == harbor.environment_id and reef._template_name == harbor._template_name
+    # The lifetime is the task's build, agent and verifier limits plus an hour. The task's resources stay its own.
+    assert reef._sandbox_timeout == harbor._sandbox_timeout == 120 + 900 + 300 + 3600
+    assert (reef.task_env_config.cpus, reef.task_env_config.memory_mb) == (2, 4096)
+    # A time limit of the trial's own agent config replaces the task's 900 s in the lifetime that the class gets.
+    longer = harbor_e2b_environments(tmp_path / "longer", {"override_timeout_sec": 7200})["reef"]
+    assert type(longer) is KillOnTimeoutE2BEnvironment and longer._sandbox_timeout == 120 + 7200 + 300 + 3600
+    # Harbor's job checks read the class's resource capabilities through the import path: E2B's.
+    config = EnvironmentConfig.model_validate(environment_config("e2b", tmp_path / "task"))
+    resources = EnvironmentFactory.resource_capabilities(config.type, config.import_path)
+    assert resources == E2BEnvironment.resource_capabilities()
+    EnvironmentFactory.validate_resource_policies(config)
+
+
+@pytest.mark.unit
+def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    e2b = pytest.importorskip("e2b")
+    environments = harbor_e2b_environments(tmp_path)
+    calls: dict[str, list[dict[str, object]]] = {name: [] for name in environments}
+    created = object()
+
+    def recording(made: list[dict[str, object]]) -> staticmethod:
+        async def create(**options: object) -> object:
+            made.append(options)
+            # The first try fails, as a create can for a moment, and the retry policy tries once more.
+            if len(made) == 1:
+                raise RuntimeError("the service did not answer")
+            return created
+
+        return staticmethod(create)
+
+    for name, environment in environments.items():
+        monkeypatch.setattr(e2b.AsyncSandbox, "create", recording(calls[name]))
+        # The private Harbor method that Reef's class overrides; ``start`` calls it.
+        asyncio.run(environment._create_sandbox())
+        assert environment._sandbox is created
+    assert len(calls["reef"]) == len(calls["harbor"]) == 2
+    harbor_call = calls["harbor"][-1]
+    assert harbor_call["metadata"] == {"environment_name": "task", "session_id": "t__env"}
+    assert harbor_call["envs"] == {"TASK_SETTING": "from-the-task", "TRIAL_SETTING": "from-the-trial"}
+    assert harbor_call["network"] == {"allow_out": ["pypi.org"], "deny_out": [e2b.ALL_TRAFFIC]}
+    assert harbor_call["timeout"] == 120 + 900 + 300 + 3600 and "lifecycle" not in harbor_call
+    # Every argument of Harbor's call, and one more: delete the sandbox at its timeout, never pause it.
+    assert calls["reef"][-1] == {**harbor_call, "lifecycle": {"on_timeout": "kill"}}

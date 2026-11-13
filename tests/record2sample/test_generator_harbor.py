@@ -15,6 +15,7 @@ import pytest
 
 from reef.core.tasks import read_harbor_task, write_harbor_task
 from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessScope
+from reef.execution.sandbox.task_environment import HARBOR_E2B_ENVIRONMENT
 from reef.record2sample.generator import (
     GeneratedHarborTask,
     HarborReply,
@@ -366,10 +367,15 @@ def test_an_e2b_check_runs_both_agents_in_e2b_and_harbor_sees_the_e2b_key(
     harbor = fake_harbor(tmp_path, {"oracle": 1.0, "nop": 0.0}, record_path=str(record_path))
     assert oracle_check(root, harbor=harbor, environment="e2b").is_solvable
     jobs = tmp_path / "tasks" / ".harbor-jobs" / root.name
-    # The harbor child inherits the generator's environment, so Harbor's E2B environment finds the key.
+    # The child gets the environment of an in-process trial: ``-e`` names Reef's class, which deletes the sandbox at
+    # its timeout (``-e e2b`` would select Harbor's own), and ``--ek`` the lifetime of the task's build (600), agent
+    # (900) and verifier (300) limits plus an hour. It inherits the generator's environment, so it finds the key.
     assert harbor_runs(record_path) == [
         {
-            "arguments": ["run", "-p", str(root), "-a", agent, "-e", "e2b", "-o", str(jobs / agent), "-n", "1"],
+            "arguments": [
+                *("run", "-p", str(root), "-a", agent, "-e", HARBOR_E2B_ENVIRONMENT, "-o", str(jobs / agent)),
+                *("-n", "1", "--ek", f"sandbox_timeout_secs={600 + 900 + 300 + 3600}"),
+            ],
             "e2b_api_key": "e2b-test-key",
         }
         for agent in ("oracle", "nop")

@@ -5,8 +5,9 @@ limits and execution adapters. The shared ``reef.execution.processes`` module ow
 child processes, termination grace and reaping. Callers bind an executor to a ``SandboxProgram``
 and open sessions through that interface, without knowing the sandbox kind.
 ``config`` builds the executor a deployment's ``executor`` setting selects, and
-``task_environment`` names the Harbor task environments and checks what each
-needs. ``remote`` owns cloud sessions, file transfer and gateway
+``task_environment`` names the Harbor task environments, checks what each
+needs and gives a trial's environment config; ``harbor_e2b`` is Harbor's E2B
+task environment with each sandbox deleted at its timeout. ``remote`` owns cloud sessions, file transfer and gateway
 tunnels for any provider, and the credentials of the remote Harbor task
 environments; ``e2b`` and ``modal`` add each provider's sandbox. ``environment`` adapts any executor to
 ``harbor.environments.base.BaseEnvironment``. Harness rendering and evaluation

@@ -22,7 +22,6 @@ import math
 import os
 import re
 import sys
-import tomllib
 import urllib.parse
 import urllib.request
 import uuid
@@ -39,6 +38,7 @@ from reef.core.errors import InternalError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.execution.sandbox.task_environment import environment_config
 from reef.harness.capture import CaptureObserver, CaptureProxy
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
@@ -53,13 +53,6 @@ PLACEHOLDER_API_KEY = "reef"
 #: A label rides every call as an ``x-reef-tag-<name>`` header; the service keeps the name in lower case.
 LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 RESERVED_LABELS = ("task", "rollout")
-#: Harbor's time limits for a task whose ``task.toml`` names none, in seconds.
-HARBOR_BUILD_TIMEOUT_S = 600
-HARBOR_VERIFIER_TIMEOUT_S = 600
-#: What a Modal sandbox lives beyond its task's time limits: the agent's install and the trial's file transfers.
-MODAL_SANDBOX_MARGIN_S = 3600
-#: Harbor's default lifetime of a Modal sandbox, in seconds.
-MODAL_SANDBOX_MAX_S = 24 * 60 * 60
 
 
 class TaskRolloutError(InternalError, RuntimeError):
@@ -219,38 +212,6 @@ def task_identity(task_path: Path) -> dict[str, str]:
     with contextlib.suppress(HarborTaskError):
         identity["digest"] = read_harbor_task(task_path).digest
     return identity
-
-
-def environment_config(environment: str, task_path: Path) -> dict[str, object]:
-    """The Harbor environment config of a rollout of ``task_path`` in the Harbor environment type ``environment``.
-
-    It is ``{"type": environment}``, plus these Harbor kwargs when ``environment`` is ``modal``:
-
-    - ``modal_vm_runtime`` is True when the task has ``environment/docker-compose.yaml`` and its ``task.toml`` asks
-      for no GPU. Modal's default runtime puts each Compose service on the host network, and Compose refuses that
-      for a service that names its networks. The VM runtime keeps the task's networks and their DNS aliases, but it
-      has no GPUs.
-    - ``sandbox_timeout_secs`` is the lifetime of the sandbox when ``task.toml`` gives the agent a time limit: the
-      task's build, agent, and verifier time limits plus ``MODAL_SANDBOX_MARGIN_S``, at most Harbor's default of one
-      day. Harbor stops the sandbox when the trial ends. This lifetime ends the sandbox of a trial whose process was
-      killed, which no one stops. A task with no agent time limit keeps Harbor's default.
-    """
-    if environment != "modal":
-        return {"type": environment}
-    task = tomllib.loads((task_path / "task.toml").read_text())
-    task_environment = task.get("environment", {})
-    kwargs: dict[str, object] = {}
-    if (task_path / "environment" / "docker-compose.yaml").is_file() and task_environment.get("gpus", 0) == 0:
-        kwargs["modal_vm_runtime"] = True
-    agent_timeout_seconds = task.get("agent", {}).get("timeout_sec")
-    if agent_timeout_seconds is not None:
-        trial_seconds = (
-            task_environment.get("build_timeout_sec", HARBOR_BUILD_TIMEOUT_S)
-            + agent_timeout_seconds
-            + task.get("verifier", {}).get("timeout_sec", HARBOR_VERIFIER_TIMEOUT_S)
-        )
-        kwargs["sandbox_timeout_secs"] = min(math.ceil(trial_seconds) + MODAL_SANDBOX_MARGIN_S, MODAL_SANDBOX_MAX_S)
-    return {"type": environment, "kwargs": kwargs} if kwargs else {"type": environment}
 
 
 def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
@@ -494,12 +455,16 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         return list(await asyncio.gather(*(run_one(task_path) for task_path in task_paths)))
 
     async def build_task_environment(self, task_path: Path, slots: asyncio.Semaphore) -> str:
-        """Start and stop the task's environment, holding one of ``slots``: "", or the error of the second failed try."""
+        """Start and stop the task's environment, holding one of ``slots``: "", or the error of the second failed try.
+
+        The build gets the environment config of the task's rollouts, which holds the time limits of this runner's
+        agent (``environment_config``).
+        """
         error = ""
         for _ in range(2):
             async with slots:
                 error = await self.lab.build_environment(
-                    task_path, overrides={"environment": environment_config(self.environment, task_path)}
+                    task_path, overrides={"environment": environment_config(self.environment, task_path, self.agent)}
                 )
             if not error:
                 break
@@ -531,7 +496,9 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         try:
             base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
             agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
-            overrides: dict[str, object] = {"environment": environment_config(self.environment, task_path)}
+            # The environment config reads the agent's own time limits, so a cloud sandbox lives for them. They are
+            # numbers, which bound_agent leaves as they are, so the task's build gets the same config.
+            overrides: dict[str, object] = {"environment": environment_config(self.environment, task_path, self.agent)}
             if self.extra_instruction_paths:
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
             row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)

@@ -2171,7 +2171,7 @@ samples train.
        the Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must fit the training component's text chat: system, user and assistant text messages, no tools.
 
    ``rollout.environment`` : docker
-       the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``. On ``modal``, a task with ``environment/docker-compose.yaml`` and no GPU runs on Modal's VM runtime, so that its Compose networks work. A Modal sandbox of a task with an agent time limit lives for the task's build, agent, and verifier time limits plus one hour, at most one day
+       the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``. On ``modal``, a task with ``environment/docker-compose.yaml`` and no GPU runs on Modal's VM runtime, so that its Compose networks work. An E2B or Modal sandbox of a rollout whose agent has a time limit lives for the task's build, agent, and verifier time limits plus one hour. An ``override_timeout_sec`` in ``rollout.agent`` replaces the task's agent time limit in that sum, and an ``override_setup_timeout_sec`` adds to it. The lifetime is at most one day, which is Harbor's default: a longer rollout loses its sandbox then. An E2B sandbox is deleted at the end of its lifetime, also on a self-hosted service that would pause it
 
    ``rollout.agent_host`` : none
        the host at which an agent inside the sandbox reaches the component's host; none for an agent on this host
@@ -2400,7 +2400,12 @@ check looks there, so ``generator.harbor`` must come from the same Python
 environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
 compose services), an agent inside the sandbox cannot reach a
 ``generator.agent-host`` on a private host, and E2B builds a template for each
-new task image. ``modal`` runs each task in a Modal sandbox. It needs
+new task image. The checks and the rollouts delete each E2B sandbox at the end of
+its lifetime, as ``rollout.environment`` describes; a check's ``harbor run`` names
+Reef's E2B environment class with ``-e`` and the lifetime with ``--ek``. A
+``harbor run -e e2b`` that Reef does not start uses Harbor's own E2B environment,
+which leaves the end of the sandbox to the service.
+``modal`` runs each task in a Modal sandbox. It needs
 ``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve``
 starts, and ``reef-infra[modal]`` in the generator's interpreter. ``execution.generator`` selects the generator's executor, so a
 deployment can place it on another host. The generator runs its proposals,

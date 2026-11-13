@@ -27,6 +27,15 @@ them:
   for each need: the Docker daemon; the E2B key, the e2b package and
   dockerfile-parse; or the two Modal token variables and the modal package.
   ``checked_task_environment`` refuses any other name.
+  ``environment_config(environment, task_path, agent)`` is the Harbor
+  environment config of a trial of the task with the Harbor agent config
+  ``agent``. On ``e2b`` and ``modal`` it bounds the sandbox's lifetime by the
+  trial's time limits: the task's, and the ``override_timeout_sec`` and
+  ``override_setup_timeout_sec`` of the agent config. The lifetime is at most
+  one day, which is Harbor's default. On ``e2b`` the config names the import
+  path of ``reef.execution.sandbox.harbor_e2b.KillOnTimeoutE2BEnvironment``,
+  Harbor's E2B environment with the sandbox deleted at the end of that
+  lifetime: a self-hosted service that speaks E2B's API can pause it instead.
 
 Every other caller uses these interfaces.
 
@@ -42,11 +51,18 @@ the task's agent and verifier in it and stops it.
 
 The generator service's checks (``harbor run -e`` children) and runs
 (in-process Harbor trials) use Harbor's task environment lifecycle. They select
-an environment by name and read its needs from ``reef.execution.sandbox.task_environment``.
+an environment by name and read its needs and its ``environment_config`` from
+``reef.execution.sandbox.task_environment``. Two callers apply that config.
+``reef.harness.harbor.rollouts.TaskRolloutRunner`` gives it to each in-process
+trial of the generator's runs and of the evaluation and training rollouts. On
+``e2b``, a generator check passes it to its child as
+``harbor run -e <import path> --ek sandbox_timeout_secs=<seconds>``.
 Checks share local process management with the executors through
 ``reef.execution.processes.ProcessScope``; their command arguments and scoring
 remain in the generator. The Terminus harness layers the two: an executor
-launches its runner, which then drives a Harbor task environment.
+launches its runner, which then drives a Harbor task environment. That runner
+gives Harbor the environment type alone. On ``e2b`` it gets Harbor's own E2B
+environment, which leaves the end of a sandbox to the service.
 
 Shared execution control
 ------------------------
