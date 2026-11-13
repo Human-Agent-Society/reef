@@ -139,13 +139,22 @@ def finalize_reef_slime_args(args: SlimeArguments, arguments: Sequence[str]) -> 
         args.reef_chained_before_train_step_hook_path = previous_before_step
         args.custom_megatron_before_train_step_hook_path = REEF_BEFORE_TRAIN_STEP_HOOK_PATH
 
-    if args.megatron_lora_rank:
-        previous_provider = args.custom_model_provider_path
-        if previous_provider != REEF_MODEL_PROVIDER_PATH:
-            args.reef_chained_model_provider_path = previous_provider
-            args.custom_model_provider_path = REEF_MODEL_PROVIDER_PATH
+    install_reef_model_provider(args)
 
     configure_reef_loss_args(args)
+
+
+def install_reef_model_provider(args: SlimeArguments) -> None:
+    """Point Slime's model provider at Reef's and chain the user's behind it; a second call changes nothing.
+
+    Every actor and critic builds through Reef's provider: it installs the
+    checkpoint's YaRN scaling and the LoRA adapters, and returns Slime's model
+    unchanged when the run uses neither.
+    """
+    previous_provider = args.custom_model_provider_path
+    if previous_provider != REEF_MODEL_PROVIDER_PATH:
+        args.reef_chained_model_provider_path = previous_provider
+        args.custom_model_provider_path = REEF_MODEL_PROVIDER_PATH
 
 
 def configure_reef_loss_args(args: SlimeArguments) -> None:
@@ -226,5 +235,6 @@ __all__ = [
     "add_reef_slime_arguments",
     "configure_reef_loss_args",
     "finalize_reef_slime_args",
+    "install_reef_model_provider",
     "loss_family_job_args",
 ]
