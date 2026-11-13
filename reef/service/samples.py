@@ -17,8 +17,8 @@ MAX_SAMPLES_PER_PAGE = 1000
 def list_samples(dispatcher: Dispatcher, scenario: str, *, after_sequence: int, limit: int) -> dict[str, Any]:
     """The stored samples after ``after_sequence``, at most ``limit``, as ``{scenario, samples, next}``.
 
-    Each sample is ``{sample_id, sequence, kind, split, component, group, benchmark, train_counts}``, one for each
-    use: ``benchmark`` is the held benchmark that gives the use, or null (RFC #1420). ``next`` is the
+    Each sample is ``{sample_id, sequence, kind, split, component, group, held_set, train_counts}``, one for each
+    use: ``held_set`` is the name of the held benchmark or trajectory set that gives the use, or null (RFC #1420). ``next`` is the
     ``after`` of the next page, or None after the last sample. Raise ``ValueError`` for a negative
     ``after_sequence`` or a ``limit`` outside 1 to ``MAX_SAMPLES_PER_PAGE``.
     """
@@ -35,7 +35,7 @@ def list_samples(dispatcher: Dispatcher, scenario: str, *, after_sequence: int, 
                 "split": stored.split,
                 "component": stored.component,
                 "group": stored.group,
-                "benchmark": stored.benchmark,
+                "held_set": stored.held_set,
                 "train_counts": dict(stored.train_counts),
             }
             for stored in page

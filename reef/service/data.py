@@ -41,6 +41,7 @@ from reef.storage.data import (
     check_owner,
     check_scenarios,
     created_metadata,
+    held_sets,
     patched_metadata,
 )
 from reef.storage.data_queue import DATA_SYNC_QUEUE
@@ -121,12 +122,16 @@ def new_use(kind: str, split: str) -> Use:
 
 def using_scenarios(store: DataStore, owner: str, metadata: Iterable[Mapping[str, Any]]) -> set[str]:
     """The scenarios that use an item with one of ``metadata``: those of its ``scenarios``, and those that hold one
-    of its ``benchmarks`` (RFC #1420). A write of such an item syncs them."""
+    of its sets (``held_sets``, RFC #1420). A write of such an item syncs them."""
     values = list(metadata)
     scenarios = {scenario for value in values for scenario in value.get("scenarios", {})}
-    benchmarks = sorted({benchmark for value in values for benchmark in value.get("benchmarks", ())})
-    if benchmarks:
-        scenarios.update(store.holding_scenarios(owner, benchmarks))
+    sets: dict[str, set[str]] = {}
+    for value in values:
+        kind, names = held_sets(value) or ("", ())
+        sets.setdefault(kind, set()).update(names)
+    for set_kind, set_names in sorted(sets.items()):
+        if set_names:
+            scenarios.update(store.holding_scenarios(owner, set_kind, sorted(set_names)))
     return scenarios
 
 
@@ -244,13 +249,15 @@ def store_items(data: DataAccess, owner: str, items: Sequence[NewItem], *, wait:
     if not 1 <= len(items) <= MAX_ITEMS_PER_CREATE:
         raise ValueError(f"a create call holds 1 to {MAX_ITEMS_PER_CREATE} items")
     uses: dict[str, list[Use]] = {}
-    for item in items:
-        checked = created_metadata(owner, item.metadata)
+    created = [created_metadata(owner, item.metadata) for item in items]
+    for checked in created:
         for scenario, split in checked["scenarios"].items():
             uses.setdefault(scenario, []).append(new_use(checked["kind"], split))
     check_uses(data, owner, uses)
-    stored = data.require_store().create(owner, list(items))
-    synced = sync_touched(data, owner, uses, wait=wait)
+    store = data.require_store()
+    stored = store.create(owner, list(items))
+    # A scenario that holds the trajectory set of a new trajectory uses it too.
+    synced = sync_touched(data, owner, using_scenarios(store, owner, created), wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
@@ -315,7 +322,8 @@ def create_task_directories(
     stored = store.create(
         owner, [NewItem(directory.name, directory, {**metadata, "kind": "task"}) for directory in directories]
     )
-    synced = sync_touched(data, owner, using_scenarios(store, owner, [metadata]) | set(scenarios), wait=wait)
+    used = using_scenarios(store, owner, [{**metadata, "kind": "task", "scenarios": scenarios}])
+    synced = sync_touched(data, owner, used, wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 

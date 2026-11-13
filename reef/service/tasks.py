@@ -79,7 +79,7 @@ def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]
             {
                 "name": task.sample_id,
                 "split": task.split,
-                "benchmark": task.benchmark,
+                "benchmark": task.held_set,
                 "files_digest": task.digest,
                 "trained": bool(task.train_counts),
             }

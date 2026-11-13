@@ -171,19 +171,17 @@ def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path)
         assert added.status == 200, await added.text()
         receipt = await added.json()
         assert (receipt["task_count"], receipt["synced"]) == (2, True)
-        assert receipt["benchmarks"] == [
-            {"scenario": "math", "benchmark": "lite", "split": "eval", "task_count": 1},
-            {"scenario": "math", "benchmark": "full", "split": "eval", "task_count": 2},
+        assert receipt["holds"] == [
+            {"scenario": "math", "kind": "benchmark", "name": "lite", "split": "eval", "item_count": 1},
+            {"scenario": "math", "kind": "benchmark", "name": "full", "split": "eval", "item_count": 2},
         ]
         # The scenario holds the benchmarks, so it uses their tasks, and no task item changed.
         used = await (await client.get(f"{base}?kind=task&scenario=math", headers=AUTH)).json()
         assert {item["id"]: item["metadata"]["scenarios"] for item in used["items"]} == {"add": {}, "sort": {}}
         held = "/reef/namespaces/acme/scenarios/math/benchmarks"
         holds = await (await client.get(held, headers=AUTH)).json()
-        assert [(hold["benchmark"], hold["split"]) for hold in holds["benchmarks"]] == [
-            ("full", "eval"),
-            ("lite", "eval"),
-        ]
+        assert holds["kind"] == "benchmark"
+        assert [(hold["name"], hold["split"]) for hold in holds["holds"]] == [("full", "eval"), ("lite", "eval")]
         # A task in two held benchmarks is used once through each.
         tasks = (await (await client.get("/reef/scenarios/math/tasks", headers=AUTH)).json())["tasks"]
         assert sorted((task["name"], task["split"], task["benchmark"]) for task in tasks) == [
@@ -198,9 +196,10 @@ def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path)
         assert await one.json() == {
             "owner": "acme",
             "scenario": "math",
-            "benchmark": "extra",
+            "kind": "benchmark",
+            "name": "extra",
             "split": "eval",
-            "task_count": 1,
+            "item_count": 1,
             "synced": True,
         }
         joined = {"ids": ["sort"], "patch": {"benchmarks": ["full", "extra"]}}
@@ -215,6 +214,38 @@ def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path)
         # This recipe trains no imported task, so its scenario holds a benchmark for evaluation only.
         for body in ({"split": "train"}, {"split": "dev"}, {"split": "eval", "more": 1}, {}):
             assert (await client.put(f"{held}/extra", headers=AUTH, json=body)).status == 400, body
+
+        # A scenario holds trajectory sets too: it trains the trajectories of the set, with no mark on them.
+        sets = "/reef/namespaces/acme/scenarios/math/trajectory-sets"
+        await upload_trajectories(client, AUTH, "t1", "t2", scenario=None, base=base)
+        named = {"ids": ["t1"], "patch": {"set_id": "day-1"}}
+        assert (await client.post(f"{base}/metadata", headers=AUTH, json=named)).status == 200
+        one = await client.put(f"{sets}/day-1", headers=AUTH, json={})
+        assert one.status == 200, await one.text()
+        assert await one.json() == {
+            "owner": "acme",
+            "scenario": "math",
+            "kind": "trajectory_set",
+            "name": "day-1",
+            "split": "train",
+            "item_count": 1,
+            "synced": True,
+        }
+        assert (await client.put(f"{sets}/day-1", headers=AUTH, json={"split": "eval"})).status == 400
+        listed = await (await client.get(sets, headers=AUTH)).json()
+        assert [(hold["name"], hold["item_count"]) for hold in listed["holds"]] == [("day-1", 1)]
+
+        async def trajectories() -> list[tuple[str, str | None]]:
+            page = await (await client.get("/reef/scenarios/math/samples", headers=AUTH)).json()
+            return [(s["sample_id"], s["held_set"]) for s in page["samples"] if s["kind"] == "trajectory"]
+
+        assert await trajectories() == [("t1", "day-1")]
+        # A trajectory that joins the set joins the scenario, and the release of the set ends both uses.
+        joined = {"ids": ["t2"], "patch": {"set_id": "day-1"}}
+        assert (await client.post(f"{base}/metadata", headers=AUTH, json=joined)).status == 200
+        assert await trajectories() == [("t1", "day-1"), ("t2", "day-1")]
+        assert (await (await client.delete(f"{sets}/day-1", headers=AUTH)).json())["released"] is True
+        assert await trajectories() == []
         bad_split = {"scenario": "math", "split": "dev"}
         assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json=bad_split)).status == 400
         assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json={"scenario": "math"})).status == 400

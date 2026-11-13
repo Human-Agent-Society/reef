@@ -63,11 +63,11 @@ class StoredSample:
 
     Values: ``sequence`` is the positive sequence of the scenario's use of the item (``DataStore.scenario_items``),
     or the item's sequence when ``SampleStore.read`` read it. ``sample_id`` is the item's ID. ``split`` is the
-    split of that use: ``train``, or ``eval`` for an imported task that an evaluation runs. ``benchmark`` is the
-    held benchmark that gives the use (RFC #1420), or None for the use of the item's own mark. A scenario can use
-    one item more than once, so two values of one page can have one ``sample_id``. A value that ``SampleStore.read``
-    read stands for the item, not for one use: its ``split`` is ``train`` when a use of the item trains, and its
-    ``benchmark`` is None. ``sample`` is
+    split of that use: ``train``, or ``eval`` for an imported task that an evaluation runs. ``held_set`` is the
+    name of the held set that gives the use (RFC #1420), a benchmark for a task or a trajectory set for a
+    trajectory, or None for the use of the item's own mark. A scenario can use one item more than once, so two
+    values of one page can have one ``sample_id``. A value that ``SampleStore.read`` read stands for the item, not
+    for one use: its ``split`` is ``train`` when a use of the item trains, and its ``held_set`` is None. ``sample`` is
     the ``TrajectorySample`` or ``TaskSample`` of the item. ``train_counts`` maps each trainer (its component, or
     ``""`` for the only trainer of a scenario) to the positive number of its committed jobs that listed
     ``consumed_sample_id(sample_id)``. ``component`` is the trainer whose stage made the item, or None for an upload
@@ -84,7 +84,7 @@ class StoredSample:
     train_counts: Mapping[str, int] = field(default_factory=dict)
     component: str | None = None
     group: str | None = None
-    benchmark: str | None = None
+    held_set: str | None = None
 
     @property
     def kind(self) -> SampleKind:
@@ -99,7 +99,7 @@ class StoredSample:
 class ListedSample:
     """What a listing shows of one sample: the values of ``StoredSample`` without its content.
 
-    Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component``, ``group`` and ``benchmark``
+    Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component``, ``group`` and ``held_set``
     are those of ``StoredSample``. ``kind`` is the kind of its item, and ``digest`` is the digest of its item: of a task, the
     digest of its files.
 
@@ -115,7 +115,7 @@ class ListedSample:
     train_counts: Mapping[str, int]
     component: str | None
     group: str | None
-    benchmark: str | None = None
+    held_set: str | None = None
 
 
 class TrainingState(ABC):
@@ -227,7 +227,7 @@ class SampleStore:
             train_counts,
             None if own is None else own["component"],
             None if own is None else item.metadata.get("group"),
-            use.benchmark,
+            use.held_set,
         )
 
     def own_origin(self, item: StoredItem) -> Mapping[str, Any] | None:
@@ -300,7 +300,7 @@ class SampleStore:
             )
         component = None if own is None else own["component"]
         group = None if own is None else item.metadata.get("group")
-        return StoredSample(use.sequence, item.item_id, split, sample, train_counts, component, group, use.benchmark)
+        return StoredSample(use.sequence, item.item_id, split, sample, train_counts, component, group, use.held_set)
 
     def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         """Every task that the scenario uses and that no stage of it made, in use order; only ``split``'s if given."""

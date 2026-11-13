@@ -320,19 +320,19 @@ def test_a_task_that_the_scenario_uses_through_benchmarks_is_listed_for_each_use
     samples = scenario.samples
     scenario.task("task-a", "eval")
     scenario.data.update("acme", ["task-a"], {"benchmarks": ["suite", "more"]})
-    scenario.data.hold_benchmark("acme", "math", "suite", "train")
-    scenario.data.hold_benchmark("acme", "math", "more", "train")
+    scenario.data.hold("acme", "math", "benchmark", "suite", "train")
+    scenario.data.hold("acme", "math", "benchmark", "more", "train")
     uses = [("task-a", "eval", None), ("task-a", "train", "suite"), ("task-a", "train", "more")]
-    assert [(stored.sample_id, stored.split, stored.benchmark) for stored in samples.page(kind="task")] == uses
-    assert [(task.sample_id, task.split, task.benchmark) for task in samples.listed_imported_tasks()] == uses
-    assert [task.benchmark for task in samples.imported_tasks(split="eval")] == [None]
+    assert [(stored.sample_id, stored.split, stored.held_set) for stored in samples.page(kind="task")] == uses
+    assert [(task.sample_id, task.split, task.held_set) for task in samples.listed_imported_tasks()] == uses
+    assert [task.held_set for task in samples.imported_tasks(split="eval")] == [None]
     # A reader of the ID gets the item once: it trains when one of its uses trains.
     (read,) = samples.read(["task-a", "task-a"])
-    assert (read.sample_id, read.split, read.benchmark) == ("task-a", "train", None)
+    assert (read.sample_id, read.split, read.held_set) == ("task-a", "train", None)
     assert len(samples.task_paths(["task-a"])) == 1
 
     for benchmark in ("suite", "more"):
-        assert scenario.data.release_benchmark("acme", "math", benchmark)
+        assert scenario.data.release("acme", "math", "benchmark", benchmark)
     assert [stored.split for stored in samples.read(["task-a"])] == ["eval"]
     scenario.data.update("acme", ["task-a"], {"scenarios": {"math": None}})
     assert samples.read(["task-a"]) == () and samples.task_paths(["task-a"]) == ()

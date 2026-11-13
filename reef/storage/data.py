@@ -406,15 +406,34 @@ class ItemGroup:
             raise ValueError("a group's first_sequence is at most its last_sequence")
 
 
+#: The kinds of sets that a scenario holds, each with the kind of its items: a benchmark is a set of tasks, and a
+#: trajectory set is a set of trajectories.
+HOLD_ITEM_KINDS: Mapping[str, ItemKind] = {"benchmark": "task", "trajectory_set": "trajectory"}
+#: The metadata key of a trajectory item that names its trajectory set.
+TRAJECTORY_SET_KEY = "set_id"
+
+
+def held_sets(metadata: Mapping[str, Any]) -> tuple[str, tuple[str, ...]] | None:
+    """The sets that an item with ``metadata`` is in, with their kind (a key of ``HOLD_ITEM_KINDS``): the benchmarks
+    of a task (``benchmarks``), or the one trajectory set of a trajectory, when ``TRAJECTORY_SET_KEY`` is a
+    non-empty string. None for an item of another kind."""
+    if metadata["kind"] == "task":
+        return "benchmark", tuple(metadata.get("benchmarks", ()))
+    if metadata["kind"] == "trajectory":
+        name = metadata.get(TRAJECTORY_SET_KEY)
+        return "trajectory_set", (name,) if isinstance(name, str) and name else ()
+    return None
+
+
 @dataclass(frozen=True)
 class ItemUse:
     """One use of an item by a scenario.
 
     Values: ``sequence`` is a positive int, the sequence of the use: it increases across the store, and a new use
     and a use whose split changes get a new one. ``item`` is the used item. ``split`` is ``train`` or ``eval``.
-    ``benchmark`` is the benchmark that the scenario holds and through which it uses the item, or None for the use
-    that the item's own ``scenarios`` metadata gives. So a scenario has at most one use of an item with None, and at
-    most one for each benchmark of the item.
+    ``held_set`` is the name of the set that the scenario holds and through which it uses the item: a benchmark for
+    a task, a trajectory set for a trajectory. It is None for the use that the item's own ``scenarios`` metadata
+    gives. So a scenario has at most one use of an item with None, and at most one for each set of the item.
 
     Purpose: ``DataStore.scenario_items`` returns it. A trainer reads its scenario's items by the sequences.
     """
@@ -422,51 +441,51 @@ class ItemUse:
     sequence: int
     item: StoredItem
     split: str
-    benchmark: str | None = None
+    held_set: str | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
             raise ValueError("a use's sequence is a positive int")
         if self.split not in SPLIT_NAMES:
             raise ValueError(f"a use's split is one of {', '.join(SPLIT_NAMES)}")
-        if self.benchmark is not None and (not isinstance(self.benchmark, str) or not self.benchmark):
-            raise ValueError("a use's benchmark is None or a non-empty string")
+        if self.held_set is not None and (not isinstance(self.held_set, str) or not self.held_set):
+            raise ValueError("a use's held_set is None or a non-empty string")
 
 
 @dataclass(frozen=True)
-class BenchmarkHold:
-    """A scenario's hold of one benchmark (RFC #1420).
+class ScenarioHold:
+    """A scenario's hold of one set of items (RFC #1420).
 
-    Values: ``scenario`` and ``benchmark`` are non-empty strings. ``split`` is ``train`` or ``eval``. ``task_count``
-    is a non-negative int, the number of task items of the owner whose ``benchmarks`` metadata has ``benchmark``
-    when the value was made. The scenario uses each of those tasks in ``split`` through the benchmark
-    (``ItemUse.benchmark``); the membership is live, so a task that joins the benchmark later is used too.
+    Values: ``scenario`` and ``name`` are non-empty strings. ``kind`` is ``benchmark`` or ``trajectory_set``
+    (``HOLD_ITEM_KINDS``): ``name`` is then a benchmark, the task items of the owner whose ``benchmarks`` metadata
+    has it, or a trajectory set, the trajectory items whose ``TRAJECTORY_SET_KEY`` metadata is it. ``split`` is
+    ``train`` or ``eval``, and ``train`` for a trajectory set: a trajectory always trains. ``item_count`` is a
+    non-negative int, the number of items of the set when the value was made. The scenario uses each of those items
+    in ``split`` through the set (``ItemUse.held_set``); the membership is live, so an item that joins the set
+    later is used too.
 
-    Purpose: ``DataStore.hold_benchmark`` and ``DataStore.held_benchmarks`` return it, and the routes of a
-    scenario's benchmarks give it to a client.
+    Purpose: ``DataStore.hold`` and ``DataStore.holds`` return it, and the routes of a scenario's benchmarks and
+    trajectory sets give it to a client.
     """
 
     scenario: str
-    benchmark: str
+    kind: str
+    name: str
     split: str
-    task_count: int
+    item_count: int
 
     def __post_init__(self) -> None:
-        for name in ("scenario", "benchmark"):
-            value = getattr(self, name)
-            if not isinstance(value, str) or not value:
-                raise ValueError(f"a hold's {name} is a non-empty string")
-        if self.split not in SPLIT_NAMES:
-            raise ValueError(f"a hold's split is one of {', '.join(SPLIT_NAMES)}")
-        if isinstance(self.task_count, bool) or not isinstance(self.task_count, int) or self.task_count < 0:
-            raise ValueError("a hold's task_count is a non-negative int")
+        check_hold(self.scenario, self.kind, self.name, self.split)
+        if isinstance(self.item_count, bool) or not isinstance(self.item_count, int) or self.item_count < 0:
+            raise ValueError("a hold's item_count is a non-negative int")
 
     def to_json(self) -> dict[str, Any]:
         return {
             "scenario": self.scenario,
-            "benchmark": self.benchmark,
+            "kind": self.kind,
+            "name": self.name,
             "split": self.split,
-            "task_count": self.task_count,
+            "item_count": self.item_count,
         }
 
 
@@ -527,9 +546,10 @@ class DataStore(Plugin, JobDataReader, ABC):
       with these filters and no limit gives.
     * ``last_sequence(owner, kind, scenario, origin, request_type)`` returns the largest sequence of those items,
       or 0 when there is none.
-    * A scenario uses an item once for the item's own mark, when ``scenario`` is in its ``scenarios`` metadata, and
-      once for each benchmark of the item that the scenario holds (``hold_benchmark``, RFC #1420). So a task in two
-      held benchmarks has two uses, and a task can have a ``train`` use and an ``eval`` use.
+    * A scenario holds sets of items (``hold``, RFC #1420): benchmarks, which are sets of tasks, and trajectory
+      sets (``held_sets``). It uses an item once for the item's own mark, when ``scenario`` is in its ``scenarios``
+      metadata, and once for each set of the item that it holds. So a task in two held benchmarks has two uses, and
+      a task can have a ``train`` use and an ``eval`` use.
     * ``scenario_items(owner, scenario, kinds, after, limit)`` returns the uses (``ItemUse``) by ``scenario`` of the
       items of ``kinds`` of ``owner``, with content, in the order of their sequences: the uses after ``after``, at
       most ``limit``. The store reads no item of another kind; without ``content``, each item's ``content`` is None,
@@ -538,14 +558,14 @@ class DataStore(Plugin, JobDataReader, ABC):
       it. With ``excluding_origin``, the record items that this scenario made are left out.
     * ``item_splits(owner, scenario, item_ids)`` maps each ID of ``item_ids`` that ``scenario`` uses to the set of
       the splits of its uses. An ID that the scenario does not use is not a key.
-    * ``hold_benchmark(owner, scenario, benchmark, split)`` makes ``scenario`` hold ``benchmark`` in ``split`` and
-      returns the ``BenchmarkHold``. It writes no item. A hold that exists with another split gets ``split``, and
-      each of its uses a new sequence; the same split changes nothing.
-    * ``release_benchmark(owner, scenario, benchmark)`` ends the hold and its uses, and returns True, or returns
-      False when the scenario does not hold the benchmark.
-    * ``held_benchmarks(owner, scenario)`` returns the holds of ``scenario``, in the order of their benchmarks.
-    * ``holding_scenarios(owner, benchmarks)`` returns the scenarios that hold one of ``benchmarks``, in name
-      order. A write that changes the tasks of a benchmark wakes them.
+    * ``hold(owner, scenario, kind, name, split)`` makes ``scenario`` hold the set ``name`` of ``kind`` in ``split``
+      and returns the ``ScenarioHold``. It writes no item. A hold that exists with another split gets ``split``,
+      and each of its uses a new sequence; the same split changes nothing.
+    * ``release(owner, scenario, kind, name)`` ends the hold and its uses, and returns True, or returns False when
+      the scenario does not hold the set.
+    * ``holds(owner, scenario)`` returns the holds of ``scenario``, in the order of their kinds and names.
+    * ``holding_scenarios(owner, kind, names)`` returns the scenarios that hold one of the sets ``names`` of
+      ``kind``, in name order. A write that changes the items of a set wakes them.
     * ``last_use_sequence(owner, scenario)`` returns the sequence of the newest use by ``scenario``, or 0.
     * ``scenarios_with_records(owner)`` returns each scenario that uses a record item of ``owner``. A durable reader of record items keeps one cursor for each: a
       ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
@@ -719,16 +739,16 @@ class DataStore(Plugin, JobDataReader, ABC):
     def item_splits(self, owner: str, scenario: str, item_ids: Sequence[str]) -> dict[str, frozenset[str]]: ...
 
     @abstractmethod
-    def hold_benchmark(self, owner: str, scenario: str, benchmark: str, split: str) -> BenchmarkHold: ...
+    def hold(self, owner: str, scenario: str, kind: str, name: str, split: str) -> ScenarioHold: ...
 
     @abstractmethod
-    def release_benchmark(self, owner: str, scenario: str, benchmark: str) -> bool: ...
+    def release(self, owner: str, scenario: str, kind: str, name: str) -> bool: ...
 
     @abstractmethod
-    def held_benchmarks(self, owner: str, scenario: str) -> tuple[BenchmarkHold, ...]: ...
+    def holds(self, owner: str, scenario: str) -> tuple[ScenarioHold, ...]: ...
 
     @abstractmethod
-    def holding_scenarios(self, owner: str, benchmarks: Sequence[str]) -> tuple[str, ...]: ...
+    def holding_scenarios(self, owner: str, kind: str, names: Sequence[str]) -> tuple[str, ...]: ...
 
     @abstractmethod
     def last_use_sequence(self, owner: str, scenario: str) -> int: ...
@@ -854,14 +874,18 @@ class DataStore(Plugin, JobDataReader, ABC):
         """Release the store's resources. A second call does nothing."""
 
 
-def check_hold(owner: str, scenario: object, benchmark: object, split: object = "train") -> None:
-    """Raise ``ValueError`` unless the arguments name a hold of a benchmark by a scenario of ``owner``."""
-    check_owner(owner)
-    for name, value in (("scenario", scenario), ("benchmark", benchmark)):
+def check_hold(scenario: object, kind: object, name: object, split: object = "train") -> None:
+    """Raise ``ValueError`` unless the arguments name a hold by a scenario of the set ``name`` of ``kind`` in
+    ``split``: a benchmark in ``train`` or ``eval``, or a trajectory set in ``train``."""
+    if kind not in HOLD_ITEM_KINDS:
+        raise ValueError(f"a hold's kind is one of {', '.join(HOLD_ITEM_KINDS)}")
+    for label, value in (("scenario", scenario), ("name", name)):
         if not isinstance(value, str) or not value:
-            raise ValueError(f"a hold's {name} is a non-empty string")
+            raise ValueError(f"a hold's {label} is a non-empty string")
     if split not in SPLIT_NAMES:
         raise ValueError(f"a hold's split is one of {', '.join(SPLIT_NAMES)}")
+    if kind == "trajectory_set" and split != "train":
+        raise ValueError("a hold of a trajectory set is in the train split")
 
 
 def check_groups(owner: str, kind: object, key: object, scenario: object, before: object, limit: object) -> None:
@@ -987,8 +1011,8 @@ class MemoryDataStore(DataStore):
     """A data store in memory, for tests and for a deployment that keeps nothing.
 
     It keeps the items of each owner in a dict from ID to item, the split and the sequence of each use (``uses``,
-    by owner, item, scenario and benchmark, where "" stands for the item's own mark), the split of each hold of a
-    benchmark (``holds``), and the next sequence, which items and uses share. Task directories go to the task file store that it
+    by owner, item, scenario and held set, where "" stands for the item's own mark), the split of each hold
+    (``held``, by owner, scenario, kind and name), and the next sequence, which items and uses share. Task directories go to the task file store that it
     is given. ``trajectories`` links the record items of each owner and link scope (``record_link_scope``) as
     they are created; a deleted item stays there as a link of later calls.
     """
@@ -1003,7 +1027,7 @@ class MemoryDataStore(DataStore):
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
         self.uses: dict[tuple[str, str, str, str], tuple[str, int]] = {}
-        self.holds: dict[tuple[str, str, str], str] = {}
+        self.held: dict[tuple[str, str, str, str], str] = {}
         self.generations: dict[tuple[str, str], str] = {}
         self.losses: dict[tuple[str, str], RecordLoss] = {}
         self.stored_collections: dict[str, dict[str, TaskCollection]] = {}
@@ -1015,26 +1039,29 @@ class MemoryDataStore(DataStore):
         return self.next_sequence - 1
 
     def write_uses(self, owner: str, item_id: str, metadata: Mapping[str, Any] | None) -> None:
-        """Make the uses of the item those that ``metadata`` gives: its own marks, and the holds of its benchmarks.
-        None stands for an item that is gone. An unchanged use keeps its sequence, and a new one gets its own."""
+        """Make the uses of the item those that ``metadata`` gives: its own marks, and the holds of its sets
+        (``held_sets``). None stands for an item that is gone. An unchanged use keeps its sequence, and a new one
+        gets its own."""
         wanted: dict[tuple[str, str], str] = {}
         if metadata is not None:
             wanted.update({(scenario, ""): split for scenario, split in metadata["scenarios"].items()})
-            benchmarks = metadata.get("benchmarks", ())
-            for (hold_owner, scenario, benchmark), split in self.holds.items():
-                if hold_owner == owner and benchmark in benchmarks:
-                    wanted[(scenario, benchmark)] = split
+            kind, names = held_sets(metadata) or ("", ())
+            for (hold_owner, scenario, hold_kind, name), split in self.held.items():
+                if (hold_owner, hold_kind) == (owner, kind) and name in names:
+                    wanted[(scenario, name)] = split
         for key in [key for key in self.uses if key[:2] == (owner, item_id) and key[2:] not in wanted]:
             self.uses.pop(key)
-        for (scenario, benchmark), split in wanted.items():
-            used = self.uses.get((owner, item_id, scenario, benchmark))
+        for (scenario, name), split in wanted.items():
+            used = self.uses.get((owner, item_id, scenario, name))
             if used is None or used[0] != split:
-                self.uses[(owner, item_id, scenario, benchmark)] = (split, self.take_sequence())
+                self.uses[(owner, item_id, scenario, name)] = (split, self.take_sequence())
 
-    def benchmark_items(self, owner: str, benchmark: str) -> list[StoredItem]:
-        """The task items of ``owner`` whose ``benchmarks`` metadata has ``benchmark``."""
+    def set_items(self, owner: str, kind: str, name: str) -> list[StoredItem]:
+        """The items of ``owner`` in the set ``name`` of ``kind`` (``held_sets``), in the order that they arrived."""
         return [
-            item for item in self.items.get(owner, {}).values() if benchmark in item.metadata.get("benchmarks", ())
+            item
+            for item in self.items.get(owner, {}).values()
+            if item.kind == HOLD_ITEM_KINDS[kind] and name in (held_sets(item.metadata) or ("", ()))[1]
         ]
 
     def item_splits(self, owner: str, scenario: str, item_ids: Sequence[str]) -> dict[str, frozenset[str]]:
@@ -1046,38 +1073,40 @@ class MemoryDataStore(DataStore):
                 found.setdefault(item_id, set()).add(split)
         return {item_id: frozenset(splits) for item_id, splits in found.items()}
 
-    def hold_benchmark(self, owner: str, scenario: str, benchmark: str, split: str) -> BenchmarkHold:
-        check_hold(owner, scenario, benchmark, split)
-        self.holds[(owner, scenario, benchmark)] = split
-        members = self.benchmark_items(owner, benchmark)
+    def hold(self, owner: str, scenario: str, kind: str, name: str, split: str) -> ScenarioHold:
+        check_owner(owner)
+        check_hold(scenario, kind, name, split)
+        self.held[(owner, scenario, kind, name)] = split
+        members = self.set_items(owner, kind, name)
         for item in members:
             self.write_uses(owner, item.item_id, item.metadata)
-        return BenchmarkHold(scenario, benchmark, split, len(members))
+        return ScenarioHold(scenario, kind, name, split, len(members))
 
-    def release_benchmark(self, owner: str, scenario: str, benchmark: str) -> bool:
-        check_hold(owner, scenario, benchmark)
-        if self.holds.pop((owner, scenario, benchmark), None) is None:
+    def release(self, owner: str, scenario: str, kind: str, name: str) -> bool:
+        check_owner(owner)
+        check_hold(scenario, kind, name)
+        if self.held.pop((owner, scenario, kind, name), None) is None:
             return False
-        for item in self.benchmark_items(owner, benchmark):
+        for item in self.set_items(owner, kind, name):
             self.write_uses(owner, item.item_id, item.metadata)
         return True
 
-    def held_benchmarks(self, owner: str, scenario: str) -> tuple[BenchmarkHold, ...]:
+    def holds(self, owner: str, scenario: str) -> tuple[ScenarioHold, ...]:
         check_owner(owner)
         return tuple(
-            BenchmarkHold(scenario, benchmark, split, len(self.benchmark_items(owner, benchmark)))
-            for (hold_owner, hold_scenario, benchmark), split in sorted(self.holds.items())
+            ScenarioHold(scenario, kind, name, split, len(self.set_items(owner, kind, name)))
+            for (hold_owner, hold_scenario, kind, name), split in sorted(self.held.items())
             if hold_owner == owner and hold_scenario == scenario
         )
 
-    def holding_scenarios(self, owner: str, benchmarks: Sequence[str]) -> tuple[str, ...]:
+    def holding_scenarios(self, owner: str, kind: str, names: Sequence[str]) -> tuple[str, ...]:
         check_owner(owner)
         return tuple(
             sorted(
                 {
                     scenario
-                    for hold_owner, scenario, benchmark in self.holds
-                    if hold_owner == owner and benchmark in benchmarks
+                    for hold_owner, scenario, hold_kind, name in self.held
+                    if (hold_owner, hold_kind) == (owner, kind) and name in names
                 }
             )
         )
@@ -1254,8 +1283,8 @@ class MemoryDataStore(DataStore):
         check_query(owner, None, scenario, after, limit)
         stored = self.items.get(owner, {})
         used = sorted(
-            (sequence, item_id, split, benchmark)
-            for (use_owner, item_id, use_scenario, benchmark), (split, sequence) in self.uses.items()
+            (sequence, item_id, split, held_set)
+            for (use_owner, item_id, use_scenario, held_set), (split, sequence) in self.uses.items()
             if use_owner == owner
             and use_scenario == scenario
             and sequence > after
@@ -1267,9 +1296,9 @@ class MemoryDataStore(DataStore):
                 sequence,
                 stored[item_id] if content else replace(stored[item_id], content=None),
                 split,
-                benchmark or None,
+                held_set or None,
             )
-            for sequence, item_id, split, benchmark in used[:limit]
+            for sequence, item_id, split, held_set in used[:limit]
         )
 
     def scenarios_with_records(self, owner: str) -> tuple[str, ...]:
@@ -1340,8 +1369,8 @@ class MemoryDataStore(DataStore):
         check_owner(owner)
         stored = self.items.get(owner, {})
         used = [item for item in stored.values() if scenario in item.scenarios]
-        for hold in [hold for hold in self.holds if hold[:2] == (owner, scenario)]:
-            self.holds.pop(hold)
+        for hold in [hold for hold in self.held if hold[:2] == (owner, scenario)]:
+            self.held.pop(hold)
         for use in [use for use in self.uses if (use[0], use[2]) == (owner, scenario)]:
             self.uses.pop(use)
         for item in used:

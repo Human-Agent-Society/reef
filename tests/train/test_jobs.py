@@ -617,7 +617,7 @@ def test_a_task_in_a_train_benchmark_and_an_eval_benchmark_trains_once(component
     data.create(owner, [NewItem("task-a", task, {"kind": "task", "benchmarks": ["suite", "more", "held"]})])
     # The scenario uses the task three times: twice to train, and then once to evaluate.
     for benchmark, split in (("suite", "train"), ("more", "train"), ("held", "eval")):
-        data.hold_benchmark(owner, "math", benchmark, split)
+        data.hold(owner, "math", "benchmark", benchmark, split)
     trainer = Trainer.build(
         "math",
         session.records,
@@ -637,6 +637,6 @@ def test_a_task_in_a_train_benchmark_and_an_eval_benchmark_trains_once(component
     trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
     # A new train use of the trained task starts no second job.
     data.update(owner, ["task-a"], {"benchmarks": ["suite", "more", "held", "again"]})
-    data.hold_benchmark(owner, "math", "again", "train")
+    data.hold(owner, "math", "benchmark", "again", "train")
     trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
     assert len(component.jobs) == 1

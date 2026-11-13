@@ -18,6 +18,7 @@ from tests.support.conversations import conversation
 from tests.support.trajectories import policy_trajectory
 
 from reef.core.atif_payloads import canonical_json
+from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
 from reef.core.job_data import JobData
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
@@ -25,13 +26,13 @@ from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.data import (
-    BenchmarkHold,
     ItemConflictError,
     ItemNotFoundError,
     MemoryDataStore,
     NewItem,
     RecordLink,
     ScenarioArchivedError,
+    ScenarioHold,
 )
 from reef.storage.item_kinds import json_digest
 from reef.storage.job_data import job_data_key
@@ -1113,11 +1114,11 @@ def benchmark_task(tmp_path, name: str, *benchmarks: str, **metadata) -> NewItem
     return NewItem(name, directory, {"kind": "task", "benchmarks": list(benchmarks), **metadata})
 
 
-def uses_of(store, scenario: str, after: int = 0) -> list[tuple[str, str, str | None]]:
-    """Each use by ``scenario`` of a task of acme after ``after``, in use order: item, split, benchmark."""
-    uses = store.scenario_items("acme", scenario, kinds=("task",), after=after, content=False)
+def uses_of(store, scenario: str, after: int = 0, kind: str = "task") -> list[tuple[str, str, str | None]]:
+    """Each use by ``scenario`` of an item of ``kind`` of acme after ``after``, in use order: item, split, held set."""
+    uses = store.scenario_items("acme", scenario, kinds=(kind,), after=after, content=False)
     assert [use.sequence for use in uses] == sorted({use.sequence for use in uses}), "each use has its own sequence"
-    return [(use.item.item_id, use.split, use.benchmark) for use in uses]
+    return [(use.item.item_id, use.split, use.held_set) for use in uses]
 
 
 def test_a_scenario_that_holds_a_benchmark_uses_its_tasks_without_a_write_to_them(store, tmp_path):
@@ -1125,29 +1126,37 @@ def test_a_scenario_that_holds_a_benchmark_uses_its_tasks_without_a_write_to_the
     store.create("acme", [benchmark_task(tmp_path, "sort", "lists")])
     before = {item.item_id: item.metadata for item in store.query("acme", kind="task")}
 
-    assert store.hold_benchmark("acme", "coding", "math", "train") == BenchmarkHold("coding", "math", "train", 2)
+    held = ScenarioHold("coding", "benchmark", "math", "train", 2)
+    assert store.hold("acme", "coding", "benchmark", "math", "train") == held
 
     assert uses_of(store, "coding") == [("add", "train", "math"), ("sub", "train", "math")]
     assert {item.item_id: item.metadata for item in store.query("acme", kind="task")} == before
     assert [item.item_id for item in store.query("acme", scenario="coding")] == ["add", "sub"]
     assert store.item_splits("acme", "coding", ["add", "sort", "none"]) == {"add": frozenset({"train"})}
-    assert store.held_benchmarks("acme", "coding") == (BenchmarkHold("coding", "math", "train", 2),)
-    assert store.held_benchmarks("acme", "other") == () and uses_of(store, "other") == []
-    assert store.holding_scenarios("acme", ["math", "lists"]) == ("coding",)
+    assert store.holds("acme", "coding") == (held,)
+    assert store.holds("acme", "other") == () and uses_of(store, "other") == []
+    assert store.holding_scenarios("acme", "benchmark", ["math", "lists"]) == ("coding",)
+    assert store.holding_scenarios("acme", "trajectory_set", ["math"]) == ()
     # The same hold again changes nothing, and another owner's scenario holds nothing of acme.
     last = store.last_use_sequence("acme", "coding")
-    store.hold_benchmark("acme", "coding", "math", "train")
+    store.hold("acme", "coding", "benchmark", "math", "train")
     assert store.last_use_sequence("acme", "coding") == last
-    assert store.hold_benchmark("other", "coding", "math", "train").task_count == 0
-    for arguments in (("coding", "", "train"), ("", "math", "train"), ("coding", "math", "test")):
-        with pytest.raises(ValueError, match="a hold's"):
-            store.hold_benchmark("acme", *arguments)
+    assert store.hold("other", "coding", "benchmark", "math", "train").item_count == 0
+    for arguments in (
+        ("coding", "benchmark", "", "train"),
+        ("", "benchmark", "math", "train"),
+        ("coding", "benchmark", "math", "test"),
+        ("coding", "collection", "math", "train"),
+        ("coding", "trajectory_set", "day-1", "eval"),
+    ):
+        with pytest.raises(ValueError, match="a hold"):
+            store.hold("acme", *arguments)
 
 
 def test_a_task_has_one_use_for_its_own_mark_and_one_for_each_held_benchmark_of_it(store, tmp_path):
     store.create("acme", [benchmark_task(tmp_path, "add", "math", "easy", scenarios={"coding": "eval"})])
-    store.hold_benchmark("acme", "coding", "math", "train")
-    store.hold_benchmark("acme", "coding", "easy", "train")
+    store.hold("acme", "coding", "benchmark", "math", "train")
+    store.hold("acme", "coding", "benchmark", "easy", "train")
     # A task in two held benchmarks is there twice, and it can train and be evaluated at the same time.
     assert uses_of(store, "coding") == [("add", "eval", None), ("add", "train", "math"), ("add", "train", "easy")]
     assert store.item_splits("acme", "coding", ["add"]) == {"add": frozenset({"train", "eval"})}
@@ -1155,21 +1164,22 @@ def test_a_task_has_one_use_for_its_own_mark_and_one_for_each_held_benchmark_of_
 
     # A hold that changes its split begins its uses again, after the others.
     last = store.last_use_sequence("acme", "coding")
-    assert store.hold_benchmark("acme", "coding", "easy", "eval").split == "eval"
+    assert store.hold("acme", "coding", "benchmark", "easy", "eval").split == "eval"
     assert uses_of(store, "coding", after=last) == [("add", "eval", "easy")]
 
-    assert store.release_benchmark("acme", "coding", "math") and not store.release_benchmark("acme", "coding", "math")
+    assert store.release("acme", "coding", "benchmark", "math")
+    assert not store.release("acme", "coding", "benchmark", "math")
     assert uses_of(store, "coding") == [("add", "eval", None), ("add", "eval", "easy")]
     # The end of a scenario ends its holds, so a new scenario of that name uses nothing.
     assert store.delete_scenario("acme", "coding") == 1
-    assert uses_of(store, "coding") == [] and store.held_benchmarks("acme", "coding") == ()
-    assert store.holding_scenarios("acme", ["easy"]) == ()
+    assert uses_of(store, "coding") == [] and store.holds("acme", "coding") == ()
+    assert store.holding_scenarios("acme", "benchmark", ["easy"]) == ()
 
 
 def test_a_task_that_joins_or_leaves_a_held_benchmark_joins_or_leaves_the_scenario(store, tmp_path):
     store.create("acme", [benchmark_task(tmp_path, "add", "math"), benchmark_task(tmp_path, "sort")])
-    store.hold_benchmark("acme", "coding", "math", "train")
-    store.hold_benchmark("acme", "review", "math", "eval")
+    store.hold("acme", "coding", "benchmark", "math", "train")
+    store.hold("acme", "review", "benchmark", "math", "eval")
     last = store.last_use_sequence("acme", "coding")
 
     # A patch of the benchmarks and a new item both give the holding scenarios a use, after the earlier uses.
@@ -1177,14 +1187,14 @@ def test_a_task_that_joins_or_leaves_a_held_benchmark_joins_or_leaves_the_scenar
     store.create("acme", [benchmark_task(tmp_path, "mul", "math")])
     assert uses_of(store, "coding", after=last) == [("sort", "train", "math"), ("mul", "train", "math")]
     assert uses_of(store, "review") == [("add", "eval", "math"), ("sort", "eval", "math"), ("mul", "eval", "math")]
-    assert store.held_benchmarks("acme", "coding")[0].task_count == 3
+    assert store.holds("acme", "coding")[0].item_count == 3
 
     # A patch that leaves the benchmarks keeps the uses of the holds and their sequences.
     kept = store.scenario_items("acme", "coding", kinds=("task",), content=False)
     store.update("acme", ["add"], {"scenarios": {"coding": "eval"}, "note": "x"})
     after = store.scenario_items("acme", "coding", kinds=("task",), content=False)
-    assert [(use.sequence, use.benchmark) for use in after if use.benchmark] == [
-        (use.sequence, use.benchmark) for use in kept
+    assert [(use.sequence, use.held_set) for use in after if use.held_set] == [
+        (use.sequence, use.held_set) for use in kept
     ]
     assert ("add", "eval", None) in uses_of(store, "coding")
 
@@ -1202,25 +1212,62 @@ def test_a_task_that_joins_or_leaves_a_held_benchmark_joins_or_leaves_the_scenar
     assert [use[0] for use in uses_of(store, "review")] == ["mul"]
 
 
-def test_a_store_adopts_the_uses_of_the_earlier_table_in_their_order(tmp_path):
-    task_files = LocalTaskFileStore(tmp_path / "task-files")
-    with closing(task_files), closing(SQLiteDataStore(tmp_path / "data", task_files)) as store:
+def test_a_scenario_that_holds_a_trajectory_set_uses_its_trajectories(store, tmp_path):
+    store.create("acme", [trajectory("t1", set_id="day-1"), trajectory("t2", set_id="day-2"), trajectory("t3")])
+    # A benchmark with the name of the set is another set: its task is no trajectory.
+    store.create("acme", [benchmark_task(tmp_path, "add", "day-1")])
+    held = store.hold("acme", "coding", "trajectory_set", "day-1", "train")
+    assert held == ScenarioHold("coding", "trajectory_set", "day-1", "train", 1)
+    assert uses_of(store, "coding", kind="trajectory") == [("t1", "train", "day-1")]
+    assert uses_of(store, "coding") == [] and store.read("acme", "t1").scenarios == {}
+
+    # A trajectory joins the set by a patch or by its create, and leaves it with another set.
+    last = store.last_use_sequence("acme", "coding")
+    store.update("acme", ["t3"], {"set_id": "day-1"})
+    store.create("acme", [trajectory("t4", "four", set_id="day-1")])
+    assert uses_of(store, "coding", after=last, kind="trajectory") == [
+        ("t3", "train", "day-1"),
+        ("t4", "train", "day-1"),
+    ]
+    store.update("acme", ["t1"], {"set_id": "day-2"})
+    assert [use[0] for use in uses_of(store, "coding", kind="trajectory")] == ["t3", "t4"]
+    assert store.holding_scenarios("acme", "trajectory_set", ["day-1", "day-2"]) == ("coding",)
+
+    # The scenario holds the benchmark of that name too: the release of the set keeps the task's use.
+    store.hold("acme", "coding", "benchmark", "day-1", "eval")
+    assert [(hold.kind, hold.item_count) for hold in store.holds("acme", "coding")] == [
+        ("benchmark", 1),
+        ("trajectory_set", 2),
+    ]
+    assert store.release("acme", "coding", "trajectory_set", "day-1")
+    assert uses_of(store, "coding", kind="trajectory") == [] and uses_of(store, "coding") == [("add", "eval", "day-1")]
+
+
+def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_store):
+    with closing(open_durable_store()) as store:
         store.create("acme", [trajectory("t1"), trajectory("t2"), trajectory("t3")])
+        schema = store.uses_table.schema
+        prefix = "" if schema is None else f"{schema}."
         with store.transaction() as connection:
-            # A database of a store before RFC #1420: the uses are in data_item_scenario.
+            # A database of version 1: the uses are in data_item_scenario, and no table records the version.
+            connection.exec_driver_sql(f"DROP TABLE {prefix}data_schema_version")
             connection.exec_driver_sql(
-                "CREATE TABLE data_item_scenario (sequence INTEGER PRIMARY KEY, owner TEXT, item_id TEXT,"
+                f"CREATE TABLE {prefix}data_item_scenario (sequence INTEGER PRIMARY KEY, owner TEXT, item_id TEXT,"
                 " scenario TEXT, split VARCHAR(8))"
             )
             connection.exec_driver_sql(
-                "INSERT INTO data_item_scenario (sequence, owner, item_id, scenario, split) VALUES"
+                f"INSERT INTO {prefix}data_item_scenario (sequence, owner, item_id, scenario, split) VALUES"
                 " (7, 'acme', 't3', 'coding', 'train'), (9, 'acme', 't1', 'coding', 'train')"
             )
-    with closing(SQLiteDataStore(tmp_path / "data", task_files)) as store:
-        uses = store.scenario_items("acme", "coding", kinds=("trajectory",), content=False)
-        assert [(use.item.item_id, use.split, use.benchmark) for use in uses] == [
-            ("t3", "train", None),
-            ("t1", "train", None),
-        ]
-        with store.transaction(read_only=True) as connection:
-            assert not sqlalchemy.inspect(connection).has_table("data_item_scenario")
+    for _ in range(2):
+        # The second open finds version 2 and changes nothing.
+        with closing(open_durable_store()) as store:
+            assert uses_of(store, "coding", kind="trajectory") == [("t3", "train", None), ("t1", "train", None)]
+            with store.transaction(read_only=True) as connection:
+                assert not sqlalchemy.inspect(connection).has_table("data_item_scenario", schema=schema)
+                versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
+                assert versions.fetchall() == [(2,)]
+    with closing(open_durable_store()) as store, store.transaction() as connection:
+        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 3")
+    with pytest.raises(ReefError, match="a later Reef wrote them"):
+        open_durable_store()
