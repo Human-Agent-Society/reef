@@ -251,7 +251,7 @@ class SpindleFullFacts(TrainingBackendFacts):
             return {"files": files.checksum()}
         manifest = self.validated(manifest_of(files)).to_dict()
         if REFERENCE_FILE not in files.paths():
-            raise ValueError(f"a {self.name} release holds {REFERENCE_FILE} beside its manifest")
+            raise ValueError(f"a {self.name} snapshot holds {REFERENCE_FILE} beside its manifest")
         revision = HuggingFaceRevision.from_dict(json.loads(files.read_bytes(REFERENCE_FILE)))
         return {"manifest": manifest, "weights": revision.to_dict()}
 

@@ -8,7 +8,7 @@ import secrets
 import socket
 import sys
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -185,7 +185,7 @@ def local_inference_component(config: dict[str, Any], settings: ServiceSettings)
     control_token = os.environ.setdefault(remote.control_token_env, secrets.token_urlsafe(32))
     if os.environ.setdefault(remote.inference_token_env, secrets.token_urlsafe(32)) == control_token:
         raise DeployConfigError(f"{remote.control_token_env} and {remote.inference_token_env} must differ")
-    config["reef"]["inference_remote"] = asdict(remote)
+    config["reef"]["inference_remote"] = remote.to_dict()
     command = [
         python,
         "-m",

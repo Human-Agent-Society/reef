@@ -43,7 +43,6 @@ from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.served_models import ServedModels
-from reef.train.trainer_builder import TrainerBuilder
 from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
@@ -117,7 +116,6 @@ class ScenarioRegistry:
         lifecycle: ScenarioLifecycle,
         served_models: ServedModels | None = None,
         training_requests: TrainingRequestQueue | None = None,
-        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         self._storage = scenario_storage
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
@@ -133,7 +131,6 @@ class ScenarioRegistry:
             experiment_tracker=tracker,
             served_models=served_models,
             training_requests=training_requests,
-            trainer_builder=trainer_builder,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe

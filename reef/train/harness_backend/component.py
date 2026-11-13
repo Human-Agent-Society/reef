@@ -265,10 +265,6 @@ class HarnessTrainingComponent(LocalJobComponent):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.facts.parameters_schema(kind)
 
-    @property
-    def default_start_inputs(self) -> Mapping[str, str]:
-        return self.facts.default_start_inputs
-
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Accept: an offline job runs the head tree on its train tasks."""
         return
@@ -287,11 +283,11 @@ class HarnessTrainingComponent(LocalJobComponent):
         return frozenset(self.descriptor.layout.part_names(changes).values())
 
     def import_start(self, artifact_dir: Path) -> str:
-        """Copy the tree of ``release`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
+        """Copy the tree of ``artifact_dir`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
         tree fails validation.
 
         The tree is the snapshot's text files without the repository's own files (``TextFileTree``), as a client
-        pulls it: a Git LFS release directory also holds ``.gitattributes``.
+        pulls it: a Git LFS snapshot directory also holds ``.gitattributes``.
         """
         tree = self.facts.tree_in(artifact_dir)
         directory = self.starts_root / tree.checksum()

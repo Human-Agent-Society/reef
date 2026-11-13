@@ -221,11 +221,7 @@ def catalog(scenario: Scenario) -> list[dict[str, Any]]:
     """The catalog rows of ``scenario``, newest first, as ``GET /reef/harness/artifacts`` lists them."""
     rows = []
     for row in scenario.harness_snapshot_rows():
-        snapshot, selected, parent = row["snapshot"], row["artifact_snapshot"], row["parent_snapshot"]
-        listed = {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
-        listed["release_id"] = selected.revision
-        listed["parent_release_id"] = snapshot.parent_revision if parent is None else parent.revision
-        rows.append(listed)
+        rows.append({key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS})
     return rows
 
 

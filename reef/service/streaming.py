@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from reef.core.errors import INFERENCE_ABORT_ERROR, inference_aborted
 from reef.inference.interfaces import InferenceStream
 from reef.inference.provider_protocol import SSE_DONE, frame_data, stream_events
 
@@ -15,6 +16,33 @@ RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplet
 #: for a web search (actions ``search``, ``open_page``, ``find_in_page``).
 OPENROUTER_WEB_SEARCH_ITEM = "openrouter:web_search"
 WEB_SEARCH_CALL_ITEM = "web_search_call"
+
+
+def sse_failure(frame: bytes) -> str | None:
+    """The failure that one SSE ``frame`` of a provider reports, or None when it reports none.
+
+    A failure is an ``error`` event, a JSON object that carries an error or a failed response, or an engine abort,
+    which gives ``INFERENCE_ABORT_ERROR``. A frame without a JSON object reports none. The check needs no native
+    capture, and a missing finish reason is not a failure.
+    """
+    if any(line.startswith(b"event:") and line[6:].strip() == b"error" for line in frame.splitlines()):
+        return "the provider reported a stream error"
+    try:
+        payload = json.loads(frame_data(frame))
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if inference_aborted(payload):
+        return INFERENCE_ABORT_ERROR
+    nested = payload.get("response")
+    if (
+        payload.get("error") is not None
+        or payload.get("type") in ("error", "response.failed")
+        or (isinstance(nested, dict) and (nested.get("error") is not None or nested.get("status") == "failed"))
+    ):
+        return "the provider reported a stream error"
+    return None
 
 
 def is_terminal_sse_event(path: str, frame: bytes) -> bool:
@@ -249,5 +277,6 @@ __all__ = [
     "frame_for_codex",
     "is_terminal_sse_event",
     "receipt_sse_events",
+    "sse_failure",
     "stream_record",
 ]

@@ -97,7 +97,21 @@ class ArtifactHeadSync:
 
 class ScenarioCommitter:
     """Order one scenario's commits, activations, new training starts, imports, syncs and retries; delegate snapshot
-    queries."""
+    queries.
+
+    Values: ``name`` names the scenario, and its records and errors carry it. ``trainers`` is the non-empty tuple
+    of the scenario's component trainers; the first one serves scenario-wide operations (``component_trainer``).
+    ``commit_number`` is the non-negative number of the last recorded operation, 0 before any. The constructor
+    refuses an empty tuple and a negative commit number.
+
+    Purpose: the scenario runs each change through its committer, which keeps the changes in one order. An
+    operation that changes the scenario holds ``lock`` and then the publication lock. It appends one record at
+    ``commit_number`` + 1, and the store refuses a record whose expected commit number is stale
+    (``ScenarioStore.append_commit``). It then changes the published state when the operation does, and advances
+    ``commit_number`` to the record's number (``advance_to``). Readers (``snapshot_queries``) take only the
+    publication lock, so they see the state before or after an operation. ``commit_status`` reads the commit
+    number and the last training outcome without a lock.
+    """
 
     def __init__(
         self,
@@ -118,7 +132,8 @@ class ScenarioCommitter:
             artifacts.repository.require_staged_commit_support()
         if not trainers:
             raise ValueError("a scenario commits through at least one trainer")
-        self._name = name
+        #: The name of the scenario whose commits this committer orders; its errors name it.
+        self.name = name
         self._binding = binding
         #: Decides whether a training step's artifact serves. It starts as the binding's rule.
         self.activation_rule = binding.activation_rule
@@ -196,7 +211,7 @@ class ScenarioCommitter:
         for component_trainer in self.trainers:
             if component_trainer.component == component:
                 return component_trainer
-        raise ReefError(f"scenario {self._name!r} has no trainer for component {component!r}")
+        raise ReefError(f"scenario {self.name!r} has no trainer for component {component!r}")
 
     def trainer_for(self, component: str | None) -> Trainer:
         return self.component_trainer(component).trainer
@@ -286,7 +301,7 @@ class ScenarioCommitter:
         components = self._binding.components
         if not components.single:
             raise ReefError(
-                f"scenario {self._name!r} serves components {list(components.names)} but snapshot "
+                f"scenario {self.name!r} serves components {list(components.names)} but snapshot "
                 f"{artifact.ref.revision!r} carries no component manifest"
             )
         name = components.names[0] if components.names else self.trainers[0].component
@@ -307,7 +322,7 @@ class ScenarioCommitter:
         missing = [name for name in components.names if name not in manifest.entries]
         if missing:
             raise ReefError(
-                f"scenario {self._name!r} serves components {list(components.names)} but snapshot "
+                f"scenario {self.name!r} serves components {list(components.names)} but snapshot "
                 f"{artifact.ref.revision!r} binds {list(manifest.names)}"
             )
 
@@ -342,19 +357,19 @@ class ScenarioCommitter:
         names = self.component_names()
         if component is None:
             if len(names) > 1:
-                raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
+                raise ValueError(f"scenario {self.name!r} has components {list(names)}: name the component")
             component = names[0]
         if component not in names:
-            raise ValueError(f"scenario {self._name!r} has no component {component!r}")
+            raise ValueError(f"scenario {self.name!r} has no component {component!r}")
         listed = self.snapshot_queries.artifacts(self._commit_number, names)
         row = next((row for row in listed if (row["artifact_id"], row["component"]) == (artifact_id, component)), None)
         if row is None:
             raise ArtifactNotFoundError(
-                f"scenario {self._name!r} has no artifact {artifact_id!r} of component {component!r}"
+                f"scenario {self.name!r} has no artifact {artifact_id!r} of component {component!r}"
             )
         found = self.snapshot_queries.find_snapshot(row["snapshot"].revision)
         if found is None or not found[1]:
-            raise SnapshotNotRestorableError(f"scenario {self._name!r} artifact {artifact_id!r} has no durable bytes")
+            raise SnapshotNotRestorableError(f"scenario {self.name!r} artifact {artifact_id!r} has no durable bytes")
         return component, found[0]
 
     def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
@@ -437,7 +452,7 @@ class ScenarioCommitter:
                 raise ValueError("restore commit number must be a non-negative integer")
             records = self.snapshot_queries.records()
             if commit_number and not any(record.commit_number == commit_number for record in records):
-                raise ValueError(f"scenario {self._name!r} has no operation at commit {commit_number}")
+                raise ValueError(f"scenario {self.name!r} has no operation at commit {commit_number}")
             self.require_no_pending_commit("restore a selection")
             preceding = tuple(record for record in records if record.commit_number <= commit_number)
             previous = active_record(preceding)
@@ -485,13 +500,25 @@ class ScenarioCommitter:
         Raise as :meth:`resolve_artifact` does, and ``CommitPendingError`` while a
         training result waits for its commit. Raise ``ReefError`` when the
         scenario keeps no durable commit history. Raise it also when the
-        runtime answers only from the snapshot that it has loaded
-        (``InferenceRuntime.serves_any_artifact`` is False).
+        scenario has a loaded component and its runtime cannot answer for the
+        artifact beside the active selection. A runtime that answers each call
+        from the artifact that the call names
+        (``InferenceRuntime.serves_any_artifact``) serves every artifact. Any
+        other runtime serves only an artifact of the loaded component, which it
+        loads beside the active one, and only when it keeps more than one
+        loaded at once (``InferenceRuntime.served_artifact_capacity`` is not 1).
+
+        The call does not count the artifacts that serve already.
+        ``Dispatcher.set_served`` serves the new artifacts of a mapping before
+        it stops the old ones, so it compares the count of the whole mapping
+        with the capacity first. The runtime finds a free engine itself when
+        the inference worker loads the artifact, and that load fails while
+        every engine still holds another artifact.
         """
         with self._lock, self._publication_lock:
             if not self._store.durable:
                 raise ReefError(
-                    f"scenario {self._name!r} keeps no durable commit history, so it serves its active selection alone"
+                    f"scenario {self.name!r} keeps no durable commit history, so it serves its active selection alone"
                 )
             selected, snapshot = self.resolve_artifact(artifact_id, component)
             served = self.snapshot_queries.served_beside(self._commit_number, self.component_names()).get(
@@ -505,12 +532,20 @@ class ScenarioCommitter:
             loaded = components.loaded_component
             runtime = self._binding.runtime
             # The calls use the artifact's own weights, or the active selection's weights for an artifact of another
-            # component. The runtime must answer each call from the snapshot that the call names.
+            # component. The runtime must answer each call from the snapshot that the call names, or load the
+            # artifact's weights beside the active ones.
             if loaded is not None and runtime is not None and not runtime.serves_any_artifact:
-                raise ReefError(
-                    f"scenario {self._name!r}'s runtime answers only from the snapshot it has loaded, so it "
-                    f"cannot serve artifact {selected.artifact_id!r} beside the active selection"
-                )
+                if runtime.served_artifact_capacity == 1:
+                    raise ReefError(
+                        f"scenario {self.name!r}'s runtime answers only from the snapshot it has loaded, so it "
+                        f"cannot serve artifact {selected.artifact_id!r} beside the active selection"
+                    )
+                if selected.component != loaded:
+                    raise ReefError(
+                        f"scenario {self.name!r}'s runtime answers only from the artifacts of component "
+                        f"{loaded!r} that it has loaded, so it cannot serve artifact {selected.artifact_id!r} of "
+                        f"component {selected.component!r} beside the active selection"
+                    )
             target = self.snapshot_with(current, selected, snapshot)
             record = self.append_operation_record(
                 "serve",
@@ -535,7 +570,7 @@ class ScenarioCommitter:
             served = self.snapshot_queries.served_beside(self._commit_number, self.component_names()).get(artifact_id)
             if served is None:
                 raise ArtifactNotFoundError(
-                    f"scenario {self._name!r} does not serve artifact {artifact_id!r} beside its active selection"
+                    f"scenario {self.name!r} does not serve artifact {artifact_id!r} beside its active selection"
                 )
             self.require_no_pending_commit("stop serving an artifact")
             if self._binding.components.single:
@@ -680,12 +715,12 @@ class ScenarioCommitter:
                 component_trainer.trainer.has_pending_commit or component_trainer.trainer.job_running
                 for component_trainer in self.trainers
             ):
-                raise ArtifactConflictError(f"scenario {self._name!r} is running a step; sync again when it ends")
+                raise ArtifactConflictError(f"scenario {self.name!r} is running a step; sync again when it ends")
             current_ref, checkpoint = self._artifacts.current, self._artifacts.checkpoint
             current_selection = self._artifacts.repository.selection(current_ref, self.component_names())
             if current_selection != expected_selection:
                 raise ArtifactConflictError(
-                    f"scenario {self._name!r} changed its active artifacts during the sync; sync again"
+                    f"scenario {self.name!r} changed its active artifacts during the sync; sync again"
                 )
             component_trainer = self.component_trainer(component)
             next_commit_number = self._commit_number + 1
@@ -821,7 +856,7 @@ class ScenarioCommitter:
                 logger.exception("training backend failed to describe experiment configuration")
         backend_name = None if job_loop is None else job_loop.component.name
         context = TrainingExperimentContext(
-            scenario=self._name,
+            scenario=self.name,
             recipe=observer.recipe,
             commit_number=commit_number,
             source_artifacts=observer.start_artifacts,
@@ -961,7 +996,7 @@ class ScenarioCommitter:
         metadata of the commit ``prepared`` describes.
         """
         scenario_metadata = scenario_metadata_for(
-            name=self._name,
+            name=self.name,
             source=self.root_source,
             start_artifact=self._artifacts.start,
             commit_number=commit_number,
@@ -1031,9 +1066,9 @@ class ScenarioCommitter:
         components = self._binding.components
         component = publication.component
         if component is None:
-            raise ReefError(f"scenario {self._name!r}: a publication names the component it replaces")
+            raise ReefError(f"scenario {self.name!r}: a publication names the component it replaces")
         if components.names and component not in components.names:
-            raise ReefError(f"scenario {self._name!r} serves no component {component!r}")
+            raise ReefError(f"scenario {self.name!r} serves no component {component!r}")
         if components.single:
             components.validate(publication.artifact)
             return self._artifacts.stage(next_commit_number, publication.artifact, parent=checkpoint)
@@ -1167,7 +1202,7 @@ class ScenarioCommitter:
         import's source or a sync's own metrics.
         """
         record = CommitRecord(
-            scenario=self._name,
+            scenario=self.name,
             commit_number=self._commit_number + 1,
             snapshot=snapshot,
             checkpoint=operation in ("import", "sync"),
@@ -1194,7 +1229,7 @@ class ScenarioCommitter:
         components: Mapping[str, str] | None = None,
     ) -> CommitRecord:
         record = CommitRecord(
-            scenario=self._name,
+            scenario=self.name,
             commit_number=commit_number,
             snapshot=snapshot,
             checkpoint=checkpoint,

@@ -27,6 +27,19 @@ Keep component tests with their owner even when they use a dispatcher or a
 service fixture. A test belongs in `reef_service/` when it checks the service
 contract or the service's coordination of several components.
 
+Two suites group related modules in subdirectories:
+
+| Subdirectory | Responsibility |
+| --- | --- |
+| `inference/sglang/`, `inference/vllm/` | Behavior of one serving engine |
+| `reef_service/deploy/` | Deployment configuration, service startup, executors, and component selection |
+| `reef_service/harness/` | Harness routes, the evolution recipe, client sync, and vendor installs |
+| `reef_service/inference/` | Inference routes, served artifacts, traffic weights, and streams |
+| `reef_service/routing/` | Routing policy, lifecycle, and the routing deployment |
+
+Keep contracts that all engines share in `inference/`. Keep contracts across
+service components in `reef_service/`.
+
 Use markers for `unit`, `integration`, `acceptance`, and `sandbox`; do not add a
 second directory hierarchy for those categories. A mock-based test stays with
 its component, even when the real component needs a GPU.

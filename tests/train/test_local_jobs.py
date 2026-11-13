@@ -57,15 +57,11 @@ class GatedComponent(LocalJobComponent):
     def concurrent_jobs(self) -> bool:
         return self.concurrent
 
-    @property
-    def default_start_inputs(self) -> dict[str, str]:
-        return {}
-
     def root_start(self, root: ScenarioRoot) -> str:
         return "gated:base"
 
-    def import_start(self, release: Path) -> str:
-        return str(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        return str(artifact_dir)
 
     def check_job(self, job: TrainingJob) -> None:
         if job.parameters.get("invalid"):

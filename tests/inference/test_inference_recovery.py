@@ -49,8 +49,10 @@ def control():
 def test_recovery_reapplies_pause_until_commit_resume(control):
     controller, engines, events = control
     assert controller.pause() == ["paused"]
+    assert controller.pause() == ["paused"]
+    engines.dead_engines = 1
     events.clear()
-    controller.recover()
+    assert controller.recover() == 1
     assert events == ["recover_engines", "pause_engines"]
     assert engines.paused and controller.paused
     assert controller.resume() == ["resumed"]

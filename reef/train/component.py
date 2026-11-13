@@ -103,8 +103,9 @@ class TrainingJob:
     (the non-empty start: one that the component made, such as ``SavedCheckpoint.path``, or in a job that control
     queued the name of a snapshot, ``SnapshotStart.to_text``, which the training service replaces by the component's
     start of that snapshot before the component reads the job),
-    ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
-    with ``job.read_data()`` and cuts it into optimizer batches by its own batch size),
+    ``data`` (the reference to the job data directory that the job trains, ``reef.storage.job_data``; a component
+    that trains on Reef's host reads it with ``job.read_data()`` and cuts it into optimizer batches by its own batch
+    size, and a component that runs the job elsewhere gives that place ``data_uri``),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
     trainer submits the job. The jobs of one scenario can run at the same time when the component has
     ``concurrent_jobs``; each starts from its own ``start``.
@@ -151,11 +152,12 @@ class TrainingJob:
 
     @property
     def data_dir(self) -> Path:
-        """The local job data directory: read it with ``read_data``."""
+        """The local job data directory: read it with ``read_data``. The first read copies it from a remote store."""
         return self.data.path
 
     def read_data(self) -> JobData:
-        """The job's data, without a request: its samples in job order, each task with its local directory."""
+        """The job's data, without a request: its samples in job order, each task with its local directory. The
+        read copies the directory and the tasks' directories from a remote store when the host does not hold them."""
         return self.data.read()
 
     @property
@@ -322,11 +324,11 @@ class TrainingBackendFacts(ABC):
 
     Relation to the component: let ``component`` be the backend's ``TrainingComponent`` of the same settings. Then
     ``name``, ``artifact_format``, ``shares_scenarios`` and ``concurrent_jobs`` equal the component's,
-    ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``default_start_inputs`` equals
-    ``component.default_start_inputs``, ``check_root_start(root)`` raises exactly when
-    ``component.root_start(root)`` raises, and ``check_import_start(artifact_dir)`` exactly when
+    ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``check_root_start(root)`` raises
+    exactly when ``component.root_start(root)`` raises, and ``check_import_start(artifact_dir)`` exactly when
     ``component.import_start(artifact_dir)`` raises, each with the same message. The component holds a value and
-    answers these members from it, so the two cannot differ. ``default_start().inputs`` equals
+    answers these members from it, so the two cannot differ. Only the facts state the default start: the
+    component has no ``default_start`` and no ``default_start_inputs``. ``default_start().inputs`` equals
     ``default_start_inputs``, and ``component.root_start`` accepts a root that holds ``default_start()``: the
     component starts training from the files that the facts write.
 
@@ -488,15 +490,6 @@ class TrainingComponent(ABC):
         example a Tinker manifest that Tinker's sampler serves).
         """
 
-    @property
-    @abstractmethod
-    def default_start_inputs(self) -> Mapping[str, str]:
-        """The ``inputs`` of the backend's default start: the model and the settings that decide its content.
-
-        They equal ``TrainingBackendFacts.default_start_inputs`` of the same settings. The component writes no
-        default start: the backend's facts do (``TrainingBackendFacts.default_start``).
-        """
-
     def root_start(self, root: ScenarioRoot) -> str:
         """The start of the first job of a trainer whose scenario has the root snapshot ``root``.
 
@@ -583,11 +576,11 @@ class TrainingComponent(ABC):
 
     @abstractmethod
     def import_start(self, artifact_dir: Path) -> str:
-        """Take the published snapshot in ``release`` as the start of later jobs; return that start.
+        """Take the published snapshot in ``artifact_dir`` as the start of later jobs; return that start.
 
         Reef calls this when a trainer starts training from an artifact
         (``train-from``). The component copies what it trains
-        from into its own durable directory, since ``release`` can be
+        from into its own durable directory, since ``artifact_dir`` can be
         discarded later. Raise ``ValueError``, and change nothing, when the
         component cannot start from these weights.
         """

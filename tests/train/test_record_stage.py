@@ -477,7 +477,7 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
         commit=CommitRecord(
             scenario="s",
             commit_number=1,
-            snapshot=SnapshotRef("release:1", "base"),
+            snapshot=SnapshotRef("snapshot:1", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=0,

@@ -53,7 +53,7 @@ class TTTDGrouping(ReportGrouping):
 
     A step is ready when every one of its ``groups_per_step`` x
     ``rollouts_per_group`` slots is filled. A complete step whose reports span
-    releases is discarded wholesale, because mixed-version rewards are not
+    artifacts is discarded wholesale, because mixed-version rewards are not
     comparable.
     """
 

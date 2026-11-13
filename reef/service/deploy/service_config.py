@@ -106,7 +106,10 @@ class ServiceSettings:
     inference_num_gpus: int | None = config_option(
         None,
         public_path=("inference", "num_gpus"),
-        help="Total inference GPUs; defaults to tensor-parallel-size. Slime can launch multiple engines.",
+        help=(
+            "Total inference GPUs, or those of each component with inference.remote.slot-urls; defaults to "
+            "tensor-parallel-size. Slime can launch multiple engines."
+        ),
     )
     inference_options: Mapping[str, Any] = field(
         default_factory=dict,
@@ -115,9 +118,10 @@ class ServiceSettings:
     inference_remote: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata(
-            "Run the engines that inference.backend names on a remote inference component: url, "
-            "control-token-env, inference-token-env and startup-timeout-s. Resolution replaces it with the "
-            "fields of the validated RemoteInferenceSettings.",
+            "Run the engines that inference.backend names on a remote inference component: url, slot-urls, "
+            "control-token-env, inference-token-env and startup-timeout-s. url is the component's base URL; "
+            "slot-urls lists further components, so that a full-weight scenario serves one checkpoint on each. "
+            "See the inference section of the configuration reference.",
             public_path=("inference", "remote"),
         ),
     )
@@ -146,8 +150,8 @@ class ServiceSettings:
         False,
         public_path=("inference", "prefix_sharing"),
         help=(
-            "Share prefix-cache entries between requests. Each snapshot load then retracts the requests in "
-            "flight, which prefill again on the new weights."
+            "Share the prefix cache among requests on the same snapshot (default: false). The engines finish their "
+            "requests and clear the cache before each snapshot load."
         ),
     )
     teacher_model_path: str | None = config_option(
@@ -461,6 +465,8 @@ class ServiceSettings:
         adapters = self.inference_max_loaded_adapters
         if isinstance(adapters, bool) or not isinstance(adapters, int) or adapters <= 0:
             raise ValueError("inference.max-loaded-adapters must be a positive int")
+        if not isinstance(self.inference_prefix_sharing, bool):
+            raise ValueError("inference.prefix-sharing must be true or false")
         if self.inference_serving is not None and (
             not isinstance(self.inference_serving, str) or not self.inference_serving.strip()
         ):

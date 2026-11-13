@@ -29,7 +29,7 @@ def deferred_factory(tmp_path: Path):
     ):
         factory = ScenarioFactory(
             TestPolicyRecipe(),
-            InMemoryRepositoryBackend.factory(directory=tmp_path / "releases"),
+            InMemoryRepositoryBackend.factory(directory=tmp_path / "snapshots"),
             live=live_objects(training, runtime),
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
@@ -117,7 +117,7 @@ def test_a_request_trains_while_the_selected_artifact_does_not_serve(deferred_fa
         assert scenario.served_artifact_id() is None
         assert scenario.training_requests is not None
         samples = [stored.sample_id for stored in scenario.trainer.pipeline.store.page()]
-        payload = {"text": "train", "session": "session-1", "artifact_id": "release-1", "samples": samples}
+        payload = {"text": "train", "session": "session-1", "artifact_id": "artifact-1", "samples": samples}
         scenario.training_requests.file("t1", normalize_training_request_payload(payload))
 
         result = scenario.next_commit()

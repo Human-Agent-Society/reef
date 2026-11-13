@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from reef.core.errors import ReefError
 from reef.core.weight_layout import WeightFiles
-from reef.inference.interfaces import AdapterEngine
+from reef.inference.interfaces import AdapterEngine, InferenceOwnerLostError
 
 logger = logging.getLogger(__name__)
 
@@ -190,6 +190,9 @@ class AdapterResidencyManager:
             self.next_order += 1
             try:
                 engine.load_adapter(name, files)
+            except InferenceOwnerLostError:
+                self.adapters.pop(name, None)
+                raise
             except Exception as exc:
                 # Never leave a phantom slot: it would evict a live peer later for an adapter the engine never held.
                 self.adapters.pop(name, None)
@@ -200,21 +203,6 @@ class AdapterResidencyManager:
                     f"engine could not load adapter {name!r} for scenario {scenario!r}: {exc}"
                 ) from exc
             self.counters["loads"] += 1
-            self.current[scenario] = name
-            return name
-
-    def adopt(self, scenario: str, runtime_load_id: str, *, files: WeightFiles) -> str:
-        """Record that the engine already holds ``runtime_load_id`` for ``scenario``, as it did before this manager
-        existed (a control restart), and make it the scenario's current revision without loading it; return its
-        engine name. ``files`` is where the engine would load it from again after an engine restart."""
-        require_name(scenario, "scenario")
-        require_name(runtime_load_id, "runtime_load_id")
-        name = adapter_name(scenario, runtime_load_id)
-        with self.lock:
-            if name not in self.adapters:
-                self.adapters[name] = ResidentAdapter(name, scenario, runtime_load_id, files, self.next_order)
-                self.next_order += 1
-                self.note("adopted", name, scenario)
             self.current[scenario] = name
             return name
 
@@ -278,6 +266,8 @@ class AdapterResidencyManager:
         """
         try:
             engine.unload_adapter(name)
+        except InferenceOwnerLostError:
+            raise
         except Exception as exc:
             self.counters["cleanup_failures"] += 1
             self.note("cleanup_failed", name, scenario, str(exc))
@@ -334,6 +324,8 @@ class AdapterResidencyManager:
         """Drop ``adapter`` from the engine and the table; a returned failure leaves it ``leaked``."""
         try:
             engine.unload_adapter(adapter.name)
+        except InferenceOwnerLostError:
+            raise
         except Exception as exc:
             self.counters["unload_failures"] += 1
             adapter.state = "leaked"

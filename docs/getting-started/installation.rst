@@ -28,7 +28,7 @@ Or, to work on Reef itself:
    pip install -e .
    git lfs install
 
-``git lfs`` is required: Reef keeps release history in Git, with weight files
+``git lfs`` is required: Reef keeps snapshot history in Git, with weight files
 under LFS. The checkout includes the core ``recipe`` example, the paper-backed
 methods under ``recipes/``, and the harness evolution demo under
 ``tutorials/evolve-your-harness/``.

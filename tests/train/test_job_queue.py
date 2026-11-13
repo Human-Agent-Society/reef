@@ -81,15 +81,11 @@ class StepComponent(LocalJobComponent):
     def artifact_format(self) -> ArtifactFormat:
         return ArtifactFormat("full")
 
-    @property
-    def default_start_inputs(self) -> dict[str, str]:
-        return {}
-
     def root_start(self, root: ScenarioRoot) -> str:
         return "steps:base"
 
-    def import_start(self, release: Path) -> str:
-        return str(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        return str(artifact_dir)
 
     def check_job(self, job: TrainingJob) -> None:
         self.checked.append(job.job_id)
@@ -446,7 +442,7 @@ def test_a_queue_component_serves_the_parameters_schema_of_its_facts(tmp_path):
 @pytest.mark.unit
 def test_a_listed_job_carries_its_parameters_request_data_and_times(tmp_path):
     queue = memory_coordination(lease_seconds=300).work_queue
-    request = TrainingRequest("prefer tests", "session-1", "release-1", id="r1", parameters={"learning_rate": 1e-5})
+    request = TrainingRequest("prefer tests", "session-1", "artifact-1", id="r1", parameters={"learning_rate": 1e-5})
     sample = policy_trajectory("s-j1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
     data = JobData("s:request:r1", (sample, sample), request=request)
     parameters = {"objective": "sft", "learning_rate": 1e-5}
@@ -558,7 +554,7 @@ def test_the_job_of_a_request_that_was_cancelled_meanwhile_is_cancelled_when_it_
     sample = policy_trajectory("s-j", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
 
     def request_job(job_id: str, request_id: str) -> TrainingJob:
-        request = TrainingRequest("prefer tests", "session-1", "release-1", id=request_id)
+        request = TrainingRequest("prefer tests", "session-1", "artifact-1", id=request_id)
         requests.file(request_id, request.to_dict())
         data = JobData(f"s:request:{request_id}", (sample,), request=request)
         return TrainingJob(job_id, "steps", "steps:base", job_data_ref(data), {}, scenario="s", request_id=request_id)

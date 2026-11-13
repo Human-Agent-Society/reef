@@ -15,9 +15,9 @@ from reef.artifact import SnapshotRef
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.tasks import write_harbor_task
 from reef.storage.commits import CommitRecord
-from reef.storage.data import DataStore, MemoryDataStore, NewItem
+from reef.storage.data import TASK_PATH_READERS, DataStore, MemoryDataStore, NewItem
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.samples import TASK_PATH_READERS, SampleStore, consumed_sample_id, stage_item_id
+from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -165,7 +165,7 @@ def training_commit(step: int, *consumed: str, component: str | None = None) -> 
     return CommitRecord(
         scenario="math",
         commit_number=step,
-        snapshot=SnapshotRef(f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"snapshot:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         high_water_sequence=step,

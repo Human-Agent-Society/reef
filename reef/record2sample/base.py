@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.errors import inference_aborted
+from reef.core.errors import inference_incomplete
 from reef.core.job_data import JobOutcome, Sample, TrajectorySample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
@@ -93,8 +93,9 @@ class Record2Sample(ABC, Plugin):
     The pipeline pushes every record that it reads, in append order (``push``). The stage collects the records that
     train together into record sets and forms each one (``form``). No record is in two record sets of one stage:
     ``form`` refuses a set that holds a record of another set. Before it makes samples, ``form`` rejects a set if
-    any inference response reports an engine abort, and the whole set ends, including reports that reference the
-    aborted inference. Otherwise ``form`` makes the set's samples (``make_samples``) and settles the result
+    any inference response is incomplete (``inference_incomplete``): it reports an engine abort, or a stream whose
+    delivery did not complete. The whole set then ends, including reports that reference that inference.
+    Otherwise ``form`` makes the set's samples (``make_samples``) and settles the result
     (``settle``): a set that has samples waits in a record set unit, and a set without samples ends. When the
     pipeline looks for job data, it first advances the stage to the current time (``advance``): the stage takes in
     background work that ended, such as judgments, and forms the sets that are due. The pipeline takes the units
@@ -167,7 +168,7 @@ class Record2Sample(ABC, Plugin):
         """Make the samples of ``record_set`` and settle them. Raises ``ValueError`` if a record of it is in another
         set.
 
-        A set with the ID of an earlier set takes its records again, as a retry does. An engine-aborted inference
+        A set with the ID of an earlier set takes its records again, as a retry does. An incomplete inference
         rejects the whole set before sample creation. Replaying retained records applies the same check.
         """
         record_ids = record_set.record_ids()
@@ -183,7 +184,7 @@ class Record2Sample(ABC, Plugin):
             if record.request_type is not RequestType.INFERENCE:
                 continue
             response = record.payload.get("response")
-            if isinstance(response, Mapping) and inference_aborted(response):
+            if isinstance(response, Mapping) and inference_incomplete(response):
                 self.reject(record_set)
                 return
         self.settle(record_set, self.make_samples(record_set))

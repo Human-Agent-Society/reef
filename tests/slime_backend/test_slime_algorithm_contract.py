@@ -14,7 +14,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 
 from recipes.sao.slime import CRITIC_ATTENTION_PARAM_PATTERN, SaoSchedule
-from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.algorithm import WORKER_HOOKS, SlimeAlgorithm
 from reef.train.slime_backend.loss_families import (
     UnknownLossFamilyError,
     loss_family_names,
@@ -635,12 +635,13 @@ def test_objective_resolution_rejects_a_missing_required_objective_module(monkey
 
 @pytest.mark.unit
 def test_objective_resolution_rejects_missing_required_hook_registrations(monkeypatch) -> None:
-    from reef.train.slime_backend import algorithm as base_module
-
     # Load the spec before import_module is patched, so only the objective module's import sees the patch.
     resolve_loss_family("tttd")
     monkeypatch.setattr(importlib, "import_module", lambda _name: ModuleType("empty_objective"))
-    monkeypatch.setattr(base_module, "WORKER_HOOKS", {})
+    # Another test of the process may have imported the real objective module, which registered its hooks.
+    # The resolver reads the one registry object, so the test empties that object and pytest restores it.
+    for registered_module in list(WORKER_HOOKS):
+        monkeypatch.delitem(WORKER_HOOKS, registered_module)
     with pytest.raises(RuntimeError, match="custom_loss_function_path"):
         resolve_objective_paths(SimpleNamespace(loss_family="tttd"))
 
@@ -656,14 +657,13 @@ def test_objective_resolution_rejects_missing_required_hook_registrations(monkey
 def test_objective_resolution_derives_core_hook_requirements(
     monkeypatch, loss_type: str, uses_pg_loss_primitive: bool, required_channel: str
 ) -> None:
-    from reef.train.slime_backend import algorithm as base_module
-
     toy = _TestAlgorithm(loss_family="toy_objective", loss_type=loss_type)
     toy.uses_pg_loss_primitive = uses_pg_loss_primitive
     try:
         register_loss_family(toy)
         monkeypatch.setattr(importlib, "import_module", lambda _name: ModuleType("empty_objective"))
-        monkeypatch.setattr(base_module, "WORKER_HOOKS", {})
+        for registered_module in list(WORKER_HOOKS):
+            monkeypatch.delitem(WORKER_HOOKS, registered_module)
         with pytest.raises(RuntimeError, match=required_channel):
             resolve_objective_paths(SimpleNamespace(loss_family="toy_objective"))
     finally:

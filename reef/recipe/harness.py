@@ -181,9 +181,9 @@ class HarnessEvolutionRecipe(Recipe):
     the training component that runs the jobs
     (``reef.service.assembly.with_harness_components``).
     Purpose: a deployment names it as its recipe; the service loads it once
-    from the deployment config, and the scenario factory's trainer builder
-    makes each scenario's trainer, which submits each job to the process's
-    harness component.
+    from the deployment config, and the scenario factory builds each
+    scenario's trainer (``reef.train.trainer_builder.build_trainers``), which
+    submits each job to the process's harness component.
     """
 
     evolution: EvolutionSettings = section_field(

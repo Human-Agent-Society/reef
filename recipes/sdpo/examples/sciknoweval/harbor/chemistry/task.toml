@@ -12,7 +12,7 @@ tags = ["reef", "harbor", "sdpo", "sciknoweval", "chemistry"]
 timeout_sec = 300.0
 
 [agent]
-# Every step is a 32x8 sampling grid, one optimizer step and a weight release,
+# Every step is a 32x8 sampling grid, one optimizer step and a weight snapshot,
 # with an avg@16 evaluation of 210 questions every five steps; the harness runs
 # the whole run as one exec inside this container.
 timeout_sec = 172800.0

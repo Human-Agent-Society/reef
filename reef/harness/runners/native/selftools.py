@@ -43,7 +43,7 @@ PATCH_SCHEMA: dict[str, Any] = {
 
 INSPECT_DESCRIPTION = (
     "Read the harness you are running in. what=tree returns every file of the live tree by path and the mounted "
-    "release id; what=graph shows the main loop graph and every named graph as JSON; what=results lists the "
+    "artifact ID; what=graph shows the main loop graph and every named graph as JSON; what=results lists the "
     "newest snapshots with the evaluation metrics that admitted each one and, when Reef exposes it, the candidates "
     "the evaluation rejected; what=status shows the mounted artifact, the follow mode and any pending mount. Read "
     "only. Call it before you change anything."
