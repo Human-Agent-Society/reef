@@ -1016,16 +1016,18 @@ The routes of benchmarks are under
 trajectory sets under ``…/trajectory-sets``.
 
 - ``PUT …/{name}`` makes the scenario hold the set. For a benchmark the body
-  is ``{"split"}``, ``train`` or ``eval``, and a hold that exists gets the
-  split. For a trajectory set the body is ``{}``: a trajectory always trains.
+  is ``{"split"}``, ``train`` or ``eval``. A scenario can hold one benchmark
+  in both splits, with one call for each: the two holds are apart. For a
+  trajectory set the body is ``{}``: a trajectory always trains.
   The response is ``{"owner", "scenario", "kind", "name", "split",
   "item_count", "synced"}``; ``kind`` is ``benchmark`` or ``trajectory_set``.
   A ``train`` hold of a benchmark needs a recipe that trains imported tasks,
   and a hold of a trajectory set one that takes uploaded trajectories, as a
   mark does; else Reef returns 400.
-- ``DELETE …/{name}`` ends the hold: ``{"owner", "scenario", "kind", "name",
-  "released", "synced"}``. ``released`` is false when the scenario did not
-  hold the set.
+- ``DELETE …/{name}?split=<split>`` ends the hold in that split: ``{"owner",
+  "scenario", "kind", "name", "split", "released", "synced"}``. A benchmark
+  needs ``split``; a trajectory set does not. ``released`` is false when the
+  scenario did not hold the set in that split.
 - ``GET`` of the two base paths returns ``{"owner", "scenario", "kind",
   "holds"}``: each hold with its ``split`` and its ``item_count``, in the
   order of the names.
@@ -1041,8 +1043,9 @@ compares no item lists and refuses no overlap:
   train uses as a set of items, so a job holds the task once, and the task has
   one train count. The same holds for a trajectory with a mark and a held set.
 - A task in a ``train`` benchmark and in an ``eval`` benchmark is trained, and
-  an evaluation runs it. Keep such a task out of one of the two benchmarks
-  when the evaluation must not see trained tasks.
+  an evaluation runs it. The same holds for each task of a benchmark that the
+  scenario holds in both splits. Reef does not prevent it: hold a benchmark in
+  one split when the evaluation must not see trained tasks.
 
 Download an item
 ~~~~~~~~~~~~~~~~

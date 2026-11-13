@@ -206,9 +206,12 @@ def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path)
         assert (await client.post(f"{base}/metadata", headers=AUTH, json=joined)).status == 200
         tasks = (await (await client.get("/reef/scenarios/math/tasks", headers=AUTH)).json())["tasks"]
         assert [(task["name"], task["benchmark"]) for task in tasks][-1] == ("sort", "extra")
-        released = await (await client.delete(f"{held}/extra", headers=AUTH)).json()
-        assert (released["released"], released["synced"]) == (True, True)
-        assert (await (await client.delete(f"{held}/extra", headers=AUTH)).json())["released"] is False
+        # A release names its split: the benchmark can be held in the other one too.
+        assert (await client.delete(f"{held}/extra", headers=AUTH)).status == 400
+        assert (await (await client.delete(f"{held}/extra?split=train", headers=AUTH)).json())["released"] is False
+        released = await (await client.delete(f"{held}/extra?split=eval", headers=AUTH)).json()
+        assert (released["split"], released["released"], released["synced"]) == ("eval", True, True)
+        assert (await (await client.delete(f"{held}/extra?split=eval", headers=AUTH)).json())["released"] is False
         tasks = (await (await client.get("/reef/scenarios/math/tasks", headers=AUTH)).json())["tasks"]
         assert {task["benchmark"] for task in tasks} == {"full", "lite"}
         # This recipe trains no imported task, so its scenario holds a benchmark for evaluation only.

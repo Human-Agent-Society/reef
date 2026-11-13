@@ -433,7 +433,8 @@ class ItemUse:
     and a use whose split changes get a new one. ``item`` is the used item. ``split`` is ``train`` or ``eval``.
     ``held_set`` is the name of the set that the scenario holds and through which it uses the item: a benchmark for
     a task, a trajectory set for a trajectory. It is None for the use that the item's own ``scenarios`` metadata
-    gives. So a scenario has at most one use of an item with None, and at most one for each set of the item.
+    gives. So a scenario has at most one use of an item with None, and at most one for each set of the item and
+    split.
 
     Purpose: ``DataStore.scenario_items`` returns it. A trainer reads its scenario's items by the sequences.
     """
@@ -459,7 +460,8 @@ class ScenarioHold:
     Values: ``scenario`` and ``name`` are non-empty strings. ``kind`` is ``benchmark`` or ``trajectory_set``
     (``HOLD_ITEM_KINDS``): ``name`` is then a benchmark, the task items of the owner whose ``benchmarks`` metadata
     has it, or a trajectory set, the trajectory items whose ``TRAJECTORY_SET_KEY`` metadata is it. ``split`` is
-    ``train`` or ``eval``, and ``train`` for a trajectory set: a trajectory always trains. ``item_count`` is a
+    ``train`` or ``eval``, and ``train`` for a trajectory set: a trajectory always trains. A scenario can hold one
+    benchmark in both splits, as two holds. ``item_count`` is a
     non-negative int, the number of items of the set when the value was made. The scenario uses each of those items
     in ``split`` through the set (``ItemUse.held_set``); the membership is live, so an item that joins the set
     later is used too.
@@ -559,10 +561,10 @@ class DataStore(Plugin, JobDataReader, ABC):
     * ``item_splits(owner, scenario, item_ids)`` maps each ID of ``item_ids`` that ``scenario`` uses to the set of
       the splits of its uses. An ID that the scenario does not use is not a key.
     * ``hold(owner, scenario, kind, name, split)`` makes ``scenario`` hold the set ``name`` of ``kind`` in ``split``
-      and returns the ``ScenarioHold``. It writes no item. A hold that exists with another split gets ``split``,
-      and each of its uses a new sequence; the same split changes nothing.
-    * ``release(owner, scenario, kind, name)`` ends the hold and its uses, and returns True, or returns False when
-      the scenario does not hold the set.
+      and returns the ``ScenarioHold``. It writes no item. A scenario can hold one benchmark in both splits: the
+      two holds are apart, and a hold that exists stays as it is.
+    * ``release(owner, scenario, kind, name, split)`` ends the hold in ``split`` and its uses, and returns True, or
+      returns False when the scenario does not hold the set in that split.
     * ``holds(owner, scenario)`` returns the holds of ``scenario``, in the order of their kinds and names.
     * ``holding_scenarios(owner, kind, names)`` returns the scenarios that hold one of the sets ``names`` of
       ``kind``, in name order. A write that changes the items of a set wakes them.
@@ -742,7 +744,7 @@ class DataStore(Plugin, JobDataReader, ABC):
     def hold(self, owner: str, scenario: str, kind: str, name: str, split: str) -> ScenarioHold: ...
 
     @abstractmethod
-    def release(self, owner: str, scenario: str, kind: str, name: str) -> bool: ...
+    def release(self, owner: str, scenario: str, kind: str, name: str, split: str) -> bool: ...
 
     @abstractmethod
     def holds(self, owner: str, scenario: str) -> tuple[ScenarioHold, ...]: ...
@@ -1011,8 +1013,8 @@ class MemoryDataStore(DataStore):
     """A data store in memory, for tests and for a deployment that keeps nothing.
 
     It keeps the items of each owner in a dict from ID to item, the split and the sequence of each use (``uses``,
-    by owner, item, scenario and held set, where "" stands for the item's own mark), the split of each hold
-    (``held``, by owner, scenario, kind and name), and the next sequence, which items and uses share. Task directories go to the task file store that it
+    by owner, item, scenario, held set and split, where "" stands for the item's own mark), the holds
+    (``held``, by owner, scenario, kind, name and split), and the next sequence, which items and uses share. Task directories go to the task file store that it
     is given. ``trajectories`` links the record items of each owner and link scope (``record_link_scope``) as
     they are created; a deleted item stays there as a link of later calls.
     """
@@ -1026,8 +1028,8 @@ class MemoryDataStore(DataStore):
         self.job_directory_uses: dict[str, float] = {}
         self.items: dict[str, dict[str, StoredItem]] = {}
         self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
-        self.uses: dict[tuple[str, str, str, str], tuple[str, int]] = {}
-        self.held: dict[tuple[str, str, str, str], str] = {}
+        self.uses: dict[tuple[str, str, str, str, str], int] = {}
+        self.held: set[tuple[str, str, str, str, str]] = set()
         self.generations: dict[tuple[str, str], str] = {}
         self.losses: dict[tuple[str, str], RecordLoss] = {}
         self.stored_collections: dict[str, dict[str, TaskCollection]] = {}
@@ -1042,19 +1044,18 @@ class MemoryDataStore(DataStore):
         """Make the uses of the item those that ``metadata`` gives: its own marks, and the holds of its sets
         (``held_sets``). None stands for an item that is gone. An unchanged use keeps its sequence, and a new one
         gets its own."""
-        wanted: dict[tuple[str, str], str] = {}
+        wanted: set[tuple[str, str, str]] = set()
         if metadata is not None:
-            wanted.update({(scenario, ""): split for scenario, split in metadata["scenarios"].items()})
+            wanted.update((scenario, "", split) for scenario, split in metadata["scenarios"].items())
             kind, names = held_sets(metadata) or ("", ())
-            for (hold_owner, scenario, hold_kind, name), split in self.held.items():
+            for hold_owner, scenario, hold_kind, name, split in self.held:
                 if (hold_owner, hold_kind) == (owner, kind) and name in names:
-                    wanted[(scenario, name)] = split
+                    wanted.add((scenario, name, split))
         for key in [key for key in self.uses if key[:2] == (owner, item_id) and key[2:] not in wanted]:
             self.uses.pop(key)
-        for (scenario, name), split in wanted.items():
-            used = self.uses.get((owner, item_id, scenario, name))
-            if used is None or used[0] != split:
-                self.uses[(owner, item_id, scenario, name)] = (split, self.take_sequence())
+        for use in sorted(wanted):
+            if (owner, item_id, *use) not in self.uses:
+                self.uses[(owner, item_id, *use)] = self.take_sequence()
 
     def set_items(self, owner: str, kind: str, name: str) -> list[StoredItem]:
         """The items of ``owner`` in the set ``name`` of ``kind`` (``held_sets``), in the order that they arrived."""
@@ -1068,7 +1069,7 @@ class MemoryDataStore(DataStore):
         check_owner(owner)
         wanted = set(item_ids)
         found: dict[str, set[str]] = {}
-        for (use_owner, item_id, use_scenario, _), (split, _) in self.uses.items():
+        for use_owner, item_id, use_scenario, _, split in self.uses:
             if use_owner == owner and use_scenario == scenario and item_id in wanted:
                 found.setdefault(item_id, set()).add(split)
         return {item_id: frozenset(splits) for item_id, splits in found.items()}
@@ -1076,17 +1077,18 @@ class MemoryDataStore(DataStore):
     def hold(self, owner: str, scenario: str, kind: str, name: str, split: str) -> ScenarioHold:
         check_owner(owner)
         check_hold(scenario, kind, name, split)
-        self.held[(owner, scenario, kind, name)] = split
+        self.held.add((owner, scenario, kind, name, split))
         members = self.set_items(owner, kind, name)
         for item in members:
             self.write_uses(owner, item.item_id, item.metadata)
         return ScenarioHold(scenario, kind, name, split, len(members))
 
-    def release(self, owner: str, scenario: str, kind: str, name: str) -> bool:
+    def release(self, owner: str, scenario: str, kind: str, name: str, split: str) -> bool:
         check_owner(owner)
-        check_hold(scenario, kind, name)
-        if self.held.pop((owner, scenario, kind, name), None) is None:
+        check_hold(scenario, kind, name, split)
+        if (owner, scenario, kind, name, split) not in self.held:
             return False
+        self.held.remove((owner, scenario, kind, name, split))
         for item in self.set_items(owner, kind, name):
             self.write_uses(owner, item.item_id, item.metadata)
         return True
@@ -1095,7 +1097,7 @@ class MemoryDataStore(DataStore):
         check_owner(owner)
         return tuple(
             ScenarioHold(scenario, kind, name, split, len(self.set_items(owner, kind, name)))
-            for (hold_owner, hold_scenario, kind, name), split in sorted(self.held.items())
+            for hold_owner, hold_scenario, kind, name, split in sorted(self.held)
             if hold_owner == owner and hold_scenario == scenario
         )
 
@@ -1105,7 +1107,7 @@ class MemoryDataStore(DataStore):
             sorted(
                 {
                     scenario
-                    for hold_owner, scenario, hold_kind, name in self.held
+                    for hold_owner, scenario, hold_kind, name, _ in self.held
                     if (hold_owner, hold_kind) == (owner, kind) and name in names
                 }
             )
@@ -1256,7 +1258,7 @@ class MemoryDataStore(DataStore):
         """The items of ``owner`` that the filters of ``query`` keep, in no order."""
         used = {
             item_id
-            for use_owner, item_id, use_scenario, _ in self.uses
+            for use_owner, item_id, use_scenario, _, _ in self.uses
             if (use_owner, use_scenario) == (owner, scenario)
         }
         for item in self.items.get(owner, {}).values():
@@ -1284,7 +1286,7 @@ class MemoryDataStore(DataStore):
         stored = self.items.get(owner, {})
         used = sorted(
             (sequence, item_id, split, held_set)
-            for (use_owner, item_id, use_scenario, held_set), (split, sequence) in self.uses.items()
+            for (use_owner, item_id, use_scenario, held_set, split), sequence in self.uses.items()
             if use_owner == owner
             and use_scenario == scenario
             and sequence > after
@@ -1308,7 +1310,7 @@ class MemoryDataStore(DataStore):
             sorted(
                 {
                     use_scenario
-                    for (use_owner, item_id, use_scenario, _) in self.uses
+                    for (use_owner, item_id, use_scenario, _, _) in self.uses
                     if use_owner == owner and stored[item_id].kind == "record"
                 }
             )
@@ -1318,7 +1320,7 @@ class MemoryDataStore(DataStore):
         return max(
             (
                 sequence
-                for (use_owner, _, use_scenario, _), (_, sequence) in self.uses.items()
+                for (use_owner, _, use_scenario, _, _), sequence in self.uses.items()
                 if use_owner == owner and use_scenario == scenario
             ),
             default=0,
@@ -1357,7 +1359,7 @@ class MemoryDataStore(DataStore):
             item = replace(item, digest=digest)
             stored[item_id] = item
             for key in sorted(key for key in self.uses if key[:2] == (owner, item_id)):
-                self.uses[key] = (self.uses[key][0], self.take_sequence())
+                self.uses[key] = self.take_sequence()
         return replace(item, content=None)
 
     def delete(self, owner: str, item_id: str) -> bool:
@@ -1369,8 +1371,7 @@ class MemoryDataStore(DataStore):
         check_owner(owner)
         stored = self.items.get(owner, {})
         used = [item for item in stored.values() if scenario in item.scenarios]
-        for hold in [hold for hold in self.held if hold[:2] == (owner, scenario)]:
-            self.held.pop(hold)
+        self.held = {hold for hold in self.held if hold[:2] != (owner, scenario)}
         for use in [use for use in self.uses if (use[0], use[2]) == (owner, scenario)]:
             self.uses.pop(use)
         for item in used:
