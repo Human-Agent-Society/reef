@@ -1119,6 +1119,10 @@ A backend shares no snapshot between scenarios. It must:
   - ``discard_all_content()`` removes every content of the scenario. Reef
     calls it when the scenario is deleted, so no content outlives its
     scenario.
+
+  A discard can delete only the content's name and leave its files. Then
+  the factory frees them in ``reclaim_discarded()``, which control's sweep of
+  ended work calls once per sweep. The default frees nothing.
   - ``publish_parts(parts, *, metadata, expected_parent, advance_head)``
     stores a snapshot of files that the backend holds already, and moves the
     head as ``publish`` does. Callers use the inherited ``publish_stored``,

@@ -778,6 +778,39 @@ def test_a_job_item_stays_until_its_content_is_discarded_and_does_not_stop_the_s
     assert sweeper.sweep() == 0
 
 
+class UnansweringQueue:
+    """The work queue of a sweep whose store fails when it deletes the ended items."""
+
+    def __init__(self, queue) -> None:
+        self.queue = queue
+
+    def __getattr__(self, name: str):
+        return getattr(self.queue, name)
+
+    def delete_final(self, *, finished_before, keep):
+        raise ConnectionError("the store did not answer")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("store", ["answers", "fails"])
+def test_each_sweep_frees_the_storage_of_discarded_content(store, tmp_path):
+    """A discard deletes only the content's name; control's sweep frees its files, also when the items stay."""
+    reclaimed = []
+
+    class ReclaimingBackends(FailingBackends):
+        def reclaim_discarded(self) -> None:
+            reclaimed.append(True)
+
+    queue = memory_coordination(lease_seconds=30).work_queue
+    sweeper = EndedWorkSweeper(
+        queue if store == "answers" else UnansweringQueue(queue),
+        ReclaimingBackends(registered_backends(tmp_path / "artifacts")),
+        retention_seconds=100.0,
+    )
+    assert sweeper.sweep() == 0
+    assert reclaimed == [True]
+
+
 @pytest.mark.unit
 def test_a_job_check_of_a_scenario_waits_for_the_archive_of_the_scenario_before_it(tmp_path):
     """An archive never moves the directory of a scenario that was created again under the name: the queue gives

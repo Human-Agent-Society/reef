@@ -82,7 +82,7 @@ from typing import Any, cast
 
 from reef.artifact.artifact import Artifact, ArtifactError
 from reef.artifact.components import ComponentChecks
-from reef.artifact.repository import Repository, RepositoryBackendFactory
+from reef.artifact.repository import RegistrationAwareRepositoryBackendFactory, Repository, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import InternalError, ReefError
 from reef.core.weight_layout import ArtifactFormat
@@ -834,7 +834,7 @@ class TrainingJobWorker(QueueWorker):
         that the job's scenario still exists (``refuses_deleted_scenario``).
         """
         stored_names = [str(name) for name in cast(list[JsonValue], item.metadata.get(STORED_CONTENT_KEY, []))]
-        if self.refuses_deleted_scenario(item, stored_names):
+        if self.refuses_deleted_scenario(item):
             raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
         job = resolved_job(
             self.component, job_from_item(item, self.data_store), self.backends, self.local_artifact_dir
@@ -849,7 +849,7 @@ class TrainingJobWorker(QueueWorker):
                 status = self.component.status(job.job_id)
                 if status.state != "running":
                     job_progress = None
-                    self.store_records(item, job, stored_names)
+                    self.store_records(item, job)
                 if job_progress != written_progress:
                     value = None if job_progress is None else cast(JsonValue, dict(job_progress))
                     self.queue.write_metadata(JOBS_QUEUE, item.id, PROGRESS_METADATA_KEY, value)
@@ -866,7 +866,7 @@ class TrainingJobWorker(QueueWorker):
                     except (ValueError, ReefError) as exc:
                         self.component.cancel(job.job_id)
                         # A person reads the records of a refused job first.
-                        self.store_records(item, job, stored_names)
+                        self.store_records(item, job)
                         raise ItemFailedError(
                             f"the scenario's check refused checkpoint {checkpoint.step} of job {job.job_id}: {exc}"
                         ) from exc
@@ -879,7 +879,7 @@ class TrainingJobWorker(QueueWorker):
                         if named is None:
                             raise WorkLeaseLostError(f"job {item.id} left the queue")
                     self.backends(job.scenario).store_content(content, Path(checkpoint.artifact_path))
-                    if self.refuses_deleted_scenario(item, stored_names):
+                    if self.refuses_deleted_scenario(item):
                         raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
                     stored = replace(
                         checkpoint,
@@ -916,17 +916,17 @@ class TrainingJobWorker(QueueWorker):
             self.component.cancel(item.id)
             raise
 
-    def store_records(self, item: WorkItem, job: TrainingJob, stored_names: list[str]) -> None:
+    def store_records(self, item: WorkItem, job: TrainingJob) -> None:
         """Store the record files of the ended ``job`` of ``item`` (``TrainingComponent.job_records``) as the content
         ``job_records_content(item.id)``; nothing when the component kept none. Raise ``WorkLeaseLostError``, and
         discard what it stored, when the job was cancelled or taken meanwhile, or when its scenario was deleted
-        (``refuses_deleted_scenario`` with the item's ``stored_names``)."""
+        (``refuses_deleted_scenario``)."""
         records = self.component.job_records(job.job_id)
         if records is None:
             return
         backend = self.backends(job.scenario)
         backend.store_content(job_records_content(item.id), records)
-        if self.refuses_deleted_scenario(item, stored_names):
+        if self.refuses_deleted_scenario(item):
             raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
         held = self.queue.read(JOBS_QUEUE, item.id)
         if held is None or held.worker_id != self.worker_id or held.final:
@@ -935,23 +935,28 @@ class TrainingJobWorker(QueueWorker):
             backend.discard_content(job_records_content(item.id))
             raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
 
-    def refuses_deleted_scenario(self, item: WorkItem, stored_names: list[str]) -> bool:
+    def refuses_deleted_scenario(self, item: WorkItem) -> bool:
         """Whether the scenario of the job ``item`` has no registration in the artifact store
-        (``RepositoryBackend.metadata`` is None). Then the worker cancels the item and discards the content of
-        ``stored_names``, the checkpoints that the item names, and the job's record files.
+        (``RegistrationAwareRepositoryBackendFactory.has_registration``, which builds no backend for a scenario
+        that this process has not opened; else ``RepositoryBackend.metadata`` is None). Then the worker cancels the
+        item and discards every content of the scenario with one call (``RepositoryBackend.discard_all_content``):
+        the checkpoints that the item names, the job's record files, and any other content that a job stored after
+        the delete.
 
         The delete of a scenario cancels the jobs that it finds in the queue, and a trainer whose cycle added a job
         after that look cancels it when the cycle returns. When the trainer's process stops in between, the job
         stays queued. The delete archives the registration last, so the worker that takes such a job, or stores
         for it after the delete, finds no registration: the job does not run on, and its content does not stay.
         """
-        backend = self.backends(item.scenario)
-        if backend.metadata() is not None:
+        if isinstance(self.backends, RegistrationAwareRepositoryBackendFactory):
+            registered = self.backends.has_registration(item.scenario)
+        else:
+            registered = self.backends(item.scenario).metadata() is not None
+        if registered:
             return False
         logger.warning("training worker %s cancels job %s: its scenario was deleted", self.worker_id, item.id)
         self.queue.cancel(JOBS_QUEUE, item.id, SCENARIO_DELETED_ERROR)
-        for name in (*stored_names, job_records_content(item.id)):
-            backend.discard_content(name)
+        self.backends(item.scenario).discard_all_content()
         return True
 
 

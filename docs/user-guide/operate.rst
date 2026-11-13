@@ -789,19 +789,25 @@ deletes its ended job, and when its scenario is deleted. What happens to its
 Git LFS objects depends on where the repository is:
 
 - A local repository, named by a path or a ``file://`` URL: the discard
-  removes each LFS object that no ref references any more. Snapshots, pending
-  snapshots and archived scenarios keep their objects. A materialized file is
-  a link to its object, so a cache entry of discarded content in another
-  process keeps its bytes until that entry goes. The training service's clone
-  drops its links when it stores its next checkpoint. While a store pushes,
-  a removal does nothing, and the next discard removes what it left. The
-  processes coordinate with ``flock`` on the file ``reef-objects.lock`` in the
-  repository. This is safe when every process that writes the repository runs
-  on one host, on any local filesystem. It is also safe across hosts on a Linux
-  NFS mount, such as Amazon EFS, because Linux emulates ``flock`` there with NFS
-  byte-range locks. On other shared filesystems, such as SMB or a FUSE mount of
-  object storage, the lock does not reach other hosts: do not share a local
-  repository between hosts there. Reef does not detect the filesystem.
+  deletes the ref only. Control's sweep of ended work, once an hour, removes
+  each LFS object that no ref references any more. The delete of a scenario
+  does the same at once. Snapshots, pending snapshots and archived scenarios
+  keep their objects. A materialized file is a link to its object. So the
+  sweep removes a cache entry of discarded content one sweep later, because
+  another service that shares the cache directory can still read it. The
+  training service's clone drops its links when the store's push ends.
+  The removal scans the refs without the lock, so stores and publishes do not
+  wait for the scan. When a store or publish starts during the scan, the sweep
+  removes nothing, and the next sweep removes what it left. The processes
+  coordinate with ``flock`` on the file ``reef-objects.lock`` in the
+  repository, and count their writes in ``reef-objects.writes``, which grows
+  by one byte for each write. This is safe when every process that writes the
+  repository runs on one host, on any local filesystem. It is also safe across
+  hosts on a Linux NFS mount, such as Amazon EFS, because Linux emulates
+  ``flock`` there with NFS byte-range locks. On other shared filesystems, such
+  as SMB or a FUSE mount of object storage, the lock does not reach other
+  hosts: do not share a local repository between hosts there. Reef does not
+  detect the filesystem.
 - A remote Git server or the Hugging Face Hub: the objects stay on the remote
   after Reef deletes the ref. Reef's clone in the work directory also keeps a
   copy of each object that it uploaded. To free the remote's space, stop every

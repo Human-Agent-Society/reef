@@ -350,6 +350,13 @@ class RepositoryBackendFactory(ABC):
     @abstractmethod
     def __call__(self, scenario: str) -> RepositoryBackend: ...
 
+    def reclaim_discarded(self) -> None:
+        """Free the storage that discarded content still holds. Control's sweep calls it on its schedule
+        (``EndedWorkSweeper``). The default frees nothing: it fits a store whose discard frees the content's
+        storage at once. A store that keeps the files of discarded content after the discard, such as Git LFS
+        objects or a local cache, frees them here."""
+        return
+
 
 class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
     @abstractmethod

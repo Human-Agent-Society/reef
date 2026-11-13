@@ -47,9 +47,12 @@ CONTENT_DIRECTORY = "content"
 FETCH_BATCH_COMMITS = 1000
 _LFS_PATTERNS = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt")
 _LFS_ATTRIBUTES = "".join(f"{pattern} filter=lfs diff=lfs merge=lfs -text\n" for pattern in _LFS_PATTERNS)
-#: The file in a local repository that ``store_content``, ``publish`` and the other writers hold shared, and that
-#: ``reclaim_objects`` holds exclusive (``fcntl.flock``).
+#: The lock file of a local repository's LFS objects (``LocalLFSObjects``).
 OBJECTS_LOCK_FILE = "reef-objects.lock"
+#: The write log of a local repository: each write that makes a ref reference LFS objects adds one byte.
+OBJECTS_WRITES_FILE = "reef-objects.writes"
+#: A marker beside a cache entry ``<commit>`` of discarded content: ``<commit>.discarded``.
+DISCARDED_SUFFIX = ".discarded"
 # Backend instances in one process can share a working directory.
 WORKSPACE_LOCKS: dict[Path, RLock] = {}
 WORKSPACE_LOCKS_LOCK = Lock()
@@ -88,6 +91,92 @@ def _initialize_local_repository(repository: Path, git: GitClient) -> None:
 
 #: The remote tracking ref naming the snapshot a workspace fetched last, a commit the remote already holds.
 FETCHED_SNAPSHOT_REF = "refs/remotes/origin/reef-fetched"
+
+
+@dataclass(frozen=True)
+class LocalLFSObjects:
+    """The LFS objects of a local repository, with the lock and the write log that make their removal safe.
+
+    Values: ``repository`` is the directory of a local bare repository (``local_directory``). Its objects are the
+    files ``lfs/objects/<aa>/<bb>/<oid>``. The lock file ``OBJECTS_LOCK_FILE`` and the write log
+    ``OBJECTS_WRITES_FILE`` are beside them. The write log holds one byte for each write that started, so its size
+    is the count of started writes; it grows by one byte for each write and is never cut.
+    Purpose: every write that makes a ref reference LFS objects runs inside ``writing``, and ``reclaim`` removes
+    the objects that no ref references.
+
+    The lock is ``fcntl.flock``. It excludes threads of one process and processes of one host on any local
+    filesystem, and processes of several hosts on a Linux NFS mount (such as Amazon EFS), where Linux emulates
+    ``flock`` with NFS byte-range locks. On another shared filesystem (SMB, a FUSE mount of object storage) it does
+    not reach other hosts, so a local repository must not be shared between hosts there. ``fcntl.lockf`` would
+    reach NFS too, but it does not exclude threads of one process.
+    """
+
+    repository: Path
+
+    @contextmanager
+    def writing(self) -> Iterator[None]:
+        """Hold the lock shared and add one byte to the write log, for a write that makes a ref reference LFS
+        objects: a push that uploads them or finds them uploaded, or a commit of trees that another ref holds."""
+        # Reef imports on platforms without fcntl; a local repository needs it.
+        import fcntl
+
+        with open(self.repository / OBJECTS_LOCK_FILE, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            with open(self.repository / OBJECTS_WRITES_FILE, "ab") as writes:
+                writes.write(b".")
+            yield
+
+    @contextmanager
+    def exclusive(self) -> Iterator[bool]:
+        """Hold the lock exclusive and yield True when no write holds it now; else yield False at once."""
+        import fcntl
+
+        with open(self.repository / OBJECTS_LOCK_FILE, "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
+
+    def write_count(self) -> int:
+        """The count of writes that started (``writing``): the size of the write log."""
+        writes = self.repository / OBJECTS_WRITES_FILE
+        return writes.stat().st_size if writes.exists() else 0
+
+    def reclaim(self, git: GitClient) -> tuple[str, ...] | None:
+        """Remove each LFS object that no ref references, and return their IDs, sorted; None when the pass
+        removed nothing because a write ran.
+
+        A ref references the objects whose pointers are in the commits that it reaches (``git lfs ls-files
+        --all``): every snapshot, binding, archived scenario and stored content. The scan runs without the lock, so
+        a write never waits for it. The pass works in three steps:
+
+        1. With the lock exclusive, taken at once, it reads the write count. No write is in progress then.
+        2. Without the lock, it scans the refs and lists the objects that none references.
+        3. With the lock exclusive, taken at once, it removes the listed objects, but only when the write count
+           has not changed. Then no write started during the scan, so no ref moved to a listed object.
+
+        When a write holds the lock in step 1 or 3, or a write started during the scan, the pass removes nothing
+        and returns None; the next pass removes what this one left. A write that starts after step 3 waits only
+        for the removal of the listed files. A file that links a removed object, such as a materialized file,
+        keeps its bytes until it is removed too.
+        """
+        with self.exclusive() as idle:
+            if not idle:
+                return None
+            started = self.write_count()
+        listed = git.run(("git", "lfs", "ls-files", "--all", "--long"), cwd=self.repository)
+        referenced = {line.split(" ", 1)[0] for line in listed.splitlines() if line}
+        unreferenced = [
+            stored for stored in (self.repository / "lfs" / "objects").glob("??/??/*") if stored.name not in referenced
+        ]
+        with self.exclusive() as idle:
+            if not idle or self.write_count() != started:
+                return None
+            for stored in unreferenced:
+                stored.unlink(missing_ok=True)
+        return tuple(sorted(stored.name for stored in unreferenced))
 
 
 @dataclass(frozen=True)
@@ -508,65 +597,27 @@ class _GitWorkspace:
 
     @contextmanager
     def writing_objects(self) -> Iterator[None]:
-        """Hold the objects lock of a local repository shared, for a write that makes a ref reference LFS objects:
-        a push that uploads them, or a commit of trees that another ref holds. ``reclaim_objects`` holds the lock
-        exclusive, so it never sees the objects of such a write before its ref. A remote repository has no lock.
-
-        The lock is ``fcntl.flock`` on ``OBJECTS_LOCK_FILE``: it excludes threads of one process and processes of
-        one host on any local filesystem, and processes of several hosts on a Linux NFS mount (such as Amazon EFS),
-        where Linux emulates ``flock`` with NFS byte-range locks. On another shared filesystem (SMB, a FUSE mount
-        of object storage) it does not reach other hosts, so a local repository must not be shared between hosts
-        there. ``fcntl.lockf`` would reach NFS too, but it does not exclude threads of one process."""
+        """``LocalLFSObjects.writing`` of a local repository; a remote repository has no lock."""
         if self.local_repository is None:
             yield
             return
-        # Reef imports on platforms without fcntl; a local repository needs it.
-        import fcntl
-
-        with open(self.local_repository / OBJECTS_LOCK_FILE, "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_SH)
+        with LocalLFSObjects(self.local_repository).writing():
             yield
 
-    def reclaim_objects(self) -> tuple[str, ...]:
-        """Remove each LFS object of a local repository that no ref of the repository references, and return
-        their IDs, sorted; a remote repository changes nothing and gives ().
-
-        A ref references the LFS objects whose pointers are in the commits that it reaches
-        (``git lfs ls-files --all``): every snapshot, binding, archived scenario and stored content. A write that
-        makes a ref reference objects holds the lock shared (``writing_objects``), so an object that such a write
-        uploaded, or found uploaded already, is never taken before its ref moves. While a write holds the lock,
-        nothing is removed and () is returned: the next reclamation removes what this one left. A file that links
-        a removed object, such as a materialized file, keeps its bytes until it is removed too.
-        """
-        if self.local_repository is None or self.local_objects is None:
-            return ()
-        import fcntl
-
-        with open(self.local_repository / OBJECTS_LOCK_FILE, "a") as lock:
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return ()
-            listed = self._run(("git", "lfs", "ls-files", "--all", "--long"), cwd=self.local_repository)
-            referenced = {line.split(" ", 1)[0] for line in listed.splitlines() if line}
-            removed = []
-            for stored in self.local_objects.glob("??/??/*"):
-                if stored.name not in referenced:
-                    stored.unlink(missing_ok=True)
-                    removed.append(stored.name)
-        return tuple(sorted(removed))
-
-    def prune_objects(self) -> None:
-        """Remove each LFS object of the clone that the local repository does not hold. The clean filter writes
-        an object into the clone, and the push links it into the repository, so the bytes of an object that
-        ``reclaim_objects`` removed stay on disk until the clone drops its link too. The caller holds the
-        workspace lock, so no object of this clone waits for its push. A remote repository changes nothing."""
+    def drop_objects(self, commit: str) -> None:
+        """Remove from the clone of a local repository the LFS objects of ``commit``, which a push uploaded. The
+        clean filter writes each object into the clone, and the upload links it into the repository, so the clone's
+        link would keep the bytes of a checkpoint after a reclamation removed the repository's object. No later push
+        needs them: a push of a commit whose objects the repository holds succeeds without them, and a new commit
+        cleans its files again. A remote repository's clone keeps its objects. The caller holds the workspace
+        lock."""
         if self.local_objects is None:
             return
         clone_objects = self.clone_dir / ".git" / "lfs" / "objects"
-        for stored in clone_objects.glob("??/??/*"):
-            if not (self.local_objects / stored.relative_to(clone_objects)).exists():
-                stored.unlink(missing_ok=True)
+        for line in self._run(("git", "lfs", "ls-files", "--long", commit), cwd=self.clone_dir).splitlines():
+            oid = line.split(" ", 1)[0]
+            if oid:
+                (clone_objects / oid[:2] / oid[2:4] / oid).unlink(missing_ok=True)
 
     def git(self, *args: str) -> str:
         return self._git_client.git(*args)
@@ -1098,14 +1149,13 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         The files keep every name, also ``.gitattributes`` and the manifest's: the backend's own LFS attributes
         are at the commit's root, outside the content. Weight files go through the LFS clean filter, so Git LFS
         keeps one object for equal bytes, whatever content or snapshot holds them. The push uploads the LFS
-        objects before the ref moves, so content that exists has its objects on the remote. The clone first drops
-        the objects that a reclamation removed from a local repository (``_GitWorkspace.prune_objects``).
+        objects before the ref moves, so content that exists has its objects on the remote. Then the clone drops
+        its copies of them (``_GitWorkspace.drop_objects``): the repository holds the bytes.
         """
         ref_name = self.content_ref(name)
         if not directory.is_dir():
             raise ArtifactPublicationError(f"content {name!r} needs an existing directory, not {directory}")
         with self._workspace.lock:
-            self._workspace.prune_objects()
             paths = self._workspace.source_files(directory)
             if any((directory / path).is_symlink() for path in paths):
                 # A symlinked tree is stored by its targets' bytes, which only a copy into the work tree resolves.
@@ -1122,6 +1172,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                 )
             with self._workspace.writing_objects():
                 self._workspace.push(f"+{commit}:{ref_name}")
+            self._workspace.drop_objects(commit)
 
     def content_commit(self, name: str) -> str:
         """The commit of the stored content ``name``; ``ArtifactNotFoundError`` when the repository has none."""
@@ -1141,11 +1192,12 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         return path / CONTENT_DIRECTORY
 
     def discard_content(self, name: str) -> None:
-        """Delete the content's ref, then free its files (``reclaim_content``)."""
+        """Delete the content's ref, and mark its cache entry discarded (``mark_discarded``). The discard removes
+        no file: the LFS objects that only this content held, and its cache entry, stay until control's sweep
+        removes them (``GitLFSRepositoryBackendFactory.reclaim_discarded``)."""
         ref_name = self.content_ref(name)
         with self._workspace.lock:
-            stored = self._workspace.ls_remote_prefix(self.content_ref_prefix)
-            commit = stored.pop(ref_name, None)
+            commit = self._workspace.ls_remote(ref_name)
             if commit is None:
                 return
             try:
@@ -1154,33 +1206,29 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                 # Another process can remove the ref between the two calls.
                 if self._workspace.ls_remote(ref_name) is not None:
                     raise
-            self.reclaim_content({commit}.difference(stored.values()))
+            self.mark_discarded((commit,))
 
     def discard_all_content(self) -> None:
-        """Delete every content ref of the scenario, in groups that fit on a command line, then free their files
-        (``reclaim_content``)."""
+        """Delete every content ref of the scenario, in groups that fit on a command line, and mark their cache
+        entries discarded (``mark_discarded``). Then remove the LFS objects of a local repository that no ref
+        references (``LocalLFSObjects.reclaim``), as control's sweep does: the scenario's delete calls this, so its
+        checkpoints do not wait for the next sweep. When a write runs meanwhile, the next sweep removes them."""
         with self._workspace.lock:
             stored = self._workspace.ls_remote_prefix(self.content_ref_prefix)
             names = sorted(stored)
             for start in range(0, len(names), FETCH_BATCH_COMMITS):
                 self._workspace.push(*(f":{name}" for name in names[start : start + FETCH_BATCH_COMMITS]))
-            self.reclaim_content(set(stored.values()))
+            self.mark_discarded(stored.values())
+        if self._workspace.local_repository is not None:
+            LocalLFSObjects(self._workspace.local_repository).reclaim(self._git_client)
 
-    def reclaim_content(self, commits: Collection[str]) -> tuple[str, ...]:
-        """Free the files of discarded content: remove the cache entries of the content ``commits``, which no
-        content ref names any more, then the LFS objects that no ref of a local repository references
-        (``_GitWorkspace.reclaim_objects``), and then the clone's links to those objects; return the IDs of the
-        removed objects. The caller holds the workspace lock.
-
-        Only this process's cache and clone lose their files. A cache entry of the content in another process,
-        such as one that a reader materialized there, keeps the bytes of its files until that process removes it.
-        A remote repository keeps the objects: its server decides when an object without a ref goes.
-        """
+    def mark_discarded(self, commits: Collection[str]) -> None:
+        """Write the marker ``<commit>.discarded`` beside each cache entry of the discarded content ``commits``.
+        Another process that shares the cache directory can still read the entry, so the discard does not remove
+        it: a later sweep does (``GitLFSRepositoryBackendFactory.reclaim_discarded``)."""
         for commit in commits:
-            shutil.rmtree(self.cache_dir / commit, ignore_errors=True)
-        removed = self._workspace.reclaim_objects()
-        self._workspace.prune_objects()
-        return removed
+            if (self.cache_dir / commit).is_dir():
+                (self.cache_dir / f"{commit}{DISCARDED_SUFFIX}").touch()
 
     def publish_parts(
         self,
@@ -1292,9 +1340,11 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             if current != expected_parent.revision:
                 raise ArtifactConflictError("repository head changed before the staged snapshot was committed")
             try:
+                # The push of the staged snapshot uploaded its objects, and the clone may hold none of them.
                 self._workspace.force_push_with_lease(
                     f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
                     f"{ref.revision}:{self.ref_name}",
+                    uploads_lfs=False,
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
@@ -1353,6 +1403,8 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         self._cache_dir = Path(cache_dir)
         self._refs = refs
         self._git_config = dict(git_config or {})
+        #: When the last ``reclaim_discarded`` started, in seconds since the epoch, or None before the first.
+        self.reclaimed_at: float | None = None
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: RepositoryBackendContext) -> Self:
@@ -1429,6 +1481,40 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             shutil.rmtree(work_dir, ignore_errors=True)
             archived.append(str(work_dir))
         return tuple(archived)
+
+    def reclaim_discarded(self) -> None:
+        """Free what discarded content holds on this host, in two steps.
+
+        - Remove each cache entry whose marker (``GitLFSRepositoryBackend.mark_discarded``) is older than the start
+          of the previous call of this factory, unless a content ref names the entry's commit again. So an entry
+          that a discard marked before one sweep goes in the next sweep, and a process that reads the entry has at
+          least one sweep interval to finish. The first call after a start removes no entry.
+        - With a local repository, remove the LFS objects that no ref references (``LocalLFSObjects.reclaim``).
+
+        Control's sweep calls it (``EndedWorkSweeper``), so the objects of discarded content stay until the next
+        sweep, and a cache entry stays until the sweep after the one that follows its discard. A remote
+        repository keeps its objects: its server decides when an object with no ref goes.
+        """
+        previous, self.reclaimed_at = self.reclaimed_at, time.time()
+        client = GitClient(self._work_dir / ".registration-check", self._git_config)
+        repository_exists = not (isinstance(self._repository, Path) and not self._repository.exists())
+        if previous is not None:
+            named: set[str] = set()
+            if repository_exists:
+                output = client.run(
+                    ("git", "ls-remote", str(self._repository), f"{self._refs.moving}contents/*"), source_error=True
+                )
+                named = {line.split()[0] for line in output.splitlines() if line}
+            for marker in self._cache_dir.glob(f"*{DISCARDED_SUFFIX}"):
+                if marker.stat().st_mtime >= previous:
+                    continue
+                commit = marker.name.removesuffix(DISCARDED_SUFFIX)
+                if commit not in named:
+                    shutil.rmtree(self._cache_dir / commit, ignore_errors=True)
+                marker.unlink(missing_ok=True)
+        local = local_directory(str(self._repository))
+        if local is not None:
+            LocalLFSObjects(local).reclaim(client)
 
     def has_archived_registration(self, scenario: str) -> bool:
         """Whether the repository holds an archived ref of ``scenario`` (``RefLayout.archived``), which

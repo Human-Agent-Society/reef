@@ -27,6 +27,9 @@ class EndedWorkSweeper(ServiceWorker):
     of the training jobs among them (``reef.train.job_queue.discard_ended_content``), so the artifact store keeps
     no checkpoint that no commit took for longer than its job's item. A job item whose content could not be
     discarded stays for the next sweep, for at most one more retention time: then the sweep gives the content up.
+    After the items, the sweep frees the storage that discarded content still holds
+    (``RepositoryBackendFactory.reclaim_discarded``): a discard only deletes the content's name, so its files stay
+    until the next sweep.
 
     Purpose: the dispatcher of a control instance runs one, so that the queues hold the items that a producer may
     still read (a job's trainer, an evaluation's results) and no item forever.
@@ -68,7 +71,8 @@ class EndedWorkSweeper(ServiceWorker):
             self.stopped.wait(self.interval_seconds)
 
     def sweep(self) -> int:
-        """Delete the items that ended before the retention; return how many, 0 when the store failed."""
+        """Delete the items that ended before the retention, then free the storage of discarded content; return
+        how many items went, 0 when the store failed."""
         try:
             ended_before = time.time() - self.retention_seconds
             kept = discard_ended_content(
@@ -77,10 +81,15 @@ class EndedWorkSweeper(ServiceWorker):
                 ended_before=ended_before,
                 give_up_before=ended_before - self.retention_seconds,
             )
-            return self.queue.delete_final(finished_before=ended_before, keep={JOBS_QUEUE: kept})
+            deleted = self.queue.delete_final(finished_before=ended_before, keep={JOBS_QUEUE: kept})
         except Exception:
             logger.exception("could not delete the ended work items")
-            return 0
+            deleted = 0
+        try:
+            self.backends.reclaim_discarded()
+        except Exception:
+            logger.exception("could not free the storage of discarded content")
+        return deleted
 
 
 __all__ = ["SWEEP_INTERVAL_SECONDS", "EndedWorkSweeper"]

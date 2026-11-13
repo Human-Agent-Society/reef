@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Event
@@ -31,7 +32,7 @@ from reef.artifact import (
 )
 from reef.artifact.composite import compose_snapshot, link_or_copy
 from reef.artifact.git_client import GitClient
-from reef.artifact.git_lfs import HUB_REFS, _GitWorkspace, local_directory, same_file, token_config
+from reef.artifact.git_lfs import HUB_REFS, LocalLFSObjects, _GitWorkspace, local_directory, same_file, token_config
 from reef.core.plugins import PluginConfigError
 
 
@@ -1157,9 +1158,9 @@ def test_a_repository_is_local_when_a_path_or_a_file_url_names_its_directory(tmp
 def test_discarded_content_leaves_no_lfs_object_and_no_copy_on_the_host(
     named_by: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Five checkpoints are stored and one is committed. Once the five are discarded, the repository holds the
-    object of the committed one only, control's cache of a discarded one is gone, and after its next store the
-    trainer's clone links no discarded object either."""
+    """Five checkpoints are stored and one is committed. The trainer's clone keeps no object after a store. The
+    discards remove no file. The next sweep removes every object but the committed one, and the sweep after it
+    removes control's cache entries of the discarded content, which another process could still read."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     byte_count = 4 * 1024 * 1024
@@ -1169,12 +1170,13 @@ def test_discarded_content_leaves_no_lfs_object_and_no_copy_on_the_host(
         run_git("init", "--bare", "-q", str(remote))
         repository = remote.as_uri()
 
-    def backend(name: str) -> GitLFSRepositoryBackend:
-        return GitLFSRepositoryBackend(
-            "agent", repository, work_dir=tmp_path / name / "work", cache_dir=tmp_path / name / "cache"
+    def factory(name: str) -> GitLFSRepositoryBackendFactory:
+        return GitLFSRepositoryBackend.factory(
+            repository, work_dir=tmp_path / name / "work", cache_dir=tmp_path / name / "cache"
         )
 
-    training, control = backend("training"), backend("control")
+    training_factory, control_factory = factory("training"), factory("control")
+    training, control = training_factory("agent"), control_factory("agent")
     root = control.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
     export = tmp_path / "export"
     for step in range(5):
@@ -1182,6 +1184,7 @@ def test_discarded_content_leaves_no_lfs_object_and_no_copy_on_the_host(
         (export / "model.safetensors").write_bytes(os.urandom(byte_count))
         training.store_content(f"job:{step}", export)
         shutil.rmtree(export)
+    assert copies_of(tmp_path / "training", byte_count) == 0
     published = control.publish_stored(
         StoredFiles(content="job:2"), metadata={"artifact_id": "a1"}, expected_parent=root
     )
@@ -1193,26 +1196,30 @@ def test_discarded_content_leaves_no_lfs_object_and_no_copy_on_the_host(
 
     for step in range(5):
         control.discard_content(f"job:{step}")
+    assert object_bytes(remote) == 5 * byte_count
+    control_factory.reclaim_discarded()
     assert object_bytes(remote) == byte_count
+    # The cache entry of job:0 keeps its bytes until the next sweep.
+    assert copies_of(tmp_path / "control", byte_count) == 2
+    control_factory.reclaim_discarded()
     assert copies_of(tmp_path / "control", byte_count) == 0
-    # The trainer's clone drops its links to the removed objects when it stores next.
-    export.mkdir()
-    (export / "records.txt").write_text("step 5\n")
-    training.store_content("job:records", export)
     assert copies_of(tmp_path, byte_count) == 1
-    served = backend("inference").materialize(published).local_path
+    served = factory("inference")("agent").materialize(published).local_path
     assert served is not None and (served / "model.safetensors").read_bytes() == committed
 
 
 @pytest.mark.integration
-@pytest.mark.parametrize("bytes_of", ["new bytes", "the discarded content's bytes"])
-def test_a_reclamation_during_a_store_keeps_the_objects_whose_ref_is_not_pushed_yet(
-    bytes_of: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("writer", ["store of new bytes", "store of the discarded bytes", "publish of stored files"])
+@pytest.mark.parametrize("starts", ["before the pass", "during the scan"])
+def test_a_reclamation_removes_no_object_that_a_write_makes_a_ref_reference(
+    writer: str, starts: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The push of ``store_content`` uploads the objects, then moves the ref. A discard that runs between the two
-    sees objects that no ref references: those of the new content, or, when the new content has the bytes of the
-    discarded one, the object that the upload found on the remote. The reclamation waits for no write and removes
-    nothing while one holds the objects lock; the next one removes only what no ref references."""
+    """A write makes a ref reference LFS objects: ``store_content`` uploads them and then moves its ref, and
+    ``publish_parts`` reads the trees of stored content and pushes a snapshot of them without an upload. A
+    reclamation can see such objects with no ref: the new content's, the object that the upload found on the
+    remote, or the object of content that is discarded after the publish read its trees. When the write holds the
+    lock at the start of the pass, or starts during the scan, the pass removes nothing. The next pass removes only
+    what no ref references."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     remote = tmp_path / "artifacts.git"
@@ -1220,46 +1227,102 @@ def test_a_reclamation_during_a_store_keeps_the_objects_whose_ref_is_not_pushed_
     def backend(name: str) -> GitLFSRepositoryBackend:
         return GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / name / "work", cache_dir=tmp_path / name)
 
-    training, control = backend("training"), backend("control")
-    control.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
+    training, publisher, control = backend("training"), backend("publisher"), backend("control")
+    root = control.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
     old_weights = os.urandom(4096)
-    new_weights = os.urandom(4096) if bytes_of == "new bytes" else old_weights
+    new_weights = os.urandom(4096) if writer == "store of new bytes" else old_weights
     for name, weights in (("old", old_weights), ("new", new_weights)):
         (tmp_path / name).mkdir()
         (tmp_path / name / "model.safetensors").write_bytes(weights)
     training.store_content("job:old", tmp_path / "old")
+    stores = writer.startswith("store")
+    writer_work_dir = (tmp_path / ("training" if stores else "publisher") / "work").resolve()
 
-    uploaded, release = Event(), Event()
-    push = _GitWorkspace.push
+    def write() -> None:
+        if stores:
+            training.store_content("job:new", tmp_path / "new")
+        else:
+            publisher.publish_stored(
+                StoredFiles(content="job:old"), metadata={"artifact_id": "a1"}, expected_parent=root
+            )
+
+    pushing, release = Event(), Event()
+    push, push_with_lease = _GitWorkspace.push, _GitWorkspace.force_push_with_lease
+
+    def pause(workspace: _GitWorkspace) -> None:
+        if workspace.work_dir != writer_work_dir:
+            return
+        # The LFS pre push hook uploads the clone's objects: the repository holds them, and no ref yet.
+        clone_objects = workspace.clone_dir / ".git" / "lfs" / "objects"
+        for stored in clone_objects.rglob("*/*/*"):
+            target = remote / "lfs" / "objects" / stored.relative_to(clone_objects)
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.link(stored, target)
+        pushing.set()
+        assert release.wait(30)
 
     def paused_push(workspace: _GitWorkspace, *refs: str, uploads_lfs: bool = True) -> None:
-        if workspace.work_dir == (tmp_path / "training" / "work").resolve() and any("contents" in r for r in refs):
-            # The LFS pre push hook uploads the clone's objects: the repository holds them, and no ref yet.
-            clone_objects = workspace.clone_dir / ".git" / "lfs" / "objects"
-            for stored in clone_objects.rglob("*/*/*"):
-                target = remote / "lfs" / "objects" / stored.relative_to(clone_objects)
-                if not target.exists():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    os.link(stored, target)
-            uploaded.set()
-            assert release.wait(30)
+        if not any(ref.startswith(":") for ref in refs):
+            pause(workspace)
         push(workspace, *refs, uploads_lfs=uploads_lfs)
 
-    monkeypatch.setattr(_GitWorkspace, "push", paused_push)
-    with ThreadPoolExecutor(1) as pool:
-        stored = pool.submit(training.store_content, "job:new", tmp_path / "new")
-        assert uploaded.wait(30)
-        objects = {path.name for path in (remote / "lfs" / "objects").rglob("*/*/*")}
-        control.discard_content("job:old")
-        assert run_git("lfs", "ls-files", "--all", cwd=remote) == ""
-        assert control.reclaim_content(()) == ()
-        assert {path.name for path in (remote / "lfs" / "objects").rglob("*/*/*")} == objects
-        release.set()
-        stored.result(timeout=30)
+    def paused_push_with_lease(workspace: _GitWorkspace, lease: str, *refs: str, uploads_lfs: bool = True) -> None:
+        pause(workspace)
+        push_with_lease(workspace, lease, *refs, uploads_lfs=uploads_lfs)
 
-    removed = control.reclaim_content(())
-    assert removed == (() if bytes_of != "new bytes" else (hashlib.sha256(old_weights).hexdigest(),))
-    assert (control.materialize_content("job:new") / "model.safetensors").read_bytes() == new_weights
+    def objects() -> set[str]:
+        return {path.name for path in (remote / "lfs" / "objects").rglob("*/*/*")}
+
+    class WriteDuringScan(GitClient):
+        """Starts the write after the pass read the write count, and ends it after the scan."""
+
+        def run(
+            self,
+            command: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            source_error: bool = False,
+            input_text: str | None = None,
+            environment: Mapping[str, str] | None = None,
+        ) -> str:
+            started = pool.submit(write)
+            assert pushing.wait(30)
+            control.discard_content("job:old")
+            listed = super().run(
+                command, cwd=cwd, source_error=source_error, input_text=input_text, environment=environment
+            )
+            # The scan sees no ref that references an object: job:old is discarded, and the write's ref waits.
+            assert listed == ""
+            release.set()
+            started.result(timeout=30)
+            return listed
+
+    lfs_objects = LocalLFSObjects(remote)
+    monkeypatch.setattr(_GitWorkspace, "push", paused_push)
+    monkeypatch.setattr(_GitWorkspace, "force_push_with_lease", paused_push_with_lease)
+    with ThreadPoolExecutor(1) as pool:
+        if starts == "before the pass":
+            started = pool.submit(write)
+            assert pushing.wait(30)
+            control.discard_content("job:old")
+            held = objects()
+            assert lfs_objects.reclaim(GitClient(tmp_path)) is None
+            assert objects() == held
+            release.set()
+            started.result(timeout=30)
+        else:
+            held = objects() | {hashlib.sha256(new_weights).hexdigest()}
+            assert lfs_objects.reclaim(WriteDuringScan(tmp_path)) is None
+            assert objects() == held
+
+    removed = lfs_objects.reclaim(GitClient(tmp_path))
+    assert removed == ((hashlib.sha256(old_weights).hexdigest(),) if writer == "store of new bytes" else ())
+    if stores:
+        assert (control.materialize_content("job:new") / "model.safetensors").read_bytes() == new_weights
+    else:
+        published = backend("reader").materialize(control.current()).local_path
+        assert published is not None and (published / "model.safetensors").read_bytes() == old_weights
 
 
 @pytest.mark.integration
