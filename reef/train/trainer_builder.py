@@ -1,13 +1,12 @@
 """Build the trainers of one scenario from a recipe's values and the live objects of their holders.
 
 A recipe is configuration: it builds no trainer (RFC #1390). The scenario factory reads a ``TrainerSpec`` from the
-recipe, or one for each component of a composite recipe, and gives it to its ``TrainerBuilder`` with the objects of
+recipe, or one for each component of a composite recipe, and gives it to ``build_trainers`` with the objects of
 the scenario's storage session.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -65,7 +64,7 @@ class ComponentTrainerSpecs:
     trainers are built. ``report_type`` is the report contract that the scenario's ingress checks, or None for any
     report.
 
-    Purpose: the scenario factory reads one from a composite recipe, and ``SpecTrainerBuilder`` builds one trainer
+    Purpose: the scenario factory reads one from a composite recipe, and ``build_trainers`` builds one trainer
     for each component.
     """
 
@@ -135,41 +134,23 @@ def build_trainer(
     )
 
 
-class TrainerBuilder(ABC):
-    """Builds the trainers of a scenario.
+def build_trainers(
+    specs: TrainerSpec | ComponentTrainerSpecs,
+    scenario: str,
+    records: RecordStore,
+    *,
+    components: ScenarioComponents,
+    algorithm_states: Mapping[str, Mapping[str, Any] | None],
+    experiment_logger: ExperimentLogger | None = None,
+    task_storage: TaskStorage | None = None,
+    artifacts: CommittedArtifacts | None = None,
+    samples: SampleStore | None = None,
+    root: ScenarioRoot | None = None,
+) -> tuple[ComponentTrainer, ...]:
+    """Build every trainer of the scenario ``scenario`` with ``build_trainer``, each bound to the component that
+    it evolves.
 
-    Purpose: ``ScenarioFactory`` holds one builder and calls it once for each scenario that it recovers, with the
-    specs that it reads from the deployment's recipe.
-    """
-
-    @abstractmethod
-    def build_trainers(
-        self,
-        specs: TrainerSpec | ComponentTrainerSpecs,
-        scenario: str,
-        records: RecordStore,
-        *,
-        components: ScenarioComponents,
-        algorithm_states: Mapping[str, Mapping[str, Any] | None],
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: CommittedArtifacts | None = None,
-        samples: SampleStore | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> tuple[ComponentTrainer, ...]:
-        """Build every trainer of the scenario ``scenario``, each bound to the component that it evolves.
-
-        ``specs`` is the recipe's one spec, or the specs of a composite recipe. ``components`` is what the scenario
-        serves. ``algorithm_states`` holds each trainer's recovered state under its component name; a trainer with
-        none is new. ``records`` is the scenario's records, ``task_storage`` opens the generated task stores of its
-        session, and ``samples`` is the samples that it trains on. ``artifacts`` reads the scenario's committed
-        snapshots, and ``root`` is its root snapshot, where a new trainer starts. The scenario runs the trainers as
-        separate workers that take turns, one step at a time.
-        """
-
-
-class SpecTrainerBuilder(TrainerBuilder):
-    """Builds each trainer from its spec with ``build_trainer``.
+    ``specs`` is the recipe's one spec, or the specs of a composite recipe:
 
     - ``ComponentTrainerSpecs`` give one trainer for each component, in the order of ``specs``. Each trainer gets its
       own view of the scenario's objects: the task stores under ``<component>/``, the committed artifacts and the
@@ -178,60 +159,50 @@ class SpecTrainerBuilder(TrainerBuilder):
     - One ``TrainerSpec`` gives one trainer. It is bound to the scenario's only component, or to ``records`` when
       the scenario serves none, and it reads the samples as the trainer ``""``.
 
-    Purpose: the scenarios of a dispatcher use it unless the dispatcher is given another builder.
+    ``components`` is what the scenario serves. ``algorithm_states`` holds each trainer's recovered state under its
+    component name; a trainer with none is new. ``records`` is the scenario's records, ``task_storage`` opens the
+    generated task stores of its session, and ``samples`` is the samples that it trains on. ``artifacts`` reads the
+    scenario's committed snapshots, and ``root`` is its root snapshot, where a new trainer starts. The scenario runs
+    the trainers as separate workers that take turns, one step at a time.
+
+    Raise ``ValueError`` when one ``TrainerSpec`` is given for a scenario that serves several components.
+
+    Purpose: the scenario factory calls it once for each scenario that it recovers, with the specs that it reads
+    from the deployment's recipe (``reef.scenario.factory.read_trainer_specs``).
     """
-
-    def build_trainers(
-        self,
-        specs: TrainerSpec | ComponentTrainerSpecs,
-        scenario: str,
-        records: RecordStore,
-        *,
-        components: ScenarioComponents,
-        algorithm_states: Mapping[str, Mapping[str, Any] | None],
-        experiment_logger: ExperimentLogger | None = None,
-        task_storage: TaskStorage | None = None,
-        artifacts: CommittedArtifacts | None = None,
-        samples: SampleStore | None = None,
-        root: ScenarioRoot | None = None,
-    ) -> tuple[ComponentTrainer, ...]:
-        """Build the trainers of ``specs`` (``TrainerBuilder.build_trainers``).
-
-        Raise ``ValueError`` when one ``TrainerSpec`` is given for a scenario that serves several components.
-        """
-        if isinstance(specs, ComponentTrainerSpecs):
-            trainers = []
-            for component, spec in specs.specs.items():
-                trainer = build_trainer(
-                    spec,
-                    scenario,
-                    records,
-                    algorithm_state=algorithm_states.get(component),
-                    experiment_logger=experiment_logger,
-                    task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
-                    artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
-                    samples=None if samples is None else samples.for_trainer(component),
-                    root=None if root is None else component_root(root, component),
-                )
-                # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
-                trainer.admit_reports_of(specs.report_type)
-                trainers.append(ComponentTrainer(component, trainer))
-            return tuple(trainers)
-        if len(components.names) > 1:
-            raise ValueError(
-                f"recipe {specs.name!r} serves components {list(components.names)}: only a composite recipe binds "
-                "one trainer per component"
+    if isinstance(specs, ComponentTrainerSpecs):
+        trainers = []
+        for component, spec in specs.specs.items():
+            trainer = build_trainer(
+                spec,
+                scenario,
+                records,
+                algorithm_state=algorithm_states.get(component),
+                experiment_logger=experiment_logger,
+                task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
+                artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
+                samples=None if samples is None else samples.for_trainer(component),
+                root=None if root is None else component_root(root, component),
             )
-        component = components.names[0] if components.names else RECORDS_COMPONENT
-        trainer = build_trainer(
-            specs,
-            scenario,
-            records,
-            algorithm_state=algorithm_states.get(component),
-            experiment_logger=experiment_logger,
-            task_storage=task_storage,
-            artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
-            samples=None if samples is None else samples.for_trainer(""),
-            root=root,
+            # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
+            trainer.admit_reports_of(specs.report_type)
+            trainers.append(ComponentTrainer(component, trainer))
+        return tuple(trainers)
+    if len(components.names) > 1:
+        raise ValueError(
+            f"recipe {specs.name!r} serves components {list(components.names)}: only a composite recipe binds "
+            "one trainer per component"
         )
-        return (ComponentTrainer(component, trainer),)
+    component = components.names[0] if components.names else RECORDS_COMPONENT
+    trainer = build_trainer(
+        specs,
+        scenario,
+        records,
+        algorithm_state=algorithm_states.get(component),
+        experiment_logger=experiment_logger,
+        task_storage=task_storage,
+        artifacts=None if artifacts is None else ComponentArtifacts(artifacts, component),
+        samples=None if samples is None else samples.for_trainer(""),
+        root=root,
+    )
+    return (ComponentTrainer(component, trainer),)

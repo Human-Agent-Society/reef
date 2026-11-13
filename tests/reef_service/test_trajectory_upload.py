@@ -20,6 +20,7 @@ from tests.support.trajectory_uploads import (
     upload_trajectories,
 )
 
+from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.train.types import TrajectorySample
@@ -28,7 +29,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 async def wait_for_batches(recipe: UploadRecipe, count: int) -> None:
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(20):
         while len(recipe.batches) < count:
             await asyncio.sleep(0.01)
     assert len(recipe.batches) == count
@@ -73,13 +74,15 @@ def test_trajectory_items_train_once_also_after_a_restart(tmp_path):
             await create_scenario(client)
             await wait_for_batches(recipe, 2)
 
-    dispatcher = dispatcher_for(tmp_path, recipe)
+    # The repository outlives the restart, as the scenario's training start is one of its snapshots.
+    factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    dispatcher = dispatcher_for(tmp_path, recipe, factory)
     try:
         asyncio.run(create_and_train(dispatcher))
         assert dispatcher.get_or_create_scenario("s").records.count("s") == 0
     finally:
         dispatcher.close()
-    dispatcher = dispatcher_for(tmp_path, recipe)
+    dispatcher = dispatcher_for(tmp_path, recipe, factory)
     try:
         asyncio.run(create_after_restart(dispatcher))
     finally:

@@ -15,6 +15,7 @@ from tests.support.trajectory_uploads import TOKEN, UploadRecipe, dispatcher_for
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
+from reef.recipe import Recipe
 from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -194,7 +195,7 @@ def test_a_collection_names_benchmarks_and_adds_their_tasks_to_a_scenario(tmp_pa
 def test_a_deployment_without_a_data_store_serves_no_data_route(tmp_path: Path) -> None:
     (tmp_path / "initial").mkdir()
     dispatcher = Dispatcher(
-        UploadRecipe(),
+        Recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
