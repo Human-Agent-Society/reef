@@ -39,6 +39,7 @@ from tests.support.samples import data_storage
 from reef.artifact import Artifact, ArtifactValidator, GitLFSRepositoryBackend, RepositoryBackendFactory
 from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
+from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.execution.workers import SERVICE_COMPONENTS
@@ -47,6 +48,7 @@ from reef.recipe import Recipe
 from reef.recipe.base import WEIGHTS_COMPONENT
 from reef.recipe.composite import CompositeRecipe
 from reef.record2sample.service.worker import SAMPLES_QUEUE
+from reef.scenario.factory import ItemStart
 from reef.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.service.request_service import RequestService
 from reef.service.scenario_files import artifact_directory
@@ -321,10 +323,11 @@ def test_a_check_that_reads_the_weights_runs_where_they_are_and_brings_no_weight
     tmp_path: Path, real_lfs: None
 ) -> None:
     """The weights' check reads their files. The training service runs it on each checkpoint before it stores it,
-    and control runs it on the reference that an import stores. An activation and a restore run no check. The
-    inference service runs apart, so every weight byte under control's directory would be one that control
-    fetched; after each operation, none is there. A refusal still refuses: a refused checkpoint fails its job, and
-    a refused import raises the check's ``ValueError``, as before."""
+    and control runs it on the reference that an import stores. An activation and a restore run no check. A
+    train-from and a new trainer's root make local only the files that the facts' start checks read
+    (``TrainingBackendFacts.start_files``). The inference service runs apart, so every weight byte under control's
+    directory would be one that control fetched; after each operation, none is there. A refusal still refuses: a
+    refused checkpoint fails its job, and a refused import raises the check's ``ValueError``, as before."""
     component = SentinelWeights(tmp_path / "training" / "checkpoints")
     live = LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component))
     recipe = CheckedPolicyRecipe(max_staleness=4)
@@ -394,6 +397,21 @@ def test_a_check_that_reads_the_weights_runs_where_they_are_and_brings_no_weight
         checked("restore")
         # A selection checks nothing: each artifact was admitted when it was stored.
         assert len(recipe.check.directories) == checks
+        # The facts' start check of a train-from reads only the files that the facts name, and the stub's none.
+        control.train_from("math", trained)
+        checked("train from an earlier commit")
+
+        # A scenario whose root is an artifact item: its new trainer's start check reads only those files too. The
+        # stub trains one scenario per process, so the first goes first.
+        control.delete_scenario("math")
+        item = ItemStart(
+            ItemIdentity("weights-item"),
+            f"hf://org/weights@{'0' * 40}",
+            PinnedWeights(given, "org/weights"),
+        )
+        other, created = control.create_scenario("item", item)
+        assert created and other.trainer.state["finished_jobs"] == 0
+        checked("create a scenario from an item root")
     assert not list(control_directory.rglob("checkpoints"))
 
 
@@ -555,6 +573,7 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
         control.set_served("agent", {active["weights"]: 50, root["weights"]: 50}, "weights")
         checked("serve two weights")
         control.train_from("agent", root["weights"], "weights")
+        control.train_from("agent", active["weights"], "weights")
         control.train_from("agent", active["harness"], "harness")
         checked("train from")
         EndedWorkSweeper(control.queue, control.backend_factory, retention_seconds=1e-6).sweep()

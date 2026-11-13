@@ -87,6 +87,18 @@ class ArtifactRepository(ABC):
         """
         return self.materialize(ref).component(name)
 
+    def materialize_component_files(
+        self, ref: SnapshotRef, name: str | None, paths: tuple[str, ...] | None
+    ) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` (the snapshot itself for None) in a local directory that
+        holds at least each file of ``paths``, relative to the component, that the component has: all its files
+        when ``paths`` is None. Other files may be missing, so a reader reads only ``paths``.
+
+        This default makes the whole component local (``materialize_component``). A repository whose snapshots
+        hold large files makes only ``paths`` local, so a reader of a few small files fetches no weights.
+        """
+        return self.materialize(ref) if name is None else self.materialize_component(ref, name)
+
 
 class ArtifactValidator(ABC):
     """An admission check of the artifacts of one component of a scenario.
@@ -297,6 +309,14 @@ class Artifact:
             artifact_id=self._artifact_id,
             content=self.content,
         )
+
+    def component_files(self, name: str | None, paths: tuple[str, ...] | None) -> Artifact:
+        """The component ``name`` of this snapshot (the snapshot itself for None) in a local directory that holds
+        at least each file of ``paths`` that the component has, or all its files for None
+        (``ArtifactRepository.materialize_component_files``). A local snapshot gives its local component."""
+        if self.local_path is not None or self.repository is None:
+            return self if name is None else self.component(name)
+        return self.repository.materialize_component_files(self.ref, name, paths)
 
     def materialize(self) -> Artifact:
         if self.local_path is not None:

@@ -769,11 +769,12 @@ class ScenarioCommitter:
 
     def training_start(self, component_trainer: ComponentTrainer, snapshot: Artifact) -> str:
         """The start of a job of ``component_trainer`` that trains from its component of ``snapshot``: the name of
-        the snapshot, after the backend's facts checked the component (``Trainer.import_start``). The training
-        service imports it when it takes the job. Raise ``TrainingStartRefusedError`` when the trainer cannot start
-        from it."""
-        artifact = self._binding.components.component_artifact(snapshot, component_trainer.component).materialize()
-        return component_trainer.trainer.import_start(artifact)
+        the snapshot, after the backend's facts checked the component (``Trainer.import_start``). Only the files
+        that the check reads are made local (``Trainer.start_files``). The training service imports it when it
+        takes the job. Raise ``TrainingStartRefusedError`` when the trainer cannot start from it."""
+        trainer = component_trainer.trainer
+        name = None if self._binding.components.single else component_trainer.component
+        return trainer.import_start(snapshot.component_files(name, trainer.start_files))
 
     def request_start(self, artifact_id: str, component: str) -> str:
         """The start of a job of ``component``'s trainer that trains from ``artifact_id`` (``training_start``). Raise

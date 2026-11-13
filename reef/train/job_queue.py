@@ -483,8 +483,9 @@ class JobQueueComponent(TrainingComponent):
 
     - ``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs`` and ``parameters_schema`` are the
       facts' members, which equal the component's.
-    - ``root_start(root)`` raises as ``component.root_start(root)`` does (``facts.check_root_start``). Otherwise it
-      returns the name of the root snapshot, ``SnapshotStart(revision, root.source).to_text()``.
+    - ``start_files`` is ``facts.start_files``. ``root_start(root)`` raises as ``component.root_start(root)`` does
+      (``facts.check_root_start`` of ``root`` with ``files`` set to ``start_files``, so only those files are made
+      local). Otherwise it returns the name of the root snapshot, ``SnapshotStart(revision, root.source).to_text()``.
       ``snapshot_start(artifact)`` raises as ``component.snapshot_start(artifact)`` does
       (``facts.check_import_start``), else returns ``SnapshotStart(revision).to_text()``. The training service
       makes the component's start of the snapshot when it takes a job that names it (``resolved_job``).
@@ -538,8 +539,12 @@ class JobQueueComponent(TrainingComponent):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.facts.parameters_schema(kind)
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        return self.facts.start_files
+
     def root_start(self, root: ScenarioRoot) -> str:
-        self.facts.check_root_start(root)
+        self.facts.check_root_start(replace(root, files=self.facts.start_files))
         return SnapshotStart(root.artifact.ref.revision, root.source).to_text()
 
     def snapshot_start(self, artifact: Artifact) -> str:

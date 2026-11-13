@@ -288,6 +288,10 @@ class _RootFiles(StubTrainingComponent):
         self.required = required
         self.checked: list[list[str]] = []
 
+    @property
+    def start_files(self) -> None:
+        return None
+
     def root_start(self, root: ScenarioRoot) -> str:
         names = sorted(path.name for path in root.local_directory().iterdir())
         self.checked.append(names)

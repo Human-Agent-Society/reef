@@ -218,10 +218,10 @@ class RepositoryBackend(ArtifactRepository):
                 continue
         return snapshots
 
-    def resolve_artifact(self, artifact_id: str) -> Artifact:
+    def resolve_artifact(self, artifact_id: str, paths: tuple[str, ...] | None = None) -> Artifact:
         """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path,
         and without the files of the other components of that snapshot where the backend can
-        (``materialize_component``).
+        (``materialize_component_files``): all its files, or at least those of ``paths``.
 
         Raise ``ArtifactNotFoundError`` when this repository has no binding for the ID.
         """
@@ -233,9 +233,9 @@ class RepositoryBackend(ArtifactRepository):
         component = components[artifact_id]
         manifest = snapshot.components
         if component is None or manifest is None or manifest.single:
-            return self.materialize(ref)
+            return self.materialize_component_files(ref, None, paths)
         # Only the files of this artifact are made local, not the other components of its snapshot.
-        return self.materialize_component(ref, component)
+        return self.materialize_component_files(ref, component, paths)
 
     @abstractmethod
     def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
@@ -737,6 +737,23 @@ class Repository(ArtifactRepository):
             raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {name!r}")
         # A view of a selection that is not composed here: only the artifact of this component is made local.
         return self.backend.resolve_artifact(selection.components[name])
+
+    def materialize_component_files(
+        self, ref: SnapshotRef, name: str | None, paths: tuple[str, ...] | None
+    ) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` with at least the files ``paths`` local
+        (``ArtifactRepository.materialize_component_files``). A snapshot of this host is local as a whole; of a
+        selection view, the artifact of ``name`` is read; of a stored snapshot, the backend reads only ``paths``
+        where it can."""
+        if ref.revision in self._local_artifacts:
+            local = self.materialize(ref)
+            return local if name is None else local.component(name)
+        selection = self.selections.get(ref.revision)
+        if selection is None:
+            return self.backend.materialize_component_files(ref, name, paths)
+        if name is None or name not in selection.components:
+            raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {name!r}")
+        return self.backend.resolve_artifact(selection.components[name], paths)
 
     def snapshot(self, ref: SnapshotRef) -> Artifact:
         """The snapshot ``ref`` with its metadata and without its files: ``materialize`` or ``component`` of the
