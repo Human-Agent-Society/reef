@@ -13,10 +13,13 @@ Format 2 of a directory:
   store (``TaskFiles``), and the name of the directory itself.
 
 The directory holds no task files. The task file store keeps the one copy of each task's directory
-(``reef.storage.tasks.TaskFileStore``). The data store takes each task's local directory from the store when it
-opens a job data directory (``DataStore.open_job_directory``), and gives them with the directory as
-``JobDataRef.task_paths``. A component that runs the job elsewhere takes the directories from its own access to the
-store, by the ``files`` of each line.
+(``reef.storage.tasks.TaskFileStore``).
+
+A job holds a reference to its directory (``JobDataRef``), and the reference copies nothing. A component that trains
+in Reef's own process or host reads ``JobDataRef.path`` and ``JobDataRef.task_paths``, or ``JobDataRef.read``. That
+read makes the local copy of the directory, and takes each task's local directory from the task file store. A
+component that runs the job elsewhere mounts or copies the URI there and takes the task directories from its own
+access to the store, by the ``files`` of each line. It reads neither path, so Reef makes no local copy for it.
 
 ``key`` is ``job_data_key`` of the samples, so two jobs of the same samples share one directory. A directory does
 not change after it is written. The data store keeps the directories (``DataStore.write_job_directory``), and deletes a
@@ -30,8 +33,9 @@ import json
 import os
 import shutil
 import tempfile
+from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, get_args
 
@@ -148,54 +152,124 @@ def read_job_data(directory: Path, task_paths: Sequence[Path], data_id: str | No
     return JobData.from_dict({"data_id": data_id or header["key"], "samples": samples, "request": None})
 
 
+class JobDataReader(ABC):
+    """Gives the local copies of what a job data reference names.
+
+    Operations:
+
+    * ``job_directory(uri)`` returns a local directory with the files of the job data directory at ``uri``.
+      A reader of a remote store copies them; a second call for the same URI copies nothing.
+      ``FileNotFoundError`` when no complete directory is at ``uri``.
+    * ``job_task_paths(directory)`` returns the local directory of each task of the job data directory
+      ``directory``, in job order, and nothing for a directory of trajectories. A reader of a remote store copies
+      the directories that it does not hold. ``TaskStoreError`` for a task whose files the store does not hold.
+
+    Purpose: ``JobDataRef`` holds the reader of its directory. ``DataStore`` is the reader of the references that
+    it makes, and ``LocalJobData`` the reader in a process that has no data store.
+    """
+
+    @abstractmethod
+    def job_directory(self, uri: str) -> Path: ...
+
+    @abstractmethod
+    def job_task_paths(self, directory: Path) -> tuple[Path, ...]: ...
+
+
+@dataclass(frozen=True)
+class LocalJobData(JobDataReader):
+    """The reader of one job data directory whose local copies exist.
+
+    Values: ``path`` is the local job data directory, and ``task_paths`` the local directory of each of its tasks,
+    in job order. Both operations return these for every argument.
+    Purpose: a job process that has no data store reads its job with it; the component that started the process
+    wrote both in the job's file (``reef.train.local_jobs``).
+    """
+
+    path: Path
+    task_paths: tuple[Path, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.path, Path):
+            raise TypeError("LocalJobData.path must be a Path")
+        if not isinstance(self.task_paths, tuple) or any(not isinstance(path, Path) for path in self.task_paths):
+            raise TypeError("LocalJobData.task_paths must be a tuple of Path")
+
+    def job_directory(self, uri: str) -> Path:
+        return self.path
+
+    def job_task_paths(self, directory: Path) -> tuple[Path, ...]:
+        return self.task_paths
+
+
 @dataclass(frozen=True)
 class JobDataRef:
-    """The job data directory of one training job.
+    """The job data directory of one training job, by reference.
 
-    Values: ``uri`` is the URI that the store gives the directory. ``path`` is a local directory with its content,
-    which ``DataStore.open_job_directory`` gives. ``data_id`` is the ``JobData.data_id`` of the job's data,
+    Values: ``uri`` is the URI that the store gives the directory. ``key`` is the directory's ``job_data_key``, by
+    which the store records the directory's use. ``data_id`` is the ``JobData.data_id`` of the job's data,
     ``sample_count`` its number of samples, and ``kind`` the kind of its samples, or None without samples.
-    ``task_paths`` holds the local directory of each task of the data, in job order, which the task file store
-    gave; it is empty for data without tasks.
-    Purpose: ``TrainingJob.data`` holds it. The jobs queue keeps it without ``path`` and ``task_paths``, as
-    ``to_dict`` gives it.
+    ``reader`` gives the local copies; two references that differ only in it are equal.
+
+    Operations: a value copies nothing when it is made. ``path`` is a local directory with the files of the
+    directory, from ``reader.job_directory(uri)``. ``task_paths`` holds the local directory of each task of the
+    data, in job order, from ``reader.job_task_paths(path)``; it is empty for data without tasks. ``read`` gives
+    the ``JobData`` of both. Each of the three can copy files from a remote store, and raises what the reader raises.
+
+    Purpose: ``TrainingJob.data`` holds it. The jobs queue keeps it as ``to_dict`` gives it. A component that runs
+    the job elsewhere reads ``uri`` only.
     """
 
     uri: str
-    path: Path
+    key: str
     data_id: str
     sample_count: int
     kind: JobDataKind | None
-    task_paths: tuple[Path, ...] = ()
+    reader: JobDataReader = field(compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.uri, str) or not self.uri:
             raise ValueError("JobDataRef.uri must be a non-empty string")
-        if not isinstance(self.path, Path):
-            raise TypeError("JobDataRef.path must be a Path")
+        if not isinstance(self.key, str) or not self.key:
+            raise ValueError("JobDataRef.key must be a non-empty string")
+        if not isinstance(self.reader, JobDataReader):
+            raise TypeError("JobDataRef.reader must be a JobDataReader")
         if not isinstance(self.data_id, str) or not self.data_id:
             raise ValueError("JobDataRef.data_id must be a non-empty string")
         if isinstance(self.sample_count, bool) or not isinstance(self.sample_count, int) or self.sample_count < 0:
             raise ValueError("JobDataRef.sample_count must be a non-negative int")
         if self.kind is not None and self.kind not in get_args(JobDataKind):
             raise ValueError("JobDataRef.kind must be trajectory, task or None")
-        if not isinstance(self.task_paths, tuple) or any(not isinstance(path, Path) for path in self.task_paths):
-            raise TypeError("JobDataRef.task_paths must be a tuple of Path")
+
+    @property
+    def path(self) -> Path:
+        """A local directory with the files of the job data directory."""
+        return self.reader.job_directory(self.uri)
+
+    @property
+    def task_paths(self) -> tuple[Path, ...]:
+        """The local directory of each task of the data, in job order."""
+        return self.reader.job_task_paths(self.path)
 
     def read(self) -> JobData:
         """The job's data, with each task at its local directory (``read_job_data``)."""
-        return read_job_data(self.path, self.task_paths, self.data_id)
+        path = self.path
+        return read_job_data(path, self.reader.job_task_paths(path), self.data_id)
 
     def to_dict(self) -> dict[str, Any]:
-        """``{data_id, uri, sample_count, kind}``: the reference without its local path."""
-        return {"data_id": self.data_id, "uri": self.uri, "sample_count": self.sample_count, "kind": self.kind}
+        """``{data_id, uri, key, sample_count, kind}``: the reference without its reader."""
+        return {
+            "data_id": self.data_id,
+            "uri": self.uri,
+            "key": self.key,
+            "sample_count": self.sample_count,
+            "kind": self.kind,
+        }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any], path: Path, task_paths: tuple[Path, ...] = ()) -> JobDataRef:
-        """The reference that ``to_dict`` wrote, with the local directory ``path`` and the local directories of its
-        tasks; ``ValueError`` for another value."""
+    def from_dict(cls, value: Mapping[str, Any], reader: JobDataReader) -> JobDataRef:
+        """The reference that ``to_dict`` wrote, with ``reader``; ``ValueError`` for another value."""
         try:
-            return cls(value["uri"], path, value["data_id"], value["sample_count"], value["kind"], task_paths)
+            return cls(value["uri"], value["key"], value["data_id"], value["sample_count"], value["kind"], reader)
         except (KeyError, TypeError) as exc:
             raise ValueError(f"malformed job data reference: {exc!r}") from exc
 
@@ -206,7 +280,9 @@ __all__ = [
     "JOB_FILE",
     "SAMPLES_FILE",
     "JobDataKind",
+    "JobDataReader",
     "JobDataRef",
+    "LocalJobData",
     "job_data_key",
     "job_data_kind",
     "job_task_files",

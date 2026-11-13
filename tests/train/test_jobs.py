@@ -587,7 +587,8 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
         pipeline_factory=lambda context: TrainingPipeline(
             context, sample2job=TrajectoryAndTaskJobData(context, None, 1)
         ),
-        job_loop=loop_with(component),
+        # The job's tasks are in the task file store of the samples' data store, so the job loop reads them there.
+        job_loop=JobLoop(component, scenario="math", data_store=samples.data),
         training_mode="manual",
         samples=samples.for_trainer(""),
         # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
