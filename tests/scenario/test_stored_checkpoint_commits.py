@@ -31,6 +31,7 @@ from reef.artifact import (
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.components import ArtifactLayout, ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.files import ArtifactFiles
+from reef.artifact.sources import DirectorySource
 from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.train.types import TrainingCommit
@@ -225,3 +226,56 @@ def test_an_admission_check_reads_stored_content_and_a_refused_checkpoint_change
         with pytest.raises(ArtifactNotFoundError):
             scenario.commit(stored_commit(scenario, "missing:0", HARNESS), component=HARNESS)
         assert scenario.commit_number == commits + 1
+
+
+# -- a scenario of several components: imports, syncs and selections --------------------------------------------
+
+
+@pytest.mark.integration
+def test_a_sync_and_an_import_of_the_harness_of_a_composite_bring_no_weight_to_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Control composes the snapshot of a sync and of an import by name, and it reads the harness tree alone: the
+    weights of the composite never reach its directories."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    training = git_backends(tmp_path, "training")("agent")
+    weights = os.urandom(1024 * 1024)
+    recipe = two_trainer_recipe(harness=checked_harness())
+    with control(tmp_path, recipe, git_backends(tmp_path, "control")) as scenario:
+        training.store_content("job-1:1", checkpoint(tmp_path / "trained", {MODEL: weights}))
+        scenario.commit(stored_commit(scenario, "job-1:1", WEIGHTS), component=WEIGHTS)
+        selection = scenario.artifact_selection()
+
+        # A sync reads the active harness tree, as the service does to merge a person's files onto it.
+        _, active = scenario.resolve_artifact(selection.components[HARNESS], HARNESS)
+        assert scenario.components.read_files(active) == {"harness.txt": "harness seed"}
+        synced = scenario.sync_artifact(
+            Artifact.local(checkpoint(tmp_path / "synced", {"AGENTS.md": b"synced"})),
+            component=HARNESS,
+            expected_selection=selection,
+            metrics={},
+        )
+        _, after_sync = scenario.resolve_artifact(synced.artifact_id, HARNESS)
+        assert scenario.components.read_files(after_sync) == {"AGENTS.md": "synced"}
+        assert scenario.artifact_selection().components == {**selection.components, HARNESS: synced.artifact_id}
+
+        given = checkpoint(tmp_path / "given", {"AGENTS.md": b"imported"})
+        imported = scenario.import_artifact(
+            DirectorySource(given, source_version="v1", link=False),
+            HARNESS,
+            source={"uri": "file:///given/", "version": "v1"},
+            directory=tmp_path / "import-work",
+        )
+        _, after_import = scenario.resolve_artifact(imported.artifact_id, HARNESS)
+        assert scenario.components.read_files(after_import) == {"AGENTS.md": "imported"}
+
+        assert not list((tmp_path / "control").rglob(MODEL))
+        assert not [path for path in (tmp_path / "control").rglob("lfs/objects/*/*/*") if path.is_file()]
+        # Both snapshots carry the weights: another service reads them from the store.
+        for component_artifact, text in ((synced, "synced"), (imported, "imported")):
+            _, ref = scenario.artifact_snapshot(component_artifact.artifact_id, HARNESS)
+            served = git_backends(tmp_path, f"inference-{text}")("agent").materialize(ref).local_path
+            assert served is not None
+            assert (served / WEIGHTS / MODEL).read_bytes() == weights
+            assert (served / HARNESS / "AGENTS.md").read_text() == text

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import shutil
 import tempfile
 import uuid
@@ -19,6 +20,7 @@ from reef.artifact.artifact import (
     LOCAL_SNAPSHOT_PREFIX,
     Artifact,
     ArtifactConflictError,
+    ArtifactError,
     ArtifactNotFoundError,
     ArtifactPublicationError,
     ArtifactRepository,
@@ -29,6 +31,8 @@ from reef.artifact.composite import compose_snapshot
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.plugins import Plugin
 from reef.core.snapshot import SELECTION_VIEW_PREFIX
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -532,6 +536,8 @@ class Repository(ArtifactRepository):
         self.stored_trees: dict[str, StoredTree] = {}
         #: The local copy of each staged snapshot of ``stored_trees`` that a reader asked for.
         self.materialized_stored: dict[str, Artifact] = {}
+        #: The stored content that exists for one staged snapshot of ``stored_trees`` alone, by its revision.
+        self.owned_content: dict[str, str] = {}
         self.selections: dict[str, ArtifactSelection] = {}
         self.selection_lock = Lock()
         self._process_id = uuid.uuid4().hex
@@ -696,6 +702,20 @@ class Repository(ArtifactRepository):
             raise ArtifactPublicationError(f"artifact {files.artifact_id!r} has no local files")
         return path
 
+    def materialize_component(self, ref: SnapshotRef, name: str) -> Artifact:
+        """The component ``name`` of the snapshot ``ref``, local. A snapshot of this host is local as a whole;
+        of a stored snapshot, the backend makes only the component local where it can."""
+        if ref.revision in self._local_artifacts or ref.revision in self.selections:
+            return self.materialize(ref).component(name)
+        return self.backend.materialize_component(ref, name)
+
+    def snapshot(self, ref: SnapshotRef) -> Artifact:
+        """The snapshot ``ref`` with its metadata and without its files: ``materialize`` or ``component`` of the
+        result makes local what a reader asks for. A view of a selection is local already."""
+        if ref.revision in self.selections:
+            return self.materialize(ref)
+        return Artifact(ref, self, metadata=self.snapshot_metadata(ref))
+
     def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
         """The metadata of the snapshot ``ref``, read without its files: of a snapshot staged on this host, or
         the backend's ``snapshot_metadata`` of a stored one."""
@@ -793,26 +813,21 @@ class Repository(ArtifactRepository):
             raise ArtifactPublicationError(f"failed to stage artifact from {artifact.local_path}: {exc}") from exc
         return self.register_staged(commit_number, artifact, destination, parent=parent)
 
-    def stage_composed(
+    def stage_stored(
         self,
         commit_number: int,
-        components: Mapping[str, Artifact],
+        files: StoredTree,
+        metadata: Mapping[str, object],
         *,
         parent: SnapshotRef,
-    ) -> Artifact:
-        """Compose several components straight into a staged local snapshot; one copy, not two."""
-        destination = self.local_root / self._process_id / uuid.uuid4().hex
-        composed = compose_snapshot(components, directory=destination)
-        return self.register_staged(commit_number, composed, destination, parent=parent)
-
-    def stage_stored(
-        self, commit_number: int, files: StoredTree, metadata: Mapping[str, object], *, parent: SnapshotRef
+        owned_content: str | None = None,
     ) -> Artifact:
         """Stage the snapshot of commit ``commit_number`` whose files the backend holds already (``files``), with
         the storage metadata ``metadata`` and the parent ``parent``.
 
         The result has no local path. ``materialize`` makes it local for a reader that asks, ``publish`` stores it
-        with ``RepositoryBackend.publish_stored``, and ``discard`` forgets it.
+        with ``RepositoryBackend.publish_stored``, and ``discard`` forgets it. ``owned_content`` names stored
+        content that exists for this snapshot alone: ``discard`` removes it, also after the publication.
         """
         staged = Artifact(
             SnapshotRef(
@@ -824,6 +839,8 @@ class Repository(ArtifactRepository):
         )
         self.stored_trees[staged.ref.revision] = files
         self._local_artifacts[staged.ref.revision] = staged
+        if owned_content is not None:
+            self.owned_content[staged.ref.revision] = owned_content
         return staged
 
     def register_staged(
@@ -898,6 +915,13 @@ class Repository(ArtifactRepository):
             composed = self.materialized_stored.pop(artifact.ref.revision, None)
             if composed is not None:
                 composed.discard()
+            owned = self.owned_content.pop(artifact.ref.revision, None)
+            if owned is not None:
+                # The snapshot keeps the files. A failure leaves content that no job item names.
+                try:
+                    self.backend.discard_content(owned)
+                except ArtifactError:
+                    logger.warning("could not discard the stored content %s", owned)
         path = artifact.local_path
         artifact.discard()
         if path is not None:

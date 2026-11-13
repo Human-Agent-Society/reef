@@ -455,7 +455,10 @@ component:
   artifact backend, and control commits them by name. Control reads no
   directory of the training service and holds none of a checkpoint's bytes, so
   the two share no volume for checkpoints. The training service therefore
-  needs write access to the artifact backend. A checkpoint that no commit
+  needs write access to the artifact backend. An artifact import and a
+  harness sync are composed in the artifact backend too, and control reads
+  one component of a snapshot at a time, so the weights of a scenario with
+  several components do not pass through control. A checkpoint that no commit
   took, such as one of a cancelled job, leaves the artifact backend when
   control deletes the job's ended item
   (``storage.work-retention-s``, 7 days by default).

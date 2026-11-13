@@ -438,8 +438,9 @@ class _GitWorkspace:
         for start in range(0, len(ordered), FETCH_BATCH_COMMITS):
             self.git("fetch", "origin", *ordered[start : start + FETCH_BATCH_COMMITS])
 
-    def clone_for_materialize(self, destination: Path, version: str) -> None:
-        """Check out ``version`` in a new clone at ``destination``, with the bytes of its LFS files.
+    def clone_for_materialize(self, destination: Path, version: str, directory: str | None = None) -> None:
+        """Check out ``version`` in a new clone at ``destination``, with the bytes of its LFS files; with
+        ``directory``, only the files under that directory of the snapshot, so no other file is fetched.
 
         The checkout leaves an LFS file as its pointer. When the repository is a local directory, each such file
         becomes a hard link to its object in the repository's own LFS storage, or a copy across file systems, so
@@ -453,12 +454,16 @@ class _GitWorkspace:
         self._run(("git", "clone", "--no-checkout", self.repository, str(destination)))
         self._install_lfs(destination)
         self._run(("git", "fetch", "origin", version), cwd=destination)
+        if directory is not None:
+            self._run(("git", "sparse-checkout", "set", "--no-cone", f"/{directory}/"), cwd=destination)
         self._run(("git", "checkout", "--detach", "FETCH_HEAD"), cwd=destination)
         pointers = [
             line.split(" ", 2)
             for line in self._run(("git", "lfs", "ls-files", "--long"), cwd=destination).splitlines()
             if line
         ]
+        if directory is not None:
+            pointers = [pointer for pointer in pointers if pointer[2].startswith(f"{directory}/")]
         missing = bool(pointers)
         if self.local_objects is not None:
             missing = False
@@ -475,7 +480,8 @@ class _GitWorkspace:
                 else:
                     missing = True
         if missing:
-            self._run(("git", "lfs", "pull"), cwd=destination)
+            only = () if directory is None else ("--include", f"{directory}/**")
+            self._run(("git", "lfs", "pull", *only), cwd=destination)
 
     def git(self, *args: str) -> str:
         return self._git_client.git(*args)
@@ -827,6 +833,44 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         if not destination.is_dir():
             raise ArtifactMaterializationError(f"artifact cache was not created: {ref.revision}")
         return Artifact(ref, None, local_path=destination, metadata=materialized_metadata(destination))
+
+    def materialize_component(self, ref: SnapshotRef, name: str) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` from a sparse checkout of its directory: the LFS objects
+        of the other components are not fetched. A snapshot that is local as a whole, or that holds one component,
+        answers from its whole checkout."""
+        with self._workspace.lock:
+            self._workspace.fetch_version(ref.revision)
+            snapshot = self.stored_snapshot(ref.revision)
+        manifest = snapshot.components
+        if (self.cache_dir / ref.revision).is_dir() or manifest is None or manifest.single:
+            return self.materialize(ref).component(name)
+        if name not in manifest.entries:
+            raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {name!r}")
+        destination = self.cache_dir / f"{ref.revision}.{name}"
+        if not destination.is_dir():
+            temporary = Path(tempfile.mkdtemp(prefix=f".{ref.revision}-", dir=self.cache_dir))
+            try:
+                self._workspace.clone_for_materialize(temporary / "artifact", ref.revision, name)
+                # Git keeps no directory for a component with no file.
+                (temporary / "artifact" / name).mkdir(exist_ok=True)
+                try:
+                    (temporary / "artifact" / name).rename(destination)
+                except OSError:
+                    if not destination.is_dir():
+                        raise
+            except ArtifactPublicationError as exc:
+                raise ArtifactMaterializationError(
+                    f"failed to materialize component {name!r} of {ref.revision}: {exc}"
+                ) from exc
+            finally:
+                shutil.rmtree(temporary, ignore_errors=True)
+        return Artifact(
+            snapshot.ref,
+            None,
+            local_path=destination,
+            metadata=manifest.entries[name].metadata,
+            artifact_id=manifest.artifact_ids(ref.revision)[name],
+        )
 
     def publish(
         self,

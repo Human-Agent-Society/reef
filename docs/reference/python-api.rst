@@ -1136,8 +1136,11 @@ A backend shares no snapshot between scenarios. It must:
     server-side copy, so that the calling process downloads no file.
 
   A backend whose snapshots hold large files also overrides
-  ``snapshot_metadata(ref)`` to read a snapshot's metadata without its files.
-  The default materializes the snapshot.
+  ``snapshot_metadata(ref)`` to read a snapshot's metadata without its files,
+  and ``materialize_component(ref, name)`` to make one component of a snapshot
+  local without the files of the others. Control reads a harness tree through
+  the second, so that it fetches no weights. Both defaults materialize the
+  whole snapshot.
 
 The optional capabilities are separate base classes. Inherit only the ones
 that the backend supports:

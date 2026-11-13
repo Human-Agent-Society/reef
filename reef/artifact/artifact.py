@@ -78,6 +78,15 @@ class ArtifactRepository(ABC):
     @abstractmethod
     def materialize(self, ref: SnapshotRef) -> Artifact: ...
 
+    def materialize_component(self, ref: SnapshotRef, name: str) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` with its files in a local directory, as
+        ``Artifact.component`` gives it.
+
+        This default materializes the whole snapshot. A repository whose snapshots hold large components makes
+        only the files of ``name`` local, so a reader of one component does not fetch the others.
+        """
+        return self.materialize(ref).component(name)
+
 
 class ArtifactValidator(ABC):
     """Artifact admission checks selected for one scenario."""
@@ -163,8 +172,9 @@ class Artifact:
         """
         if self._artifact_id is not None:
             return self._artifact_id
-        # Provider calls can carry a ref without local files or a repository.
-        materialized = self if self.repository is None else self.materialize()
+        # Provider calls can carry a ref without local files or a repository. An artifact that carries its
+        # metadata answers from it, and no file is fetched.
+        materialized = self if self.repository is None or self._metadata else self.materialize()
         if materialized._artifact_id is not None:
             return materialized._artifact_id
         manifest = materialized.components
@@ -186,8 +196,15 @@ class Artifact:
 
         A snapshot without a manifest, or with one component, is that component
         itself. A multi-component snapshot keeps each component in a directory
-        named after it; the view carries the component's own artifact ID and metadata.
+        named after it; the view carries the component's own artifact ID and metadata. A snapshot of several
+        components that is not local yet, and that carries its manifest, makes only this component local
+        (``ArtifactRepository.materialize_component``).
         """
+        known = self.components
+        if self.local_path is None and self.repository is not None and known is not None and not known.single:
+            if name not in known.entries:
+                raise ArtifactNotFoundError(f"snapshot {self.ref.revision!r} binds no component {name!r}")
+            return self.repository.materialize_component(self.ref, name)
         materialized = self.materialize()
         manifest = materialized.components
         if manifest is None:
