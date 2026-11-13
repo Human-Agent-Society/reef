@@ -41,6 +41,11 @@ from reef.storage.tasks import LocalTaskFileStore, SplitName, TaskFileStore
 CONSUMED_SAMPLE_PREFIX = "sample:"
 #: The prefix of a record ID in a ``TrainingState`` that a stage ended and no commit named when it was stored.
 ENDED_RECORD_PREFIX = "ended:"
+#: The prefix of the ``TrainingState`` key under which the samples service stores the served states that it judged
+#: a trainer's samples against (``TrainerSamples.write_judged``).
+JUDGED_KEY_PREFIX = "judged:"
+#: The metadata key with which the samples service marks a sample that a stage made as stale.
+STALE_KEY = "stale"
 
 SampleKind = Literal["trajectory", "task"]
 SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
@@ -72,7 +77,8 @@ class StoredSample:
     ``""`` for the only trainer of a scenario) to the positive number of its committed jobs that listed
     ``consumed_sample_id(sample_id)``. ``component`` is the trainer whose stage made the item, or None for an upload
     or an imported task. ``group`` is None or the name that the samples of one stage unit share, so that they train
-    together.
+    together. ``stale`` is True when ``component`` is not None and the samples service marked the item stale
+    (``TrainerSamples.mark_stale``); else False.
 
     Purpose: ``SampleStore`` makes it. A trainer's pipeline reads it, and the listings and evaluations too.
     """
@@ -85,6 +91,7 @@ class StoredSample:
     component: str | None = None
     group: str | None = None
     held_set: str | None = None
+    stale: bool = False
 
     @property
     def kind(self) -> SampleKind:
@@ -122,7 +129,8 @@ class TrainingState(ABC):
     """The training state of one scenario: what its trainers trained and consumed.
 
     Values: the train count of each sample ID and trainer, a positive int, and the IDs of the records that each
-    trainer's stages consumed. The train count of a sample and a trainer is the number of that trainer's commits that
+    trainer's stages consumed. Under the key ``judged:<trainer>`` (``JUDGED_KEY_PREFIX``) in place of a trainer, the
+    consumed IDs are the served states that the samples service judged that trainer's samples against. The train count of a sample and a trainer is the number of that trainer's commits that
     list the sample (``consumed_sample_id``), so only a commit changes it. A train count stays when its item leaves
     the scenario, so an item that comes back keeps it.
 
@@ -300,7 +308,10 @@ class SampleStore:
             )
         component = None if own is None else own["component"]
         group = None if own is None else item.metadata.get("group")
-        return StoredSample(use.sequence, item.item_id, split, sample, train_counts, component, group, use.held_set)
+        stale = own is not None and item.metadata.get(STALE_KEY) is True
+        return StoredSample(
+            use.sequence, item.item_id, split, sample, train_counts, component, group, use.held_set, stale
+        )
 
     def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         """Every task that the scenario uses and that no stage of it made, in use order; only ``split``'s if given."""
@@ -365,11 +376,12 @@ class TrainerSamples:
         samples: Sequence[tuple[str, Sample]],
         *,
         lineage: Mapping[str, str] | None = None,
+        stale: bool = False,
     ) -> int:
         """Save the samples that the stages of ``trainer`` made from ``record_ids`` as items that the scenario uses,
         then mark the records consumed; return the number of new items. ``lineage`` adds top-level metadata that
         names the sample processing tasks of the samples (``TrainingPipeline.lineage``), so a query by group finds
-        them.
+        them. With ``stale``, the samples are stored with the stale mark (``mark_stale``).
 
         The sample named ``name`` is the item ``stage_item_id(scenario, name)``. An item that exists stays as it is,
         so a stage that makes a sample again, after a restart, changes nothing. ``record_ids`` is empty for samples
@@ -390,6 +402,7 @@ class TrainerSamples:
                 "scenarios": {store.scenario: "train"},
                 "origin": origin,
                 **({"group": group} if group is not None else {}),
+                **({STALE_KEY: True} if stale else {}),
                 **(lineage or {}),
             }
             try:
@@ -427,6 +440,22 @@ class TrainerSamples:
             self.trainer, [f"{ENDED_RECORD_PREFIX}{record_id}" for record_id in sorted(record_ids)]
         )
 
+    def mark_stale(self, sample_ids: Sequence[str]) -> None:
+        """Mark ``sample_ids``, samples that the stages of ``trainer`` made, stale: the item's metadata ``stale`` is
+        true. No automatic job takes such a sample; a training request can still name it. The mark stays, so a
+        restart reads the same decision."""
+        for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT):
+            self.store.data.update(self.store.owner, list(batch), {STALE_KEY: True})
+
+    def judged(self, served_state: str) -> bool:
+        """Whether the samples service judged the samples of ``trainer`` against ``served_state``
+        (``ServedArtifacts.served_state``)."""
+        return served_state in self.store.state.consumed_record_ids(f"{JUDGED_KEY_PREFIX}{self.trainer}")
+
+    def write_judged(self, served_state: str) -> None:
+        """Store that the samples service judged the samples of ``trainer`` against ``served_state``."""
+        self.store.state.consume_records(f"{JUDGED_KEY_PREFIX}{self.trainer}", [served_state])
+
     def ended_record_ids(self) -> frozenset[str]:
         """The records that the stages of ``trainer`` ended (``end_records``), whether a commit names them or not."""
         return frozenset(
@@ -438,7 +467,9 @@ class TrainerSamples:
 
 __all__ = [
     "CONSUMED_SAMPLE_PREFIX",
+    "JUDGED_KEY_PREFIX",
     "SAMPLE_KINDS",
+    "STALE_KEY",
     "ListedSample",
     "MemoryTrainingState",
     "SampleKind",

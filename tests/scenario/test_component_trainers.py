@@ -6,7 +6,7 @@ import asyncio
 import socket
 import threading
 import time
-from collections.abc import Hashable, Iterator, Mapping
+from collections.abc import Hashable, Iterator, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -17,7 +17,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 from tests.support.component_trainers import (
     HARNESS,
-    MAX_STALENESS,
+    MAX_ARTIFACT_LAG,
     WEIGHTS,
     ComponentJobs,
     JudgedAtOnce,
@@ -43,7 +43,7 @@ from tests.support.component_trainers import (
 )
 from tests.support.polling import became_true
 from tests.support.records import memory_records, report
-from tests.support.runtime_stubs import StubInferenceRuntime, harness_live_objects
+from tests.support.runtime_stubs import StubInferenceRuntime, harness_live_objects, job_sized_stages
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
@@ -65,6 +65,9 @@ from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import SAMPLES_QUEUE
+from reef.record2sample.staleness import ServedArtifacts, lags_behind
+from reef.record2sample.traces import TraceSamples
+from reef.sample2job.traces import TraceJobData
 from reef.scenario import Scenario
 from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import validate_component_trainers
@@ -82,7 +85,7 @@ from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, SnapshotStart, TrainingJob
 from reef.train.job_queue import CHECKS_QUEUE, JOBS_QUEUE, TrainingCheckWorker
 from reef.train.jobs import JobLoopState
-from reef.train.pipeline import TrainingPipeline
+from reef.train.pipeline import PipelineSpec, TrainingPipeline
 from reef.train.types import JobData, Sample
 
 
@@ -941,7 +944,10 @@ class _RetiringRetriesSamples(JudgedSamples):
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(_RetiringRetriesJudging(), JudgedAtOnce(), max_staleness=MAX_STALENESS)
+        return cls(_RetiringRetriesJudging(), JudgedAtOnce())
+
+    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
+        return lags_behind(samples, served, MAX_ARTIFACT_LAG)
 
     def make_sample(self, record: AgentRecord, judgment: Judgment) -> Any:
         return policy_trajectory(
@@ -1209,6 +1215,33 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
         consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0")),
     }
     assert reloaded.records.count("agent") == 2
+
+
+@pytest.mark.unit
+def test_a_weights_step_marks_the_older_weights_samples_stale_and_the_harness_still_trains_them(
+    dispatchers: _Dispatchers,
+) -> None:
+    """Weights and harness train from one stream of records. The weights stage is on-policy; the harness stage reads
+    traces, which never go stale. Once a weights step activates new weights, the samples service marks the weights'
+    sample of a row that the old weights answered stale, and the harness still trains that row."""
+    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={}))
+    harness = harness_recipe(job_sized_stages(PipelineSpec(TraceSamples, TraceJobData)))
+    recipe = two_trainer_recipe(weights=weights, harness=harness)
+    dispatcher, _ = dispatchers.open(recipe=recipe, hold_local_cycles=True)
+    scenario = loaded(dispatcher, 1, 2)
+    root = scenario.serving_artifact_id()
+    assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
+    assert scenario.serving_artifact_id() != root
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+
+    make_samples(scenario)
+    stale = {stored.sample_id: stored.stale for stored in scenario.trainer_for(WEIGHTS).pipeline.store.store.page()}
+    assert stale[stage_item_id("agent", f"{WEIGHTS}:r2:0")], "the old weights answered row 2"
+    assert not stale[stage_item_id("agent", f"{HARNESS}:r2:0")], "a trace never goes stale"
+    assert append_commit(scenario, WEIGHTS) is None
+    assert append_commit(scenario, HARNESS) is not None
+    assert append_commit(scenario, HARNESS) is not None
+    assert scenario.trainer_for(HARNESS).state["finished_jobs"] == 2
 
 
 @pytest.mark.unit
@@ -1883,7 +1916,9 @@ def test_a_job_that_waits_for_its_check_holds_nothing_of_the_scenario(
     scenario.train_from(root, WEIGHTS)
     assert scenario.store.history()[-1].operation == "train_from"
     assert all(record.training_job_id is None for record in scenario.store.history())
-    # The job now starts from another start, so it is another job with a check of its own.
+    # The job now starts from another start, so it is another job with a check of its own. The samples service
+    # judges the samples against the activation first, as it does after each commit.
+    make_samples(scenario)
     assert scenario.next_commit(WEIGHTS) is None
     first, second = dispatcher.queue.items(CHECKS_QUEUE)
     assert first.id == check.id and second.state == "queued"

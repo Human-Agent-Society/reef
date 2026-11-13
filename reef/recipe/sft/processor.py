@@ -20,6 +20,7 @@ from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import make_trajectory
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import ReportContext, ReportSamples
+from reef.record2sample.staleness import ServedArtifacts
 from reef.sample2job import DistillJobData
 
 #: ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response.
@@ -59,9 +60,9 @@ class SFTSamples(ReportSamples):
     calls, for example an imported dataset example. The training component renders the sample with the model's chat
     template; a sample longer than ``max_tokens`` does not train (``extra.reef.max_tokens``).
 
-    Each valid report trains by itself and owns its inference records. The stage never drops a sample as stale:
-    the staleness check drops tokens that an older model version sampled, and an SFT target is fixed text, not
-    sampled tokens. Thus ``SFTSettings`` has no ``max_staleness``.
+    Each valid report trains by itself and owns its inference records. A sample never goes stale (``is_stale``):
+    staleness concerns tokens that an older model version sampled, and an SFT target is fixed text, not sampled
+    tokens.
     """
 
     def __init__(self, context: PipelineContext, settings: SFTSettings) -> None:
@@ -79,7 +80,7 @@ class SFTSamples(ReportSamples):
     ) -> Self:
         return cls(context, SFTSettings.parse(config, plugin_class=cls))
 
-    def is_stale(self, samples: Sequence[Sample], served_artifact_ids: Sequence[str]) -> bool:
+    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
         return False
 
     def limited(self, sample: TrajectorySample) -> TrajectorySample:

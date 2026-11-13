@@ -25,6 +25,7 @@ from reef.inference.interfaces import InferenceRuntime
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.record2sample.service import ProducedSamples, Selection
+from reef.record2sample.staleness import ServedArtifacts
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
 from reef.scenario.snapshots import ServedBesideArtifact
@@ -279,10 +280,11 @@ class Scenario:
 
     def produce_samples(self, component: str | None = None, selection: Selection | None = None) -> ProducedSamples:
         """Do the samples service's step for ``component``'s trainer: read its newer commits, then make the samples of
-        the new records (``Trainer.produce_samples``).
+        the new records and judge the stored samples against the artifacts that the scenario served
+        (``Trainer.produce_samples``, ``served_artifacts``).
 
-        The commit history gives the job ends and the records that the commits named, since control can run in another
-        process. The caller runs one step of the trainer at a time.
+        The commit history gives the job ends, the records that the commits named and the served artifacts, since
+        control can run in another process. The caller runs one step of the trainer at a time.
         """
         component_trainer = self._committer.component_trainer(component)
         name = self._committer.component_on_record(component_trainer.component)
@@ -298,7 +300,7 @@ class Scenario:
         component_trainer.trainer.read_commits(new)
         if new:
             self.job_ends_read_commit_number[component_trainer.component] = new[-1].commit_number
-        return component_trainer.trainer.produce_samples(selection)
+        return component_trainer.trainer.produce_samples(selection, self.served_artifacts())
 
     def selection_serves(self) -> bool:
         """Whether the artifact that the scenario selected answers its requests now. True for a scenario that loads
@@ -338,25 +340,23 @@ class Scenario:
         self.refresh_requests()
         if not trainer.job_slot_free():
             return None
-        # The staleness check measures data against the weights that serve; a scenario that loads no weights
-        # serves one fixed model, so its data never goes stale.
-        weights_load = self._binding.components.loaded_component is not None and self.runtime is not None
-        serving = self.served_artifact_id() if weights_load else None
         if len(self.trainers) > 1:
-            return self.prepare_job(component, serving, automatic_jobs)
+            return self.prepare_job(component, automatic_jobs)
         with self._committer.lock:
-            return self.prepare_job(component, serving, automatic_jobs)
+            return self.prepare_job(component, automatic_jobs)
 
-    def prepare_job(
-        self, component: str | None, serving: str | None, automatic_jobs: bool = True
-    ) -> TrainingCommit | None:
-        """Give ``component``'s trainer the served artifacts of the commit history, and submit its next job when the
-        job's data is ready. The job of a request that names ``train_from`` starts from that artifact
-        (``ScenarioCommitter.request_start``); any other job continues the training start."""
+    def prepare_job(self, component: str | None, automatic_jobs: bool = True) -> TrainingCommit | None:
+        """Submit ``component``'s next job when the job's data is ready. The job of a request that names
+        ``train_from`` starts from that artifact (``ScenarioCommitter.request_start``); any other job continues the
+        training start.
+
+        An automatic job waits until the samples service judged the trainer's samples against what the scenario
+        serves now (``TrainingPipeline.mark_staled``), so that it takes no sample that the samples service marks stale.
+        A request's job does not wait: the request names its samples."""
         component_trainer = self._committer.component_trainer(component)
         trainer = component_trainer.trainer
-        self.restore_served_artifacts(trainer, serving)
-        data = trainer.reserve_job(serving, automatic_jobs=automatic_jobs)
+        judged = trainer.pipeline.judged(self.served_artifacts())
+        data = trainer.reserve_job(automatic_jobs=automatic_jobs and judged)
         if data is None:
             return None
         component = component_trainer.component
@@ -370,26 +370,33 @@ class Scenario:
             data, start=self._committer.request_start(artifact_id, component), train_from_artifact_id=artifact_id
         )
 
-    def restore_served_artifacts(self, trainer: Trainer, serving: str | None) -> None:
-        """Give ``trainer`` the served artifacts of the commit history, for the staleness check of its pipeline.
-        ``serving`` is the artifact that serves now, or None for a scenario that loads no weights: its data never
-        goes stale."""
+    def served_artifacts(self) -> ServedArtifacts:
+        """The artifacts that the scenario served, as its commit history holds them: the served component's artifacts
+        that the creation and each activating commit bound, and those that it serves beside its active selection.
+        Before the first commit, it is the artifact that the scenario was created with. It is empty for a store without
+        a durable history, which no other process can read, and for a scenario that loads no weights, which serves one
+        fixed model: then no data goes stale. The samples service judges samples against it, and control names it to
+        wait for that judgment."""
         served_component = self.served_component()
-        if serving is None or served_component is None:
-            return
+        if (
+            self._binding.components.loaded_component is None
+            or self.runtime is None
+            or served_component is None
+            or not self.store.durable
+        ):
+            return ServedArtifacts()
         history = self.snapshot_queries.served_history(
             self._committer.commit_number, served_component, self._committer.component_names()
         )
-        if history:
-            trainer.restore_served_artifacts(history, self.served_beside())
+        if not history:
+            # No commit yet: the scenario serves the artifact that it was created with.
+            return ServedArtifacts((self.serving_artifact_id(),))
+        return ServedArtifacts(history, frozenset(self.served_beside()))
 
     def next_job_listing(self, component: str | None = None) -> Mapping[str, Any]:
         """The training mode of ``component``'s trainer and the samples of its next automatic job
-        (``Trainer.next_job_listing``), measured against the artifacts that the scenario served."""
-        trainer = self.trainer_for(component)
-        weights_load = self._binding.components.loaded_component is not None and self.runtime is not None
-        self.restore_served_artifacts(trainer, self.served_artifact_id() if weights_load else None)
-        return trainer.next_job_listing()
+        (``Trainer.next_job_listing``): the held samples that the samples service did not mark stale."""
+        return self.trainer_for(component).next_job_listing()
 
     def fail_pending_request(self, error: str, component: str | None = None) -> bool:
         """Store that ``component``'s reserved request failed with ``error``, so that its next job data is a skip row,

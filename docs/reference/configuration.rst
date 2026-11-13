@@ -2034,27 +2034,13 @@ A scenario can replace keys of ``pipeline.record2sample.config`` for itself
 with its ``record2sample_config`` setting (`Record-to-sample config
 <http-api.rst#record-to-sample-config>`__).
 
-Every built-in record-to-sample stage that holds units reads
-``max_staleness``, Reef's staleness filter. Reef drops held training data
-whose producing artifact is more than this many served artifacts behind the
-artifact that the scenario serves. The limit is a record-to-sample setting,
-not a recipe setting: ``recipe.config.max_staleness`` is an error.
-
-.. container:: config
-
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       the artifacts that training data may lag behind the served artifact and still train, a non-negative int; 0 trains only data of the served artifact
-
-.. code:: yaml
-
-   pipeline:
-     record2sample:
-       config:
-         max_staleness: 2
-
-``NoSamples`` and ``SFTSamples`` refuse the key: the first holds no unit, and
-the second never drops an SFT target as stale. A training
-framework's own off-policy limit goes in that backend's
+Each record-to-sample stage decides which of its samples are stale, and the
+samples service applies that rule; no setting chooses it. Most built-in stages
+are on-policy: only data of the artifact that the scenario serves trains. An
+SFT stage and the harness trace stages never drop a sample. SAO accepts a
+bounded lag, its own ``max_artifact_lag`` (`SAO <../user-guide/recipes/sao.rst>`__).
+A ``pipeline.record2sample.config.max_staleness`` key is refused at startup:
+remove it. A training framework's own off-policy limit goes in that backend's
 ``training.options``. No built-in backend has one now. See `Staleness
 <../developer-guide/processors.rst#staleness>`__.
 

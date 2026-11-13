@@ -34,6 +34,10 @@ sample. It waits in the store with the other samples, in store order.
 A record-to-sample stage can also make samples from no record set, such as the
 generated-task recipe's tasks (``Record2Sample.made_samples``). The pipeline
 stores them like the samples of a unit, and they train like any other sample. The stage reads each job's end (``Record2Sample.job_ended``).
+
+The samples service decides which stored samples are stale (``mark_stale``, with the
+stage's ``Record2Sample.is_stale``) and marks them in the store. The automatic
+jobs leave a marked sample out; the pipeline runs no staleness check of its own.
 """
 
 from __future__ import annotations
@@ -84,7 +88,8 @@ class PipelineSettings:
 
     Values: ``record2sample`` names a ``Record2Sample`` class and ``sample2job`` a ``Sample2Job`` class, each
     with the config that the class parses. ``environ`` is the environment that the stages read. The constructor
-    refuses a reference to another class with ``PluginConfigError``.
+    refuses a reference to another class, and a record-to-sample config that sets the removed
+    ``max_staleness``, with ``PluginConfigError``.
 
     It comes from the deployment's ``pipeline`` section over the recipe's
     ``PipelineSpec``. Each key of the section is ``{module, config}``; a key
@@ -101,6 +106,12 @@ class PipelineSettings:
     def __post_init__(self) -> None:
         Record2Sample.referenced_class(self.record2sample)
         Sample2Job.referenced_class(self.sample2job)
+        if {"max_staleness", "max-staleness"} & set(self.record2sample.config):
+            raise PluginConfigError(
+                "pipeline.record2sample.config.max_staleness was removed: the samples service asks the "
+                "record-to-sample stage which samples are stale. Remove the key. On-policy stages train only data "
+                "of the served artifact; an SAO stage takes its lag bound as max_artifact_lag."
+            )
 
     @classmethod
     def from_setting(cls, value: object, *, spec: PipelineSpec, environ: Mapping[str, str]) -> PipelineSettings:
@@ -239,8 +250,15 @@ class TrainingPipeline:
         self.trained_sample_ids: set[str] = set()
         #: The ended records of the stage that this pipeline stored and no commit named yet.
         self.stored_ended_record_ids: set[str] = set()
-        #: The artifacts that the scenario served, oldest first, for the staleness check.
-        self.served_artifacts = ServedArtifacts()
+        #: The samples that this trainer's stages stored, that no job of it trained and that the samples service
+        #: did not mark stale, by group (the stored group, or the sample ID of a sample without one), each by sample
+        #: ID: what ``mark_stale`` asks the stage about. The samples service keeps it.
+        self.offered: dict[str, dict[str, Sample]] = {}
+        #: The sequence of the last stored sample that ``mark_stale`` read.
+        self.offered_sequence = 0
+        #: The artifacts that the scenario served, as the samples service's last judgment read them: a sample that
+        #: the stage finds stale against them is stored with the stale mark.
+        self.served = ServedArtifacts()
         self.set_training_mode(context.training_mode)
 
     @property
@@ -383,8 +401,12 @@ class TrainingPipeline:
         self, group: str | None, record_ids: tuple[str, ...], samples: tuple[tuple[str, Sample], ...]
     ) -> bool:
         """Save samples (``TrainerSamples.write_record_samples``) with their tasks (``lineage``), count the new ones,
-        and return whether one is new."""
-        added = self.store.write_record_samples(group, record_ids, samples, lineage=self.lineage(record_ids))
+        and return whether one is new. Samples that the stage finds stale against ``served`` are stored with the
+        stale mark, so no reader sees them unmarked."""
+        stale = self.record2sample.is_stale(tuple(sample for _, sample in samples), self.served)
+        added = self.store.write_record_samples(
+            group, record_ids, samples, lineage=self.lineage(record_ids), stale=stale
+        )
         self.stored_sample_count += added
         return added > 0
 
@@ -400,13 +422,9 @@ class TrainingPipeline:
         for unit in ready_units:
             stored = self.store_unit(unit) or stored
         made = self.record2sample.made_samples()
-        if made:
-            stored = (
-                self.write_record_samples(
-                    None, (), tuple((f"{self.sample_id_prefix}{name}", sample) for name, sample in made)
-                )
-                or stored
-            )
+        for name, sample in made:
+            # Each made sample trains by itself, so the stage judges each one alone.
+            stored = self.write_record_samples(None, (), ((f"{self.sample_id_prefix}{name}", sample),)) or stored
         if ready_units or made:
             self.read_store()
         self.received_input = self.received_input or stored
@@ -447,9 +465,59 @@ class TrainingPipeline:
         """Give the record-to-sample stage the outcome of a job whose end the trainer committed."""
         self.record2sample.job_ended(outcome)
 
-    def observe_serving_artifact_id(self, artifact_id: str) -> None:
-        """Add the artifact that serves the scenario now to those that served it, for the staleness check."""
-        self.served_artifacts.observe(artifact_id)
+    def mark_stale(self, served: ServedArtifacts) -> bool:
+        """The samples service's staleness check: ask the stage about each group of offered samples
+        (``Record2Sample.is_stale``) and mark the samples of each stale group in the store
+        (``TrainerSamples.mark_stale``); then store that the samples were judged against ``served``
+        (``TrainerSamples.write_judged``). Return whether a sample was marked or the judged state is new.
+
+        The offered samples are the samples that this trainer's stages stored, that no job of it trained and that
+        carry no mark: the pipeline reads those stored since the last call. A stale group never comes back, and its
+        records stay consumed, so a restart rebuilds the same decision from the store. The samples that the pipeline
+        stores after the call are judged against ``served`` when they are stored (``write_record_samples``).
+        """
+        self.served = served
+        trainer = self.store.trainer
+        while listed := self.store.store.listing(after_sequence=self.offered_sequence, limit=MAX_QUERY_LIMIT):
+            self.offered_sequence = listed[-1].sequence
+            own = [
+                entry.sample_id
+                for entry in listed
+                if entry.component == trainer and not entry.train_counts.get(trainer)
+            ]
+            for stored in self.store.read(own) if own else ():
+                if not stored.stale:
+                    self.offered.setdefault(stored.group or stored.sample_id, {})[stored.sample_id] = stored.sample
+        stale_groups = [
+            group
+            for group, samples in self.offered.items()
+            if self.record2sample.is_stale(tuple(samples.values()), served)
+        ]
+        stale_ids = [sample_id for group in stale_groups for sample_id in self.offered.pop(group)]
+        if stale_ids:
+            self.store.mark_stale(stale_ids)
+        state = served.served_state
+        if state is None or self.store.judged(state):
+            return bool(stale_ids)
+        self.store.write_judged(state)
+        return True
+
+    def forget_trained(self, sample_ids: Iterable[str]) -> None:
+        """Take ``sample_ids``, samples that a job of this trainer trained, out of the offered samples."""
+        trained = set(sample_ids)
+        for group in list(self.offered):
+            samples = self.offered[group]
+            for sample_id in trained & samples.keys():
+                samples.pop(sample_id)
+            if not samples:
+                self.offered.pop(group)
+
+    def judged(self, served: ServedArtifacts) -> bool:
+        """Whether the samples service judged this trainer's samples against what ``served`` serves: always for a
+        scenario that loads no weights. An automatic job waits for it, so that it takes no sample that the samples
+        service would mark stale."""
+        state = served.served_state
+        return state is None or self.store.judged(state)
 
     # --------------------------------------------------------- job data cycle
 
@@ -469,7 +537,11 @@ class TrainingPipeline:
             untrainable: list[str] = []
             for stored in stored_samples:
                 self.store_sequence = stored.sequence
-                if stored.train_count(self.store.trainer) > 0 or stored.sample_id in self.trained_sample_ids:
+                if (
+                    stored.train_count(self.store.trainer) > 0
+                    or stored.sample_id in self.trained_sample_ids
+                    or stored.stale
+                ):
                     self.held.pop(stored.sample_id, None)
                     continue
                 sample = self.trainable(stored)
@@ -521,11 +593,10 @@ class TrainingPipeline:
         """The samples that the next automatic job takes, in store order, each with the sample that it trains.
 
         The candidates are the held samples that no job data reserved, of a kind that the recipe gives job parameters
-        (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), of the kind of the first
-        of them, and that are not stale: a sample that the record-to-sample stage made is stale when the stage's
-        staleness check finds its data too many versions behind (``Record2Sample.is_stale``). An artifact that the
-        scenario serves beside its active selection is not behind. Every sample of a stale sample's group is stale. The job takes the first ``buffer_size`` candidates, or all of them without a ``buffer_size``,
-        and the other candidates of every group that those touch, so a group trains whole.
+        (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), and of the kind of the
+        first of them. The held samples carry no stale mark of the samples service (``read_store``, ``ready``). The
+        job takes the first ``buffer_size`` candidates, or all of them without a ``buffer_size``, and the other
+        candidates of every group that those touch, so a group trains whole.
         """
         # A kind that the recipe gives no parameters trains only with a request that gives them.
         kinds = set(self.context.job_parameters) or set(SAMPLE_KINDS)
@@ -535,18 +606,10 @@ class TrainingPipeline:
             if sample_id not in self.reserved_sample_ids and stored.kind in kinds
         ]
         candidates = [(stored, sample) for stored, sample in unreserved if stored.kind == unreserved[0][0].kind]
-        stale_groups = {
-            stored.group or stored.sample_id
-            for stored, sample in candidates
-            if stored.component is not None
-            and not self.served_artifacts.served_beside((sample,))
-            and self.record2sample.is_stale((sample,), self.served_artifacts.artifact_ids)
-        }
-        fresh = [entry for entry in candidates if (entry[0].group or entry[0].sample_id) not in stale_groups]
-        prefix = fresh if self.buffer_size is None else fresh[: self.buffer_size]
+        prefix = candidates if self.buffer_size is None else candidates[: self.buffer_size]
         groups = {stored.group for stored, _ in prefix if stored.group is not None}
         prefix_ids = {stored.sample_id for stored, _ in prefix}
-        return tuple(entry for entry in fresh if entry[0].sample_id in prefix_ids or entry[0].group in groups)
+        return tuple(entry for entry in candidates if entry[0].sample_id in prefix_ids or entry[0].group in groups)
 
     def request_entries(self, request: TrainingRequest) -> tuple[tuple[StoredSample, Sample], ...]:
         """The samples that ``request`` names and the store holds, in store order, each with the sample that it
@@ -670,13 +733,15 @@ class TrainingPipeline:
     def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness (``holds_job_data``).
 
-        A held sample that left the scenario, or left its ``train`` split, since the pipeline read it leaves the
-        next automatic job.
+        A held sample that left the scenario, left its ``train`` split, or that the samples service marked stale since
+        the pipeline read it, leaves the next automatic job.
         """
         self.advance()
         while self.pending is None and self.next_request() is None and self.holds_job_data(sample_count):
             ids = [stored.sample_id for stored, _ in self.auto_entries()]
-            used = {stored.sample_id for stored in self.store.read(ids) if stored.split == "train"}
+            used = {
+                stored.sample_id for stored in self.store.read(ids) if stored.split == "train" and not stored.stale
+            }
             left = [sample_id for sample_id in ids if sample_id not in used]
             if not left:
                 return True

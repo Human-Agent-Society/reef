@@ -14,9 +14,9 @@ from typing import Any
 
 from reef.core.config import config_option
 from reef.core.job_data import TrajectorySample
+from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
-from reef.record2sample.base import Record2SampleSettings
 from reef.record2sample.reports import ReportContext
 from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 
@@ -41,9 +41,12 @@ def reported_task(metadata: object) -> dict[str, Any] | None:
 
 
 @dataclass(frozen=True)
-class SampleAssemblySettings(Record2SampleSettings):
-    """The sample-assembly keys of a record-to-sample stage's config, with ``max_staleness``. A stage's settings
-    extend this class."""
+class SampleAssemblySettings(PluginSettings):
+    """The sample-assembly keys of a record-to-sample stage's config. A stage's settings extend this class.
+
+    Values: ``realign_threshold`` and ``scaffold_tolerance`` are non-negative; the constructor refuses other values.
+    Purpose: a stage that builds policy samples parses it and gives it to ``SampleAssembly``.
+    """
 
     accept_multi_turn_policy_samples: bool = config_option(
         False,
@@ -64,7 +67,6 @@ class SampleAssemblySettings(Record2SampleSettings):
     )
 
     def __post_init__(self) -> None:
-        super().__post_init__()
         if self.realign_threshold < 0:
             raise ValueError("realign_threshold must be non-negative")
         if self.scaffold_tolerance < 0:

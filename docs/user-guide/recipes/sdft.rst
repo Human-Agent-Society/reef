@@ -102,8 +102,7 @@ top-K representation of the teacher is another switch. Each sample
 contributes the mean over its trained response tokens. That mean is weighted
 by the truncated importance-sampling ratio between the policy and the
 old-policy log-probs. The actor computes those with the weights of the job's
-start, so the ratio is exact for ``max_staleness: 0`` and an approximation
-above it.
+start. The stage is on-policy, so the ratio is exact.
 
 The sampled reverse-KL mode also accepts score centering for training/inference
 mismatch. Score centering needs the sampler's recorded top-K, which samples
@@ -138,7 +137,6 @@ stage reads only its own ``config``.
    pipeline:
      record2sample:
        config:
-         max_staleness: 0
          max_teacher_tokens: 8192
      sample2job:
        config:
@@ -165,9 +163,6 @@ key's place in ``pipeline``.
 
    ``training.config.global_batch_size``
        rollouts in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
-
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 ``SDFTSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and

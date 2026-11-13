@@ -26,6 +26,7 @@ from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Suppor
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import load_recipe
+from reef.record2sample.staleness import ServedArtifacts
 from reef.scenario.live_objects import scenario_components
 from reef.service.deploy.training import training_recipe_config
 from reef.train.pipeline import TrainingPipeline
@@ -205,15 +206,15 @@ def test_untrainable_verdicts_are_terminal() -> None:
 def test_candidates_behind_the_served_artifact_leave_the_buffer() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
-    processor.observe_serving_artifact_id("v1")
     processor.push(_turn("old", Q1, artifact_id="v1"))
     processor.push(_turn("cont1", _successor(Q1, "ok")))
-    processor.observe_serving_artifact_id("v2")
     processor.push(_turn("new", Q2, artifact_id="v2"))
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
     processor.produce()
+    # The samples service judges the stored candidates against the served artifacts, and marks the old one stale.
+    processor.mark_stale(ServedArtifacts(("v1", "v2")))
     assert not processor.ready(2)  # the stale candidate is not in the buffer, 1 < 2
     assert {"old", "new"} <= processor.record2sample.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]

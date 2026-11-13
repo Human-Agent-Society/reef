@@ -37,7 +37,7 @@ recipe:
 pipeline:
   record2sample:
     config:
-      max_staleness: 4
+      max_artifact_lag: 4
   sample2job:
     config:
       # The fewest samples of one job: one optimizer step of Slime's global batch.

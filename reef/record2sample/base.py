@@ -1,7 +1,6 @@
 """The record-to-sample stage: records in, samples out, for one pipeline.
 
-``Record2Sample`` is the interface, and ``Record2SampleSettings`` is the config that every stage that holds units
-takes. ``NoSamples`` is the default of a pipeline that trains nothing.
+``Record2Sample`` is the interface. ``NoSamples`` is the default of a pipeline that trains nothing.
 """
 
 from __future__ import annotations
@@ -13,14 +12,13 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Self
 
-from reef.core.config import config_option
 from reef.core.errors import inference_incomplete
 from reef.core.job_data import JobOutcome, Sample, TrajectorySample
-from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
+from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.record2sample.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
-from reef.record2sample.staleness import is_stale, producing_artifact_ids
+from reef.record2sample.staleness import ServedArtifacts, lags_behind
 
 
 class SampleStatus(Enum):
@@ -59,34 +57,6 @@ class SampleResult:
         return cls(SampleStatus.SKIPPED)
 
 
-def require_max_staleness(value: object) -> None:
-    """Raise ``ValueError`` unless ``value`` is a non-negative int (not a bool)."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"max_staleness must be a non-negative int, got {value!r}")
-
-
-@dataclass(frozen=True)
-class Record2SampleSettings(PluginSettings):
-    """The config of a record-to-sample stage: how many versions its training data may lag behind.
-
-    Values: ``max_staleness`` is a non-negative int. The constructor refuses other values. With 0, only data of the
-    version that the scenario serves trains.
-    Purpose: a stage's ``from_config`` parses it from ``pipeline.record2sample.config`` and gives ``max_staleness``
-    to ``Record2Sample.__init__``. A stage settings class that has more keys extends it.
-    """
-
-    max_staleness: int = config_option(
-        0,
-        help=(
-            "The versions that training data may lag behind the served version and still train. "
-            "0 trains only data of the served version."
-        ),
-    )
-
-    def __post_init__(self) -> None:
-        require_max_staleness(self.max_staleness)
-
-
 class Record2Sample(ABC, Plugin):
     """Turn records into samples for one pipeline, and decide which samples train together.
 
@@ -102,10 +72,10 @@ class Record2Sample(ABC, Plugin):
     that became ready (``take_ready_units``), saves the samples of each one (``unit_samples``) as data items,
     and the stage ends it (``consume``). The stage never calls the pipeline.
 
-    The stage also runs the staleness check. No other part of Reef checks how far the training data lags behind the
-    weights. The pipeline asks the stage whether the data of a stored sample is more than ``max_staleness`` artifacts
-    behind the artifacts that the scenario served (``is_stale``) before job data takes it. ``max_staleness`` is a
-    non-negative int, from ``Record2SampleSettings``; the constructor refuses other values.
+    The stage also decides when its stored samples are stale (``is_stale``). No other part of Reef checks how far
+    training data lags behind the weights. The samples service asks the stage about each group of its stored samples
+    that no job trained, against the artifacts that the scenario served (``TrainingPipeline.mark_stale``), and marks the
+    stale ones in the store. Control's automatic jobs leave them out.
 
     A record that the stage ends, for example a record that can no longer train, appears in
     ``releasable_record_ids``. The samples service stores those IDs, and the trainer's next commit names them, so the
@@ -115,8 +85,8 @@ class Record2Sample(ABC, Plugin):
     lifecycle methods.
 
     Only the samples service feeds a stage (``push``, ``advance``, ``job_ended``), and a stage that holds records or
-    runs background work keeps that state there. Control asks only ``is_stale`` and ``uploaded_sample``, which depend
-    on their arguments and the stage's config.
+    runs background work keeps that state there. Control asks only ``uploaded_sample``, which depends on its argument
+    and the stage's config.
 
     ``push``, ``advance``, and ``make_samples`` run on the trainer thread and must not block on network or model
     calls. A stage with slow work runs it on a worker that it owns, forms sets when the work ends, and ``close``
@@ -143,10 +113,7 @@ class Record2Sample(ABC, Plugin):
         """The directories under which a stage built from ``config`` keeps a scenario's state, for archiving."""
         return ()
 
-    def __init__(self, *, max_staleness: int = 0) -> None:
-        require_max_staleness(max_staleness)
-        #: How many versions the training data of a stored sample may lag behind the served version and still train.
-        self.max_staleness = max_staleness
+    def __init__(self) -> None:
         #: The record set units that became ready since the last ``take_ready_units``, by unit ID.
         self.ready_units: dict[Hashable, RecordSetUnit] = {}
         #: The samples of each set that has samples and has not ended, by set ID.
@@ -229,16 +196,18 @@ class Record2Sample(ABC, Plugin):
 
     # ------------------------------------------------------------- staleness
 
-    def is_stale(self, samples: Sequence[Sample], served_artifact_ids: Sequence[str]) -> bool:
-        """Whether the training data of ``samples`` is more than ``max_staleness`` artifacts behind the served one.
+    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
+        """Whether ``samples``, the stored samples of one group that no job trained, may no longer train now that the
+        scenario serves ``served``.
 
-        ``served_artifact_ids`` holds the artifacts that the scenario served, oldest first. The result is ``is_stale``
-        of the artifacts that produced the samples (``producing_artifact_ids``) and ``served_artifact_ids``. It depends
-        on nothing else. The pipeline asks it for each sample that the stage made before job data takes it. A
-        stage whose samples do not depend on the version that produced them, such as fixed SFT targets, returns
-        False.
+        The samples service calls it, and marks every sample of a stale group in the store; the stage's state does not
+        change. The default is on-policy: the samples are stale when the data of one of them is of an artifact
+        other than the one that the scenario serves now, or one that it serves beside it
+        (``lags_behind(samples, served, 0)``). A task never goes stale. A stage whose samples do not depend on the
+        artifact that produced them, such as fixed SFT targets, returns False. A stage whose method accepts a bounded
+        lag passes its own bound to ``lags_behind``.
         """
-        return is_stale(producing_artifact_ids(samples), served_artifact_ids, self.max_staleness)
+        return lags_behind(samples, served, 0)
 
     def consume(self, unit: RecordSetUnit) -> None:
         """End ``unit``, whose samples the pipeline stored: its records are releasable."""
@@ -318,7 +287,7 @@ class NoSamples(Record2Sample):
     """Make no sample: the default of a pipeline that trains nothing. No config.
 
     The stage reads each record and keeps nothing. The pipeline then makes no job data, and the records stay stored
-    for audit. The stage holds no unit, so it refuses ``max_staleness``.
+    for audit.
     """
 
     @classmethod
