@@ -199,8 +199,12 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     assert claude is not None and (claude.adapter, claude.binary) == ("claude", "/opt/claude")
     unset = agent_settings({}, {"REEF_AGENT_SANDBOX": "none"}, state_dir=state_dir)
     assert unset is not None and isinstance(unset.executor, LocalExecutor)
-    with pytest.raises(ValueError, match="one of 'bwrap', 'seatbelt', 'e2b', 'modal', 'none'"):
+    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox", lambda: SandboxExecutor)
+    with pytest.raises(ValueError, match="one of 'bwrap', 'e2b', 'modal', 'none' on this host"):
         agent_settings({"sandbox": "docker"}, {}, state_dir=state_dir)
+    # Each host runs one local sandbox: the other host's name is refused at startup, not at preflight.
+    with pytest.raises(ValueError, match="one of 'bwrap', 'e2b', 'modal', 'none' on this host"):
+        agent_settings({"sandbox": "seatbelt"}, {}, state_dir=state_dir)
     with pytest.raises(ValueError, match="positive number"):
         agent_settings({"timeout_s": 0}, {}, state_dir=state_dir)
     # E2B: the key from the section, else the environment; none at all is refused at startup.
@@ -232,14 +236,14 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
         raise SandboxUnavailableError("no bwrap here")
 
     monkeypatch.setattr(SandboxExecutor, "preflight", unavailable)
-    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox_kind", lambda: "bwrap")
+    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox", lambda: SandboxExecutor)
     # Unset on a host that cannot isolate: the agent is off and the served model answers in text.
     assert agent_settings({}, {}, state_dir=state_dir) is None
     with pytest.raises(ValueError, match="no bwrap here"):
         agent_settings({"sandbox": "bwrap"}, {}, state_dir=state_dir)
     # Unset on macOS: the agent runs under Seatbelt with the internet but no host port.
     monkeypatch.setattr(SeatbeltExecutor, "preflight", lambda self: None)
-    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox_kind", lambda: "seatbelt")
+    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox", lambda: SeatbeltExecutor)
     jailed = agent_settings({}, {}, state_dir=state_dir)
     assert jailed is not None and isinstance(jailed.executor, SeatbeltExecutor)
     assert jailed.executor.network == "isolated"

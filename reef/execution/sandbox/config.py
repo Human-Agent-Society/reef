@@ -24,16 +24,11 @@ from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 
 #: The cloud sandbox providers, by the name a deployment selects.
 REMOTE_EXECUTORS: Mapping[str, type[RemoteExecutor]] = {"e2b": E2BExecutor, "modal": ModalExecutor}
-#: The local sandboxes, by the name a deployment selects: bubblewrap on Linux, Seatbelt on macOS.
-LOCAL_SANDBOXES: Mapping[str, type[LocalSandboxExecutor]] = {"bwrap": SandboxExecutor, "seatbelt": SeatbeltExecutor}
 
 
-def host_sandbox_kind(platform: str | None = None) -> str:
-    """The local sandbox this host runs: ``seatbelt`` on macOS (``platform`` ``darwin``), else ``bwrap``.
-
-    ``platform`` defaults to ``sys.platform``.
-    """
-    return "seatbelt" if (sys.platform if platform is None else platform) == "darwin" else "bwrap"
+def host_sandbox() -> type[LocalSandboxExecutor]:
+    """The local sandbox this host runs: Seatbelt on macOS, else bubblewrap."""
+    return SeatbeltExecutor if sys.platform == "darwin" else SandboxExecutor
 
 
 def remote_executor(
@@ -79,7 +74,7 @@ def build_executor(
     """Build the executor a deployment selected.
 
     ``executor`` is ``local`` (default), ``sandbox``, or a cloud sandbox (``e2b``, ``modal``). ``sandbox`` is the
-    host's local sandbox (``host_sandbox_kind``): bubblewrap on Linux, Seatbelt on macOS. Each executor reads its
+    host's local sandbox (``host_sandbox``): bubblewrap on Linux, Seatbelt on macOS. Each executor reads its
     options from the ``sandbox`` section with its ``from_config``. The executor is
     preflighted at build so a hosted deployment that requires the sandbox
     fails to start, not at the first run. The caller binds the result to
@@ -97,7 +92,7 @@ def build_executor(
     if isinstance(kind, str) and kind in REMOTE_EXECUTORS:
         executor = REMOTE_EXECUTORS[kind].from_config(section, values)
     elif kind == "sandbox":
-        executor = LOCAL_SANDBOXES[host_sandbox_kind()].from_config(section, values)
+        executor = host_sandbox().from_config(section, values)
     else:
         kinds = ", ".join(f"'{name}'" for name in ("local", "sandbox", *sorted(REMOTE_EXECUTORS)))
         raise ReefError(f"unknown run executor {kind!r}; use one of {kinds}")

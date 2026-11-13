@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.execution.sandbox.config import LOCAL_SANDBOXES, REMOTE_EXECUTORS, host_sandbox_kind, remote_executor
+from reef.execution.sandbox.config import REMOTE_EXECUTORS, host_sandbox, remote_executor
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import AdapterProgram
@@ -106,10 +106,11 @@ def agent_settings(section: Any, environ: Mapping[str, str], *, state_dir: Path)
         except SandboxUnavailableError as exc:
             raise ValueError(f"evolution.agent.sandbox is {sandbox}, but {exc}") from exc
         return AgentSettings(adapter, remote, timeout_s, binary)
-    if sandbox not in ("", *LOCAL_SANDBOXES):
-        choices = ", ".join(f"'{name}'" for name in (*LOCAL_SANDBOXES, *sorted(REMOTE_EXECUTORS), "none"))
-        raise ValueError(f"evolution.agent.sandbox must be one of {choices}")
-    executor = LOCAL_SANDBOXES[sandbox or host_sandbox_kind()](network="isolated")
+    local = host_sandbox()
+    if sandbox not in ("", local.kind):
+        choices = ", ".join(f"'{name}'" for name in (local.kind, *sorted(REMOTE_EXECUTORS), "none"))
+        raise ValueError(f"evolution.agent.sandbox must be one of {choices} on this host")
+    executor = local(network="isolated")
     try:
         executor.preflight()
     except SandboxUnavailableError as exc:

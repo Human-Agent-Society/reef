@@ -9,6 +9,7 @@ import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import ClassVar
 
 from reef.execution.sandbox.process import (
     ISOLATION_ENV,
@@ -49,6 +50,7 @@ class SeatbeltExecutor(LocalSandboxExecutor):
     tool. ``SandboxExecutor`` narrows each call on Linux.
     """
 
+    kind: ClassVar[str] = "seatbelt"
     base_paths: tuple[str, ...] = (
         "/usr",
         "/bin",

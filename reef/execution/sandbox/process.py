@@ -32,7 +32,7 @@ from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Self
+from typing import ClassVar, Self
 
 from reef.core.errors import InternalError, ReefError
 from reef.execution.processes import (
@@ -371,10 +371,14 @@ class LocalSandboxExecutor(ProgramExecutor):
     each run's resources. ``base_paths`` are the host directories a run may read so its binary and runtime resolve.
     ``env`` is the deployment's explicit environment for every run; a run inherits no other host variable.
 
-    Each subclass enforces these values with one host mechanism and implements :meth:`preflight` and :meth:`launch`.
+    Each subclass enforces these values with one host mechanism, which its ``kind`` names, and implements
+    :meth:`preflight` and :meth:`launch`.
     Purpose: :mod:`reef.execution.sandbox.config` builds one with :meth:`from_config` from a deployment's sandbox
     section, as it builds a ``RemoteExecutor``; a caller binds it to a program with :meth:`for_program`.
     """
+
+    #: The host mechanism's name, as a deployment selects it.
+    kind: ClassVar[str] = ""
 
     egress_hosts: tuple[str, ...] = ()
     network: str = "default"
@@ -445,6 +449,7 @@ class SandboxExecutor(LocalSandboxExecutor):
     proves the host can nest one.
     """
 
+    kind: ClassVar[str] = "bwrap"
     #: Base directories bound read-only so the binary and its runtime resolve.
     base_paths: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/etc/alternatives", "/etc/ssl", "/opt")
 

@@ -137,7 +137,7 @@ class Proposals(ModelBinding):
 @pytest.fixture
 def campaign(driver, monkeypatch, tmp_path, fake_git_lfs):
     # The campaign's commits, not Git LFS, are under test here; tests/artifact covers real LFS.
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SandboxExecutor)
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     launches = []
 

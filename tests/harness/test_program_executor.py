@@ -14,7 +14,7 @@ import pytest
 
 import reef
 from reef.core.errors import ReefError
-from reef.execution.sandbox.config import build_executor, host_sandbox_kind
+from reef.execution.sandbox.config import build_executor, host_sandbox
 from reef.execution.sandbox.process import (
     LocalExecutor,
     ProgramLaunchError,
@@ -126,7 +126,7 @@ def test_build_executor_rejects_an_unknown_kind() -> None:
 
 
 def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SandboxExecutor)
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(SandboxUnavailableError, match="bubblewrap"):
         SandboxExecutor().preflight()
@@ -242,7 +242,7 @@ def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_
 
 
 def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SandboxExecutor)
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     _probe_result(monkeypatch, 0)
     executor = build_executor(
@@ -259,7 +259,7 @@ def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
 def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path: Path) -> None:
     from reef.execution.sandbox.process import ISOLATION_ENV
 
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SandboxExecutor)
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     executor = build_executor(
         {"executor": "sandbox", "sandbox": {"env_from": ["REMOTE_KEY"]}},
@@ -284,13 +284,14 @@ def test_sandbox_refuses_invalid_env_from(names) -> None:
         build_executor({"executor": "sandbox", "sandbox": {"env_from": names}})
 
 
-@pytest.mark.parametrize(("platform", "kind"), [("darwin", "seatbelt"), ("linux", "bwrap")])
-def test_host_sandbox_kind_follows_the_platform(platform: str, kind: str) -> None:
-    assert host_sandbox_kind(platform) == kind
+@pytest.mark.parametrize(("platform", "sandbox"), [("darwin", SeatbeltExecutor), ("linux", SandboxExecutor)])
+def test_host_sandbox_follows_the_platform(monkeypatch, platform: str, sandbox: type) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.config.sys.platform", platform)
+    assert host_sandbox() is sandbox
 
 
 def test_build_executor_selects_seatbelt_on_macos(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "seatbelt")
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SeatbeltExecutor)
     monkeypatch.setattr(SeatbeltExecutor, "preflight", lambda self: None)
     executor = build_executor(
         {"executor": "sandbox", "sandbox": {"egress_hosts": ["127.0.0.1:8000"], "limits": {"cpu_seconds": 30}}}
