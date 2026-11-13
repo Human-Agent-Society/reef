@@ -2002,7 +2002,11 @@ answers 501.
 
 For a scenario that trains weights, the delete also cancels the scenario's
 running training job at its training component, since nothing would read the
-job's checkpoints afterwards. On a runtime that serves per-scenario adapters,
+job's checkpoints afterwards. The training service also cancels a job of the
+scenario that reaches the queue after the delete, also when control stopped
+before it could cancel it: the service finds no registration of the scenario
+when it takes the job or stores a checkpoint, and it discards what the job
+stored. On a runtime that serves per-scenario adapters,
 the scenario's adapter stays resident in the serving engines until the
 adapter residency evicts it.
 

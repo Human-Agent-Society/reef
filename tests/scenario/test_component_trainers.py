@@ -70,7 +70,7 @@ from reef.record2sample.staleness import ServedArtifacts, lags_behind
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData
 from reef.scenario import Scenario
-from reef.scenario.live_objects import LiveObjects
+from reef.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.scenario.scenario import validate_component_trainers
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
@@ -84,7 +84,14 @@ from reef.storage.commits import (
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, SnapshotStart, TrainingJob
-from reef.train.job_queue import CHECKS_QUEUE, JOBS_QUEUE, TrainingCheckWorker
+from reef.train.job_queue import (
+    CHECKS_QUEUE,
+    JOBS_QUEUE,
+    SCENARIO_DELETED_ERROR,
+    TrainingCheckWorker,
+    TrainingJobWorker,
+    job_records_content,
+)
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import PipelineSpec, TrainingPipeline
 from reef.train.types import JobData, Sample
@@ -2004,6 +2011,64 @@ def test_a_job_that_was_submitted_and_not_committed_is_cancelled_when_its_scenar
     cancelled = dispatcher.queue.read(JOBS_QUEUE, job.id)
     assert cancelled.state == "failed" and cancelled.error in ("the scenario was deleted", "cancelled")
     assert training.submitted == []
+
+
+@pytest.mark.unit
+def test_a_job_queued_after_the_delete_does_not_run_when_the_cycle_stops_before_its_cancel(
+    tmp_path: Path, dispatchers: _Dispatchers
+) -> None:
+    """The cycle adds its job to the queue after the delete cancelled the scenario's jobs, and its process stops
+    before the cycle cancels the job: here the cycle waits until the test ends. The job stays queued, and the
+    training worker that takes it finds no registration of the scenario: it cancels the job before the component
+    runs it."""
+    training = WeightsJobComponent(tmp_path / "checkpoints")
+    factory = _repository(tmp_path)
+    dispatcher, _ = dispatchers.open(
+        training=training,
+        hold_local_cycles=True,
+        backend_factory=factory,
+        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+    )
+    scenario = loaded(dispatcher, 1)
+    checks = TrainingCheckWorker(
+        training, dispatcher.queue, dispatcher.job_directory_store, factory, worker_id="checks", poll_seconds=0.01
+    )
+    checks.start()
+    queued = scenario.trainer_for(WEIGHTS).job_loop_required().component
+    submit = queued.submit
+    submitted, stopped = threading.Event(), threading.Event()
+
+    def delete_submit_and_stop(job: TrainingJob) -> None:
+        dispatcher.delete_scenario("agent")
+        submit(job)
+        submitted.set()
+        stopped.wait(30)
+
+    try:
+        wait_for_job_check(scenario, WEIGHTS)
+        queued.submit = delete_submit_and_stop  # type: ignore[method-assign]
+        dispatcher.open_local_cycles()
+        assert submitted.wait(30)
+        (job,) = dispatcher.queue.items(JOBS_QUEUE)
+        assert job.state == "queued"
+
+        worker = TrainingJobWorker(
+            training,
+            dispatcher.queue,
+            dispatcher.job_directory_store,
+            factory,
+            checks=RecipeChecks(Recipe()),
+            worker_id="training",
+        )
+        assert worker.run_once()
+        cancelled = dispatcher.queue.read(JOBS_QUEUE, job.id)
+        assert (cancelled.state, cancelled.error, cancelled.progress) == ("failed", SCENARIO_DELETED_ERROR, ())
+        assert training.submitted == []
+        with pytest.raises(ArtifactNotFoundError):
+            factory("agent").materialize_content(job_records_content(job.id))
+    finally:
+        stopped.set()
+        checks.stop()
 
 
 @pytest.mark.unit
