@@ -256,12 +256,6 @@ def test_a_loopback_service_starts_without_a_token(host):
     assemble_provider_services(provider_config(host=host))
 
 
-def _unused_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
 @pytest.fixture
 def provider_service(tmp_path):
     """Yield the URL of a ``reef serve`` process, the requests that its local provider gets, and its log path."""
@@ -293,13 +287,16 @@ def provider_service(tmp_path):
     env = {key: value for key, value in os.environ.items() if not key.startswith("REEF_")}
     env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(Path(reef.__file__).resolve().parents[1])))
     env["REEF_UPSTREAM_API_KEY"] = "test-upstream-key"
-    port = _unused_port()
-    base_url = f"http://127.0.0.1:{port}"
     provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     thread = threading.Thread(target=provider.serve_forever, daemon=True)
     thread.start()
     log_path = tmp_path / "launch.log"
     try:
+        # The provider holds its port now, so the system cannot choose that port for Reef.
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
         with log_path.open("w") as log:
             process = subprocess.Popen(
                 [
