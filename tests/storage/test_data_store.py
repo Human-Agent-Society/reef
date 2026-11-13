@@ -1196,6 +1196,8 @@ def test_a_task_that_joins_or_leaves_a_held_benchmark_joins_or_leaves_the_scenar
     assert uses_of(store, "review") == [("add", "eval", "math"), ("sort", "eval", "math"), ("mul", "eval", "math")]
     assert store.holds("acme", "coding")[0].item_count == 3
     # One listing counts each held set: a task of two held benchmarks counts in each, and a set with no task has 0.
+    # A task without a benchmarks list is in no benchmark.
+    store.create("acme", [NewItem("loose", benchmark_task(tmp_path, "loose").content, {"kind": "task"})])
     store.hold("acme", "coding", "benchmark", "lists", "eval")
     store.hold("acme", "coding", "benchmark", "empty", "train")
     assert [(hold.name, hold.split, hold.item_count) for hold in store.holds("acme", "coding")] == [

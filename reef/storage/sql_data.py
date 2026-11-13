@@ -1943,10 +1943,12 @@ class PostgresDataStore(SQLDataStore):
         return cast(self.items_table.c.metadata_json, JSONB).contains({"benchmarks": [benchmark]})
 
     def benchmark_names(self) -> TableValuedAlias:
-        # Only a list has elements: jsonb_array_elements_text refuses another value.
+        # Only a list has elements: jsonb_array_elements_text refuses another value. A bound "[]" would be the JSON
+        # string, so the empty list is jsonb_build_array().
         metadata = cast(self.items_table.c.metadata_json, JSONB)
         listed = case(
-            (func.jsonb_typeof(metadata["benchmarks"]) == "array", metadata["benchmarks"]), else_=cast("[]", JSONB)
+            (func.jsonb_typeof(metadata["benchmarks"]) == "array", metadata["benchmarks"]),
+            else_=func.jsonb_build_array(),
         )
         return func.jsonb_array_elements_text(listed).table_valued("value")
 
