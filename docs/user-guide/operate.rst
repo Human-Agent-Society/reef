@@ -451,13 +451,18 @@ component:
   backend when it takes the job. Give the training service the same
   ``storage.artifact-backend`` access as control, and its own
   ``storage.artifact-cache-dir``.
+* The training service stores the files of each saved checkpoint in the
+  artifact backend, and control commits them by name. Control reads no
+  directory of the training service and holds none of a checkpoint's bytes, so
+  the two share no volume for checkpoints. The training service therefore
+  needs write access to the artifact backend. A checkpoint that no commit
+  took, such as one of a cancelled job, leaves the artifact backend when
+  control deletes the job's ended item
+  (``storage.work-retention-s``, 7 days by default).
 * An artifact import for ``tinker`` or ``spindle_full`` looks the checkpoint up
   on the backend's service. The training service does that, so such an import
   needs a running training service. It answers ``503`` when the training
   service gives no answer within 60 seconds.
-
-Control still publishes each checkpoint from the path that the training service
-reports, so both must reach the checkpoint directories.
 
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the

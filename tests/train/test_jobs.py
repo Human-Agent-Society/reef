@@ -215,7 +215,7 @@ def test_a_checkpoint_moves_the_training_start_only_for_the_job_that_continues_i
     loop = loop_with(component)
     named, continuing = RunningJob("named", "fake:a1", train_from="a1"), RunningJob("continuing", "fake:base")
     state = JobLoopState("fake:base", (named, continuing))
-    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-artifact"))
+    saved = SavedCheckpoint(1, str(tmp_path / "1"), None, content="named:1")
 
     published = loop.publish(state, named, saved).result
     # The commit names the start of the job, so its artifact does not become the training start.
@@ -238,7 +238,7 @@ def test_poll_reports_the_first_job_with_news_and_an_end_removes_only_that_job(c
     for job in jobs:
         component.statuses[job.job_id] = JobStatus(job.job_id, "running")
     assert loop.poll(state) is None
-    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"))
+    saved = SavedCheckpoint(1, str(tmp_path / "1"), None, content="job-3:1")
     component.statuses["job-2"] = JobStatus("job-2", "finished")
     component.statuses["job-3"] = JobStatus("job-3", "running", (saved,))
     ended = loop.poll(state).result
@@ -267,11 +267,13 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
     state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
     job_id = state.jobs[0].job_id
     assert loop.poll(state) is None
-    first = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-artifact"), {"loss": 0.5})
+    first = SavedCheckpoint(1, str(tmp_path / "1"), None, {"loss": 0.5}, content="stored:1")
     component.statuses[job_id] = JobStatus(job_id, "running", (first,))
     publication = loop.poll(state)
     published = publication.result
-    assert published.artifact is not None and published.artifact.local_path == tmp_path / "1-artifact"
+    # The commit names the stored content: control holds no file of the checkpoint.
+    assert published.artifact is not None
+    assert (published.artifact.content, published.artifact.local_path) == ("stored:1", None)
     # The commit carries the training metrics and the checkpoint's place in its job, and no selection.
     assert published.metrics == {
         "loss": 0.5,
@@ -348,7 +350,7 @@ def test_a_state_from_before_concurrent_jobs_reads_as_one_job_that_continues_the
 def test_a_checkpoint_publication_refuses_a_training_metric_that_it_would_overwrite(component, tmp_path):
     loop = loop_with(component)
     state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
-    reserved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"), {"training_job": 1})
+    reserved = SavedCheckpoint(1, str(tmp_path / "1"), None, {"training_job": 1}, content="stored:1")
     with pytest.raises(ValueError, match="training metrics name 'training_job'"):
         loop.publish(state, state.jobs[0], reserved)
 
@@ -432,7 +434,7 @@ def test_start_from_is_refused_while_a_commit_is_pending(component):
 
 @pytest.mark.unit
 def test_a_poll_result_is_dropped_when_a_new_start_was_set_while_the_poll_ran(tmp_path):
-    saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
+    saved = SavedCheckpoint(0, str(tmp_path / "0"), None, content="stored:0")
 
     class StartDuringStatus(FakeComponent):
         trainer: Trainer
@@ -457,7 +459,7 @@ def test_a_restarted_trainer_polls_its_running_job_before_it_reserves_a_batch(co
     assert trainer.job_running
     assert trainer.advance_job() is None
     assert trainer.pending_job_data is None and component.jobs == []
-    saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
+    saved = SavedCheckpoint(0, str(tmp_path / "0"), None, content="stored:0")
     component.statuses["job-1"] = JobStatus("job-1", "running", (saved,))
     published = trainer.advance_job()
     assert published is not None and published.metrics["training_job"]["event"] == "checkpoint"
@@ -512,7 +514,7 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     submitted = trainer.advance_job()
     trainer.settle_commit(trainer.prepare_commit(submitted))
     [job] = component.jobs
-    saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
+    saved = SavedCheckpoint(0, str(tmp_path / "0"), None, content="stored:0")
     component.statuses[job.job_id] = JobStatus(job.job_id, "running", (saved,))
     published = trainer.advance_job()
     trainer.settle_commit(trainer.prepare_commit(published))

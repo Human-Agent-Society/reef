@@ -279,6 +279,8 @@ class HarnessTrainingComponent(LocalJobComponent):
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         """The parts of the tree that the job changed: the parts of the paths of the diff from the start's tree to
         the checkpoint's."""
+        if checkpoint.artifact_path is None:
+            raise ValueError("the changed parts are read from the checkpoint's local tree")
         changes = HarnessTree.read(Path(start)).diff(HarnessTree.read(Path(checkpoint.artifact_path))).changes
         return frozenset(self.descriptor.layout.part_names(changes).values())
 

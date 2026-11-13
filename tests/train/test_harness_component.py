@@ -26,7 +26,6 @@ from reef.train.harness_backend.component import (
     ProgressFile,
     read_job_progress,
 )
-from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 
@@ -109,17 +108,12 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
         (checkpoint,) = ended(component, "one").checkpoints
     finally:
         component.close()
-    # The job loop of every component asks the component for the parts; the activation rule reads them: the job
-    # rewrote the rules of the seed tree.
-    loop = JobLoop(component, scenario="demo", scenario_component=COMPONENT)
-    # The parts are those that changed from the job's own start, wherever the training start is.
-    first = RunningJob("one", seed_start(component, tmp_path))
-    published = loop.publish(JobLoopState(checkpoint.path, (first,)), first, checkpoint)
-    assert published.result.artifact is not None and published.result.changed_kinds == {"rules"}
+    # The training worker asks the component for the parts and records them with the checkpoint; the activation
+    # rule reads them. The parts are those that changed from the job's own start: the job rewrote the rules of the
+    # seed tree.
+    assert component.changed_parts(seed_start(component, tmp_path), checkpoint) == {"rules"}
     # From a start that holds the same tree, nothing changed.
-    second = RunningJob("two", checkpoint.path)
-    again = loop.publish(JobLoopState(checkpoint.path, (second,)), second, checkpoint)
-    assert again.result.changed_kinds == frozenset()
+    assert component.changed_parts(checkpoint.path, checkpoint) == frozenset()
 
 
 @pytest.mark.unit

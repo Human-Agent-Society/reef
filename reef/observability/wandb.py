@@ -387,7 +387,7 @@ class WandbExperimentTracker(ExperimentTracker):
         try:
             run.log(values)
             run.summary.update({f"reef/{key}": value for key, value in metadata.items() if value is not None})
-            if event.checkpoint_path and self.config.upload_checkpoints:
+            if event.checkpoint is not None and self.config.upload_checkpoints:
                 self._upload_checkpoint(run, event)
         except Exception as exc:
             logger.warning("W&B logging failed (%s); training will continue", type(exc).__name__)
@@ -590,16 +590,21 @@ class WandbExperimentTracker(ExperimentTracker):
             "outcome": event.outcome,
             "source_artifact_ids": source.artifact_ids,
             "produced_artifact_ids": produced.artifact_ids,
-            "checkpoint_path": event.checkpoint_path,
         }
 
     def _upload_checkpoint(self, run: Any, event: TrainingExperimentEvent) -> None:
         client = self._client
-        if client is None or event.checkpoint_path is None:
+        if client is None or event.checkpoint is None:
             return
+        # The committed snapshot is read from the artifact store: the process that commits holds no checkpoint file.
+        component = event.context.component
+        files = event.checkpoint if component is None else event.checkpoint.component(component)
+        directory = files.materialize().local_path
+        if directory is None:
+            raise RuntimeError(f"snapshot {event.checkpoint.ref.revision} has no local files to upload")
         identity = event.training_job_id or f"{event.context.scenario}-commit-{event.context.commit_number}"
         artifact = client.Artifact(name=f"reef-checkpoint-{_artifact_name(identity)}", type="model")
-        artifact.add_dir(event.checkpoint_path)
+        artifact.add_dir(str(directory))
         run.log_artifact(artifact)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -8,7 +9,7 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, RLock
@@ -34,6 +35,8 @@ from reef.artifact.repository import (
     ConfigurableRepositoryBackendFactory,
     RepositoryBackendContext,
     StagedSnapshotRepositoryBackend,
+    StoredFiles,
+    StoredTree,
 )
 from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
@@ -101,6 +104,11 @@ class RefLayout:
     def snapshot(self, commit: str) -> str:
         return f"{self.fixed}releases/{commit}"
 
+    def contents(self, encoded: str) -> str:
+        """The prefix of the refs of the stored content of the scenario ``encoded``. A content's ref is replaced
+        and deleted, so it is a moving ref."""
+        return f"{self.moving}contents/{encoded}/"
+
     def archived(self, encoded: str, stamp: str) -> str:
         return f"{self.fixed}archived/{encoded}/{stamp}"
 
@@ -151,6 +159,10 @@ class _GitWorkspace:
         self.work_dir = Path(work_dir).resolve()
         self.clone_dir = self.work_dir / "repository"
         self._git_client = git_client
+        #: The LFS object directory of a repository that is a local bare directory, else None.
+        self.local_objects = Path(repository) / "lfs" / "objects" if Path(repository).is_dir() else None
+        #: False while a push adds no LFS object (``without_lfs_upload``); the holder of ``lock`` sets it.
+        self.uploads_lfs = True
         with WORKSPACE_LOCKS_LOCK:
             self.lock = WORKSPACE_LOCKS.setdefault(self.work_dir, RLock())
 
@@ -248,12 +260,13 @@ class _GitWorkspace:
         source: Path,
         paths: Sequence[str],
         *,
-        parent: str,
+        parent: str | None,
         carried_from: Path | None,
         files: Mapping[str, str],
         message: str,
     ) -> str:
-        """Commit ``paths`` from ``source`` plus ``files`` as the child of ``parent`` without checking it out.
+        """Commit ``paths`` from ``source`` plus ``files`` as the child of ``parent`` without checking it out; with
+        no ``parent``, as a commit with no parent.
 
         The index starts from the parent's tree, so a file that is a hard link
         to the same path in ``carried_from`` (the parent's materialized tree)
@@ -265,8 +278,11 @@ class _GitWorkspace:
         index.unlink(missing_ok=True)
         environment = {"GIT_INDEX_FILE": str(index)}
         try:
-            self.fetch_version(parent)
-            self._run(("git", "read-tree", parent), cwd=self.clone_dir, environment=environment)
+            if parent is None:
+                self._run(("git", "read-tree", "--empty"), cwd=self.clone_dir, environment=environment)
+            else:
+                self.fetch_version(parent)
+                self._run(("git", "read-tree", parent), cwd=self.clone_dir, environment=environment)
             parent_paths = {
                 path
                 for path in self._run(("git", "ls-files", "-z"), cwd=self.clone_dir, environment=environment).split(
@@ -296,18 +312,55 @@ class _GitWorkspace:
                     environment=environment,
                     input_text="\0".join(changed),
                 )
-            entries = []
-            for path, text in files.items():
-                blob = self._run(("git", "hash-object", "-w", "--stdin"), cwd=self.clone_dir, input_text=text)
-                entries.append(f"100644 {blob}\t{path}\n")
-            self._run(
-                ("git", "update-index", "--index-info"),
-                cwd=self.clone_dir,
-                environment=environment,
-                input_text="".join(entries),
-            )
-            tree = self._run(("git", "write-tree"), cwd=self.clone_dir, environment=environment)
-            return self.git("commit-tree", tree, "-p", parent, "-m", message)
+            return self.commit_index(environment, files, parent=parent, message=message)
+        finally:
+            index.unlink(missing_ok=True)
+
+    def commit_index(
+        self, environment: Mapping[str, str], files: Mapping[str, str], *, parent: str | None, message: str
+    ) -> str:
+        """Add ``files`` (text by path) to the index of ``environment`` and commit it as the child of ``parent``."""
+        entries = []
+        for path, text in files.items():
+            blob = self._run(("git", "hash-object", "-w", "--stdin"), cwd=self.clone_dir, input_text=text)
+            entries.append(f"100644 {blob}\t{path}\n")
+        self._run(
+            ("git", "update-index", "--index-info"),
+            cwd=self.clone_dir,
+            environment=environment,
+            input_text="".join(entries),
+        )
+        tree = self._run(("git", "write-tree"), cwd=self.clone_dir, environment=environment)
+        parents = () if parent is None else ("-p", parent)
+        return self.git("commit-tree", tree, *parents, "-m", message)
+
+    def commit_trees(
+        self, trees: Mapping[str | None, str | None], *, parent: str, files: Mapping[str, str], message: str
+    ) -> str:
+        """Commit fetched trees plus ``files`` as the child of ``parent``; no file is read, hashed or downloaded.
+
+        ``trees`` maps a directory name to the tree that the commit holds there, or to None for no file. The one
+        key None puts its tree at the root. Each tree loses the paths of ``files`` at its own root: they are the
+        files that the backend added to the snapshot that the tree comes from.
+        """
+        index = self.work_dir / "publish-index"
+        index.unlink(missing_ok=True)
+        environment = {"GIT_INDEX_FILE": str(index)}
+        try:
+            self.fetch_version(parent)
+            self._run(("git", "read-tree", "--empty"), cwd=self.clone_dir, environment=environment)
+            for directory, tree in trees.items():
+                if tree is None:
+                    continue
+                prefix = "" if directory is None else f"{directory}/"
+                selector = (tree,) if directory is None else (f"--prefix={prefix}", tree)
+                self._run(("git", "read-tree", *selector), cwd=self.clone_dir, environment=environment)
+                self._run(
+                    ("git", "update-index", "--force-remove", *(f"{prefix}{path}" for path in files)),
+                    cwd=self.clone_dir,
+                    environment=environment,
+                )
+            return self.commit_index(environment, files, parent=parent, message=message)
         finally:
             index.unlink(missing_ok=True)
 
@@ -317,10 +370,25 @@ class _GitWorkspace:
         return self.git("rev-parse", "HEAD")
 
     def push(self, *refs: str) -> None:
-        self.git("push", "origin", *refs)
+        self.git("push", *self.push_options(), "origin", *refs)
 
     def force_push_with_lease(self, lease: str, *refs: str) -> None:
-        self.git("push", lease, "origin", *refs)
+        self.git("push", *self.push_options(), lease, "origin", *refs)
+
+    def push_options(self) -> tuple[str, ...]:
+        """``--no-verify`` while ``uploads_lfs`` is false: the LFS pre push hook would refuse a commit whose LFS
+        objects this clone does not hold, although the remote holds them."""
+        return () if self.uploads_lfs else ("--no-verify",)
+
+    @contextlib.contextmanager
+    def without_lfs_upload(self) -> Iterator[None]:
+        """Push without the LFS upload inside the block. The caller holds ``lock``, and every commit that it
+        pushes points only at LFS objects that an earlier push uploaded."""
+        self.uploads_lfs = False
+        try:
+            yield
+        finally:
+            self.uploads_lfs = True
 
     def fetch_version(self, version: str) -> str:
         """Fetch ``version`` from the remote and return its commit id.
@@ -361,11 +429,35 @@ class _GitWorkspace:
             self.git("fetch", "origin", *ordered[start : start + FETCH_BATCH_COMMITS])
 
     def clone_for_materialize(self, destination: Path, version: str) -> None:
+        """Check out ``version`` in a new clone at ``destination``, with the bytes of its LFS files.
+
+        The checkout leaves an LFS file as its pointer. When the repository is a local directory, each such file
+        becomes a hard link to its object in the repository's own LFS storage, or a copy across file systems, so
+        a snapshot that a process of this host stored is made local without a second copy of its weights. The
+        objects are immutable, as every materialized file is. ``git lfs pull`` fetches what is still a pointer:
+        every LFS file of a remote repository, and none when every object was linked.
+        """
         self._run(("git", "clone", "--no-checkout", self.repository, str(destination)))
         self._install_lfs(destination)
         self._run(("git", "fetch", "origin", version), cwd=destination)
         self._run(("git", "checkout", "--detach", "FETCH_HEAD"), cwd=destination)
-        self._run(("git", "lfs", "pull"), cwd=destination)
+        pointers = [
+            line.split(" ", 2)
+            for line in self._run(("git", "lfs", "ls-files", "--long"), cwd=destination).splitlines()
+            if line
+        ]
+        missing = bool(pointers)
+        if self.local_objects is not None:
+            missing = False
+            for oid, _, path in pointers:
+                stored = self.local_objects / oid[:2] / oid[2:4] / oid
+                if stored.is_file():
+                    (destination / path).unlink()
+                    link_or_copy(str(stored), str(destination / path))
+                else:
+                    missing = True
+        if missing:
+            self._run(("git", "lfs", "pull"), cwd=destination)
 
     def git(self, *args: str) -> str:
         return self._git_client.git(*args)
@@ -498,6 +590,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
         self.refs = refs
         self.artifact_ref_prefix = f"{refs.fixed}artifacts/{encoded}/"
+        self.content_ref_prefix = refs.contents(encoded)
         self.ref_name = refs.scenario(encoded)
         self.work_dir = Path(work_dir)
         self.cache_dir = Path(cache_dir)
@@ -752,26 +845,155 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                     files=files,
                     message="publish artifact",
                 )
-            self.bind_artifact_ids(self.stored_snapshot(commit))
-            if not advance_head:
-                # A pending snapshot lives under the snapshots namespace; the scenario's ref and the head stay put.
-                self._workspace.push(f"+{commit}:{self.refs.snapshot(commit)}")
-                if not linked:
-                    self._cache_snapshot(commit, artifact.local_path, paths, files)
-                return self._manifest.snapshot(commit)
-            try:
-                self._workspace.force_push_with_lease(
-                    f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
-                    f"{commit}:{self.ref_name}",
-                )
-            except ArtifactPublicationError as exc:
-                current = self._workspace.ls_remote(self.ref_name)
-                if current != expected_parent.revision:
-                    raise ArtifactConflictError(f"repository advanced from {expected_parent.revision}") from exc
-                raise
+            self.push_snapshot(commit, expected_parent, advance_head)
             if not linked:
                 self._cache_snapshot(commit, artifact.local_path, paths, files)
             return self._manifest.snapshot(commit)
+
+    def push_snapshot(self, commit: str, expected_parent: SnapshotRef, advance_head: bool) -> None:
+        """Bind the artifact IDs of the local snapshot ``commit`` and push it: to the scenario's ref when
+        ``advance_head``, else under the snapshots namespace. The caller holds the workspace lock."""
+        self.bind_artifact_ids(self.stored_snapshot(commit))
+        if not advance_head:
+            # A pending snapshot lives under the snapshots namespace; the scenario's ref and the head stay put.
+            self._workspace.push(f"+{commit}:{self.refs.snapshot(commit)}")
+            return
+        try:
+            self._workspace.force_push_with_lease(
+                f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
+                f"{commit}:{self.ref_name}",
+            )
+        except ArtifactPublicationError as exc:
+            current = self._workspace.ls_remote(self.ref_name)
+            if current != expected_parent.revision:
+                raise ArtifactConflictError(f"repository advanced from {expected_parent.revision}") from exc
+            raise
+
+    def content_ref(self, name: str) -> str:
+        """The Git ref of the stored content ``name`` of this scenario."""
+        if not isinstance(name, str) or not name:
+            raise ValueError("a content's name is a non-empty string")
+        return self.content_ref_prefix + hashlib.sha256(name.encode()).hexdigest()
+
+    def store_content(self, name: str, directory: Path) -> None:
+        """Commit the files of ``directory`` with no parent and push the commit to the content's ref.
+
+        Weight files go through the LFS clean filter, so Git LFS keeps one object for equal bytes, whatever
+        content or snapshot holds them.
+        """
+        ref_name = self.content_ref(name)
+        if not directory.is_dir():
+            raise ArtifactPublicationError(f"content {name!r} needs an existing directory, not {directory}")
+        with self._workspace.lock:
+            files = {".gitattributes": _LFS_ATTRIBUTES}
+            paths = tuple(path for path in self._workspace.source_files(directory) if path not in (_MANIFEST, *files))
+            if any((directory / path).is_symlink() for path in paths):
+                # A symlinked tree is stored by its targets' bytes, which only a copy into the work tree resolves.
+                self._workspace.orphan_checkout()
+                self._workspace.replace_tree(directory)
+                (self._workspace.clone_dir / _MANIFEST).unlink(missing_ok=True)
+                self._workspace.write_lfs_attributes()
+                commit = self._workspace.commit("store content")
+            else:
+                commit = self._workspace.commit_files(
+                    directory, paths, parent=None, carried_from=None, files=files, message="store content"
+                )
+            self._workspace.push(f"+{commit}:{ref_name}")
+
+    def content_commit(self, name: str) -> str:
+        """The commit of the stored content ``name``; ``ArtifactNotFoundError`` when the repository has none."""
+        commit = self._workspace.ls_remote(self.content_ref(name))
+        if commit is None:
+            raise ArtifactNotFoundError(f"repository has no content {name!r}")
+        return commit
+
+    def materialize_content(self, name: str) -> Path:
+        with self._workspace.lock:
+            commit = self.content_commit(name)
+        path = self.materialize(SnapshotRef(commit, None)).local_path
+        if path is None:
+            raise ArtifactMaterializationError(f"content {name!r} was not made local")
+        return path
+
+    def discard_content(self, name: str) -> None:
+        ref_name = self.content_ref(name)
+        with self._workspace.lock:
+            if self._workspace.ls_remote(ref_name) is None:
+                return
+            try:
+                self._workspace.push(f":{ref_name}")
+            except ArtifactPublicationError:
+                # Another process can remove the ref between the two calls.
+                if self._workspace.ls_remote(ref_name) is not None:
+                    raise
+
+    def publish_stored(
+        self,
+        files: StoredTree,
+        *,
+        metadata: Mapping[str, object],
+        expected_parent: SnapshotRef,
+        advance_head: bool = True,
+    ) -> SnapshotRef:
+        """Commit the trees of the named files as the child of ``expected_parent`` and push the commit.
+
+        The commit points at the Git trees and LFS pointers that the remote holds already. This clone fetches the
+        commits of those trees, not their LFS objects, and it uploads none.
+        """
+        with self._workspace.lock:
+            current = self._workspace.ls_remote(self.ref_name)
+            if current != expected_parent.revision:
+                raise ArtifactConflictError(
+                    f"repository is at {current}, not expected parent {expected_parent.revision}"
+                )
+            parts = {None: files} if isinstance(files, StoredFiles) else dict(files)
+            trees = {directory: self.stored_tree(part) for directory, part in parts.items()}
+            commit = self._workspace.commit_trees(
+                trees,
+                parent=expected_parent.revision,
+                files={
+                    ".gitattributes": _LFS_ATTRIBUTES,
+                    _MANIFEST: _ArtifactManifest.text(
+                        parent_revision=expected_parent.revision,
+                        source={"kind": "training"},
+                        metadata=metadata,
+                    ),
+                },
+                message="publish artifact",
+            )
+            with self._workspace.without_lfs_upload():
+                self.push_snapshot(commit, expected_parent, advance_head)
+            return self._manifest.snapshot(commit)
+
+    def stored_tree(self, files: StoredFiles) -> str | None:
+        """The fetched Git tree of ``files``, or None for an artifact whose snapshot keeps no file of it."""
+        if files.content is not None:
+            content = self.content_commit(files.content)
+            self._workspace.git("fetch", "origin", content)
+            return f"{content}^{{tree}}"
+        artifact_id = files.artifact_id
+        commit = None if artifact_id is None else self._workspace.ls_remote(self.artifact_ref_name(artifact_id))
+        if artifact_id is None or commit is None:
+            raise ArtifactNotFoundError(f"repository has no artifact {artifact_id!r}")
+        self._workspace.git("fetch", "origin", commit)
+        snapshot = self.stored_snapshot(commit)
+        components = artifact_components(snapshot)
+        if artifact_id not in components:
+            raise ArtifactNotFoundError(f"storage snapshot does not contain artifact {artifact_id!r}")
+        component = components[artifact_id]
+        manifest = snapshot.components
+        if component is None or manifest is None or manifest.single:
+            return f"{commit}^{{tree}}"
+        # Git keeps no directory for a component with no file.
+        if not self._workspace.git("ls-tree", commit, component):
+            return None
+        return f"{commit}:{component}"
+
+    def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
+        """The metadata in the snapshot's manifest, read from its commit without its LFS objects."""
+        with self._workspace.lock:
+            self._workspace.fetch_version(ref.revision)
+            return self.stored_snapshot(ref.revision).storage_metadata
 
     def _cache_snapshot(self, revision: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
         """Fill a just-published snapshot's cache entry from the staged tree it was committed from.

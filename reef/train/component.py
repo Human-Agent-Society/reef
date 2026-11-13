@@ -200,30 +200,40 @@ class SavedCheckpoint:
 
     ``step`` is a non-negative int, counted within the job. ``path`` is a
     non-empty directory path as the component wrote it, which a later job
-    can start from. ``artifact_path`` is the non-empty directory that Reef
-    publishes as a snapshot when it serves the checkpoint: the weights that
-    serving loads, without the training state that only the component reads
-    (for example ``path`` itself, or its Hugging Face export).
-    ``metrics`` is the backend's telemetry for the training that led to this
+    can start from. ``metrics`` is the backend's telemetry for the training that led to this
     checkpoint, a mapping that encodes as JSON, which Reef records without
-    reading. ``changed_parts`` is a frozenset of non-empty strings: empty in the value that a component makes, and
-    ``TrainingComponent.changed_parts`` of the checkpoint in the value that the training service writes into the
-    jobs queue. A component makes the value; ``JobLoop`` reads it.
+    reading.
+
+    Exactly one of ``artifact_path`` and ``content`` is a non-empty string, and the other is None:
+
+    - In the value that a component makes, ``artifact_path`` is the local directory that Reef publishes as a
+      snapshot: the weights that serving loads, without the training state that only the component reads (for
+      example ``path`` itself, or its Hugging Face export). The component does not change the directory after it
+      reports the checkpoint. ``changed_parts`` is empty.
+    - In the value that the training service writes into the jobs queue, ``content`` is the name under which
+      the training service stored the files of that directory in the artifact store of the job's scenario
+      (``RepositoryBackend.store_content``), and ``changed_parts`` is ``TrainingComponent.changed_parts`` of the
+      checkpoint, a frozenset of non-empty strings.
+
+    A component makes the first value; ``TrainingJobWorker`` makes the second of it, and ``JobLoop`` reads the
+    second: control commits the checkpoint by ``content`` and reads no path of the training service.
     """
 
     step: int
     path: str
-    artifact_path: str
+    artifact_path: str | None
     metrics: Mapping[str, Any] = field(default_factory=dict)
     changed_parts: frozenset[str] = frozenset()
+    content: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 0:
             raise ValueError("SavedCheckpoint.step must be a non-negative int")
         if not isinstance(self.path, str) or not self.path:
             raise ValueError("SavedCheckpoint.path must be a non-empty string")
-        if not isinstance(self.artifact_path, str) or not self.artifact_path:
-            raise ValueError("SavedCheckpoint.artifact_path must be a non-empty string")
+        named = [value for value in (self.artifact_path, self.content) if value is not None]
+        if len(named) != 1 or not isinstance(named[0], str) or not named[0]:
+            raise ValueError("SavedCheckpoint names exactly one of artifact_path and content, a non-empty string")
         if not isinstance(self.metrics, Mapping):
             raise TypeError("SavedCheckpoint.metrics must be a mapping")
         if not isinstance(self.changed_parts, frozenset) or not all(

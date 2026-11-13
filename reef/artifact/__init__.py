@@ -46,6 +46,12 @@ on restart; the pointer never overrides committed scenario state. The memory
 and Git LFS backends implement this contract. Backends without this capability
 are rejected before scenario creation or recovery when a commit history is configured.
 They remain usable without a commit history.
+
+Every backend also holds stored content: named file trees that are no snapshot.
+The training service stores the files of a checkpoint with ``store_content``, and
+control commits them by name with ``publish_stored``, which makes the snapshot of
+files that the backend holds already (``StoredFiles``). The process that commits
+reads no file. ``discard_content`` removes content; a snapshot keeps its files.
 """
 
 from reef.artifact.artifact import (
@@ -76,6 +82,7 @@ from reef.artifact.repository import (
     RepositoryBackendContext,
     RepositoryBackendFactory,
     StagedSnapshotRepositoryBackend,
+    StoredFiles,
 )
 from reef.artifact.snapshot_chain import ArtifactSnapshotChain, SnapshotNotRestorableError
 from reef.artifact.sources import (
@@ -141,6 +148,7 @@ __all__ = [
     "SnapshotRef",
     "SourceFiles",
     "StagedSnapshotRepositoryBackend",
+    "StoredFiles",
     "base_root_of",
     "compose_snapshot",
     "directory_checksum",

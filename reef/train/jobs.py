@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact
@@ -300,12 +299,19 @@ class JobLoop:
     def publish(self, state: JobLoopState, job: RunningJob, checkpoint: SavedCheckpoint) -> JobCommit:
         """The commit that publishes ``checkpoint``, the next unpublished one of ``job``, as an artifact.
 
-        ``job`` is a running job of ``state``. The commit publishes the checkpoint's ``artifact_path``, and
+        ``job`` is a running job of ``state``. The commit publishes the checkpoint's stored ``content`` by name
+        (``Artifact.stored``), so this process reads no file of the checkpoint, and
         the scenario's activation rule decides whether it serves. A job that continues the training start moves it to
         ``checkpoint.path``; the commit of any other job names the job's start (``TrainingCommit.train_from``). The
         commit's metrics are the checkpoint's training metrics and ``training_job``. Raise ``ValueError`` when a
-        training metric is named ``training_job``: a metric is never overwritten.
+        training metric is named ``training_job``: a metric is never overwritten, and for a checkpoint whose files
+        no training service stored.
         """
+        if checkpoint.content is None:
+            raise ValueError(
+                f"checkpoint {job.job_id}:{checkpoint.step} names no stored content; the training service stores "
+                "a checkpoint before control commits it"
+            )
         if TRAINING_JOB_KEY in checkpoint.metrics:
             raise ValueError(f"checkpoint {job.job_id}:{checkpoint.step}'s training metrics name {TRAINING_JOB_KEY!r}")
         handled = replace(job, checkpoints_handled=job.checkpoints_handled + 1)
@@ -327,7 +333,7 @@ class JobLoop:
             TrainingCommit(
                 state=published.to_dict(),
                 metrics=metrics,
-                artifact=Artifact.local(Path(checkpoint.artifact_path)),
+                artifact=Artifact.stored(checkpoint.content),
                 training_job_id=job.job_id,
                 train_from=job.train_from,
                 changed_kinds=self.component.changed_parts(job.start, checkpoint),

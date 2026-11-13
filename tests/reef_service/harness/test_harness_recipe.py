@@ -1346,11 +1346,12 @@ def test_a_publish_keeps_the_source_tree_and_the_jobs_tree_is_the_next_start(tmp
         assert scenario is not None
         report_once(scenario, "1")
         result = drive_job(scenario)
+        # The commit names the stored content of the job's tree, and control holds none of its files.
         assert result.artifact is not None
-        source = result.artifact.local_path
+        assert result.artifact.content is not None and result.artifact.local_path is None
         # The job's kept tree outlives the commit: the next job starts from it.
-        assert source is not None and source.is_dir()
-        assert scenario.trainer.state["start"] == str(source)
+        source = Path(scenario.trainer.state["start"])
+        assert source.is_dir() and (source / "rules.md").read_text() == "marker rules\n"
         committed = scenario.repository.resolve(scenario.current_snapshot())
         assert (committed.local_path / "rules.md").read_text() == "marker rules\n"
     finally:

@@ -87,7 +87,11 @@ class ArtifactValidator(ABC):
 
 
 class Artifact:
-    """A concrete artifact bound to one scenario-scoped repository."""
+    """A concrete artifact bound to one scenario-scoped repository.
+
+    ``content`` is None, or the non-empty name of the stored content that holds the files of an unpublished
+    artifact (``Artifact.stored``); such an artifact has no ``local_path``.
+    """
 
     def __init__(
         self,
@@ -97,10 +101,14 @@ class Artifact:
         local_path: Path | None = None,
         metadata: Mapping[str, object] | None = None,
         artifact_id: str | None = None,
+        content: str | None = None,
     ) -> None:
+        if content is not None and (not isinstance(content, str) or not content or local_path is not None):
+            raise ValueError("content is the non-empty name of stored content, on an artifact with no local_path")
         self._ref = ref
         self._repository = repository
         self._local_path = None if local_path is None else Path(local_path)
+        self._content = content
         self._metadata = dict(metadata or {})
         stored_identity = self._metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
         if stored_identity is not None and (not isinstance(stored_identity, str) or not stored_identity):
@@ -122,6 +130,11 @@ class Artifact:
     @property
     def local_path(self) -> Path | None:
         return self._local_path
+
+    @property
+    def content(self) -> str | None:
+        """The name of the stored content that holds this unpublished artifact's files, or None."""
+        return self._content
 
     @property
     def metadata(self) -> Mapping[str, object]:
@@ -234,6 +247,19 @@ class Artifact:
             metadata=stored_metadata,
         )
 
+    @classmethod
+    def stored(cls, content: str) -> Artifact:
+        """An unpublished artifact with a fresh ID whose files are the stored content ``content`` of its scenario's
+        repository backend (``RepositoryBackend.store_content``). It has no local path: the process that makes it
+        need not hold the files."""
+        token = uuid.uuid4().hex
+        return cls(
+            SnapshotRef(revision=f"{LOCAL_SNAPSHOT_PREFIX}{token}", parent_revision=None),
+            None,
+            metadata={ARTIFACT_ID_METADATA_KEY: f"artifact:{token}"},
+            content=content,
+        )
+
     def with_repository(self, repository: ArtifactRepository) -> Artifact:
         return Artifact(
             self.ref,
@@ -241,6 +267,7 @@ class Artifact:
             local_path=self.local_path,
             metadata=self.metadata,
             artifact_id=self._artifact_id,
+            content=self.content,
         )
 
     def materialize(self) -> Artifact:
@@ -300,4 +327,5 @@ def with_training_starts(artifact: Artifact, starts: tuple[str, ...]) -> Artifac
         artifact.repository,
         local_path=artifact.local_path,
         metadata={**artifact.storage_metadata, TRAINING_STARTS_METADATA_KEY: list(starts)},
+        content=artifact.content,
     )

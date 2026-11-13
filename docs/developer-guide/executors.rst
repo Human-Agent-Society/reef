@@ -93,6 +93,10 @@ service`_). The component contract is:
 
 Each ``SavedCheckpoint`` has a ``path`` (what a later job starts from) and a
 ``artifact_path`` (the weights that serving loads, without training state).
+Both are local directories of the training service. The training worker stores
+the files of ``artifact_path`` in the artifact backend as stored content, and
+records the content's name in the job's item. Control commits the checkpoint by
+that name: it reads no directory of the training service.
 
 A weight trainer has one training component, and it drives the component
 through ``reef.train.jobs.JobLoop``:

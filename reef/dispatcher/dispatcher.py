@@ -309,7 +309,9 @@ class Dispatcher(
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
-            self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
+            self.workers.add(
+                EndedWorkSweeper(coordination.work_queue, backend_factory, retention_seconds=work_retention_seconds)
+            )
             if training_manager is not None:
                 self.workers.add(TrainingManagerWorker(training_manager, self))
             if data_store is not None:

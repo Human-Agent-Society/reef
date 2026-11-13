@@ -18,8 +18,14 @@ from reef.artifact.artifact import (
     artifact_components,
     content_metadata,
 )
+from reef.artifact.composite import link_or_copy
 from reef.artifact.files import directory_checksum
-from reef.artifact.repository import CachedRepositoryBackendFactory, StagedSnapshotRepositoryBackend
+from reef.artifact.repository import (
+    CachedRepositoryBackendFactory,
+    StagedSnapshotRepositoryBackend,
+    StoredFiles,
+    StoredTree,
+)
 
 
 class _InMemoryStorage:
@@ -32,6 +38,8 @@ class _InMemoryStorage:
         self.metadata: dict[str, dict[str, object]] = {}
         #: The snapshot that each artifact ID is bound to.
         self.artifacts: dict[str, SnapshotRef] = {}
+        #: The directory of each stored content, by its name.
+        self.contents: dict[str, Path] = {}
 
     def copy_artifact(self, source: Path, *, parent_revision: str | None) -> SnapshotRef:
         revision = uuid.uuid4().hex
@@ -146,6 +154,89 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
                 self._current = ref
                 self._metadata = artifact.storage_metadata
             return ref
+
+    def store_content(self, name: str, directory: Path) -> None:
+        if not isinstance(name, str) or not name:
+            raise ValueError("a content's name is a non-empty string")
+        destination = self._storage.root / f"content-{uuid.uuid4().hex}"
+        try:
+            shutil.copytree(directory, destination)
+        except OSError as exc:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise ArtifactPublicationError(f"failed to store content {name!r} from {directory}: {exc}") from exc
+        with self._storage.lock:
+            replaced = self._storage.contents.get(name)
+            self._storage.contents[name] = destination
+        if replaced is not None:
+            shutil.rmtree(replaced, ignore_errors=True)
+
+    def materialize_content(self, name: str) -> Path:
+        with self._storage.lock:
+            path = self._storage.contents.get(name)
+        if path is None:
+            raise ArtifactNotFoundError(f"repository has no content {name!r}")
+        return path
+
+    def discard_content(self, name: str) -> None:
+        with self._storage.lock:
+            path = self._storage.contents.pop(name, None)
+        if path is not None:
+            shutil.rmtree(path, ignore_errors=True)
+
+    def publish_stored(
+        self,
+        files: StoredTree,
+        *,
+        metadata: Mapping[str, object],
+        expected_parent: SnapshotRef,
+        advance_head: bool = True,
+    ) -> SnapshotRef:
+        """Copy the named files into a new snapshot directory, by hard link where the filesystem allows."""
+        with self._storage.lock:
+            current = self.current()
+            if current.revision != expected_parent.revision:
+                raise ArtifactConflictError(
+                    f"repository is at {current.revision}, not expected parent {expected_parent.revision}"
+                )
+            parts = {None: files} if isinstance(files, StoredFiles) else dict(files)
+            sources: dict[str | None, Path] = {}
+            for directory, part in parts.items():
+                if part.content is not None:
+                    sources[directory] = self.materialize_content(part.content)
+                elif part.artifact_id is not None:
+                    local_path = self.resolve_artifact(part.artifact_id).local_path
+                    if local_path is None:
+                        raise ArtifactPublicationError(f"artifact {part.artifact_id!r} has no stored files")
+                    sources[directory] = local_path
+            revision = uuid.uuid4().hex
+            destination = self._storage.root / revision
+            try:
+                for directory, source in sources.items():
+                    target = destination if directory is None else destination / directory
+                    if source.is_dir():
+                        shutil.copytree(source, target, copy_function=link_or_copy)
+                    else:
+                        target.mkdir(parents=True)
+                destination.mkdir(exist_ok=True)
+            except OSError as exc:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise ArtifactPublicationError(f"failed to store a snapshot of stored files: {exc}") from exc
+            ref = SnapshotRef(revision=revision, parent_revision=current.revision)
+            self._storage.refs[revision] = ref
+            self._storage.paths[revision] = destination
+            self._storage.metadata[revision] = dict(metadata)
+            self.bind_artifact_ids(self.materialize(ref))
+            if advance_head:
+                self._current = ref
+                self._metadata = dict(metadata)
+            return ref
+
+    def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
+        with self._storage.lock:
+            metadata = self._storage.metadata.get(ref.revision)
+        if metadata is None:
+            raise ArtifactMaterializationError(f"snapshot does not exist: {ref.revision}")
+        return dict(metadata)
 
     def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         with self._storage.lock:
