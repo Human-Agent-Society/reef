@@ -671,6 +671,17 @@ def test_an_evaluation_with_num_samples_runs_that_many_tasks_chosen_by_their_nam
             named = await _accepted({"num_samples": 1, "task_names": ["add", "sort"]})
             assert named["request"]["task_names"] == ["sort"]
 
+            # A seed changes the choice, and the same seed gives the same choice again.
+            for refused in ({"sample_seed": 7}, {"num_samples": 1, "sample_seed": "7"}):
+                response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json={**body, **refused})
+                assert response.status == 400, await response.text()
+            seeded = [
+                (await _accepted({"num_samples": 1, "sample_seed": seed}))["request"]["task_names"]
+                for seed in (0, 0, 1, 2, 3, 4, 5, 6, 7)
+            ]
+            assert seeded[0] == seeded[1]
+            assert {name for names in seeded for name in names} == {"add", "sort", "sum"}
+
             # On a collection, the choice is among its eval tasks, and a benchmark with no chosen task is left out.
             for item_id, benchmarks in (("add", ["lite", "full"]), ("sort", ["full"])):
                 patch = {"ids": [item_id], "patch": {"benchmarks": benchmarks}}

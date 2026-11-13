@@ -1192,6 +1192,11 @@ The body takes these fields:
   tasks, and their scores compare. The stored request names the tasks in
   ``task_names``, and a stored ``collection`` leaves out a benchmark with no
   chosen task.
+- ``sample_seed``: an integer that changes which tasks ``num_samples``
+  chooses, or null (the default). Reef then ranks the digests of
+  ``"<sample_seed>:<task name>"``. Send a new random seed to run another
+  random part of the tasks, and the same seed to run the same part again. Reef
+  returns 400 for a ``sample_seed`` without ``num_samples``.
 - ``rollouts_per_task``: the rollouts of each task, 1 by default.
 - ``environment``: the Harbor environment type, ``docker`` by default.
 - ``max_concurrent_rollouts``: the most rollouts of this evaluation that run

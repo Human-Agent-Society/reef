@@ -531,6 +531,7 @@ class ArtifactEvaluationSettings:
     ``collection`` is None, or the non-empty name of a collection of the scenario's owner, and then ``task_names`` is
     empty: the evaluation runs the eval tasks of the collection. ``num_samples`` is None, to run every task that the
     other fields select, or a positive int: the most tasks that the evaluation runs (``sampled_task_names``).
+    ``sample_seed`` is None or an int, and is None when ``num_samples`` is None: two seeds choose different tasks.
     Purpose: a client's evaluation request is these settings and an artifact ID, and a scenario keeps settings to
     evaluate each new artifact with; ``request`` makes the request of one artifact.
     """
@@ -545,6 +546,7 @@ class ArtifactEvaluationSettings:
     max_failed_fraction: float | None = None
     collection: str | None = None
     num_samples: int | None = None
+    sample_seed: int | None = None
 
     def __post_init__(self) -> None:
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
@@ -552,6 +554,11 @@ class ArtifactEvaluationSettings:
         count = self.num_samples
         if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 1):
             raise ValueError("an artifact evaluation's num_samples is a positive integer or null")
+        seed = self.sample_seed
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise ValueError("an artifact evaluation's sample_seed is an integer or null")
+        if seed is not None and count is None:
+            raise ValueError("an artifact evaluation gives sample_seed only with num_samples")
         if self.collection is not None and (not isinstance(self.collection, str) or not self.collection):
             raise ValueError("an artifact evaluation's collection is None or a non-empty collection name")
         if self.collection is not None and self.task_names:
@@ -579,13 +586,15 @@ class ArtifactEvaluationSettings:
     def sampled_task_names(self, task_names: Sequence[str]) -> tuple[str, ...]:
         """The tasks of ``task_names``, distinct names, that an evaluation with these settings runs, in their order.
 
-        All of them when ``num_samples`` is None or not less than their number. Else the ``num_samples`` tasks whose
-        names have the smallest SHA-256 digests. The choice reads the names only, so every evaluation of the same
-        tasks with the same ``num_samples`` runs the same tasks, and a smaller ``num_samples`` gives a subset.
+        All of them when ``num_samples`` is None or not less than their number. Else the ``num_samples`` tasks with
+        the smallest SHA-256 digests: of the task's name without a ``sample_seed``, and of ``"<sample_seed>:<name>"``
+        with one. The choice reads the names and the seed only, so every evaluation of the same tasks with the same
+        ``num_samples`` and ``sample_seed`` runs the same tasks, and a smaller ``num_samples`` gives a subset.
         """
         if self.num_samples is None or self.num_samples >= len(task_names):
             return tuple(task_names)
-        ranked = sorted(task_names, key=lambda name: hashlib.sha256(name.encode("utf-8")).digest())
+        prefix = "" if self.sample_seed is None else f"{self.sample_seed}:"
+        ranked = sorted(task_names, key=lambda name: hashlib.sha256(f"{prefix}{name}".encode()).digest())
         sampled = frozenset(ranked[: self.num_samples])
         return tuple(name for name in task_names if name in sampled)
 
@@ -601,6 +610,7 @@ class ArtifactEvaluationSettings:
             "max_failed_fraction": self.max_failed_fraction,
             "collection": self.collection,
             "num_samples": self.num_samples,
+            "sample_seed": self.sample_seed,
         }
 
     @classmethod
@@ -623,6 +633,7 @@ class ArtifactEvaluationSettings:
             "max_failed_fraction",
             "collection",
             "num_samples",
+            "sample_seed",
         }
         unknown = sorted(set(value) - known)
         if unknown:
@@ -641,6 +652,7 @@ class ArtifactEvaluationSettings:
             value.get("max_failed_fraction"),
             value.get("collection"),
             value.get("num_samples"),
+            value.get("sample_seed"),
         )
 
 
