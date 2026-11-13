@@ -122,9 +122,8 @@ Use the source checkout for development and for the training examples below.
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
 
-As a minimal example, start Reef as a pure inference server. The base installation
-includes no inference engine: the environment must also have SGLang and GPU-enabled
-PyTorch (see [Configuration](https://reefinfra.ai/docs/reference/configuration/)).
+As a minimal example, start Reef as a pure inference server. This needs SGLang and
+GPU-enabled PyTorch in the environment:
 
 ```bash
 reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
@@ -157,16 +156,10 @@ Send inference requests through Reef and report a score for each response. The
 SAO recipe uses each eligible scored rollout to run a training step.
 
 Reef's inference endpoint is OpenAI- and Anthropic-compatible: `/v1/chat/completions`,
-`/v1/responses` and `/v1/messages` take the provider's own request body. Each request names its
-scenario in the `x-reef-scenario` header. Requests do not select recipes.
-
-Create the scenario before you send the first inference request. `POST /reef/scenarios`
-creates it with the deployment's configured recipe. A repeated request returns the existing
-scenario. An inference request never creates a scenario: an unknown name gets HTTP 404.
-
-Scenario creation does not wait for the model's engine to start, and `/healthz` shows only
-that the service runs. Poll `GET /reef/scenarios/{scenario}/inference/status` until `state`
-is `ready`. If `state` is `failed`, `error` gives the cause.
+`/v1/responses` and `/v1/messages` take the provider's own request body. A request includes the
+`x-reef-scenario` header. Inference requests do not create scenarios or select recipes. Create
+the scenario with `POST /reef/scenarios`; it uses the deployment's configured recipe. Then wait
+until `GET /reef/scenarios/{scenario}/inference/status` reports `ready`.
 
 The response body uses the provider's OpenAI-compatible format. Reef adds the
 `x-reef-agent-record-id` response header. Its value is the **receipt** that a

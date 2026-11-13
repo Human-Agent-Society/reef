@@ -120,8 +120,7 @@ python3 -c "import reef; print(reef.__version__)"
 Reef 支持两类学习载体：模型**权重**和 Agent 的 **harness**。每个部署使用的 recipe
 决定其 scenario 更新哪一种载体。
 
-作为最小示例，将 Reef 启动为纯推理服务。基础安装不包含推理引擎：运行环境还需安装 SGLang
-和支持 GPU 的 PyTorch（参见[配置说明](https://reefinfra.ai/docs/reference/configuration/)）。
+作为最小示例，将 Reef 启动为纯推理服务。运行环境需要已安装 SGLang 和支持 GPU 的 PyTorch：
 
 ```bash
 reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
@@ -153,15 +152,9 @@ curl -f http://127.0.0.1:8900/healthz          # the service is up
 rollout 执行一次训练。
 
 Reef 的推理端点兼容 OpenAI 和 Anthropic：`/v1/chat/completions`、`/v1/responses` 与 `/v1/messages`
-直接接收相应模型提供商的请求体。每个请求通过 `x-reef-scenario` 请求头指定所属的 scenario。
-请求本身不选择 recipe。
-
-发送第一个推理请求前，请先创建 scenario。`POST /reef/scenarios` 会使用部署配置的 recipe
-创建它；重复创建会返回已有的 scenario。推理请求不会创建 scenario：名称未知时返回 HTTP 404。
-
-创建 scenario 不会等待模型引擎启动完成，`/healthz` 也只表示服务已在运行。请轮询
-`GET /reef/scenarios/{scenario}/inference/status`，直到 `state` 为 `ready`。`state` 为 `failed`
-时，`error` 会给出原因。
+直接接收相应模型提供商的请求体。请求需包含 `x-reef-scenario` 请求头。推理请求不会创建 scenario，
+也不选择 recipe。请先用 `POST /reef/scenarios` 创建 scenario，它会使用部署配置的 recipe；然后等待
+`GET /reef/scenarios/{scenario}/inference/status` 返回 `ready`。
 
 响应体使用模型提供商的 OpenAI 兼容格式。Reef 会添加 `x-reef-agent-record-id` 响应头，
 其值是后续报告用来标识本次交互的**回执**。报告可以包含数值 `score`、文本或结构化
