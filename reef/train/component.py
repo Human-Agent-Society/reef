@@ -103,8 +103,9 @@ class TrainingJob:
     (the non-empty start: one that the component made, such as ``SavedCheckpoint.path``, or in a job that control
     queued the name of a snapshot, ``SnapshotStart.to_text``, which the training service replaces by the component's
     start of that snapshot before the component reads the job),
-    ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
-    with ``job.read_data()`` and cuts it into optimizer batches by its own batch size),
+    ``data`` (the reference to the job data directory that the job trains, ``reef.storage.job_data``; a component
+    that trains on Reef's host reads it with ``job.read_data()`` and cuts it into optimizer batches by its own batch
+    size, and a component that runs the job elsewhere gives that place ``data_uri``),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
     trainer submits the job. The jobs of one scenario can run at the same time when the component has
     ``concurrent_jobs``; each starts from its own ``start``.
@@ -151,11 +152,12 @@ class TrainingJob:
 
     @property
     def data_dir(self) -> Path:
-        """The local job data directory: read it with ``read_data``."""
+        """The local job data directory: read it with ``read_data``. The first read copies it from a remote store."""
         return self.data.path
 
     def read_data(self) -> JobData:
-        """The job's data, without a request: its samples in job order, each task with its local directory."""
+        """The job's data, without a request: its samples in job order, each task with its local directory. The
+        read copies the directory and the tasks' directories from a remote store when the host does not hold them."""
         return self.data.read()
 
     @property

@@ -8,7 +8,16 @@ from tests.support.trajectories import policy_trajectory
 
 from reef.core.job_data import JobData, TaskFiles, TaskSample
 from reef.storage.data import MemoryDataStore
-from reef.storage.job_data import JOB_FILE, SAMPLES_FILE, job_data_key, job_task_files, read_job_data, write_job_data
+from reef.storage.job_data import (
+    JOB_FILE,
+    SAMPLES_FILE,
+    JobDataRef,
+    LocalJobData,
+    job_data_key,
+    job_task_files,
+    read_job_data,
+    write_job_data,
+)
 from reef.storage.tasks import LocalTaskFileStore, TaskStoreError
 
 
@@ -100,7 +109,45 @@ def test_the_data_store_gives_each_task_of_a_job_its_directory_from_the_task_fil
     # A reference from the jobs queue opens with its tasks' directories again.
     opened = store.open_job_directory(first.to_dict())
     assert opened.task_paths == first.task_paths and opened.read() == first.read()
-    # A task whose files the store does not hold fails the open, not the component that reads the data later.
+    # A task whose files the store does not hold fails the read of the tasks, and not the reference.
     missing = store.write_job_directory(JobData("s:data:3", (replace(task, files=TaskFiles("one", "0" * 64)),)))
+    unread = store.open_job_directory(missing.to_dict())
     with pytest.raises(TaskStoreError, match="holds no files with digest"):
-        store.open_job_directory(missing.to_dict())
+        unread.read()
+
+
+def test_a_job_data_reference_copies_nothing_until_a_component_reads_it(tmp_path, monkeypatch):
+    class CountingTaskFiles(LocalTaskFileStore):
+        """A task file store that counts the directories it gives."""
+
+        def __init__(self, directory):
+            super().__init__(directory)
+            self.given = 0
+
+        def path(self, partition, digest):
+            self.given += 1
+            return super().path(partition, digest)
+
+    task_files = CountingTaskFiles(tmp_path / "task-files")
+    store = MemoryDataStore(task_files)
+    opened_uris = []
+    open_directory = store.job_directories.open_directory
+    monkeypatch.setattr(
+        store.job_directories, "open_directory", lambda uri: opened_uris.append(uri) or open_directory(uri)
+    )
+    task = stored_task(task_files, "one", task_dir(tmp_path / "a", "add"))
+    task_files.given = 0
+
+    written = store.write_job_directory(JobData("s:data:1", (task,)))
+    opened = store.open_job_directory(written.to_dict())
+    # A component that runs the job elsewhere reads these only.
+    assert (opened.uri, opened.key, opened.sample_count, opened.kind) == (written.uri, written.key, 1, "task")
+    assert opened == written and opened_uris == [] and task_files.given == 0
+
+    assert opened.path.is_dir() and opened_uris == [written.uri] and task_files.given == 0
+    assert opened.task_paths == (task.task_path,) and task_files.given == 1
+    # A process without a data store reads the same data from the local copies.
+    local = JobDataRef.from_dict(written.to_dict(), LocalJobData(opened.path, opened.task_paths))
+    assert local.read() == opened.read() and local == opened
+    with pytest.raises(ValueError, match="malformed job data reference"):
+        JobDataRef.from_dict({key: value for key, value in written.to_dict().items() if key != "key"}, store)
