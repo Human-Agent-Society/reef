@@ -205,11 +205,11 @@ class Campaign:
                     if key in rows or key not in expected or row.get("evaluation") is not expected[key]:
                         raise ValueError(f"Unexpected or duplicate sample in {path}: {key}")
                     if not row.get("receipt") or not row.get("artifact_id"):
-                        raise ValueError(f"Sample in {path} lacks a receipt or release")
+                        raise ValueError(f"Sample in {path} lacks a receipt or artifact ID")
                     rows[key] = row
         versions = {row["artifact_id"] for row in rows.values()}
         if len(versions) > 1 or (artifact_id is not None and versions - {artifact_id}):
-            raise RuntimeError(f"Saved batch does not match expected release {artifact_id}: {versions}")
+            raise RuntimeError(f"Saved batch does not match expected artifact {artifact_id}: {versions}")
         if artifact_id is None and versions:
             artifact_id = next(iter(versions))
         missing = [item for item in work if (item[0].id, item[1]) not in rows]
@@ -281,7 +281,7 @@ class Campaign:
     def reuse_baseline(self, questions: list[Question]) -> None:
         """Take step 0 from an earlier campaign's evaluation of the same initial weights, seeds and budget.
 
-        The reused rows keep their own release id, so the baseline release stays
+        The reused rows keep their own artifact ID, so the baseline artifact stays
         distinct from every trained checkpoint.
         """
         target = self.output / "eval-0000.jsonl"

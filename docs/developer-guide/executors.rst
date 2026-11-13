@@ -24,9 +24,11 @@ from their owning modules.
 .. code:: mermaid
 
    flowchart TD
-       T[Weight trainer / JobLoop] -- submit, status, cancel, import_start --> C[TrainingComponent]
+       T[Weight trainer / JobLoop] -- submit, status, cancel --> Q[Jobs queue and training checks]
+       Q -- job, check --> C[TrainingComponent in the training service]
        C --> W[Framework workers: Slime, Tinker]
-       C -- saved checkpoint --> T
+       C -- saved checkpoint --> Q
+       Q -- status --> T
        T -- evaluate, select --> E[Candidate evaluation]
        T -- publish snapshot --> R[Artifact repository]
        R -- activate, restore --> I[InferenceRuntime]
@@ -39,13 +41,22 @@ A ``TrainingJob`` is one bounded job. It has a job ID, the backend name, the
 start, the job data directory that it trains (``data_dir``, and its URI
 ``data_uri``; see `The job data directory
 <processors.rst#the-job-data-directory>`__), the backend's parameters and the
-scenario whose trainer submits it. The start is the
-directory of the weights that the job starts from, or ``None`` for the base
-model. Reef reads none of the parameters. The component contract is:
+scenario whose trainer submits it. The start is one that the component made,
+such as a saved checkpoint's ``path``. Reef reads none of the parameters.
+
+Only the training service builds a training component. Control, and every
+other service, holds the backend's facts (`Facts without a component`_) and
+reaches the component through the work queue (`Control and the training
+service`_). The component contract is:
 
 ``submit(job)``
    Record the job durably and return; the job runs in the background.
-   Submitting a job ID again does nothing.
+   Submitting a job ID again does nothing. Raise ``ValueError`` for a job
+   that the component refuses.
+``check_job(job)``
+   Raise ``ValueError`` for a job that the component cannot train. The
+   training service calls it before control adds the job to the queue, so a
+   refused job consumes no sample.
 ``status(job_id)``
    Report ``running``, ``finished`` or ``failed``, the checkpoints saved so
    far and the backend's metrics. Raise ``KeyError`` for an unknown job. A
@@ -58,15 +69,22 @@ model. Reef reads none of the parameters. The component contract is:
    none; the harness component diffs the trees.
 ``import_start(artifact_dir)``
    Copy a published snapshot into the component's own storage and return it
-   as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
-   when the component cannot start from those weights.
+   as a start. The training service calls it when it takes a job whose start
+   names a snapshot. Raise ``ValueError`` when the component cannot start
+   from those weights. The same snapshot must give the same start again.
+   ``root_start(root)`` does the same for a scenario's root; its default is
+   ``import_start`` of the root's files.
+``check_remote_artifact(names)``
+   Raise ``ValueError`` unless what ``names`` names resolves on the
+   component's service. ``names`` is what the facts' ``check_artifact``
+   returned for an import. A backend whose facts return ``None`` does not
+   implement it.
 ``start_jobs()``
    Start running jobs in this process and resume the jobs that have not
    ended. Only the training service's job worker calls it, also in a
-   one-process deployment. Control and the other services use the component
-   to describe jobs and import starts, and never run a job. A component that
-   keeps its job state on disk, such as Tinker's ``state_dir``, locks it
-   here, so one process at a time runs its jobs.
+   one-process deployment. A component that keeps its job state on disk,
+   such as Tinker's ``state_dir``, locks it here, so one process at a time
+   runs its jobs.
 ``name``
    The backend name that jobs carry.
 ``shares_scenarios``
@@ -100,12 +118,14 @@ through ``reef.train.jobs.JobLoop``:
    it, the trainer runs one job at a time.
 #. A failed job ends like a finished one. Reef consumed the records of its data
    when it submitted the job, so they do not train again.
-#. For a ``train-from``, Reef first imports the snapshot with
-   ``import_start`` and cancels the running job that continues the start
-   before. It then writes the ``train_from`` commit. The next job that names
-   no start begins from the imported snapshot. A component that cannot load a
-   snapshot refuses it, and Reef answers the request with HTTP 400. A
-   request's ``train_from`` takes its start with ``import_start`` too. Activating an artifact changes only what serves; the
+#. For a ``train-from``, control first asks the backend's facts
+   (``check_import_start``) and cancels the running job that continues the
+   start before. It then writes the ``train_from`` commit. The training start
+   is now the name of the snapshot. The training service imports the snapshot
+   with ``import_start`` when it takes the next job that names no start. A
+   backend that cannot load the snapshot refuses it in the facts, and Reef
+   answers the request with HTTP 400. A request's ``train_from`` names its
+   start the same way. Activating an artifact changes only what serves; the
    component never sees it.
 
 The trainer stores its state, a ``JobLoopState``, in the scenario's commit
@@ -161,28 +181,80 @@ members are:
 ``check_root_start(root)``
    Raise ``ValueError`` for a scenario root that the component's
    ``root_start`` refuses. It reads the root's files and writes nothing.
+``check_import_start(artifact_dir)``
+   Raise ``ValueError`` for a published snapshot that the component's
+   ``import_start`` refuses. It writes nothing. Control calls it for a
+   ``train-from`` and for a request's ``train_from``.
+``check_artifact(files)``
+   Check the files of an import against the layout of the backend's
+   snapshots, as far as the files and the settings decide. Return ``None``
+   when that is the whole check. Return a JSON object when something must
+   also resolve on the backend's service; the component's
+   ``check_remote_artifact`` gets it in the training service. The default
+   checks ``artifact_format`` and returns ``None``.
 
 The component holds a value of the same type and answers these members from
 it, so the facts and the component give the same answers. The Slime component
 also refuses to start when its options, as written, state other facts than
 Slime's parser read from them.
 
-Everything else stays a call to the component, because it needs the training
-service, its files or its framework: ``root_start`` and ``import_start``
-(they write a start), ``check_artifact``, ``check_task_jobs``, ``check_job``,
+Everything else stays a call to the component in the training service,
+because it needs the backend's service, its files or its framework:
+``root_start`` and ``import_start`` (they write a start),
+``check_remote_artifact``, ``check_task_jobs``, ``check_job``,
 ``changed_parts`` and the jobs.
 
 The facts are the one place that states the default start. A
-``TrainingComponent`` has no ``default_start`` method, and Reef asks no
-component for a root. The component has two duties toward the start:
-
-- ``default_start_inputs`` returns the same inputs as the facts.
-- ``root_start(root)`` accepts a root that holds the files of
-  ``facts.default_start()`` and returns the start of a job at the base model.
-  The default ``root_start`` calls ``import_start`` on the root's files.
+``TrainingComponent`` has no ``default_start`` method and no
+``default_start_inputs`` property, and Reef asks no component for a root. The
+component has one duty toward the start: ``root_start(root)`` accepts a root
+that holds the files of ``facts.default_start()`` and returns the start of a
+job at the base model. The default ``root_start`` calls ``import_start`` on
+the root's files.
 
 The harness component has no factory; ``HarnessFacts.from_settings`` makes its
 facts from the ``HarnessSettings``.
+
+Control and the training service
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Control's trainers see ``reef.train.job_queue.JobQueueComponent``. It holds the
+facts and the work queue, and no component. A deployment in one process takes
+the same path: its dispatcher runs the training service's workers beside
+control.
+
+- Jobs. ``submit`` first adds a check to the ``training_checks`` queue and
+  raises ``JobCheckPendingError``. The trainer releases the job's data and
+  builds the job again at its next poll: the same data names the same job, so
+  the poll finds the job's check. No lock and no reservation is held while
+  the answer is missing, so ``train-from``, activation, imports and the
+  commits of running jobs go on, and no sample is consumed.
+  ``TrainingCheckWorker`` in the training service answers with ``check_job``.
+  A refusal comes back as the component's ``ValueError``, where control's own
+  check raised it before. A check that could not run, for example because the
+  training service cannot reach the artifact store, ends after its attempts
+  with an error that says so; a request's job then fails the request, and its
+  samples stay untrained. An accepted job enters the ``jobs`` queue, and
+  ``TrainingJobWorker`` runs it. The check worker answers no check that
+  control did not ask for within 10 minutes, and control's sweep deletes
+  ended checks with the other ended work.
+- Starts. ``JobLoopState.start`` and a job's start can name a snapshot of the
+  scenario (``SnapshotStart``): the root of a new trainer, or the artifact of
+  a ``train-from``. The training service reads the snapshot from the artifact
+  store and makes the component's start of it (``resolved_job``). The facts
+  refuse a bad root or artifact at once.
+- Imports. The layout of the weight component
+  (``TrainingArtifactLayout``) runs the facts' ``check_artifact``. When the
+  facts return names, control adds an ``artifact`` check and waits up to 60
+  seconds for the answer. A refusal is the same HTTP 400. Without an answer
+  the import ends with HTTP 503.
+- Checkpoints. The training worker records the parts that each checkpoint
+  changed (``changed_parts``) in the job's progress, so control reads them
+  from the queue. A job item that does not parse, such as one that an older
+  release wrote, is a failed job with that error; the trainer goes on.
+
+An outside backend gets all of this from its component and its facts. It adds
+nothing to control.
 
 Decide what a scenario trains
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -221,6 +293,102 @@ slow decision delays only the other managed trainers. An error in
 ``actions``, or a refused action, is logged, and the next round reads the
 trainer again.
 
+Production inference contract
+-----------------------------
+
+A runtime that serves weights must keep each admitted request on the
+artifact that the request selected:
+
+- A request admitted for artifact A uses A's model and adapter until its
+  generation ends.
+- Its response and its stored record identify A.
+- The receiver refuses a request for an unavailable or uncertain binding
+  before generation. No request runs on weights that it did not select.
+
+The contract applies to local engines, to hosted providers, and to a gateway
+in front of several engine replicas. Training and the trainer's own rollout
+engines have separate contracts.
+
+A published route does not meet the contract by itself: it describes the
+binding when the runtime made it, and reserves that binding for no request.
+An echoed artifact header, a health check, or a load-ID check before the
+request does not meet it either. The serving path needs one of these:
+
+- **An immutable revision** behind the route, such as a provider deployment
+  or a Tinker sampler revision. Nothing replaces its weights, so a hosted
+  provider needs no native GPU controls.
+- **A receiver that pins each request**, for engines whose weights change
+  while they run. In one atomic step, the receiver admits the request under
+  the weights that it selected and holds those weights against loading,
+  unloading and replacement. Generation and prefix-cache reuse keep that
+  binding until the last token. Reef's saved-weight runtimes always use
+  such a receiver (`Request pinning`_).
+
+What a runtime implements
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every ``InferenceRuntime`` implements three members:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 72
+
+   * - Required member
+     - What it does
+   * - ``inference_handler``
+     - Returns the handler that executes a request. An HTTP integration
+       can reuse Reef's HTTP handler.
+   * - ``activate_checkpoint``
+     - Establishes the binding before any route exposes it, and returns
+       its runtime load ID. It raises on failure.
+   * - ``served_artifact``
+     - Reports the route of a binding that already holds: a verified load,
+       or an immutable revision. It loads nothing. It returns ``None`` for
+       an unknown artifact and for an unavailable or uncertain binding;
+       Reef then publishes no route.
+
+Every other member has a default. Override one only for a capability that
+the runtime has: engines of its own, takeover of a retained endpoint,
+several artifacts at the same time, any artifact on request, or snapshots
+without weights. `Runtime responsibilities
+<../reference/python-api.rst#runtime-responsibilities>`__ gives each
+member's signature, default, result and errors.
+
+When a binding is in doubt, the runtime must fail safely:
+
+- After an ambiguous load, the affected engines stay unavailable until a
+  known binding is restored and checked.
+- On takeover, ``adopt(served)`` returns false when the retained endpoint
+  cannot establish its binding.
+- Retirement lets admitted requests finish on their pinned weights, or it
+  interrupts them explicitly.
+- A stream that has sent output never retries on another artifact. An
+  incomplete stream can keep a diagnostic record, but it gets no receipt.
+
+`Integration qualification`_ lists the cases to test before an engine or
+provider serves weights for production requests.
+
+Routes that bind no weights
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Two modes bind no weights and claim no weight identity. The contract and
+request pinning do not apply to them:
+
+- **A snapshot without a weight component**, such as a record-only or
+  harness snapshot, gets no activation. Its route names the model that
+  ``endpoint_model_name(scenario)`` returns, under the snapshot's own
+  artifact ID. That ID identifies the snapshot, not weights: Reef does not
+  check what the endpoint serves under the name. The built-in
+  ``inference_proxy`` runtime returns its configured model, and it refuses
+  weight snapshots. A scenario with a weight component never uses this
+  mode.
+- **A routed target** of the Semantic Router (``reef.routing_manifest``) is
+  not a Reef artifact: its requests and records name no artifact (see
+  `Routed external-model requests
+  <../reference/http-api.rst#routed-external-model-requests>`__). A target
+  must expose an OpenAI chat endpoint, which the component's native
+  receiver (``reef.inference.remote``) is not.
+
 Serving saved weights
 ---------------------
 
@@ -228,18 +396,30 @@ Serving loads only the weights that a job saved and Reef published. It loads
 them when a scenario starts, when a committed snapshot is activated, and when
 a person activates a snapshot. No trainer holds a serving engine.
 
-``reef.inference.serving`` has two runtimes over an ``InferenceBackend``:
+These runtimes serve saved weights on inference components. The first two,
+in ``reef.inference.serving``, run over an ``InferenceBackend``:
 
 - ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
-  base model. Requests name the adapter per scenario. At most
+  base model. Requests name the adapter per scenario, and a scenario that
+  serves a base root names the base model. At most
   ``adapter_capacity`` adapters are resident.
   ``reef.inference.residency.AdapterResidencyManager`` evicts a leaked
   adapter first, then the oldest-activated adapter that is no scenario's
   current one.
 - ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
-  weights. The engines start with the base model. Activating the base
-  artifact after another snapshot loads its files from the artifact
-  repository.
+  weights. The engines start with the base model, and they stay paused
+  until the first activation succeeds. Each activation loads the artifact's
+  files from the artifact repository. A base root loads the base model's
+  directory, the runtime's ``model_path``.
+- ``CheckpointSlotsRuntime`` (``reef.inference.checkpoint_slots``) serves
+  several full-weight checkpoints of one training scenario at the same
+  time. It holds one ``FullWeightServingRuntime`` for each inference
+  component that ``inference.remote`` names (``url`` and ``slot-urls``), so
+  each checkpoint has its own engines, load IDs, health checks and
+  recovery. It never replaces a checkpoint that still serves: when every
+  component holds one, it refuses a further checkpoint. A checkpoint that
+  stops serving releases its component, which keeps its engines. The
+  runtime evaluates no artifact that is not deployed.
 
 Each load gets a new runtime load ID, and every engine reports it afterwards.
 The IDs of one runtime belong to a fresh incarnation, so a restart never
@@ -260,8 +440,163 @@ workers reserve separate GPUs.
 The serving runtime checks the component's health every 30 seconds. The
 component names its process in each health report, so the control plane sees
 a component that restarted and runs no engines. After a failed check, the
-runtime pauses generation, starts the lost engines again (or replaces the
-dead ones), loads each scenario's active selection into them, and resumes.
+runtime pauses generation. When an engine is lost or dead, or the component
+reports an uncertain binding, the runtime replaces the whole engine stack.
+It then loads what it served again, and resumes.
+
+Generation resumes only after the reload and its load-ID check succeed.
+Until then, the runtime reports no route. A route that is already published
+stays published, and its requests wait or fail. The runtime retries the
+restore at each health check, also when every engine is alive. Two cases
+differ:
+
+- A ``FullWeightServingRuntime`` without a verified checkpoint has nothing
+  to restore: before its first successful activation, and after it
+  released its checkpoint. A failed health check then only replaces the
+  engines, which stay paused until the next activation.
+- An ``AdapterServingRuntime`` keeps every scenario's previous adapter as
+  the restore target until the whole restore succeeds. A capacity refusal
+  changes no adapter, and the current adapters keep serving.
+
+A new serving owner always starts a new engine stack, because the old
+engines' load IDs cannot prove that the weights are unchanged. The owner
+changes when the owning inference worker restarts or loses its lease. The
+new stack ends the requests in flight, and the worker activates each
+completed selection again, so a takeover needs no operator action. `Startup
+status <../reference/http-api.rst#startup-status>`__ gives the retries of a
+failed startup.
+
+Request pinning
+~~~~~~~~~~~~~~~
+
+The inference component, local or ``inference.remote``, pins every
+production request for the saved-weight runtimes. No setting turns this
+protection off: the runtimes refuse engines whose receiver does not declare
+it (``ServingEngines.request_pinning``). The trainer's rollout engines do
+not use it, because the trainer synchronizes its own rollouts with its
+weight updates.
+
+The component gives these guarantees:
+
+- **Admission.** Each full-weight load serves under its own model name,
+  which the published route names; an adapter keeps its immutable adapter
+  name. On an adapter stack, the base model serves under the load ID that
+  the owner gave the new stack, for the route of a base root. The component
+  refuses a request for a load that it no longer serves, before any output,
+  and the replica retries once (see `Request
+  <../reference/http-api.rst#request>`__).
+- **Drain.** Before it changes weights or adapters, the component stops
+  admitting requests and waits for the admitted ones to finish, for at most
+  ``inference.timeout-s``. A request whose client disconnected keeps its
+  pin until the engine finishes it. A drain that times out interrupts the
+  remaining requests, and the engines then need recovery.
+- **Prefix sharing.** With ``inference.prefix-sharing: true``, requests on
+  the same weights share the engine's prefix cache. After the drain, the
+  component clears the cache before each change, so no cache entry outlives
+  its weights.
+- **Uncertain binding.** A failed load, an ambiguous pause or a failed
+  cache clear stops admission. Admission resumes after the component
+  replaces its engine stack, and the intended artifacts are loaded and
+  checked again. An explicit refusal from the engine leaves the binding in
+  place.
+- **Ownership.** A newer serving owner fences the older one: the component
+  refuses the older owner's control calls with HTTP 412. The new owner's
+  engine stack ends the requests in flight.
+
+The protection has these limits:
+
+- **Engines.** It covers the built-in SGLang and vLLM engines with their
+  built-in request handlers. Engine serving refuses another
+  ``inference.backend`` or ``inference.handler-factory``. Another engine
+  needs its own serving runtime (``inference.serving: module:Factory``)
+  that meets the `Production inference contract`_.
+- **Topology.** The component starts its own engines and router.
+  Generation and weight changes must go through the component, so the
+  native engine addresses stay private. The component forwards only the
+  engine's generation route, and other inference paths return HTTP 404.
+- **Caches.** The component clears only the engine's own prefix cache. It
+  cannot clear KV that an engine keeps outside itself, so engine serving
+  refuses the engine options that select such a store. `Serving of a
+  weight-training deployment
+  <../reference/configuration.rst#serving-of-a-weight-training-deployment>`__
+  lists them, and what the check does not cover. Prefix sharing needs
+  regular SGLang engines: prefill/decode-disaggregated engines cannot use
+  the clearing pause.
+- **Trust.** The component trusts the engine's acknowledgements of loads
+  and cache clears. It does not inspect the weights
+  or the cache in engine memory, so qualify the engine version that you
+  deploy (see `Integration qualification`_).
+
+`Run the services in separate processes
+<../user-guide/operate.rst#run-the-services-in-separate-processes>`__ gives
+the operating rules for the component.
+
+Integration qualification
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+CPU tests with fake engines cannot verify which weights a real engine
+serves. Before an engine or provider serves production requests, check
+these cases on the version that you deploy. Cases 1 to 3 apply to every
+integration, and the others under their condition:
+
+#. Delay a request or an activation across a promotion. Check the actual
+   output, the response identity and the stored identity. Include the
+   interval before the new route is published, and a late operation from a
+   former owner.
+#. Make a binding unavailable; for an immutable provider, select a
+   revision that it does not serve. The request must fail, and must not
+   run on another artifact.
+#. Interrupt a stream after its first token. It must get no receipt and no
+   retry on another artifact.
+#. If its engines report load IDs, make them report mixed IDs after a load,
+   and uniformly wrong ones. Neither load may give a route for the
+   requested artifact.
+#. If it changes the weights of running engines, fail one replica while it
+   loads, then recover. Requests must be refused while its weights are
+   uncertain, and succeed after a checked reload.
+#. If it adopts retained routes, present a missing or mismatched binding.
+   Adoption must be refused.
+#. If it supports adapters or prefix-cache reuse, check that each preserves
+   the selected artifact.
+
+Use two small artifacts whose outputs differ, and identify each answer
+from its generated content, not from labels or version metadata. Record the
+engine version and the capabilities checked. These cases verify behavior.
+Use a representative concurrent workload to measure throughput,
+95th-percentile latency, drain time and unavailable time.
+
+Two commands run a real integration through the real inference HTTP app
+and record store. They are not pytest tests, so ``pytest tests/`` and CI do
+not run them.
+
+**Cutover check.** ``tests.support.inference_qualification`` runs your
+integration's two artifacts through a promotion. It keeps A's route
+published after it activates B. Each answer must then come from A and agree
+with its artifact header and stored record, or fail without a receipt.
+Write a factory that takes the output directory and returns a context
+manager. The context manager owns the run's isolated resources and yields
+an ``InferenceQualification``, whose ``OutputOracle`` names the artifact
+from the generated content alone. Run the command from the checkout, with
+the factory as ``--target`` (``module:factory``):
+
+.. code-block:: bash
+
+   python -m tests.smoke.inference_cutover --target my_qualification:target \
+     --output /scratch/cutover
+
+``--output`` must be an absolute path to a new or empty directory outside
+the checkout. The command stores the records and ``report.json`` there, and
+exits with status 0 only when every check passes. The report lists the
+checked cases and the cases that the run does not cover. The CPU suite runs
+the same check against toy SGLang and vLLM components that pin each request.
+
+**Native check.** ``tests/smoke/native_inference.py`` checks Reef's own
+SGLang and vLLM integrations on one GPU, with two synthetic checkpoints.
+`Run one area <../contributing/testing.rst#run-one-area>`__ gives its
+command, its profiles and their limits. Only its ``lifecycle`` profile
+covers control-plane publication and a public deployment of several
+artifacts. Neither command covers a managed router lifecycle, or validation
+of the router's deployment image.
 
 Engine supervision
 ------------------
@@ -770,7 +1105,7 @@ cleanup, bounded probes and owner-lease loss. To run the real Ray/HTTP tests:
 
 .. code:: bash
 
-   REEF_TEST_RAY=1 python -m pytest tests/reef_service/test_service_executor_ray.py
+   REEF_TEST_RAY=1 python -m pytest tests/reef_service/deploy/test_service_executor_ray.py
 
 These are control-plane tests, not a GPU SGLang/Megatron validation or a
 multi-machine networking benchmark.

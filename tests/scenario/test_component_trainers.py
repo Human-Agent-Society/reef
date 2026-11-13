@@ -8,40 +8,45 @@ import threading
 import time
 from collections.abc import Hashable, Iterator, Mapping
 from contextlib import nullcontext
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 from aiohttp.test_utils import TestServer
 from tests.support.component_trainers import (
     HARNESS,
+    MAX_STALENESS,
     WEIGHTS,
     ComponentJobs,
     JudgedAtOnce,
     Judgment,
     WeightsJobComponent,
+    WeightsRecipe,
     _append_records,
     _dispatcher,
-    _local_pair,
     _RecordingTracker,
     _records,
     _repository,
     _scenario,
-    _TwoTrainerRecipe,
+    checked_commit,
     component_files,
     component_id,
+    component_stages,
     finish_job,
+    harness_recipe,
     seeded_start,
     stop_workers,
+    two_trainer_recipe,
+    wait_for_job_check,
 )
 from tests.support.polling import became_true
 from tests.support.records import memory_records, report
-from tests.support.runtime_stubs import StubInferenceRuntime
+from tests.support.runtime_stubs import StubInferenceRuntime, harness_live_objects
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import threshold_pipeline
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, SnapshotRef
@@ -54,12 +59,14 @@ from reef.core.requirements import required_by
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.execution.jobs import SupportsReceipt
+from reef.execution.workers import SERVICE_COMPONENTS
 from reef.pipeline_context import PipelineContext
-from reef.recipe import Recipe
+from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
+from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import SAMPLES_QUEUE
-from reef.sample2job import Sample2Job
 from reef.scenario import Scenario
+from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import validate_component_trainers
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
@@ -72,55 +79,57 @@ from reef.storage.commits import (
 )
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.train import ComponentTrainer, Trainer
-from reef.train.component import JobStatus, TrainingJob
-from reef.train.job_queue import JOBS_QUEUE
-from reef.train.jobs import JobLoop, JobLoopState
+from reef.train.component import JobStatus, SnapshotStart, TrainingJob
+from reef.train.job_queue import CHECKS_QUEUE, JOBS_QUEUE, TrainingCheckWorker
+from reef.train.jobs import JobLoopState
 from reef.train.pipeline import TrainingPipeline
-from reef.train.trainer_builder import TrainerBuilder
 from reef.train.types import JobData, Sample
 
 
-class _SlowBackend(ComponentJobs):
-    """The same component whose step waits for the test to let it go, as a minutes long rollout run would."""
+class _HeldJobData(ThresholdJobData):
+    """Batches like ``ThresholdJobData``, and holds or fails the trainer's cycle that prepares a job.
 
-    def __init__(self, component: str, artifact_dir: Path) -> None:
-        super().__init__(component, artifact_dir)
-        self.evaluating = threading.Event()
-        self.release = threading.Event()
+    ``job_parameters`` runs in the trainer's cycle, under the scenario's cycle lock and outside the trainer's own
+    lock. It counts its calls in ``attempts``. With ``blocks``, it sets ``evaluating`` and waits for ``release``, as a step of minutes would.
+    With ``fails``, it then raises ``RuntimeError("proposer away")``, so the cycle fails. The ``held_cycle`` fixture
+    resets the class attributes and sets ``release`` at teardown.
+    """
 
-    def unblock(self) -> None:
-        self.release.set()
+    blocks = False
+    fails = False
+    attempts = 0
+    evaluating = threading.Event()
+    release = threading.Event()
 
-    def step(self, job):
-        self.evaluating.set()
-        assert self.release.wait(30)
-        return super().step(job)
-
-
-class _AwayBackend(ComponentJobs):
-    """A component whose method is away: every step fails, so no job is recorded."""
-
-    def __init__(self, component: str, artifact_dir: Path) -> None:
-        super().__init__(component, artifact_dir)
-        self.attempts = 0
-
-    def step(self, job):
-        self.attempts += 1
-        raise RuntimeError("proposer away")
+    def job_parameters(self, data: JobData) -> Mapping[str, Any]:
+        held = type(self)
+        held.attempts += 1
+        if held.blocks:
+            held.evaluating.set()
+            assert held.release.wait(30)
+        if held.fails:
+            raise RuntimeError("proposer away")
+        return super().job_parameters(data)
 
 
-class _FlakyBackend(ComponentJobs):
-    """A component whose step fails once, then answers."""
+@pytest.fixture
+def held_cycle() -> Iterator[type[_HeldJobData]]:
+    """``_HeldJobData`` with its class attributes as new, for one test."""
+    _HeldJobData.blocks = False
+    _HeldJobData.fails = False
+    _HeldJobData.attempts = 0
+    _HeldJobData.evaluating = threading.Event()
+    _HeldJobData.release = threading.Event()
+    yield _HeldJobData
+    _HeldJobData.release.set()
 
-    def __init__(self, component: str, artifact_dir: Path) -> None:
-        super().__init__(component, artifact_dir)
-        self.failures_left = 1
 
-    def step(self, job):
-        if self.failures_left:
-            self.failures_left -= 1
-            raise RuntimeError("proposer away once")
-        return super().step(job)
+def held_recipe(component: str) -> CompositeRecipe:
+    """The two trainer recipe whose ``component`` trainer builds its job data with ``_HeldJobData``."""
+    stages = component_stages(sample2job=_HeldJobData)
+    if component == WEIGHTS:
+        return two_trainer_recipe(weights=WeightsRecipe(pipeline_stages=stages))
+    return two_trainer_recipe(harness=harness_recipe(stages))
 
 
 def listed_revisions(scenario: Scenario) -> list[str]:
@@ -147,12 +156,15 @@ class _Dispatchers:
     def close(self) -> None:
         for dispatcher, backends in reversed(self.opened):
             for backend in backends.values():
-                backend.unblock()
+                if isinstance(backend, ComponentJobs):
+                    backend.unblock()
             dispatcher.close()
 
 
 @pytest.fixture
-def dispatchers(tmp_path: Path) -> Iterator[_Dispatchers]:
+def dispatchers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Dispatchers]:
+    # A trainer's worker polls a job that runs, or that waits for its check, at this interval.
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.05)
     opened = _Dispatchers(tmp_path)
     yield opened
     opened.close()
@@ -213,7 +225,7 @@ def append_commit(
     ``make`` False trains the samples that are stored already."""
     if make:
         make_samples(scenario)
-    result = scenario.next_commit(component)
+    result = checked_commit(scenario, component)
     if result is None:
         return None
     batch = scenario.trainer_for(component).pending_job_data
@@ -250,7 +262,7 @@ def settle_weights_job(scenario: Scenario) -> None:
 
 
 @pytest.mark.unit
-def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispatchers) -> None:
+def test_component_trainers_take_turns_on_one_snapshot_chain(dispatchers: _Dispatchers) -> None:
     dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     scenario = loaded(dispatcher, 1)
     assert [component_trainer.component for component_trainer in scenario.trainers] == [WEIGHTS, HARNESS]
@@ -285,7 +297,7 @@ def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispat
     assert reloaded.commit_number == 6
     _append_records(reloaded, 2)
     make_samples(reloaded)
-    assert reloaded.next_commit(HARNESS) is not None
+    assert checked_commit(reloaded, HARNESS) is not None
 
 
 def submission(scenario: Scenario, component: str) -> CommitRecord:
@@ -298,9 +310,19 @@ def submission(scenario: Scenario, component: str) -> CommitRecord:
 
 
 def drain(dispatcher: Dispatcher, component: str) -> None:
-    """Run ``component``'s local cycles until one commits nothing: its job's submission, checkpoint and end."""
-    while dispatcher.local_workers.process_step("agent", component):
-        pass
+    """Run ``component``'s local cycles until one commits nothing and no job of the component runs or waits for its
+    check: the cycles commit its job's submission, checkpoint and end, as the training worker reports them."""
+    deadline = time.monotonic() + 10
+    while True:
+        committed = dispatcher.local_workers.process_step("agent", component)
+        scenario = dispatcher.registry.get_optional("agent")
+        assert scenario is not None
+        trainer = scenario.trainer_for(component)
+        if not committed:
+            if not trainer.job_running and not trainer.job_check_waits:
+                return
+            assert time.monotonic() < deadline, "the training worker did not report the job"
+            time.sleep(0.01)
 
 
 def job_event(record: CommitRecord) -> str | None:
@@ -310,7 +332,7 @@ def job_event(record: CommitRecord) -> str | None:
 
 
 @pytest.mark.unit
-def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
+def test_a_weights_job_trainer_and_the_harness_trainer_share_one_snapshot_chain(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
     """The weights trainer commits its job's submission, its checkpoint and its end; the harness commits between them
@@ -359,22 +381,26 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
 
 
 @pytest.mark.unit
-def test_a_weights_job_waits_for_the_harness_cycle_of_its_scenario(tmp_path: Path, dispatchers: _Dispatchers) -> None:
+def test_a_weights_job_waits_for_the_harness_cycle_of_its_scenario(
+    tmp_path: Path, dispatchers: _Dispatchers, held_cycle: type[_HeldJobData]
+) -> None:
     """A scenario runs one step at a time: the weights worker submits nothing while the harness cycle evaluates, and
     the status still reads. Once the cycle ends, the worker submits the job and commits its checkpoint and its end."""
-    slow = _SlowBackend(HARNESS, tmp_path / "candidates")
     training = WeightsJobComponent(tmp_path / "checkpoints")
-    dispatcher, _ = dispatchers.open(backends={HARNESS: slow}, training=training)
+    dispatcher, _ = dispatchers.open(recipe=held_recipe(HARNESS), training=training)
     scenario = loaded(dispatcher, 1)
+    # The training service checked the harness job, so the cycle that the test holds is the one that submits it.
+    wait_for_job_check(scenario, HARNESS)
+    held_cycle.blocks = True
     harness = threading.Thread(target=lambda: drain(dispatcher, HARNESS))
     harness.start()
-    assert slow.evaluating.wait(10)
+    assert held_cycle.evaluating.wait(10)
     dispatcher.local_workers.start("agent", WEIGHTS)
     time.sleep(0.2)
     assert training.submitted == []
     assert scenario.trainer_for(WEIGHTS).pending_job_data is None
     assert dispatcher.build_training_status()["scenarios"]["agent"]["commit_number"] == 0
-    slow.release.set()
+    held_cycle.release.set()
     harness.join(10)
     assert not harness.is_alive()
     assert became_true(lambda: scenario.commit_number == 6)
@@ -388,20 +414,20 @@ def test_a_weights_job_waits_for_the_harness_cycle_of_its_scenario(tmp_path: Pat
 
 @pytest.mark.unit
 def test_a_reload_leaves_the_harness_cycle_in_flight_its_instance(
-    tmp_path: Path, monkeypatch: Any, dispatchers: _Dispatchers
+    monkeypatch: Any, dispatchers: _Dispatchers, held_cycle: type[_HeldJobData]
 ) -> None:
     """A reload rebuilds the scenario at once; the instance a harness cycle evaluates on stays open until the cycle
     ends, and the cycle then looks again on the rebuilt instance instead of failing."""
-    slow = _SlowBackend(HARNESS, tmp_path / "candidates")
-    dispatcher, _ = dispatchers.open(
-        backends={WEIGHTS: ComponentJobs(WEIGHTS, tmp_path / "candidates"), HARNESS: slow}
-    )
+    dispatcher, _ = dispatchers.open(recipe=held_recipe(HARNESS))
     scenario = loaded(dispatcher, 1)
+    # The training service checked the job, so the cycle that the test holds is the one that submits it.
+    wait_for_job_check(scenario, HARNESS)
+    held_cycle.blocks = True
     closed_under_the_cycle: list[bool] = []
     close = scenario.close
 
     def observed_close() -> None:
-        closed_under_the_cycle.append(not slow.release.is_set())
+        closed_under_the_cycle.append(not held_cycle.release.is_set())
         close()
 
     monkeypatch.setattr(scenario, "close", observed_close)
@@ -416,7 +442,7 @@ def test_a_reload_leaves_the_harness_cycle_in_flight_its_instance(
 
     worker = threading.Thread(target=cycle)
     worker.start()
-    assert slow.evaluating.wait(10)
+    assert held_cycle.evaluating.wait(10)
     reloading = threading.Thread(target=lambda: dispatcher.registry.reload("agent"))
     reloading.start()
     reloading.join(5)
@@ -424,40 +450,39 @@ def test_a_reload_leaves_the_harness_cycle_in_flight_its_instance(
     assert not reloading.is_alive()
     rebuilt = dispatcher.registry.get_optional("agent")
     assert rebuilt is not None and rebuilt is not scenario
-    slow.release.set()
+    held_cycle.release.set()
     worker.join(10)
     assert not worker.is_alive()
     assert errors == [] and outcome == [True]
     assert closed_under_the_cycle == [False]
     assert dispatcher.build_training_status()["error"] is None
     # The rows the cycle held train on the rebuilt instance.
-    assert dispatcher.local_workers.process_step("agent", HARNESS) is True
     drain(dispatcher, HARNESS)
     assert training_components(rebuilt) == [HARNESS]
 
 
 @pytest.mark.unit
 def test_a_harness_backlog_is_kept_for_the_next_start_when_the_service_stops(
-    tmp_path: Path, dispatchers: _Dispatchers
+    tmp_path: Path, dispatchers: _Dispatchers, held_cycle: type[_HeldJobData]
 ) -> None:
     """A stopping service takes its routes away first, so a harness cycle's model calls through them fail and would
     come back as a skip that consumes the batch: the cycle ending then commits nothing and no further cycle starts."""
-    slow = _SlowBackend(HARNESS, tmp_path / "candidates")
-    dispatcher, _ = dispatchers.open(
-        backends={WEIGHTS: ComponentJobs(WEIGHTS, tmp_path / "candidates"), HARNESS: slow}
-    )
+    held_cycle.blocks = True
+    # One repository for both starts: the job of the second start trains from a snapshot of the first.
+    factory = _repository(tmp_path)
+    dispatcher, stopped = dispatchers.open(recipe=held_recipe(HARNESS), backend_factory=factory)
     loaded(dispatcher, 1, 2)
     dispatcher.local_workers.start("agent", HARNESS)
-    assert slow.evaluating.wait(10)
+    assert held_cycle.evaluating.wait(10)
     dispatcher.stop_local_cycles()
     closing = threading.Thread(target=dispatcher.close)
     closing.start()
-    slow.release.set()
+    held_cycle.release.set()
     closing.join(10)
     assert not closing.is_alive()
-    assert slow.prepared == 1
+    assert held_cycle.attempts == 1 and stopped[HARNESS].prepared == 0
     # The next start finds both batches unread and trains them, with no new record to wake the harness.
-    restarted, backends = dispatchers.open()
+    restarted, backends = dispatchers.open(backend_factory=factory)
     # What a restart does for every registration a repository lists (this in-memory one lists none).
     restarted.preload_scenarios(("agent",))
     scenario = _scenario(restarted)
@@ -549,13 +574,12 @@ def test_a_failed_request_of_a_scenario_that_is_gone_starts_no_worker(
 
 @pytest.mark.unit
 def test_a_failing_local_cycle_runs_once_per_wake_and_keeps_its_error_in_the_status(
-    tmp_path: Path, dispatchers: _Dispatchers
+    dispatchers: _Dispatchers, held_cycle: type[_HeldJobData]
 ) -> None:
-    """A backend that is away costs one attempt per wake, never a loop of reloads, and the failure stays visible."""
-    away = _AwayBackend(HARNESS, tmp_path / "candidates")
-    dispatcher, _ = dispatchers.open(
-        backends={WEIGHTS: ComponentJobs(WEIGHTS, tmp_path / "candidates"), HARNESS: away}
-    )
+    """A cycle that fails costs one attempt per wake, never a loop of reloads, and the failure stays visible."""
+    away = held_cycle
+    away.fails = True
+    dispatcher, _ = dispatchers.open(recipe=held_recipe(HARNESS))
     # Both rows first, then one wake: an accept wakes the worker per row, which would be two wakes.
     loaded(dispatcher, 1)
     dispatcher.local_workers.start("agent", HARNESS)
@@ -570,33 +594,21 @@ def test_a_failing_local_cycle_runs_once_per_wake_and_keeps_its_error_in_the_sta
     assert away.attempts == 2
 
 
-class _BlockingAwayBackend(ComponentJobs):
-    """A component whose step waits for the test to let it go, then fails."""
-
-    def __init__(self, component: str, artifact_dir: Path) -> None:
-        super().__init__(component, artifact_dir)
-        self.entered = threading.Event()
-        self.go = threading.Event()
-
-    def unblock(self) -> None:
-        self.go.set()
-
-    def step(self, job):
-        self.entered.set()
-        assert self.go.wait(30)
-        raise RuntimeError("proposer away")
-
-
 @pytest.mark.unit
 def test_a_sibling_waiting_at_the_cycle_lock_looks_again_after_a_reload_under_it(
-    tmp_path: Path, monkeypatch: Any, dispatchers: _Dispatchers
+    tmp_path: Path, monkeypatch: Any, dispatchers: _Dispatchers, held_cycle: type[_HeldJobData]
 ) -> None:
     """The failing cycle rebuilds the scenario at once, under the lock; the sibling that read the old instance looks again
     on the new one instead of sleeping with its rows unread."""
-    away = _BlockingAwayBackend(WEIGHTS, tmp_path / "candidates")
+    # The weights cycle waits for the test to let it go, then fails.
+    away = held_cycle
+    away.blocks = away.fails = True
     harness = ComponentJobs(HARNESS, tmp_path / "candidates")
-    dispatcher, _ = dispatchers.open(backends={WEIGHTS: away, HARNESS: harness})
+    dispatcher, _ = dispatchers.open(recipe=held_recipe(WEIGHTS), backends={HARNESS: harness})
     scenario = loaded(dispatcher, 1)
+    # The reload after the failure wakes the workers, and a woken weights worker would fail and reload again under
+    # the rest of the test; the test runs each cycle itself.
+    monkeypatch.setattr(dispatcher.local_workers, "start", lambda scenario, component=None: None)
     failures: list[BaseException] = []
 
     def fail() -> None:
@@ -607,7 +619,7 @@ def test_a_sibling_waiting_at_the_cycle_lock_looks_again_after_a_reload_under_it
 
     failing = threading.Thread(target=fail)
     failing.start()
-    assert away.entered.wait(10)
+    assert away.evaluating.wait(10)
     # The sibling reads the instance, then reaches the cycle lock the failing cycle holds.
     reached = threading.Event()
     cycle_lock = dispatcher.local_workers.cycle_lock
@@ -623,7 +635,7 @@ def test_a_sibling_waiting_at_the_cycle_lock_looks_again_after_a_reload_under_it
     monkeypatch.setattr(dispatcher.local_workers, "cycle_lock", observed)
     sibling.start()
     assert reached.wait(10)
-    away.go.set()
+    away.release.set()
     failing.join(10)
     sibling.join(10)
     assert [str(error) for error in failures] == ["proposer away"]
@@ -631,65 +643,27 @@ def test_a_sibling_waiting_at_the_cycle_lock_looks_again_after_a_reload_under_it
     assert rebuilt is not None and rebuilt is not scenario
     assert outcome == [True] and harness.prepared == 0
     # Looking again on the rebuilt instance commits the rows that were there all along.
-    assert dispatcher.local_workers.process_step("agent", HARNESS) is True
     drain(dispatcher, HARNESS)
     assert training_components(rebuilt) == [HARNESS]
 
 
 @dataclass(frozen=True)
-class _NamedComponentsRecipe(Recipe):
-    """A recipe serving the named components, each evolved by its own local backend."""
+class _NamedComponentRecipe(Recipe):
+    """A recipe serving the one component ``component``, which its trainer does not evolve."""
 
-    names: tuple[str, ...] = ()
+    component: str = ""
 
     def default_start(self) -> DefaultStart:
-        return seeded_start(self.names)
+        return seeded_start(self.component)
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        return ScenarioComponents(
-            components={
-                name: ComponentSpec(files=TextFileTree()) if name == HARNESS else ComponentSpec()
-                for name in self.names
-            }
-        )
+        spec = ComponentSpec(files=TextFileTree()) if self.component == HARNESS else ComponentSpec()
+        return ScenarioComponents(components={self.component: spec})
 
 
-class _NamedComponentTrainers(TrainerBuilder):
-    """Builds one trainer for each of ``names``, whose jobs run on a ``ComponentJobs`` on the trainer's own thread."""
-
-    def __init__(self, names: tuple[str, ...], artifact_dir: Path) -> None:
-        self.names = names
-        self.artifact_dir = artifact_dir
-
-    def build_trainers(
-        self,
-        specs,
-        scenario,
-        records,
-        *,
-        components,
-        algorithm_states,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
-    ):
-        return tuple(
-            ComponentTrainer(
-                name,
-                Trainer.build(
-                    scenario,
-                    records,
-                    pipeline_factory=partial(threshold_pipeline, job_samples=1),
-                    job_loop=JobLoop(ComponentJobs(name, self.artifact_dir), scenario=scenario),
-                    algorithm_state=algorithm_states.get(name),
-                    experiment_logger=experiment_logger,
-                    root=root,
-                ),
-            )
-            for name in self.names
-        )
+def named_components_recipe(names: tuple[str, ...]) -> CompositeRecipe:
+    """A composite recipe serving the named components."""
+    return CompositeRecipe(components={name: _NamedComponentRecipe(component=name) for name in names})
 
 
 @pytest.mark.unit
@@ -699,32 +673,29 @@ def test_a_recipe_serving_fewer_components_than_registered_is_refused(
     """A step carries forward only the components the recipe serves; one it does not serve would leave every snapshot."""
     names = ("weights", "harness", "config")
     factory = _repository(tmp_path)
-    first, _ = dispatchers.open(
-        recipe=_NamedComponentsRecipe(names=names),
-        trainer_builder=_NamedComponentTrainers(names, tmp_path / "candidates"),
-        backend_factory=factory,
-    )
+    first, _ = dispatchers.open(recipe=named_components_recipe(names), live=LiveObjects(), backend_factory=factory)
     assert first.get_or_create_scenario("agent") is not None
     first.close()
     second, _ = dispatchers.open(
-        recipe=_NamedComponentsRecipe(names=("weights", "harness")),
-        trainer_builder=_NamedComponentTrainers(("weights", "harness"), tmp_path / "candidates"),
-        backend_factory=factory,
+        recipe=named_components_recipe(("weights", "harness")), live=LiveObjects(), backend_factory=factory
     )
     with pytest.raises(ReefError, match=r"does not serve \['config'\]"):
         second.get_or_create_scenario("agent")
 
 
 @pytest.mark.unit
-def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path, dispatchers: _Dispatchers) -> None:
+def test_a_weights_job_commits_while_the_harness_cycle_fails(
+    tmp_path: Path, dispatchers: _Dispatchers, held_cycle: type[_HeldJobData]
+) -> None:
     """The harness cycle fails and the failure shows; the weights job still lands. Then the harness's rows are
     stale, since the job's checkpoint serves, so the harness stops trying them.
 
     Each wake before then costs one attempt, and the job's commits and queue changes each wake the scenario, so
     the count of attempts depends on how the wakes group."""
-    away = _AwayBackend(HARNESS, tmp_path / "candidates")
+    away = held_cycle
+    away.fails = True
     training = HeldJobs(tmp_path / "checkpoints")
-    dispatcher, _ = dispatchers.open(backends={HARNESS: away}, training=training)
+    dispatcher, _ = dispatchers.open(recipe=held_recipe(HARNESS), training=training)
     scenario = _scenario(dispatcher)
     for record in _records(1, scenario.serving_artifact_id()):
         dispatcher.accept_record(record)
@@ -797,7 +768,7 @@ def test_a_report_on_an_inference_the_weights_job_trained_is_skipped_not_raised(
     restart."""
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True)
     scenario = loaded(dispatcher, 1)
-    submitted = scenario.next_commit(WEIGHTS)
+    submitted = checked_commit(scenario, WEIGHTS)
     assert submitted is not None
     assert append_commit(scenario, HARNESS) is not None
     scenario.records.append(agent_report("r1b", "i1"))
@@ -829,15 +800,16 @@ class _SlotGrouping(ReportGrouping):
         return GroupDecision.READY if len(members) >= 2 else GroupDecision.INCOMPLETE
 
 
-@dataclass(frozen=True)
-class _SlottedRecipe(_TwoTrainerRecipe):
-    """The two trainer recipe whose harness batches reports by group and retry slot."""
+class _SlottedSamples(ThresholdSamples):
+    """The threshold stage with ``_SlotGrouping``."""
 
-    def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
-        if component == HARNESS:
-            # The threshold pipeline with ``_SlotGrouping``.
-            return threshold_pipeline(context, job_samples=1, grouping=_SlotGrouping())
-        return threshold_pipeline(context, job_samples=1)
+    def __init__(self, context: PipelineContext, settings: SampleAssemblySettings | None = None) -> None:
+        super().__init__(context, settings, grouping=_SlotGrouping())
+
+
+def slotted_recipe() -> CompositeRecipe:
+    """The two trainer recipe whose harness batches reports by group and retry slot."""
+    return two_trainer_recipe(harness=harness_recipe(component_stages(record2sample=_SlottedSamples)))
 
 
 def slotted_report(record_id: str, reference: str, group: str, slot: int) -> AgentRecord:
@@ -856,7 +828,7 @@ def test_a_retry_settled_for_a_taken_slot_stays_settled_after_a_restart(
 ) -> None:
     """r1dup retried slot 0 while r1 held it, so the harness settled it; the harness commit names r1dup as consumed
     with the rows it trained. The replay skips r1 and r1dup alike, so the rebuilt harness keeps r1dup out of G."""
-    dispatcher, _ = dispatchers.open(recipe=_SlottedRecipe(backends=_local_pair(tmp_path)), hold_local_cycles=True)
+    dispatcher, _ = dispatchers.open(recipe=slotted_recipe(), hold_local_cycles=True)
     scenario = loaded(dispatcher)
     for step in (1, 2, 3):
         scenario.records.append(_records(step, scenario.serving_artifact_id())[0])
@@ -904,13 +876,12 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     scenario = loaded(dispatcher, 1)
     fail_first_record_of(monkeypatch, scenario, HARNESS)
     with pytest.raises(OSError, match="transient store write error"):
-        dispatcher.local_workers.process_step("agent", HARNESS)
+        drain(dispatcher, HARNESS)
     rebuilt = dispatcher.registry.get_optional("agent")
     assert rebuilt is not None and rebuilt is not scenario
     assert append_commit(rebuilt, WEIGHTS) == [("i1", "r1")]
     assert rebuilt.records.read("agent", "i1") is not None and rebuilt.records.read("agent", "r1") is not None
-    for _ in range(3):
-        dispatcher.local_workers.process_step("agent", HARNESS)
+    drain(dispatcher, HARNESS)
     current = dispatcher.registry.get_optional("agent")
     assert current is not None
     history = current.store.history()
@@ -966,7 +937,11 @@ class _RetiringRetriesJudging(RecordJudging):
 
 
 class _RetiringRetriesSamples(JudgedSamples):
-    """One-token stub samples for every judged turn."""
+    """One-token stub samples for every judged turn of a ``_RetiringRetriesJudging``, each judged at the next poll."""
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        return cls(_RetiringRetriesJudging(), JudgedAtOnce(), max_staleness=MAX_STALENESS)
 
     def make_sample(self, record: AgentRecord, judgment: Judgment) -> Any:
         return policy_trajectory(
@@ -975,33 +950,33 @@ class _RetiringRetriesSamples(JudgedSamples):
             loss_mask=(1,),
             rollout_log_probs=(-0.1,),
             reward=1.0,
+            artifact_id=record.payload["artifact_id"],
         )
 
 
-class RetiringRetriesJobData(Sample2Job):
+class RetiringRetriesJobData(ThresholdJobData):
     """Batches the judged turns of ``_RetiringRetriesJudging``."""
 
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
 
 
-@dataclass(frozen=True)
-class _ComputedWeightsRecipe(_TwoTrainerRecipe):
-    """The two trainer recipe whose weights trainer computes its own feedback."""
-
-    def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
-        if component == WEIGHTS:
-            # Trains the judged turns of ``_RetiringRetriesJudging``.
-            return TrainingPipeline(
-                context,
-                record2sample=_RetiringRetriesSamples(_RetiringRetriesJudging(), JudgedAtOnce()),
-                sample2job=RetiringRetriesJobData(context, None, 1),
-            )
-        return threshold_pipeline(context, job_samples=1)
+def computed_weights_recipe() -> CompositeRecipe:
+    """The two trainer recipe whose weights trainer computes its own feedback: it trains the judged turns of
+    ``_RetiringRetriesJudging``."""
+    stages = component_stages(_RetiringRetriesSamples, RetiringRetriesJobData, record2sample_config={})
+    return two_trainer_recipe(weights=WeightsRecipe(pipeline_stages=stages))
 
 
-def turn_record(record_id: str, turn: str, completes: str | None = None) -> AgentRecord:
-    payload: dict[str, Any] = {"turn": turn, "tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
+def turn_record(scenario: Scenario, record_id: str, turn: str, completes: str | None = None) -> AgentRecord:
+    """The record of one turn, answered by the artifact that ``scenario`` serves now."""
+    payload: dict[str, Any] = {
+        "turn": turn,
+        "tokens": [1, 2],
+        "loss_mask": [0, 1],
+        "rollout_log_probs": [-0.2],
+        "artifact_id": scenario.serving_artifact_id(),
+    }
     if completes:
         payload["completes"] = completes
     return AgentRecord.create(
@@ -1017,20 +992,18 @@ def test_a_retry_a_computed_processor_retired_never_trains_after_a_reload(
     """A retries turn t1 after A trained; the weights processor retires the retry, and its next commit names the
     retry as consumed. A reload keeps it out, so a later turn that completes the retry finds nothing to judge, as on
     the live path."""
-    dispatcher, _ = dispatchers.open(
-        recipe=_ComputedWeightsRecipe(backends=_local_pair(tmp_path)), hold_local_cycles=True
-    )
+    dispatcher, _ = dispatchers.open(recipe=computed_weights_recipe(), hold_local_cycles=True)
     scenario = loaded(dispatcher)
-    scenario.records.append(turn_record("A", "t1"))
-    scenario.records.append(turn_record("B", "t2", completes="A"))
+    scenario.records.append(turn_record(scenario, "A", "t1"))
+    scenario.records.append(turn_record(scenario, "B", "t2", completes="A"))
     assert append_commit(scenario, WEIGHTS) == [("A",)]
-    scenario.records.append(turn_record("A-retry", "t1"))
-    scenario.records.append(turn_record("C", "t3", completes="B"))
+    scenario.records.append(turn_record(scenario, "A-retry", "t1"))
+    scenario.records.append(turn_record(scenario, "C", "t3", completes="B"))
     assert append_commit(scenario, WEIGHTS) == [("B",)]
     assert "A-retry" in submission(scenario, WEIGHTS).consumed_ids
     if reload:
         scenario = reload_agent(dispatcher)
-    scenario.records.append(turn_record("E", "t4", completes="A-retry"))
+    scenario.records.append(turn_record(scenario, "E", "t4", completes="A-retry"))
     assert append_commit(scenario, WEIGHTS) is None
 
 
@@ -1043,7 +1016,7 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True)
     scenario = loaded(dispatcher, 1)
     scenario.records.append(_records(2, scenario.serving_artifact_id())[0])
-    submitted = scenario.next_commit(WEIGHTS)
+    submitted = checked_commit(scenario, WEIGHTS)
     assert submitted is not None
     assert append_commit(scenario, HARNESS) is not None
     scenario.records.append(agent_report("run", "i1", "i2"))
@@ -1090,7 +1063,7 @@ def test_a_job_submitted_on_an_instance_reloaded_under_it_is_the_same_job_on_the
     training = WeightsJobComponent(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     old = loaded(dispatcher, 1)
-    assert old.next_commit(WEIGHTS) is not None
+    assert checked_commit(old, WEIGHTS) is not None
     [job] = submitted_jobs(training, 1)
     new = reload_agent(dispatcher)
     assert new is not old
@@ -1115,6 +1088,21 @@ def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers)
         scenario.set_training_mode("hybrid")
 
 
+@dataclass(frozen=True)
+class _FlatStartRecipe(Recipe):
+    """A recipe that declares the weights and the harness component itself and starts a scenario from ``files``. A
+    composite recipe keeps each component's start under the component's directory, so only such a recipe can keep
+    a file outside them."""
+
+    files: Mapping[str, str] = field(default_factory=dict)
+
+    def default_start(self) -> DefaultStart:
+        return DefaultStart(files=dict(self.files))
+
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents(components={WEIGHTS: ComponentSpec(), HARNESS: ComponentSpec(files=TextFileTree())})
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("layout", "outside"),
@@ -1128,7 +1116,7 @@ def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers)
 def test_composite_registration_refuses_files_outside_its_components(
     tmp_path: Path, dispatchers: _Dispatchers, layout: dict[str, str], outside: str
 ) -> None:
-    dispatcher, _ = dispatchers.open(start=DefaultStart(files=layout))
+    dispatcher, _ = dispatchers.open(recipe=_FlatStartRecipe(files=layout), live=LiveObjects())
     with pytest.raises(ReefError, match=rf"keeps \['{outside}'\] outside its components"):
         dispatcher.get_or_create_scenario("agent")
     # A refused root registers nothing.
@@ -1138,7 +1126,8 @@ def test_composite_registration_refuses_files_outside_its_components(
 @pytest.mark.unit
 def test_composite_registration_starts_an_unseeded_component_empty(tmp_path: Path, dispatchers: _Dispatchers) -> None:
     """A default start that seeds only the harness starts the weights component empty; it fills at its first step."""
-    dispatcher, _ = dispatchers.open(hold_local_cycles=True, start=seeded_start((HARNESS,)))
+    unseeded = ComponentJobs(WEIGHTS, tmp_path / "candidates", seeded=False)
+    dispatcher, _ = dispatchers.open(hold_local_cycles=True, backends={WEIGHTS: unseeded})
     scenario = loaded(dispatcher)
     base = scenario.repository.materialize(scenario.current_snapshot())
     assert base.components is not None and base.components.names == (WEIGHTS, HARNESS)
@@ -1321,7 +1310,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert required_by(catalog, component_id(scenario, h1, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
     # Weights held for review are activated as weights: the served tree stays, so the head stays a listed
-    # release and names no weights artifact or combination.
+    # snapshot and names no weights artifact or combination.
     _append_records(scenario, 4)
     backends[WEIGHTS].hold_next = True
     assert append_commit(scenario, WEIGHTS) is not None
@@ -1340,7 +1329,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
 
 
 @pytest.mark.unit
-def test_a_training_step_carries_the_active_release_and_keeps_an_activated_component(
+def test_a_training_step_carries_the_active_artifact_and_keeps_an_activated_component(
     dispatchers: _Dispatchers,
 ) -> None:
     """After an older weights artifact is activated, a harness step carries the active weights, not the chain tip's."""
@@ -1349,6 +1338,7 @@ def test_a_training_step_carries_the_active_release_and_keeps_an_activated_compo
     assert append_commit(scenario, WEIGHTS) is not None
     assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights step 1"
     scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
+    wait_for_serving(dispatcher, "agent")
     assert append_commit(scenario, HARNESS) is not None
     assert component_files(scenario, scenario.current_snapshot()) == {
         WEIGHTS: "weights seed",
@@ -1416,11 +1406,17 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
     """One failed read of the creation artifact must not hide the creation's manifest for the process lifetime."""
     dispatcher, _ = dispatchers.open()
     scenario = _scenario(dispatcher)
+    wait_for_serving(dispatcher, "agent")
+    # The serving of the weights read the creation's manifest; the test reads it as a process that has not.
+    scenario.snapshot_queries.creation_components_read = False
     original = ArtifactSnapshotChain.resolve
     calls = {"failed": 0}
 
+    reader = threading.current_thread()
+
     def fail_once(self: ArtifactSnapshotChain, ref: SnapshotRef) -> Artifact:
-        if calls["failed"] == 0:
+        # The serving worker resolves snapshots too; only the test's own read fails.
+        if calls["failed"] == 0 and threading.current_thread() is reader:
             calls["failed"] += 1
             raise ArtifactNotFoundError("the remote is away")
         return original(self, ref)
@@ -1438,7 +1434,7 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
 
 
 @pytest.mark.unit
-def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatchers: _Dispatchers) -> None:
+def test_an_activation_of_weights_held_at_step_one_is_no_harness_artifact(dispatchers: _Dispatchers) -> None:
     """The creation artifact has no record; its manifest still says the activated tree did not change."""
     dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     backends[WEIGHTS].hold_next = True
@@ -1519,22 +1515,13 @@ def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
     assert scenario.last_commit_for(WEIGHTS) is None
 
 
-@dataclass(frozen=True)
-class _OneTrainerRecipe(_TwoTrainerRecipe):
-    """The harness trainer alone, serving one component: the shape of every shipped recipe."""
-
-    def build_components(self, scenario: str) -> ScenarioComponents:
-        return ScenarioComponents(components={HARNESS: ComponentSpec(files=TextFileTree())})
-
-
 @pytest.mark.unit
 def test_a_lone_trainer_names_no_component_on_record(tmp_path: Path, dispatchers: _Dispatchers) -> None:
     """A scenario of one trainer writes what it wrote before components: its commit record and the checkpoint's
     scenario metadata name no component."""
-    recipe = _OneTrainerRecipe(
-        backends={HARNESS: ComponentJobs(HARNESS, tmp_path / "candidates")}, start=seeded_start((HARNESS,))
-    )
-    dispatcher, _ = dispatchers.open(recipe=recipe, hold_local_cycles=True)
+    # The harness recipe alone, serving one component: the shape of every shipped recipe.
+    live = harness_live_objects(ComponentJobs(HARNESS, tmp_path / "candidates"))
+    dispatcher, _ = dispatchers.open(recipe=harness_recipe(), live=live, hold_local_cycles=True)
     scenario = loaded(dispatcher, 1, 2)
     assert append_commit(scenario, HARNESS) is not None
     record = scenario.store.history()[-1]
@@ -1708,7 +1695,7 @@ def test_a_manual_weights_trainer_submits_the_samples_that_its_request_names(
     assert held == (stage_item_id("agent", f"{WEIGHTS}:r1:0"),)
     dispatcher.accept_request(
         "agent",
-        {"text": "learn the tool", "session": "session-1", "artifact_id": "release-1", "samples": list(held)},
+        {"text": "learn the tool", "session": "session-1", "artifact_id": "artifact-1", "samples": list(held)},
         request_id="t1",
     )
     assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
@@ -1801,16 +1788,93 @@ def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
     scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
     # The training worker stops the job on the component once it sees the cancelled item.
     assert became_true(lambda: training.statuses[running.job_id].error == "cancelled")
-    [imported] = training.imported
+    # Control names the snapshot and imports nothing: the training service imports it for the next job.
+    assert training.imported == []
     assert scenario.current_snapshot() == served
     assert component_files(scenario, served)[WEIGHTS] == "weights job 1"
     # The harness trainer's start is its own: it does not move.
     assert scenario.store.history()[-1].component == WEIGHTS
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
-    assert (state.jobs, state.start) == ((), str(imported))
+    assert state.jobs == () and SnapshotStart.from_text(state.start) == SnapshotStart(
+        scenario.repository.start_artifact.revision
+    )
     _append_records(scenario, 3)
     assert append_commit(scenario, WEIGHTS) == [("i3", "r3")]
-    assert submitted_jobs(training, 3)[-1].start == str(imported)
+    assert submitted_jobs(training, 3)[-1].start == str(training.imported[-1])
+
+
+@pytest.mark.unit
+def test_a_job_that_waits_for_its_check_holds_nothing_of_the_scenario(
+    tmp_path: Path, dispatchers: _Dispatchers
+) -> None:
+    """No training service answers. The job's data is not reserved between two polls, so the scenario's other
+    operations run, and nothing is consumed. Once the check is answered, the next poll submits the job."""
+    training = WeightsJobComponent(tmp_path / "checkpoints")
+    factory = _repository(tmp_path)
+    dispatcher, _ = dispatchers.open(
+        training=training,
+        hold_local_cycles=True,
+        backend_factory=factory,
+        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+    )
+    scenario = loaded(dispatcher, 1)
+    trainer = scenario.trainer_for(WEIGHTS)
+    for _ in range(3):
+        assert scenario.next_commit(WEIGHTS) is None
+    # The worker polls for the answer at its usual interval, and the trainer holds no reservation meanwhile.
+    assert trainer.job_check_waits and trainer.needs_polling() and not trainer.has_pending_commit
+    [check] = dispatcher.queue.items(CHECKS_QUEUE)
+    assert check.state == "queued"
+
+    root = scenario.artifact_status()[WEIGHTS]["training_start"]
+    # Each of these raised CommitPendingError while a waiting job kept its data reserved.
+    scenario.activate(root, WEIGHTS)
+    scenario.train_from(root, WEIGHTS)
+    assert scenario.store.history()[-1].operation == "train_from"
+    assert all(record.training_job_id is None for record in scenario.store.history())
+    # The job now starts from another start, so it is another job with a check of its own.
+    assert scenario.next_commit(WEIGHTS) is None
+    first, second = dispatcher.queue.items(CHECKS_QUEUE)
+    assert first.id == check.id and second.state == "queued"
+
+    # The training service comes up and answers; the next poll submits the job with the samples that waited.
+    checks = TrainingCheckWorker(
+        training, dispatcher.queue, dispatcher.job_directory_store, factory, worker_id="checks", poll_seconds=0.01
+    )
+    checks.start()
+    try:
+        assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
+    finally:
+        checks.stop()
+    assert not trainer.job_check_waits
+    [queued] = dispatcher.queue.items(JOBS_QUEUE)
+    assert SnapshotStart.from_text(queued.payload["start"]) == SnapshotStart(
+        scenario.repository.start_artifact.revision
+    )
+
+
+@pytest.mark.unit
+def test_a_check_that_could_not_run_consumes_no_sample(tmp_path: Path, dispatchers: _Dispatchers) -> None:
+    """The training service cannot run the check. The trainer's cycle fails with an error that is no refusal, no
+    commit is made, and the samples train once the check runs."""
+
+    class Unreachable(WeightsJobComponent):
+        reachable = False
+
+        def check_job(self, job: TrainingJob) -> None:
+            if not self.reachable:
+                raise ConnectionError("the artifact store did not answer")
+
+    training = Unreachable(tmp_path / "checkpoints")
+    dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
+    scenario = loaded(dispatcher, 1)
+    commits = scenario.commit_number
+    with pytest.raises(RuntimeError, match=r"so nothing was decided about it: .*the artifact store did not answer"):
+        checked_commit(scenario, WEIGHTS)
+    assert scenario.commit_number == commits and training.submitted == []
+    assert scenario.trainer_for(WEIGHTS).holds_untrained_records()
+    training.reachable = True
+    assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
 
 
 @pytest.mark.unit
@@ -1818,7 +1882,7 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
     """The process stops after the ``train_from`` record and before the trainer's next commit records the start.
-    The trainer's state recovers from its earlier commit, so the restarted scenario imports the snapshot again."""
+    The trainer's state recovers from its earlier commit, so the restarted scenario names the snapshot again."""
     training = HeldJobs(tmp_path / "checkpoints")
     factory = _repository(tmp_path)
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)
@@ -1828,7 +1892,8 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     settle_weights_job(scenario)
     served = scenario.current_snapshot()
     scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
-    assert JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).start == str(training.imported[0])
+    named = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).start
+    assert SnapshotStart.from_text(named) == SnapshotStart(scenario.repository.start_artifact.revision)
     dispatcher.close()
 
     restarted, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)
@@ -1837,12 +1902,11 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     # The previous owner's routes can remain until recovery starts. Wait for the new runtime to load its weights.
     assert became_true(lambda: runtime.served == "w1")
     scenario = loaded(restarted, 2)
-    assert len(training.imported) == 2
     assert scenario.current_snapshot() == served
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
-    assert state.start == str(training.imported[-1])
+    assert state.start == named and training.imported == []
     assert append_commit(scenario, WEIGHTS) == [("i2", "r2")]
-    assert submitted_jobs(training, 2)[-1].start == state.start
+    assert submitted_jobs(training, 2)[-1].start == str(training.imported[-1])
 
 
 @pytest.mark.unit

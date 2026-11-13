@@ -792,11 +792,11 @@ def test_end_ends_with_the_reason_and_refuses_an_unknown_one(tmp_path: Path) -> 
 SEED_LOOP_FILE = native_loop("main", SEED_LOOP, max_steps=4)
 
 
-def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the_graph(
+def test_an_artifact_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the_graph(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
     graph_only = {**tool_files("shout", "    return 'LOUD'"), **main_graph(SEED_STAGES, SEED_EDGES)}
-    reef.release("r1", graph_only)
+    reef.publish("r1", graph_only)
     reef.replies = [
         model_reply("one"),
         model_reply(tool_calls=[tool_call("shout", {}, "c1")]),
@@ -808,7 +808,7 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
         assert first["text"] == "one" and [e["type"] for e in streamed][:3] == ["session", "turn/start", "stage/enter"]
         assert typed(streamed, "session")[0]["loop"] is None
         log = server.sessions_dir / serve.SERVE_LOG
-        reef.release("r2", {**graph_only, **SEED_LOOP_FILE}, parent="r1")
+        reef.publish("r2", {**graph_only, **SEED_LOOP_FILE}, parent="r1")
         wait_until(
             lambda: any(m["artifact_id"] == "r2" for m in typed(logged_events(log), "harness/mount")),
             timeout_seconds=5,
@@ -834,7 +834,7 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
         header = typed(streamed, "session")[0]
         assert header["loop"] == "main" and header["graph"] == "main" and header["artifact_id"] == "r2"
         assert typed(streamed, "loop/enter") == [{"name": "main"}]
-        reef.release("r3", graph_only, parent="r2")
+        reef.publish("r3", graph_only, parent="r2")
         wait_until(
             lambda: any(m["artifact_id"] == "r3" for m in typed(logged_events(log), "harness/mount")),
             timeout_seconds=5,
@@ -855,7 +855,7 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
 
 def test_harness_try_refuses_a_native_loop_patch_on_a_served_loop(tmp_path: Path, reef: _FakeReef) -> None:
     served = {**tool_files("shout", "    return 'LOUD'"), **native_loop("main", SEED_LOOP, max_steps=8)}
-    reef.release("r1", served)
+    reef.publish("r1", served)
     other = native_loop("other", SEED_LOOP)
     update = native_loop("main", SEED_LOOP, max_steps=4)
     remove = {"native/loops/main.py": None}

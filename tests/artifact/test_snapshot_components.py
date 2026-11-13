@@ -1,4 +1,4 @@
-"""Multi-component releases: the manifest, component views, per-component specs, and commits."""
+"""Multi-component snapshots: the manifest, component views, per-component specs, and commits."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import threading
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,21 +26,19 @@ from reef.artifact import (
 from reef.artifact.artifact import ArtifactValidator, SnapshotRef
 from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.composite import compose_snapshot
-from reef.core.activation import ActivationRule
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
-from reef.evaluation.activation import AlwaysActivate
+from reef.evaluation.activation import activation_reference
 from reef.observability import NullExperimentTracker
 from reef.recipe.base import Recipe
+from reef.recipe.composite import CompositeRecipe
 from reef.scenario.binding import activate_snapshot
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.live_objects import LiveObjects
 from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import ComponentTrainer
-from reef.train.trainer_builder import TrainerBuilder, build_trainer
 from reef.train.types import TrainingCommit
 
 WEIGHTS = "weights"
@@ -91,19 +90,19 @@ def test_manifest_preserves_component_ids_without_a_combination_identity() -> No
 
 
 @pytest.mark.unit
-def test_component_views_of_a_composed_release(tmp_path: Path) -> None:
+def test_component_views_of_a_composed_snapshot(tmp_path: Path) -> None:
     weights = Artifact.local(
         tree(tmp_path / "w", {"adapter_config.json": "{}"}), metadata={"runtime_load_id": "inc:3"}
     )
     harness = Artifact.local(tree(tmp_path / "h", {"AGENTS.md": "rules"}))
-    composed = compose_snapshot({WEIGHTS: weights, HARNESS: harness}, directory=tmp_path / "release")
+    composed = compose_snapshot({WEIGHTS: weights, HARNESS: harness}, directory=tmp_path / "snapshot")
 
     assert composed.components is not None
     assert composed.components.names == (WEIGHTS, HARNESS)
     with pytest.raises(ArtifactNotFoundError, match="holds components"):
         _ = composed.artifact_id
     view = composed.component(WEIGHTS)
-    assert view.local_path == tmp_path / "release" / WEIGHTS
+    assert view.local_path == tmp_path / "snapshot" / WEIGHTS
     assert view.artifact_id == weights.artifact_id
     assert view.ref.revision == composed.ref.revision
     assert dict(view.metadata) == {"runtime_load_id": "inc:3"}
@@ -118,7 +117,7 @@ def test_component_views_of_a_composed_release(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_materialized_releases_keep_their_manifest_and_composed_staging_carries_components(tmp_path: Path) -> None:
+def test_materialized_snapshots_keep_their_manifest_and_composed_staging_carries_components(tmp_path: Path) -> None:
     root = tmp_path / "root"
     tree(root / WEIGHTS, {"adapter_config.json": "{}"})
     tree(root / HARNESS, {"AGENTS.md": "seed"})
@@ -186,61 +185,46 @@ def test_components_reject_ambiguous_component_sets() -> None:
         ScenarioComponents(components={"a/b": ComponentSpec()})
 
 
-class _TwoComponentRecipe(Recipe):
-    """A record-only recipe whose scenario serves weights and a harness tree through one trainer."""
+@dataclass(frozen=True, kw_only=True)
+class _ComponentRecipe(Recipe):
+    """A record-only recipe that declares the one component ``component`` as ``spec`` and starts it from ``seed``."""
 
-    def activation_rule(self) -> ActivationRule:
-        return AlwaysActivate(HELD)
+    component: str
+    spec: ComponentSpec
+    seed: Mapping[str, str]
 
     def build_components(self, scenario: str) -> ScenarioComponents:
-        return ScenarioComponents(
-            components={
-                WEIGHTS: ComponentSpec(kind="model_adapter"),
-                HARNESS: ComponentSpec(files=TextFileTree()),
-            }
-        )
+        return ScenarioComponents(components={self.component: self.spec})
 
     def default_start(self) -> DefaultStart:
-        return DefaultStart(files={f"{WEIGHTS}/adapter_config.json": "{}", f"{HARNESS}/AGENTS.md": "seed"})
+        return DefaultStart(files=dict(self.seed))
 
 
-class HarnessTrainer(TrainerBuilder):
-    """Builds one trainer that only reads records, bound to the harness component."""
+def two_component_recipe(weights: ComponentSpec | None = None) -> CompositeRecipe:
+    """A composite whose scenario serves weights and a harness tree. Each component has one trainer that only reads
+    records. The activation rule holds a step that changes a ``held`` kind for review.
 
-    def build_trainers(
-        self,
-        specs,
-        scenario,
-        records,
-        *,
-        components,
-        algorithm_states,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
-    ):
-        # One trainer, bound to the harness, publishes whichever component a step names.
-        return (
-            ComponentTrainer(
-                HARNESS,
-                build_trainer(
-                    specs,
-                    scenario,
-                    records,
-                    algorithm_state=algorithm_states.get(HARNESS),
-                    experiment_logger=experiment_logger,
-                    root=root,
-                ),
+    ``weights`` declares the weights component; None is an adapter with no check.
+    """
+    return CompositeRecipe(
+        components={
+            WEIGHTS: _ComponentRecipe(
+                component=WEIGHTS,
+                spec=ComponentSpec(kind="model_adapter") if weights is None else weights,
+                seed={"adapter_config.json": "{}"},
             ),
-        )
+            HARNESS: _ComponentRecipe(
+                component=HARNESS, spec=ComponentSpec(files=TextFileTree()), seed={"AGENTS.md": "seed"}
+            ),
+        },
+        activation=activation_reference({"module": "always", "config": {"review_kinds": sorted(HELD)}}),
+    )
 
 
 @pytest.mark.unit
 def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp_path: Path) -> None:
     runtime = StubInferenceRuntime()
-    recipe = _TwoComponentRecipe()
+    recipe = two_component_recipe()
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
@@ -248,7 +232,6 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
-        trainer_builder=HarnessTrainer(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -265,7 +248,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
 
         # A harness step carries the weights forward and does not reload them.
         evolved = Artifact.local(tree(tmp_path / "h1", {"AGENTS.md": "evolved"}))
-        scenario.commit(TrainingCommit(state={}, artifact=evolved, component=HARNESS))
+        scenario.commit(TrainingCommit(state={}, artifact=evolved, component=HARNESS), component=HARNESS)
         after_harness = scenario.repository.materialize(scenario.current_snapshot())
         assert after_harness.components is not None
         assert after_harness.components.entries[WEIGHTS].artifact_id == base_weights
@@ -279,16 +262,20 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         trained = Artifact.local(
             tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
         )
-        scenario.commit(TrainingCommit(state={}, artifact=trained, component=WEIGHTS))
+        scenario.commit(TrainingCommit(state={}, artifact=trained, component=WEIGHTS), component=WEIGHTS)
         after_weights = scenario.repository.materialize(scenario.current_snapshot())
         assert after_weights.components is not None
         assert after_weights.components.entries[WEIGHTS].artifact_id == trained.artifact_id
-        assert dict(after_weights.component(WEIGHTS).metadata) == {"runtime_load_id": "inc:1"}
+        # The weights' trainer stamps the artifact that its step started from.
+        assert dict(after_weights.component(WEIGHTS).metadata) == {
+            "runtime_load_id": "inc:1",
+            "training_starts": [base_weights],
+        }
         assert components.read_files(after_weights) == {"AGENTS.md": "evolved"}
         wait_for_serving(dispatcher, "agent")
         assert runtime.activated_ids[0] == base_weights
         assert set(runtime.activated_ids[1:]) == {trained.artifact_id}
-        # The record names the harness trainer, but the tree did not change: no new harness head.
+        # The weights' trainer made that record, and the tree did not change: no new harness head.
         service = RequestService(dispatcher)
         headers = {"x-reef-scenario": "agent"}
         assert service.harness_manifest(headers)["artifact_id"] == after_harness.component(HARNESS).artifact_id
@@ -298,7 +285,10 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         ]
 
         # A publication naming no component replaces the committing trainer's own; unknown names are refused.
-        scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(tree(tmp_path / "h2", {"AGENTS.md": "x"}))))
+        scenario.commit(
+            TrainingCommit(state={}, artifact=Artifact.local(tree(tmp_path / "h2", {"AGENTS.md": "x"}))),
+            component=HARNESS,
+        )
         assert components.read_files(scenario.repository.materialize(scenario.current_snapshot())) == {
             "AGENTS.md": "x"
         }
@@ -321,7 +311,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert service.harness_manifest(headers)["artifact_id"] == after_harness.component(HARNESS).artifact_id
 
         # Activating the root's weights loads them and keeps the served harness; the chain tip stays. The root
-        # release made its artifacts, so their artifact_id is the root snapshot's.
+        # snapshot made its artifacts, so their artifact_id is the root snapshot's.
         base_weights_id = base.components.artifact_ids(base.ref.revision)[WEIGHTS]
         assert base_weights_id == base.component(WEIGHTS).artifact_id
         assert base_weights_id != scenario.repository.start_artifact.revision
@@ -341,7 +331,9 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         # A harness step held for review is made on the chain tip; activating its harness binds it to the weights
         # served now.
         held = Artifact.local(tree(tmp_path / "h3", {"AGENTS.md": "held"}))
-        scenario.commit(TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
+        scenario.commit(
+            TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD), component=HARNESS
+        )
         assert components.read_files(scenario.repository.materialize(scenario.current_snapshot())) == {
             "AGENTS.md": "evolved"
         }
@@ -361,10 +353,12 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         held_weights = Artifact.local(
             tree(tmp_path / "w3", {"adapter_config.json": '{"r": 32}'}), metadata={"runtime_load_id": "inc:3"}
         )
-        scenario.commit(TrainingCommit(state={}, artifact=held_weights, component=WEIGHTS, changed_kinds=HELD))
+        scenario.commit(
+            TrainingCommit(state={}, artifact=held_weights, component=WEIGHTS, changed_kinds=HELD), component=WEIGHTS
+        )
         held_weights_snapshot = scenario.store.history()[-1].snapshot.revision
         newest = Artifact.local(tree(tmp_path / "h4", {"AGENTS.md": "newest"}))
-        scenario.commit(TrainingCommit(state={}, artifact=newest, component=HARNESS))
+        scenario.commit(TrainingCommit(state={}, artifact=newest, component=HARNESS), component=HARNESS)
         scenario.activate(held_weights.artifact_id, WEIGHTS)
         served = scenario.repository.materialize(scenario.current_snapshot())
         assert served.components is not None
@@ -389,19 +383,19 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
     repositories = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     with closing(SQLiteScenarioStorage(tmp_path / "store")) as storage:
         factory = ScenarioFactory(
-            _TwoComponentRecipe(),
+            two_component_recipe(),
             repositories,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
-            trainer_builder=HarnessTrainer(),
         )
         with closing(factory.load_or_create("agent")) as scenario:
             initial = {name: state["active"] for name, state in scenario.artifact_status().items()}
             scenario.commit(
                 TrainingCommit(
                     state={}, artifact=Artifact.local(tree(tmp_path / "h1", {"AGENTS.md": "one"})), component=HARNESS
-                )
+                ),
+                component=HARNESS,
             )
             after_first = {name: state["active"] for name, state in scenario.artifact_status().items()}
             scenario.commit(
@@ -409,7 +403,8 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
                     state={},
                     artifact=Artifact.local(tree(tmp_path / "w1", {"adapter_config.json": '{"r":8}'})),
                     component=WEIGHTS,
-                )
+                ),
+                component=WEIGHTS,
             )
             weights_id = scenario.artifact_status()[WEIGHTS]["active"]
             scenario.commit(
@@ -418,7 +413,8 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
                     artifact=Artifact.local(tree(tmp_path / "h2", {"AGENTS.md": "held"})),
                     component=HARNESS,
                     changed_kinds=HELD,
-                )
+                ),
+                component=HARNESS,
             )
             starts = {name: state["training_start"] for name, state in scenario.artifact_status().items()}
             checkpoint = scenario.repository.require_checkpoint_artifact()
@@ -465,16 +461,16 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
                     artifact=Artifact.local(tree(tmp_path / "h3", {"AGENTS.md": "also held"})),
                     component=HARNESS,
                     changed_kinds=HELD,
-                )
+                ),
+                component=HARNESS,
             )
         shutil.rmtree(tmp_path / "staged")
         with closing(SQLiteScenarioStorage(tmp_path / "empty-store")) as empty_storage:
             checkpoint_factory = ScenarioFactory(
-                _TwoComponentRecipe(),
+                two_component_recipe(),
                 repositories,
                 scenario_storage=empty_storage,
                 experiment_tracker=NullExperimentTracker(),
-                trainer_builder=HarnessTrainer(),
             )
             with closing(checkpoint_factory.load_or_create("agent")) as recovered:
                 assert recovered.current_snapshot() == active
@@ -544,24 +540,13 @@ def test_restoring_a_selection_does_not_readmit_unchanged_component_artifacts(tm
             if artifact.materialize().local_path.joinpath("adapter_config.json").read_text() == "{}":
                 raise ReefError("default weights are not a trained candidate")
 
-    class RestoreRecipe(_TwoComponentRecipe):
-        """A harness trainer whose unchanged default weights do not pass training admission."""
-
-        def build_components(self, scenario: str) -> ScenarioComponents:
-            return ScenarioComponents(
-                components={
-                    WEIGHTS: ComponentSpec(validator=TrainedWeights()),
-                    HARNESS: ComponentSpec(files=TextFileTree()),
-                }
-            )
-
     with closing(SQLiteScenarioStorage(tmp_path / "store")) as storage:
         factory = ScenarioFactory(
-            RestoreRecipe(),
+            # The unchanged default weights do not pass training admission.
+            two_component_recipe(ComponentSpec(validator=TrainedWeights())),
             InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
-            trainer_builder=HarnessTrainer(),
         )
         with closing(factory.load_or_create("agent")) as scenario:
             for step in (1, 2):
@@ -570,7 +555,8 @@ def test_restoring_a_selection_does_not_readmit_unchanged_component_artifacts(tm
                         state={},
                         component=HARNESS,
                         artifact=Artifact.local(tree(tmp_path / f"h{step}", {"AGENTS.md": f"harness {step}"})),
-                    )
+                    ),
+                    component=HARNESS,
                 )
             selected = scenario.restore(1)
             view = scenario.repository.resolve(scenario.current_snapshot())
@@ -583,11 +569,10 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
     repositories = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     with closing(SQLiteScenarioStorage(tmp_path / "store")) as storage:
         factory = ScenarioFactory(
-            _TwoComponentRecipe(),
+            two_component_recipe(),
             repositories,
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
-            trainer_builder=HarnessTrainer(),
         )
         with closing(factory.load_or_create("agent")) as scenario:
             scenario.commit(
@@ -596,7 +581,8 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
                     artifact=Artifact.local(tree(tmp_path / "h1", {"AGENTS.md": "held"})),
                     component=HARNESS,
                     changed_kinds=HELD,
-                )
+                ),
+                component=HARNESS,
             )
             checkpoint = scenario.repository.require_checkpoint_artifact()
             selected_id = scenario.repository.resolve(checkpoint).component(HARNESS).artifact_id
@@ -621,15 +607,14 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
 
 
 @pytest.mark.unit
-def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: Path) -> None:
-    """An activation reads the active selection and the artifact's release only: the creation's bytes may be gone."""
+def test_a_held_artifact_activates_without_the_manifest_of_its_parent(tmp_path: Path) -> None:
+    """An activation reads the active selection and the artifact's snapshot only: the creation's bytes may be gone."""
     dispatcher = Dispatcher(
-        _TwoComponentRecipe(),
+        two_component_recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
-        trainer_builder=HarnessTrainer(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -638,11 +623,13 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
         assert components.files_component is not None
         creation = scenario.repository.materialize(scenario.current_snapshot())
         held = Artifact.local(tree(tmp_path / "h1", {"AGENTS.md": "held"}))
-        scenario.commit(TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
+        scenario.commit(
+            TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD), component=HARNESS
+        )
         later = Artifact.local(
             tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
         )
-        scenario.commit(TrainingCommit(state={}, artifact=later, component=WEIGHTS))
+        scenario.commit(TrainingCommit(state={}, artifact=later, component=WEIGHTS), component=WEIGHTS)
         assert creation.local_path is not None
         shutil.rmtree(creation.local_path)
         scenario.activate(held.artifact_id, HARNESS)
@@ -656,15 +643,14 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
 
 
 @pytest.mark.unit
-def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp_path: Path) -> None:
+def test_an_activation_after_a_rejected_harness_step_adds_no_harness_artifact(tmp_path: Path) -> None:
     """The tree a rejected step served is the last one named; activating the served artifact changes nothing."""
     dispatcher = Dispatcher(
-        _TwoComponentRecipe(),
+        two_component_recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
-        trainer_builder=HarnessTrainer(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -672,13 +658,14 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
         scenario.commit(
             TrainingCommit(
                 state={}, artifact=Artifact.local(tree(tmp_path / "h1", {"AGENTS.md": "one"})), component=HARNESS
-            )
+            ),
+            component=HARNESS,
         )
         first_harness_id = scenario.repository.resolve(scenario.current_snapshot()).component(HARNESS).artifact_id
         weights = Artifact.local(
             tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
         )
-        scenario.commit(TrainingCommit(state={}, artifact=weights, component=WEIGHTS))
+        scenario.commit(TrainingCommit(state={}, artifact=weights, component=WEIGHTS), component=WEIGHTS)
         scenario.commit(TrainingCommit(state={}, metrics={"selected": False}), component=HARNESS)
         steps = scenario.commit_number
         # The first harness artifact serves already: activating it changes nothing.
@@ -697,18 +684,19 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
 def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, monkeypatch: Any) -> None:
     staged_root = tmp_path / "staged"
     dispatcher = Dispatcher(
-        _TwoComponentRecipe(),
+        two_component_recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=staged_root,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
-        trainer_builder=HarnessTrainer(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         held = Artifact.local(tree(tmp_path / "h1", {"AGENTS.md": "held"}))
-        scenario.commit(TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD))
+        scenario.commit(
+            TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD), component=HARNESS
+        )
         served = scenario.current_snapshot()
         before = {path for path in staged_root.rglob("*") if path.is_dir()}
 
@@ -727,9 +715,9 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
 
 
 def seedless_snapshot(tmp_path: Path) -> Artifact:
-    release = tmp_path / "release"
-    (release / "harness").mkdir(parents=True)
-    (release / "harness" / "AGENTS.md").write_text("seed", encoding="utf-8")
+    snapshot_dir = tmp_path / "snapshot"
+    (snapshot_dir / "harness").mkdir(parents=True)
+    (snapshot_dir / "harness" / "AGENTS.md").write_text("seed", encoding="utf-8")
     manifest = {
         "harness": {"artifact_id": "artifact:harness", "metadata": {}},
         "weights": {"artifact_id": "artifact:weights", "metadata": {}},
@@ -737,7 +725,7 @@ def seedless_snapshot(tmp_path: Path) -> Artifact:
     return Artifact(
         SnapshotRef("rel-1", None),
         None,
-        local_path=release,
+        local_path=snapshot_dir,
         metadata={COMPONENTS_METADATA_KEY: manifest},
     )
 
@@ -770,4 +758,4 @@ def test_two_readers_of_a_seedless_component_both_get_its_directory(tmp_path: Pa
     for thread in threads:
         thread.join(timeout=10)
     assert [repr(error) for error in errors] == []
-    assert artifact.component("weights").local_path == tmp_path / "release" / "weights"
+    assert artifact.component("weights").local_path == tmp_path / "snapshot" / "weights"

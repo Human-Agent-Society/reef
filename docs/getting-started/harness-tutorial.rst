@@ -47,7 +47,7 @@ the agent. Reef runs as a service, on the same machine or on a server.
 
 Each version of the harness is a *harness tree*: a directory of text files
 such as ``rules.md`` and ``skills/<name>/SKILL.md``. Reef stores every
-version as a *release*. The newest one is the *head*.
+version as a *snapshot*. The newest one is the *head*.
 
 Start Reef
 ----------

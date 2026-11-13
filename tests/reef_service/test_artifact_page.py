@@ -53,8 +53,8 @@ FOURTH = "log a note when a < b, before the turn ends"
 # What the method answers each request with; an automatic step, with no request, writes NOTES from the failure.
 ANSWERS = {FIRST: MARKER, SECOND: PLAIN, FOURTH: TWO_MARKERS_AND_EXTENSION}
 SCENARIO = "agents"
-# Hand-made catalog rows of a one-component scenario, where a row's artifact id is its release id: the creation,
-# active until a step replaces it, and a step that made release rel-1 on it; a test sets ``active`` and the metrics.
+# Hand-made catalog rows of a one-component scenario, where a row's artifact id is its snapshot's revision: the creation,
+# active until a step replaces it, and a step that made artifact rel-1 on it; a test sets ``active`` and the metrics.
 CREATION = {
     "artifact_id": "rel-0",
     "parent_artifact_id": None,
@@ -133,7 +133,7 @@ def _chain(tmp_path: Path) -> Dispatcher:
 @pytest.fixture(scope="module")
 def chain_dispatcher(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Dispatcher]:
     """Build the shared read-only snapshot chain once; mutation tests build their own."""
-    dispatcher = _chain(tmp_path_factory.mktemp("release-pages"))
+    dispatcher = _chain(tmp_path_factory.mktemp("artifact-pages"))
     try:
         yield dispatcher
     finally:
@@ -182,7 +182,7 @@ def _section(page: str, name: str) -> str:
 
 
 def _sub(page: str) -> str:
-    """The line under the title: the release id, the served marker and the commit time."""
+    """The line under the title: the artifact id, the served marker and the commit time."""
     _, _, tail = page.partition('<p class="subtitle">')
     body, _, _ = tail.partition("</p>")
     return body
@@ -195,7 +195,7 @@ def _hero(page: str) -> str:
     return body
 
 
-def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dispatcher: Dispatcher) -> None:
+def test_artifact_pages_show_the_chain_active_artifact_and_unknown_steps(chain_dispatcher: Dispatcher) -> None:
     dispatcher = chain_dispatcher
     rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
     page = _page(dispatcher, 1)
@@ -585,7 +585,7 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
     assert carried.index(twilio_row) < carried.index(notify_row)
 
 
-def test_each_file_of_the_patch_reads_against_the_release_the_step_ran_on() -> None:
+def test_each_file_of_the_patch_reads_against_the_artifact_the_step_ran_on() -> None:
     creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     patch = {EXTENSION_PATH: NEW_CODE, "skills/notes/SKILL.md": "# notes\n", "rules.md": None}
     row = {
@@ -638,7 +638,7 @@ def test_an_activated_step_reads_selected_and_adds_no_row(tmp_path: Path) -> Non
         dispatcher.close()
 
 
-def test_a_step_that_published_nothing_chains_to_the_release_it_ran_on() -> None:
+def test_a_step_that_published_nothing_chains_to_the_artifact_it_ran_on() -> None:
     head = {**PUBLISHED, "active": True}
     skipped = {**PUBLISHED, "checkpoint": False, "active": False, "metrics": {"skipped": UNCHANGED}}
     rows = [{**CREATION, "active": False}, head, skipped]

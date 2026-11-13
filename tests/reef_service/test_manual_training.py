@@ -21,7 +21,14 @@ from tests.support.harness_jobs import (
     harness_recipe,
     rebuilt_recipe,
 )
-from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
+from tests.support.harness_service import (
+    REPOSITORIES,
+    catalog,
+    drive_trainer_job,
+    harness_dispatcher,
+    job_backend,
+    seed_root,
+)
 from tests.support.polling import became_true
 from tests.support.records import item_records, memory_records
 from tests.support.runtime_stubs import (
@@ -87,7 +94,7 @@ def inference(receipt, scenario="s"):
 
 def train_body(receipt, samples=()):
     """The ``POST /reef/train`` body of the request ``receipt``, which names the sample IDs ``samples``."""
-    body = {"text": receipt, "session": "session-1", "artifact_id": "release-1"}
+    body = {"text": receipt, "session": "session-1", "artifact_id": "artifact-1"}
     return {**body, "samples": list(samples)} if samples else body
 
 
@@ -345,7 +352,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
                 "agent_record_id": "request-1",
                 "text": "Prefer tests first",
                 "session": "session-1",
-                "artifact_id": "release-1",
+                "artifact_id": "artifact-1",
             }
             response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
             assert response.status == 200, await response.text()
@@ -695,7 +702,9 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     loaded = restarted.get_or_create_scenario("s")
     assert loaded.commit_number == 2 and loaded.trainer.pipeline.training_mode == "manual"
     restarted.close()
-    # A recipe that takes no requests keeps its default, so a person can still select a mode.
+    # A recipe that takes no requests keeps its default, so a person can still select a mode. It is another
+    # deployment, with an artifact store of its own.
+    REPOSITORIES.pop(tmp_path)
     without_requests = open_dispatcher(Recipe())
     with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
         assert without_requests.get_or_create_scenario("s").trainer.pipeline.training_mode == "auto"
@@ -1048,7 +1057,7 @@ def test_the_job_of_a_request_lists_the_requests_parameters_and_its_times(tmp_pa
         "agent_record_id": "train-1",
         "text": "Prefer tests first",
         "session": "session-1",
-        "artifact_id": "release-1",
+        "artifact_id": "artifact-1",
         "parameters": {"learning_rate": 0.5},
         "samples": list(stored_samples_of(dispatcher, "a")),
     }
@@ -1161,7 +1170,8 @@ def test_a_request_that_names_train_from_starts_its_job_there_and_leaves_the_tra
 
     # The job starts from what the component imported of the named artifact, not from the first job's checkpoint.
     first, second = component.submitted
-    [imported] = component.imported
+    # The training service imported the artifact for the job's check and again for the job: one start.
+    [imported] = set(component.imported)
     assert (second.start, second.train_from_artifact_id) == (str(imported), creation)
     assert second.start != JobLoopState.from_dict(scenario.trainer.state).start
     # Its checkpoint names the start: the training start stays, and the new artifact's parent is the named artifact.

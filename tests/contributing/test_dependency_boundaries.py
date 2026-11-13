@@ -109,7 +109,7 @@ def test_harbor_task_values_and_validation_do_not_depend_on_harness() -> None:
         assert _imports_of(imported, "reef.harness") == [], module_name
 
 
-def test_release_id_chain_does_not_depend_on_scenario_or_trainer() -> None:
+def test_snapshot_chain_does_not_depend_on_scenario_or_trainer() -> None:
     module = importlib.import_module("reef.artifact.snapshot_chain")
     tree = ast.parse(inspect.getsource(module))
 
@@ -500,6 +500,42 @@ def test_inference_and_training_contracts_import_without_loading_backends() -> N
         "assert not [name for name in sys.modules "
         "if name.startswith(('reef.inference.sglang.', 'reef.train.slime_backend'))]"
     )
+
+
+def test_only_the_training_service_builds_a_training_component() -> None:
+    """One place builds a weight component and one a harness component, each only for a process that runs the
+    training service. Every other process holds the backend's facts and the jobs queue."""
+    builders = ("build_training_component", "from_settings")
+    built: dict[str, list[str]] = {}
+    for path in sorted((REPO_ROOT / "reef").rglob("*.py")):
+        if path == REPO_ROOT / "reef/train/component.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func
+            if isinstance(called, ast.Name) and called.id == "build_training_component":
+                built.setdefault(str(path.relative_to(REPO_ROOT)), []).append(called.id)
+            if (
+                isinstance(called, ast.Attribute)
+                and called.attr == "from_settings"
+                and isinstance(called.value, ast.Name)
+                and called.value.id == "HarnessTrainingComponent"
+            ):
+                built.setdefault(str(path.relative_to(REPO_ROOT)), []).append(called.attr)
+    assert built == {"reef/service/assembly.py": list(builders)}
+    assembly = ast.parse((REPO_ROOT / "reef/service/assembly.py").read_text(encoding="utf-8"))
+    guarded = [
+        ast.unparse(node.test)
+        for node in ast.walk(assembly)
+        if isinstance(node, ast.IfExp)
+        and any(name in ast.unparse(node.body) for name in ("build_training_component(", "from_settings("))
+    ]
+    assert guarded == ["runs_training", "runs_training"]
+    # Control's view of a backend holds its facts: it has no component to call.
+    from reef.train.job_queue import JobQueueComponent
+
+    assert list(inspect.signature(JobQueueComponent).parameters)[:2] == ["facts", "queue"]
 
 
 def test_training_backends_never_import_inference_implementations() -> None:

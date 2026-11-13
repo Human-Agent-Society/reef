@@ -345,7 +345,7 @@ class CommittingPipeline(TrainingPipeline):
         commit = CommitRecord(
             scenario="tasks",
             commit_number=step + 1,
-            snapshot=SnapshotRef(f"release:{step + 1}", "base"),
+            snapshot=SnapshotRef(f"snapshot:{step + 1}", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=step + 1,
@@ -645,7 +645,7 @@ def test_a_restart_hands_out_the_saved_tasks_that_did_not_train_without_generati
         commit=CommitRecord(
             scenario="tasks",
             commit_number=1,
-            snapshot=SnapshotRef("release:1", "base"),
+            snapshot=SnapshotRef("snapshot:1", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=1,

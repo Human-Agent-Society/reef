@@ -1,7 +1,7 @@
 """Shared pieces of the harness evolution tests.
 
 A fake pi binary that writes its rendered rules into its session, the
-deployment's model binding, a pi seed tree, an in-memory releases reader of
+deployment's model binding, a pi seed tree, an in-memory artifacts reader of
 one component, and a recipe, its harness training component and a backend
 built over them. Tasks run the
 fake binary through the real adapter path, so render, launch and the
@@ -109,17 +109,17 @@ class TreeArtifacts(CommittedArtifacts):
         self.trees: dict[str, HarnessTree] = {"base": base}
         self.order = ["base"]
 
-    def publish(self, release_id: str, tree: HarnessTree) -> None:
-        self.trees[release_id] = tree
-        self.order.append(release_id)
+    def publish(self, artifact_id: str, tree: HarnessTree) -> None:
+        self.trees[artifact_id] = tree
+        self.order.append(artifact_id)
 
     def head(self, component: str) -> ArtifactTextFiles:
         return self.artifact(self.order[-1], component)
 
-    def artifact(self, release_id: str, component: str) -> ArtifactTextFiles:
-        if release_id not in self.trees:
-            raise ArtifactNotFoundError(f"no snapshot {release_id!r}")
-        return ArtifactTextFiles(release_id, dict(self.trees[release_id].files))
+    def artifact(self, artifact_id: str, component: str) -> ArtifactTextFiles:
+        if artifact_id not in self.trees:
+            raise ArtifactNotFoundError(f"no snapshot {artifact_id!r}")
+        return ArtifactTextFiles(artifact_id, dict(self.trees[artifact_id].files))
 
 
 def harness_recipe(
@@ -192,7 +192,7 @@ def with_harness_component(
         collector=collector,
         agent=agent,
     )
-    return replace(live, harness_component=component)
+    return replace(live, harness_component=component, harness_facts=component.facts)
 
 
 def rebuilt_recipe(
@@ -217,7 +217,7 @@ def rebuilt_recipe(
         collector=component.collector,
         agent=component.agent,
     )
-    return changed, replace(live, harness_component=rebuilt)
+    return changed, replace(live, harness_component=rebuilt, harness_facts=rebuilt.facts)
 
 
 def configured_live(
@@ -227,7 +227,7 @@ def configured_live(
     its configuration alone (``with_harness_components``). ``live`` defaults to the runtime ``runtime()`` alone;
     ``environ`` holds the variables that the component's sandbox and agent read, none by default."""
     live = LiveObjects(runtime=runtime()) if live is None else live
-    return with_harness_components(recipe, live, {} if environ is None else environ)
+    return with_harness_components(recipe, live, {} if environ is None else environ, runs_training=True)
 
 
 def configured_component(
@@ -246,7 +246,7 @@ def harness_component(live: LiveObjects) -> HarnessTrainingComponent:
 
 
 #: The snapshots whose head each test backend runs its jobs on, as a job names its start.
-BACKEND_RELEASES: WeakKeyDictionary[HarnessBackend, TreeArtifacts] = WeakKeyDictionary()
+BACKEND_ARTIFACTS: WeakKeyDictionary[HarnessBackend, TreeArtifacts] = WeakKeyDictionary()
 
 
 def build_harness_backend(
@@ -256,15 +256,15 @@ def build_harness_backend(
     artifacts: TreeArtifacts | None = None,
 ) -> HarnessBackend:
     """The backend of ``COMPONENT`` in ``scenario`` that the harness component of ``live`` builds, whose jobs run
-    on the head of ``releases`` (an in-memory history whose base is ``recipe``'s seed by default)."""
+    on the head of ``artifacts`` (an in-memory history whose base is ``recipe``'s seed by default)."""
     backend = harness_component(live).build_backend(scenario, COMPONENT)
-    BACKEND_RELEASES[backend] = TreeArtifacts(recipe.seed) if artifacts is None else artifacts
+    BACKEND_ARTIFACTS[backend] = TreeArtifacts(recipe.seed) if artifacts is None else artifacts
     return backend
 
 
 def head_of(backend: HarnessBackend) -> ArtifactTextFiles:
     """The head that ``backend``'s next job runs on: the latest snapshot of its ``build_harness_backend`` history."""
-    return BACKEND_RELEASES[backend].head(COMPONENT)
+    return BACKEND_ARTIFACTS[backend].head(COMPONENT)
 
 
 def harness_backend(

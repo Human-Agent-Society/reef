@@ -5,8 +5,9 @@ from threading import Event
 
 import pytest
 from tests.support.artifact_versions import RecordingExperimentTracker, dispatcher, train
-from tests.support.component_trainers import HARNESS, _dispatcher, _RecordingTracker, _scenario
+from tests.support.component_trainers import HARNESS, _dispatcher, _RecordingTracker, _scenario, wait_for_job_check
 from tests.support.samples_service import make_samples
+from tests.support.serving import wait_for_serving
 
 from reef.observability import ExperimentRun
 from reef.train.job_queue import scenario_jobs
@@ -86,15 +87,19 @@ def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, mon
 @pytest.mark.parametrize("failing", [False, True])
 def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
     """A blocked ``record`` holds up nothing. ``correlation_metrics`` runs before the commit record is written,
-    under the operation lock only, so release reads still answer."""
+    under the operation lock only, so artifact reads still answer."""
     tracker = _RecordingTracker()
     # Run the cycle explicitly; sample notifications must not start competing workers.
     value, _ = _dispatcher(tmp_path, experiment_tracker=tracker, hold_local_cycles=True)
     monkeypatch.setattr(value.local_workers, "start", lambda scenario, component=None: None)
     value.local_workers.open()
     scenario = _scenario(value, 1)
+    # An automatic job waits until the selected artifact serves.
+    wait_for_serving(value, "agent")
     # The rows went to the store directly: make their samples, as the samples service does.
     make_samples(scenario)
+    # The training service checks the harness job first; the cycle below then commits the job's submission.
+    wait_for_job_check(scenario, HARNESS)
     entered, release = Event(), Event()
 
     def blocked(event):

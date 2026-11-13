@@ -43,7 +43,7 @@ def compare_scores(candidate: RolloutScores, current: RolloutScores) -> ScoreCom
     if [task for task, _ in candidate.tasks] != [
         task for task, _ in current.tasks
     ] or candidate.count != current.count:
-        raise ValueError("compared releases run the same tasks the same number of times")
+        raise ValueError("compared artifacts run the same tasks the same number of times")
 
     wins = losses = ties = dropped = 0
     for mine, theirs in zip(candidate.rollouts(), current.rollouts(), strict=True):

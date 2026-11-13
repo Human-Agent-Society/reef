@@ -246,8 +246,9 @@ def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher
     submissions: list[str] = []
 
     def lose_first_acknowledgement(self: JobQueueComponent, job: TrainingJob) -> None:
-        submissions.append(job.job_id)
+        # A submission that waits for the job's check raises before this line.
         queued_submit(self, job)
+        submissions.append(job.job_id)
         if len(submissions) == 1:
             raise ConnectionError("lost submission acknowledgement")
 
@@ -328,7 +329,7 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
 
 
 @pytest.mark.unit
-def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None:
+def test_two_jobs_form_one_deterministic_snapshot_chain(start_dispatcher) -> None:
     component, dispatcher = start_dispatcher()
     _submit_pair(dispatcher)
     _wait_for_jobs(dispatcher, 1)

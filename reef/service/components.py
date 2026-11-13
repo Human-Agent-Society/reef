@@ -46,7 +46,6 @@ from reef.service.assembly import (
     build_task_files,
     default_served_url,
     load_deployment,
-    load_serving_deployment,
     open_scenario_storage,
     open_service_coordination,
     with_harness_components,
@@ -61,7 +60,7 @@ from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.tasks import TaskFileStore
-from reef.train.job_queue import TrainingJobWorker
+from reef.train.job_queue import TrainingCheckWorker, TrainingJobWorker
 
 
 class ComponentApp(ABC):
@@ -85,11 +84,11 @@ class ControlApp(ComponentApp):
 class InferenceApp(ComponentApp):
     """The inference service owns runtime startup and serves requests from published routes.
 
-    It runs no training job, so it builds no training component for a backend that states its facts
-    (``load_serving_deployment``)."""
+    It runs no training job, so it builds no training component: it reads the backend's facts
+    (``load_deployment``)."""
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
-        recipe, live = load_serving_deployment(settings, environ)
+        recipe, live = load_deployment(settings, environ, runs_training=False)
         runtime = live.runtime
         coordination = open_service_coordination(settings)
         try:
@@ -190,14 +189,18 @@ class HarnessApp(ComponentApp):
 class TrainingApp(ComponentApp):
     """Build the training service from its job components and coordination store.
 
-    Values: this stateless builder returns an app with one worker per job component of the process, and refuses a
-    deployment with no job component. The app owns these workers, their components, the runtime and the coordination store.
-    Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario or artifact stores. It opens
-    the data store, which keeps the data directory of each job.
+    Values: this stateless builder returns an app with two workers per job component of the process, one that
+    runs the jobs (``TrainingJobWorker``) and one that answers control's checks (``TrainingCheckWorker``), and
+    refuses a deployment with no job component. The app owns these workers, their components, the runtime and the
+    coordination store.
+    Purpose: ``build_component_app("training", ...)`` is the only process of a split deployment that builds a
+    training component. It opens no scenario store. It opens the data store, which keeps the data directory of
+    each job, and the artifact store, from which it reads the snapshot that a job starts from
+    (``reef.train.job_queue.resolved_job``).
     """
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
-        recipe, live = load_deployment(settings, environ)
+        recipe, live = load_deployment(settings, environ, runs_training=True)
         if isinstance(recipe, CompositeRecipe):
             live = replace(
                 live,
@@ -208,7 +211,7 @@ class TrainingApp(ComponentApp):
         runtime = live.runtime
         try:
             # The harness training component reads the served endpoint, so it is built after ``live`` has it.
-            live = with_harness_components(recipe, live, environ)
+            live = with_harness_components(recipe, live, environ, runs_training=True)
         except BaseException:
             close_runtimes(live.job_components(), runtime)
             raise
@@ -217,9 +220,15 @@ class TrainingApp(ComponentApp):
         task_files: TaskFileStore | None = None
         data_store: DataStore | None = None
         workers: list[TrainingJobWorker] = []
+        check_workers: list[TrainingCheckWorker] = []
 
         def close_training() -> None:
             errors: list[BaseException] = []
+            for check_worker in check_workers:
+                try:
+                    check_worker.stop()
+                except BaseException as exc:
+                    errors.append(exc)
             unclosed_components = list(components[len(workers) :])
             for worker in reversed(workers):
                 try:
@@ -248,17 +257,34 @@ class TrainingApp(ComponentApp):
             coordination = open_service_coordination(settings)
             task_files = build_task_files(settings)
             data_store = build_data_store(settings, task_files)
+            # A job names the snapshot that it starts from, which the workers read from the artifact store.
+            backends = build_artifact_backend(settings)
+            local_artifact_dir = Path(settings.artifact_cache_dir) / "staged"
             workers.extend(
                 TrainingJobWorker(
                     component,
                     coordination.work_queue,
                     data_store,
+                    backends,
                     worker_id=instance_id(f"training-{component.name}"),
+                    local_artifact_dir=local_artifact_dir,
                     slots=settings.training_max_jobs,
                 )
                 for component in components
             )
-            for worker in workers:
+            check_workers.extend(
+                TrainingCheckWorker(
+                    component,
+                    coordination.work_queue,
+                    data_store,
+                    backends,
+                    worker_id=instance_id(f"training-check-{component.name}"),
+                    local_artifact_dir=local_artifact_dir,
+                )
+                for component in components
+            )
+            # The job worker starts the component's jobs first (``TrainingComponent.start_jobs``).
+            for worker in (*workers, *check_workers):
                 worker.start()
             app = service_application(settings.tokens)
         except BaseException:

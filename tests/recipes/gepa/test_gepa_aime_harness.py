@@ -392,7 +392,9 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         assert HarnessTree.read(tmp_path / "served") == recipe.seed
         # The driver plans from the history where the scenario's backend writes it; before any step the archive
         # holds the seed alone, charged GEPA's seed validation.
-        backend = job_backend(service.dispatcher.get_or_create_scenario(service.scenario).trainer)
+        backend = job_backend(
+            service.dispatcher.get_or_create_scenario(service.scenario).trainer, dispatcher=service.dispatcher
+        )
         assert service.history().root == backend.history.root
         archive = driver.committed_archive(service, problems, recipe.seed, 0)
         assert (len(archive.candidates), archive.served, archive.metric_calls) == (1, 0, len(problems))

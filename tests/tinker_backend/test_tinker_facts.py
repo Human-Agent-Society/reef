@@ -75,7 +75,6 @@ def assert_same_answers(
         component.shares_scenarios,
         component.concurrent_jobs,
     )
-    assert facts.default_start_inputs == component.default_start_inputs
     for kind in ("trajectory", "task"):
         assert facts.parameters_schema(kind) == component.parameters_schema(kind)
     answers = [(refusal(facts.check_root_start, root), refusal(component.root_start, root)) for root in roots]

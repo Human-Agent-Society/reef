@@ -382,7 +382,7 @@ Isolation (`evolution.agent.sandbox`, or `REEF_AGENT_SANDBOX`):
   process twice within the original time limit; it does not rerun the command.
   The tunnel retries interrupted response transfers without duplicating chunks.
   A response that cannot be completed remains a failed stream. Failed jobs
-  appear as `Failed` on the request and release pages, with the recorded
+  appear as `Failed` on the request and artifact pages, with the recorded
   error, and publish no snapshot. After resolving the error, submit the request again.
 
   ```bash

@@ -147,7 +147,8 @@ durable store, the order is:
        including every unchanged component.
    * - Train-from
      - The trainer takes the artifact as its start and cancels its running
-       job: a weight trainer imports the artifact with ``import_start``, and
+       job: a weight trainer names the artifact's snapshot as its start, which the
+       training service imports with ``import_start`` for the next job, and
        a harness trainer reads the entries of its tree. Commit a ``train_from``
        record. A restart before the trainer's next training commit takes the
        start again from that record.

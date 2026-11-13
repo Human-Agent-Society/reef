@@ -15,7 +15,7 @@ from reef.scenario.factory import read_trainer_specs
 from reef.scenario.live_objects import LiveObjects
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.trainer_builder import SpecTrainerBuilder
+from reef.train.trainer_builder import build_trainers
 
 
 def test_a_scenario_pipeline_opens_the_task_stores_of_its_session(tmp_path: Path) -> None:
@@ -42,7 +42,7 @@ def test_a_scenario_pipeline_opens_the_task_stores_of_its_session(tmp_path: Path
 def test_each_composite_component_opens_its_own_task_stores_and_shares_the_sample_store() -> None:
     with closing(data_storage()) as storage, closing(storage.open("math")) as session:
         samples = sample_store(storage, "math", session)
-        trainers = SpecTrainerBuilder().build_trainers(
+        trainers = build_trainers(
             read_trainer_specs(CompositeRecipe(components={"first": Recipe(), "second": Recipe()}), LiveObjects()),
             "math",
             session.records,

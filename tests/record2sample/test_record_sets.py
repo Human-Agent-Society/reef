@@ -202,10 +202,12 @@ def test_an_artifact_that_serves_again_is_the_newest_and_its_data_is_fresh() -> 
             "stop_reason": "end_turn",
             "stream_delivery": {"complete": False, "error": "upstream engine aborted the generation"},
         },
+        {"choices": [{"finish_reason": "stop"}], "stream_delivery": {"complete": False}},
+        {"stream": True, "complete": False, "body": "partial"},
     ],
-    ids=["native", "sglang", "openai", "tool-call", "anthropic", "legacy-stripped-anthropic"],
+    ids=["native", "sglang", "openai", "tool-call", "anthropic", "legacy-stripped-anthropic", "capture", "raw"],
 )
-def test_aborted_inference_ends_before_sample_creation(response: dict[str, object]) -> None:
+def test_incomplete_inference_ends_before_sample_creation(response: dict[str, object]) -> None:
     stage = EachInference()
     aborted = AgentRecord.create(
         scenario="s", request_type=RequestType.INFERENCE, payload={"response": response}, agent_record_id="aborted"

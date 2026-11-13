@@ -65,7 +65,7 @@ TASKS_FILE = WORK / "tasks.json"
 # The native variant: the pulled tree the serve process runs, and the workspace its tools work in.
 TREE_DIR = WORK / "tree"
 SCRATCH_DIR = WORK / "scratch"
-RELEASE_FILE = ".reef-harness-release"
+SNAPSHOT_FILE = ".reef-harness-release"
 #: The key the binding carries when the service wants no token: the native loop refuses an empty one.
 NO_TOKEN_API_KEY = "reef-no-token"
 
@@ -261,7 +261,7 @@ def native_main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # The pulled tree is the seed: the head moves off it only when a step publishes.
-    seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["artifact_id"]
+    seed = json.loads((TREE_DIR / SNAPSHOT_FILE).read_text())["artifact_id"]
 
     before = steps_before(client)
     # turns + report: each task is one turn on the resident process; the score goes against the turn's receipts.
@@ -340,7 +340,7 @@ def replay():
     except (OSError, ValueError, KeyError) as exc:
         print(f"replay page not written: {exc}")
         return
-    print(f"replay: open work/replay.html ({len(data['releases'])} release(s), {len(data['sessions'])} session(s))")
+    print(f"replay: open work/replay.html ({len(data['snapshots'])} snapshot(s), {len(data['sessions'])} session(s))")
 
 
 if __name__ == "__main__":

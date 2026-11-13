@@ -169,7 +169,7 @@ def test_artifact_id_binding_is_immutable_and_scoped_to_its_scenario(
 
 
 @pytest.mark.integration
-def test_each_scenario_registers_its_own_root_release_with_no_parent(tmp_path: Path, fake_git_lfs: None) -> None:
+def test_each_scenario_registers_its_own_root_snapshot_with_no_parent(tmp_path: Path, fake_git_lfs: None) -> None:
     """A registration pushes a commit with no parent to the scenario's ref; a second registration of the scenario
     stores nothing and gets the winner's head; another scenario gets a distinct root. No shared ref exists."""
     remote = tmp_path / "artifacts.git"
@@ -311,7 +311,7 @@ def test_concurrent_registrations_of_one_scenario_make_one_root(tmp_path: Path, 
 
 
 @pytest.mark.integration
-def test_metadata_and_release_reads_share_one_git_workspace_safely(
+def test_metadata_and_snapshot_reads_share_one_git_workspace_safely(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_git_lfs: None
 ) -> None:
     remote, work = tmp_path / "artifacts.git", tmp_path / "work"
@@ -541,12 +541,12 @@ def test_a_default_start_writes_its_text_files_and_refuses_other_values(tmp_path
 
 
 @pytest.mark.integration
-def test_a_published_file_is_linked_into_the_release_cache_not_copied(tmp_path: Path, fake_git_lfs: None) -> None:
+def test_a_published_file_is_linked_into_the_snapshot_cache_not_copied(tmp_path: Path, fake_git_lfs: None) -> None:
     """Stored files are immutable, so a publish links them into the snapshot's cache entry instead of cloning it."""
     remote = tmp_path / "artifacts.git"
     backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
     head = backend.register(root_tree(tmp_path / "root"), metadata={})
-    source = tmp_path / "release"
+    source = tmp_path / "snapshot"
     source.mkdir()
     (source / "weights.bin").write_bytes(b"\x00" * 64)
     published = backend.publish(Artifact.local(source), expected_parent=head)
@@ -600,8 +600,8 @@ def test_a_carried_component_is_neither_hashed_nor_copied_again(
     finally:
         carried.chmod(0o644)
 
-    def blob(release: str, path: str) -> str:
-        return run_git("--git-dir", str(remote), "rev-parse", f"{release}:{path}")
+    def blob(revision: str, path: str) -> str:
+        return run_git("--git-dir", str(remote), "rev-parse", f"{revision}:{path}")
 
     assert blob(published.revision, "weights/model.safetensors") == blob(parent.revision, "weights/model.safetensors")
     assert run_git("--git-dir", str(remote), "show", f"{published.revision}:weights/model.safetensors").startswith(
@@ -649,7 +649,7 @@ def test_the_work_tree_never_writes_through_a_link(tmp_path: Path, fake_git_lfs:
     assert (blobs / "weights").read_text() == "base"
     assert "*.safetensors filter=lfs" in backend.materialize(head).local_path.joinpath(".gitattributes").read_text()
 
-    source = tmp_path / "release"
+    source = tmp_path / "snapshot"
     source.mkdir()
     (source / "reef-artifact.json").write_text("{}")
     (source / ".gitattributes").write_text("stale\n")
@@ -664,7 +664,7 @@ def test_a_broken_symlink_below_the_top_level_is_refused_by_name(tmp_path: Path,
     remote = tmp_path / "artifacts.git"
     backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
     head = backend.register(root_tree(tmp_path / "root"), metadata={})
-    source = tmp_path / "release"
+    source = tmp_path / "snapshot"
     (source / "sub").mkdir(parents=True)
     (source / "sub" / "gone").symlink_to(tmp_path / "nowhere")
     with pytest.raises(ArtifactSourceError, match=r"broken symlink: .*sub/gone"):
@@ -685,7 +685,9 @@ def hub_like_remote(tmp_path: Path) -> Path:
 
 
 @pytest.mark.integration
-def test_the_hub_layout_keeps_releases_on_tags_and_moving_refs_on_branches(tmp_path: Path, fake_git_lfs: None) -> None:
+def test_the_hub_layout_keeps_snapshots_on_tags_and_moving_refs_on_branches(
+    tmp_path: Path, fake_git_lfs: None
+) -> None:
     remote = hub_like_remote(tmp_path)
     factory = GitLFSRepositoryBackend.factory(
         remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache", refs=HUB_REFS

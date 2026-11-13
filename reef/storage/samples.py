@@ -25,16 +25,21 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, MemoryDataStore, NewItem, StoredItem
+from reef.storage.data import (
+    MAX_QUERY_LIMIT,
+    TASK_PATH_READERS,
+    DataStore,
+    ItemConflictError,
+    MemoryDataStore,
+    NewItem,
+    StoredItem,
+)
 from reef.storage.tasks import LocalTaskFileStore, SplitName, TaskFileStore
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
 CONSUMED_SAMPLE_PREFIX = "sample:"
 #: The prefix of a record ID in a ``TrainingState`` that a stage ended and no commit named when it was stored.
 ENDED_RECORD_PREFIX = "ended:"
-#: The task directories that ``SampleStore.task_paths`` reads from the task file store at the same time. A remote
-#: store downloads each directory, and one download at a time takes minutes for some thousand tasks.
-TASK_PATH_READERS = 8
 
 SampleKind = Literal["trajectory", "task"]
 SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
@@ -155,7 +160,7 @@ class SampleStore:
     ``state`` its training state.
 
     Purpose: ``ScenarioStorage.sample_store`` makes it for an open scenario. The listings and evaluations read it,
-    and the scenario factory's trainer builder gives each trainer its ``TrainerSamples`` (``for_trainer``).
+    and ``reef.train.trainer_builder.build_trainers`` gives each trainer its ``TrainerSamples`` (``for_trainer``).
     """
 
     data: DataStore

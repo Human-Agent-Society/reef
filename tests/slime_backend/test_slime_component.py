@@ -541,7 +541,7 @@ def test_the_default_start_is_a_base_root_and_the_base_start_names_the_startup_w
     root_dir = tmp_path / "root"
     root_dir.mkdir()
     default.write(root_dir)
-    stack.component.check_artifact(DirectoryFiles(root_dir))
+    stack.component.facts.check_artifact(DirectoryFiles(root_dir))
     root = ScenarioRoot(Artifact.local(root_dir), RootSource("default", inputs=default.inputs))
     # The workers make the startup weights from the model, so a job from the base root starts at the base start.
     assert stack.component.root_start(root) == stack.component.base_start
@@ -628,21 +628,21 @@ def test_a_job_slime_cannot_run_is_refused_and_records_nothing(tmp_path, stacks,
 
 
 @pytest.mark.unit
-def test_a_lora_release_holds_the_adapter_where_serving_loads_it(tmp_path, stacks) -> None:
+def test_a_lora_artifact_holds_the_adapter_where_serving_loads_it(tmp_path, stacks) -> None:
     stack = stacks(tmp_path, lora=True)
 
     status = stack.run("sft", step=0)
 
     (checkpoint,) = status.checkpoints
-    release = Path(checkpoint.path) / "release"
-    assert checkpoint.artifact_path == str(release)
-    assert (release / ADAPTER_DIR / "adapter_config.json").is_file()
-    assert (release / ADAPTER_DIR / "adapter_model.safetensors").read_text() == "adapter-0"
-    assert {path.name for path in release.iterdir()} == {ADAPTER_DIR}
+    artifact_dir = Path(checkpoint.path) / "release"
+    assert checkpoint.artifact_path == str(artifact_dir)
+    assert (artifact_dir / ADAPTER_DIR / "adapter_config.json").is_file()
+    assert (artifact_dir / ADAPTER_DIR / "adapter_model.safetensors").read_text() == "adapter-0"
+    assert {path.name for path in artifact_dir.iterdir()} == {ADAPTER_DIR}
 
 
 @pytest.mark.unit
-def test_the_release_format_names_full_weights_or_the_lora_adapter_in_the_engines_module_names(
+def test_the_artifact_format_names_full_weights_or_the_lora_adapter_in_the_engines_module_names(
     tmp_path, stacks
 ) -> None:
     assert stacks(tmp_path / "full").component.artifact_format == ArtifactFormat("full")

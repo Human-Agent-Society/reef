@@ -1,6 +1,6 @@
 """The harness backend's algorithm state, the part of a commit record the backend owns.
 
-The tree itself is not here: it is the git release the commit recorded, and
+The tree itself is not here: it is the git snapshot the commit recorded, and
 the trees a job tried are in the scenario's history. The state keeps what
 crosses jobs and must commit with them: the failure streak the budget reads, the
 collected evaluation tasks, and the method's own files.

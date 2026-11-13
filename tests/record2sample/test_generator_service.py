@@ -826,7 +826,7 @@ def source_records() -> tuple[AgentRecord, ...]:
             request_type=RequestType.INFERENCE,
             payload={"messages": [{"role": "user", "content": "Recover the service port from its state file."}]},
             created_at=123.0,
-            artifact_id="release",
+            artifact_id="artifact-1",
         ),
         AgentRecord.create(
             agent_record_id="original-report",

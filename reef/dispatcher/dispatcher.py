@@ -63,6 +63,7 @@ from reef.storage.work_queue import FINAL_STATES, WorkItem
 from reef.train.job_queue import (
     JobExperimentRecorder,
     JobQueueComponent,
+    TrainingCheckWorker,
     TrainingJobWorker,
     cancel_request_jobs,
     cancel_scenario_job,
@@ -79,7 +80,6 @@ from reef.train.manager import (
     TrainFrom,
     TrainingManager,
 )
-from reef.train.trainer_builder import TrainerBuilder
 from reef.train.training_requests import RequestCancel, TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
@@ -142,7 +142,6 @@ class Dispatcher(
         work_retention_seconds: float = 7 * 24 * 3600.0,
         training_max_jobs: int = 1,
         training_manager: TrainingManager | None = None,
-        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         """``live``: the runtime, the job components, the data store and the served endpoint that this process
         built for ``recipe`` (``LiveObjects``); None is a process with none of them, which fits a recipe that only
@@ -178,10 +177,12 @@ class Dispatcher(
         The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
         the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
 
-        Each job component of ``live`` gets its jobs through the jobs queue: the dispatcher gives the trainers a
-        ``JobQueueComponent`` over it and, with ``training``, runs a ``TrainingJobWorker`` on it. ``self.live`` is
-        the value that the trainers see: the jobs queue's views of the components, and the store of the job data
-        directories.
+        Each training backend whose facts ``live`` holds gets its jobs through the jobs queue: the dispatcher gives
+        the trainers a ``JobQueueComponent`` of the facts. ``live`` holds a backend's component only in a process
+        that runs ``training``; the dispatcher then runs a ``TrainingJobWorker`` and a ``TrainingCheckWorker`` on
+        it, and nothing else reads the component. ``self.live`` is the value that the trainers see: the jobs
+        queue's views, and the store of the job data directories. A process that runs every service takes the same
+        path as control of a split deployment.
 
         ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
         constructor first waits for the control lease, while another control instance holds it; then the
@@ -193,9 +194,6 @@ class Dispatcher(
         (``ItemRecordStore``). Control runs the ``data_sync`` items that the data service adds after its writes
         (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
         which owns the task file store that the data store shares.
-
-        ``trainer_builder``: builds the trainers of each scenario. None builds each trainer from the
-        recipe's spec (``SpecTrainerBuilder``).
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
@@ -218,33 +216,43 @@ class Dispatcher(
         self.job_directory_store: DataStore = (
             MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
         )
+        #: The components that the process built. Its training workers run their jobs and close them; a process
+        #: that runs no training service should hold none, and the dispatcher closes those that it holds.
+        self.job_components = live.job_components()
         if self.services.runs_training:
-            for component in live.job_components():
+            for component in self.job_components:
                 self.workers.add(
                     TrainingJobWorker(
                         component,
                         self.queue,
                         self.job_directory_store,
+                        backend_factory,
                         worker_id=instance_id(f"training-{component.name}"),
+                        local_artifact_dir=local_artifact_dir,
                         slots=training_max_jobs,
                     )
                 )
-        owns_components = not self.services.runs_training
+                self.workers.add(
+                    TrainingCheckWorker(
+                        component,
+                        self.queue,
+                        self.job_directory_store,
+                        backend_factory,
+                        worker_id=instance_id(f"training-check-{component.name}"),
+                        local_artifact_dir=local_artifact_dir,
+                    )
+                )
         #: The deployment's recipe: configuration only.
         self.recipe = recipe
-        #: The live objects as the trainers see them: each job component is the jobs queue's view of the one that
-        #: the process built, and the data store is the store of the job data directories.
+        #: The live objects as the trainers see them: each component is the jobs queue's view of the backend whose
+        #: facts the process holds, and the data store is the store of the job data directories.
         self.live = replace(
             live,
             training_component=(
-                None
-                if live.training_component is None
-                else JobQueueComponent(live.training_component, self.queue, owns_component=owns_components)
+                None if live.training_facts is None else JobQueueComponent(live.training_facts, self.queue)
             ),
             harness_component=(
-                None
-                if live.harness_component is None
-                else JobQueueComponent(live.harness_component, self.queue, owns_component=owns_components)
+                None if live.harness_facts is None else JobQueueComponent(live.harness_facts, self.queue)
             ),
             data_store=self.job_directory_store,
         )
@@ -269,7 +277,6 @@ class Dispatcher(
             lifecycle=self,
             served_models=coordination.served_models,
             training_requests=TrainingRequestQueue(self.queue),
-            trainer_builder=trainer_builder,
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
@@ -674,9 +681,11 @@ class Dispatcher(
         scenario has one component.
 
         Raise ``ScenarioNotFoundError`` for an unknown scenario, the errors of ``Scenario.resolve_artifact`` for an
-        artifact that is not one of the component, ``ReefError`` when the runtime serves one artifact and
-        ``served`` names more, and ``ValueError`` when this service does not run control or when an empty
-        ``served`` comes with a ``component``.
+        artifact that is not one of the component, and ``ValueError`` when this service does not run control or when
+        an empty ``served`` comes with a ``component``. Raise ``ReefError`` when ``served`` names more artifacts than
+        the runtime keeps loaded at once (``require_served_capacity``); that check precedes every change, so the
+        scenario then serves what it served, or still serves nothing, with the same commit history, routes and
+        traffic split.
         """
         if self.publisher is None:
             raise ValueError("this service does not run control, so it cannot change what a scenario serves")
@@ -698,6 +707,7 @@ class Dispatcher(
             name = current.artifact_snapshot(active_id, component)[0]
             for artifact_id in served:
                 current.artifact_snapshot(artifact_id, name)
+            self.require_served_capacity(current, name, sorted(served))
             beside = {artifact_id for artifact_id, entry in current.served_beside().items() if entry.component == name}
             others = set(served) - {active_id}
             # The artifact that is active now keeps its route while the new one starts.
@@ -712,6 +722,35 @@ class Dispatcher(
             self.publisher.write_traffic_weights(scenario, split)
             self.scenario_committed(current)
             return {"served": self.served_mapping(current)[name]}
+
+    def require_served_capacity(self, current: Scenario, component: str, artifact_ids: Sequence[str]) -> None:
+        """Raise ``ReefError`` when the runtime of ``current`` cannot keep ``artifact_ids`` loaded at once.
+
+        ``artifact_ids`` are all the artifacts of ``component`` that the scenario shall serve, in sorted order: one
+        or more. They are more than the runtime keeps loaded when ``component`` is the one that the runtime loads
+        (``ScenarioComponents.loaded_component``) and their count exceeds
+        ``InferenceRuntime.served_artifact_capacity``. An artifact of any other component loads nothing: the active
+        weights answer for it. The same holds for every artifact of a scenario without a runtime or without a loaded
+        component.
+
+        The count is that of the mapping alone. An artifact that the mapping stops takes no part in it, though it
+        can hold its engine for a while after the change; the runtime refuses a load that finds no free engine.
+        """
+        runtime = current.runtime
+        if runtime is None or component != current.components.loaded_component:
+            return
+        capacity = runtime.served_artifact_capacity
+        if capacity is None or len(artifact_ids) <= capacity:
+            return
+        limit = (
+            "answers only from the snapshot it has loaded"
+            if capacity == 1
+            else f"keeps at most {capacity} artifacts of component {component!r} loaded at once"
+        )
+        raise ReefError(
+            f"scenario {current.name!r}'s runtime {limit}, so it cannot serve the {len(artifact_ids)} artifacts "
+            f"that the mapping names: {', '.join(artifact_ids)}"
+        )
 
     def served_mapping(self, current: Scenario) -> dict[str, dict[str, int]]:
         """What ``current`` serves, by component: each served artifact of the component with its traffic weight.
@@ -1321,7 +1360,7 @@ class Dispatcher(
             self.storage.close()
         except BaseException as exc:
             errors.append(exc)
-        errors.extend(close_runtimes(self.live.job_components(), self.live.runtime))
+        errors.extend(close_runtimes(() if self.services.runs_training else self.job_components, self.live.runtime))
         # Send the experiment events that are still queued before the tracker closes.
         self.registry.experiment_reports.close()
         try:

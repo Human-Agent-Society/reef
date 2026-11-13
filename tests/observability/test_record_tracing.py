@@ -6,11 +6,11 @@ import json
 import time
 
 import pytest
-from tests.reef_service.test_sse_streams import FakeStream
 from tests.support.artifact_versions import ImportingComponent, finished_jobs
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import live_objects
+from tests.support.sse_streams import FakeStream
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType

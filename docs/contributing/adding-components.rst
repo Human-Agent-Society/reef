@@ -132,8 +132,11 @@ Implementation
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
 - Implement ``import_start`` to load a published snapshot as the start of the
-  next job. Raise ``ValueError`` when the framework cannot do this; Reef then
-  refuses a ``train-from`` for the scenario with HTTP 400.
+  next job. The training service calls it when it takes a job whose start
+  names a snapshot, so the same snapshot must give the same start again.
+  Raise ``ValueError`` when the framework cannot do this, and refuse the same
+  snapshots in ``facts.check_import_start``; Reef then refuses a
+  ``train-from`` for the scenario with HTTP 400.
 - Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
@@ -155,18 +158,38 @@ Implementation
   its own settings, and let the component answer the same members from a value
   of it, so the two cannot differ. Share no facts code with another backend.
   ``facts`` is abstract: every factory defines it.
-  With the facts, ``reef serve --component inference`` builds the serving
-  runtime from ``facts.artifact_format`` and never builds the component, so
-  its environment does not need the framework.
+  Only ``reef serve --component training`` builds the component. Every other
+  service reads the facts, so its environment needs neither the framework nor
+  the backend's credentials. Control reaches the component through the work
+  queue; see `Control and the training service
+  <../developer-guide/executors.rst#control-and-the-training-service>`__. The
+  facts type defines these members beside the properties:
+
+  - ``default_start()`` and ``default_start_inputs``: the root of a new
+    scenario (next item).
+  - ``parameters_schema(kind)``: the JSON Schema of a job's parameters.
+  - ``check_root_start(root)`` and ``check_import_start(artifact_dir)``: raise
+    ``ValueError`` exactly when the component's ``root_start`` and
+    ``import_start`` raise, with the same message. They write nothing.
+  - ``check_artifact(files)``: check an import's files. The default checks
+    ``artifact_format`` and returns ``None``. Override it when the snapshots
+    have another layout. Return a JSON object when something must also
+    resolve on the backend's service, and implement
+    ``TrainingComponent.check_remote_artifact(names)`` for it.
+
+  The component implements ``check_job``, which the training service runs
+  before a job enters the queue, and ``changed_parts`` when its checkpoints
+  change named parts. Return no start that begins with ``snapshot:``; Reef
+  names snapshots with that prefix.
 - State the default start in the facts, and nowhere else.
   ``facts.default_start()`` returns the ``DefaultStart`` that a new scenario's
   root holds: a few small text files and ``default_start_inputs``. Write no
   weight file. A backend that trains a base model writes a base root
   (``base.json`` with ``BaseRoot(inputs).to_text()``) or a reference to the
   base model's commit (``hf-reference.json``). The component defines no
-  ``default_start``. It defines the ``default_start_inputs`` property, with
-  the facts' value, and its ``root_start`` (or the ``import_start`` behind it)
-  starts a job at the base model from a root that holds those files.
+  ``default_start`` and no ``default_start_inputs``. Its ``root_start`` (or the
+  ``import_start`` behind it) starts a job at the base model from a root that
+  holds those files.
   ``facts.check_root_start(root)`` refuses the same roots as
   ``component.root_start(root)``.
   Add a test that compares the facts with the component for two configs, and
@@ -199,7 +222,9 @@ Add a runtime kind
 
 Use this playbook for a new inference provider or a runtime implementation that
 satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
-``reef/inference/interfaces.py`` before adding configuration.
+``reef/inference/interfaces.py`` before adding configuration. `What a runtime
+implements <../developer-guide/executors.rst#what-a-runtime-implements>`__
+gives the required members.
 
 - For an external runtime, subclass ``RuntimeFactory`` and use the reference
   ``package.module:ClassName`` of the class as the runtime ``type``. Reef
@@ -223,7 +248,15 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   ``reef.inference_backends`` entry-point group, so the inference component
   can start the engines. A bundled engine adds its service class and its
   request handler class to ``BUILTIN_ENGINES`` in
-  ``reef/inference/deployment.py``. Shared monitoring and engine recovery belong in
+  ``reef/inference/deployment.py``. The serving runtimes refuse engines that
+  do not declare ``ServingEngines.request_pinning``, and the inference
+  component enforces it for the built-in SGLang and vLLM engines only. For
+  another backend, extend the component's request pinning to the backend's
+  generation route, or give the backend its own serving runtime
+  (``inference.serving: module:Factory``). `Request pinning
+  <../developer-guide/executors.rst#request-pinning>`__ lists what the
+  receiver must guarantee.
+  Shared monitoring and engine recovery belong in
   ``reef/inference/recovery.py``; adapter residency belongs in
   ``reef/inference/residency.py``. Shared contracts and version values belong in
   ``reef/inference/interfaces.py``.
@@ -245,8 +278,9 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - Keep provider authentication and provider-native request handling in the
   adapter. Do not import ``reef.train`` from ``reef/inference/``.
 - Test built-in name and reference resolution in
-  ``tests/reef_service/test_runtime_registry.py``. Add request, recovery, and
-  malformed-result contracts for every capability the runtime implements.
+  ``tests/reef_service/inference/test_runtime_registry.py``. Add request,
+  recovery, and malformed-result contracts for every capability the runtime
+  implements.
 - Add or update the stack that exercises the runtime under ``recipes/`` and
   document every public setting. Never commit credentials or real provider tokens.
 
@@ -266,7 +300,7 @@ Add a component or artifact type
 Artifacts own immutable bytes and snapshot heads. A recipe's components own
 admission, import layouts, kinds and client file trees. Runtimes own loading.
 Read `Scenario components <../developer-guide/components.rst>`__ and the
-release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
+snapshot-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 
 - Put storage, materialization, or version identity behavior in
   ``reef/artifact/``. A new storage backend implements ``RepositoryBackend``

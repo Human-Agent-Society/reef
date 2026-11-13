@@ -923,7 +923,7 @@ def test_the_store_keeps_one_job_data_directory_for_the_same_samples_until_no_jo
     store.write_job_directory_use(job_data_key(JobData("x", (sample,))), 10.0)
     assert store.delete_unused_job_directories(100.0) == 1
     with pytest.raises(FileNotFoundError):
-        store.open_job_directory(first.to_dict())
+        store.open_job_directory(first.to_dict()).read()
     assert store.open_job_directory(other.to_dict()).read().samples == (sample, sample)
     # The periodic work keeps a directory that a job used within the time to live.
     store.maintain()

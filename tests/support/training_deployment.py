@@ -111,6 +111,9 @@ class LocalFacts(TrainingBackendFacts):
     def check_root_start(self, root):
         return None
 
+    def check_import_start(self, artifact_dir):
+        return None
+
 
 class FactsFactory(LocalFactory):
     """``LocalFactory`` that counts the components that it built in ``built``."""
@@ -126,6 +129,24 @@ class FactsFactory(LocalFactory):
 
 
 facts_component_factory = FactsFactory()
+
+
+class FactsOnlyFactory(LocalFactory):
+    """``LocalFactory`` in a process that must build no component: only ``facts`` works."""
+
+    kind = "test-local-facts-only"
+
+    def __call__(self, config, model_path, environ):
+        raise AssertionError("this process builds no training component")
+
+
+facts_only_component_factory = FactsOnlyFactory()
+
+
+class FactsOnlyDeployment(LocalDeployment):
+    """``LocalDeployment`` on a backend whose factory builds no component."""
+
+    component_type = "tests.support.training_deployment:facts_only_component_factory"
 
 
 class FactsDeployment(LocalDeployment):

@@ -1,0 +1,1288 @@
+from __future__ import annotations
+
+import asyncio
+import json
+from contextlib import nullcontext
+from types import SimpleNamespace
+
+import pytest
+from aiohttp import ClientPayloadError, web
+from aiohttp.test_utils import TestServer
+from tests.support import tokenizers
+
+from recipes.openclawrl.turns import main_turn_message, turn_request_messages
+from reef.artifact import Artifact
+from reef.core.errors import inference_aborted
+from reef.inference.chat import sse_json_events
+from reef.inference.interfaces import InferenceArtifact, full_weight_name
+from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
+from reef.service.streaming import stream_record
+
+
+class RecordingClient(SGLangGenerateClient):
+    """The SGLang client with a fake tool parser per request; remembers what the handler asked for."""
+
+    def __init__(self, parser_type, inputs=None) -> None:
+        self._parser_type = parser_type
+        self._inputs = inputs
+
+    def tool_parser(self, tools, parser_name, tokenizer):
+        if self._inputs is not None:
+            self._inputs.update(tools=tools, parser_name=parser_name)
+        return self._parser_type()
+
+
+class FakeTokenizer(tokenizers.FakeTokenizer):
+    """The shared fake, which decodes the first token only and keeps special tokens, as these tests read it."""
+
+    def decode(self, token_ids, *, skip_special_tokens=False):
+        assert skip_special_tokens is False
+        return f"<{token_ids[0]}>"
+
+
+class HybridThinkingTokenizer(FakeTokenizer):
+    """A Qwen3.5-style hybrid template: <think> opens by default and closes at once for enable_thinking=False."""
+
+    vocabulary = {10: "<user>", 11: "<assistant>", 12: "<think>", 13: "\n", 14: "</think>"}
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+        prompt = super().apply_chat_template(
+            messages, tokenize=tokenize, add_generation_prompt=add_generation_prompt, **kwargs
+        )
+        if kwargs.get("enable_thinking", True):
+            return [*prompt, 12, 13]
+        return [*prompt, 12, 13, 13, 14, 13, 13]
+
+    def decode(self, token_ids, *, skip_special_tokens=False):
+        return "".join(self.vocabulary[token_id] for token_id in token_ids)
+
+
+@pytest.mark.unit
+def test_reasoning_check_reads_the_rendered_prompt() -> None:
+    tokenizer = HybridThinkingTokenizer()
+    thinking = tokenizer.apply_chat_template([], tokenize=True, add_generation_prompt=True)
+    answering = tokenizer.apply_chat_template([], tokenize=True, add_generation_prompt=True, enable_thinking=False)
+
+    backend = SGLangInferenceHandler("http://unused", model_path="model", tokenizer=tokenizer)
+    assert backend.reasoning_is_pre_opened(thinking) is True
+    assert backend.reasoning_is_pre_opened(answering) is False
+
+    pinned = SGLangInferenceHandler("http://unused", model_path="model", tokenizer=tokenizer, force_reasoning=True)
+    assert pinned.reasoning_is_pre_opened(answering) is True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("text", "force_reasoning", "message"),
+    [
+        ("No tags here.", False, {"role": "assistant", "content": "No tags here."}),
+        ("<think>still thinking", False, {"role": "assistant", "content": "", "reasoning_content": "still thinking"}),
+        (
+            "<think>a</think>\n\nb</think>c",
+            False,
+            {"role": "assistant", "content": "b</think>c", "reasoning_content": "a"},
+        ),
+        (
+            "plan the call\n<tool_call>{}</tool_call>",
+            True,
+            {"role": "assistant", "content": "<tool_call>{}</tool_call>", "reasoning_content": "plan the call"},
+        ),
+    ],
+)
+def test_reasoning_split_follows_sglang_qwen3_parser(text, force_reasoning, message) -> None:
+    """A leading <think> starts reasoning; the first </think> or <tool_call> ends it."""
+    split, _ = SGLangInferenceHandler._assistant_message(text, None, force_reasoning=force_reasoning)
+    assert split == message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("template_kwargs", "message"),
+    [
+        ({}, {"role": "assistant", "content": "", "reasoning_content": "The answer is 5."}),
+        ({"enable_thinking": False}, {"role": "assistant", "content": "The answer is 5."}),
+    ],
+)
+def test_chat_facade_splits_a_tag_free_reply_by_the_rendered_prompt(tmp_path, template_kwargs, message) -> None:
+    """A tag-free sample is truncated reasoning after an open <think>, and the answer after a closed one."""
+
+    async def run() -> None:
+        async def generate(request):
+            return web.json_response(
+                {
+                    "text": "The answer is 5.",
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.25, 20], [-0.5, 21]],
+                        "weight_version": "wv-9",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=HybridThinkingTokenizer(),
+            )
+            response = await backend.inference(
+                local_artifact(tmp_path),
+                "/v1/chat/completions",
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "what is 2+3?"}],
+                    "chat_template_kwargs": template_kwargs,
+                    "max_completion_tokens": 2,
+                },
+            )
+        finally:
+            await server.close()
+
+        assert response["choices"][0]["message"] == message
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("request_kwargs", "message"),
+    [
+        (None, {"role": "assistant", "content": "The answer is 5."}),
+        ({"enable_thinking": True}, {"role": "assistant", "content": "", "reasoning_content": "The answer is 5."}),
+    ],
+)
+def test_handler_chat_template_kwargs_apply_when_the_request_omits_them(tmp_path, request_kwargs, message) -> None:
+    """The handler's default renders non-thinking prompts; a request's own key wins."""
+
+    async def run() -> None:
+        async def generate(request):
+            return web.json_response(
+                {
+                    "text": "The answer is 5.",
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.25, 20], [-0.5, 21]],
+                        "weight_version": "wv-9",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        payload = {
+            "model": "served-model",
+            "messages": [{"role": "user", "content": "what is 2+3?"}],
+            "max_completion_tokens": 2,
+        }
+        if request_kwargs is not None:
+            payload["chat_template_kwargs"] = request_kwargs
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=HybridThinkingTokenizer(),
+                chat_template_kwargs={"enable_thinking": False},
+            )
+            response = await backend.inference(local_artifact(tmp_path), "/v1/chat/completions", payload)
+        finally:
+            await server.close()
+
+        assert response["choices"][0]["message"] == message
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_handler_chat_template_kwargs_must_not_carry_tools() -> None:
+    with pytest.raises(ValueError, match="tools is reserved"):
+        SGLangInferenceHandler("http://engine", model_path="model", chat_template_kwargs={"tools": []})
+
+
+def local_artifact(tmp_path) -> InferenceArtifact:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    return InferenceArtifact.from_artifact(Artifact.local(checkpoint))
+
+
+def live_artifact() -> InferenceArtifact:
+    return InferenceArtifact("artifact:engine:6")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure", ["transport", "trailing-data"])
+def test_native_terminal_marker_does_not_hide_a_late_failure(failure) -> None:
+    async def chunks():
+        yield b'data: {"text":"answer"}\n\ndata: [DONE]\n\n'
+        if failure == "transport":
+            raise ClientPayloadError("truncated body")
+        yield b'data: {"error":{"message":"late failure"}}\n\n'
+
+    async def run():
+        with pytest.raises((ClientPayloadError, ValueError)):
+            [event async for event in sse_json_events(chunks())]
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_native_stream_capture_requires_a_finish_reason() -> None:
+    capture = NativeStreamCapture()
+    capture.accept({"text": "partial", "meta_info": {"completion_tokens": 1, "output_token_logprobs": [[-0.5, 20]]}})
+    with pytest.raises(ValueError, match="without a finish reason"):
+        capture.response()
+
+
+@pytest.mark.unit
+def test_native_stream_capture_rejects_cumulative_chunks() -> None:
+    capture = NativeStreamCapture()
+    capture.accept(
+        {
+            "text": "a",
+            "output_ids": [20],
+            "meta_info": {
+                "completion_tokens": 1,
+                "output_token_logprobs": [[-0.5, 20]],
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="--incremental-streaming-output"):
+        capture.accept(
+            {
+                "text": "answer",
+                "output_ids": [20, 21],
+                "meta_info": {
+                    "completion_tokens": 2,
+                    "output_token_logprobs": [[-0.5, 20], [-0.25, 21]],
+                },
+            }
+        )
+
+
+@pytest.mark.unit
+def test_chat_facade_forwards_only_an_explicit_lora_path() -> None:
+    backend = SGLangInferenceHandler(
+        "http://unused",
+        model_path="model",
+        tokenizer=FakeTokenizer(),
+    )
+
+    without_adapter = backend.client.payload({}, [10, 11], {}, stream=False)
+    with_adapter = backend.client.payload({"lora_path": "reef_lora"}, [10, 11], {}, stream=False)
+
+    assert "lora_path" not in without_adapter
+    assert with_adapter["lora_path"] == "reef_lora"
+
+
+@pytest.mark.unit
+def test_chat_facade_answers_from_engine_native_ids_without_retokenizing(tmp_path) -> None:
+    async def run() -> None:
+        async def generate(request):
+            assert request.path == "/generate"
+            assert await request.json() == {
+                "input_ids": [10, 11],
+                "sampling_params": {
+                    "max_new_tokens": 2,
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                },
+                "return_logprob": True,
+                "stream": False,
+                "top_logprobs_num": 1,
+            }
+            return web.json_response(
+                {
+                    "text": "decoded answer",
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.25, 20], [-0.5, 21]],
+                        "weight_version": "wv-7",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            tokenizer = FakeTokenizer()
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=tokenizer,
+            )
+            response = await backend.inference(
+                local_artifact(tmp_path),
+                "/v1/chat/completions",
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "max_completion_tokens": 2,
+                    "logprobs": True,
+                    "top_logprobs": 1,
+                },
+            )
+        finally:
+            await server.close()
+
+        assert tokenizer.rendered_messages == ([{"role": "user", "content": "hello"}], {})
+        assert response["choices"][0]["message"]["content"] == "decoded answer"
+        assert "output_token_logprobs" not in response["choices"][0]["meta_info"]
+        logprobs = response["choices"][0]["logprobs"]["content"]
+        assert [(item["token"], item["logprob"]) for item in logprobs] == [("<20>", -0.25), ("<21>", -0.5)]
+        assert "training" not in response, "serving returns no training tensors"
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_pinned_chat_sends_the_selected_weight_name_and_the_base_model() -> None:
+    body = {
+        "text": "answer",
+        "meta_info": {
+            "finish_reason": {"type": "stop"},
+            "completion_tokens": 3,
+            "output_token_logprobs": [[-0.1, 20], [-0.2, 21], [-0.3, 22]],
+        },
+    }
+    artifact = InferenceArtifact("artifact-A", served_model=full_weight_name("/remote/model", "engine:6"))
+
+    async def run():
+        async def generate(request):
+            assert request.headers["x-reef-served-model"] == artifact.served_model
+            assert "lora_path" not in await request.json()
+            return web.json_response(body)
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        async with TestServer(app) as server:
+            handler = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+            )
+            payload = handler.address_model({"messages": [{"role": "user", "content": "hi"}]}, artifact.served_model)
+            assert payload["model"] == "model"
+            assert (await handler.inference(artifact, "/v1/chat/completions", payload))["choices"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_chat_facade_reports_the_engine_weight_version_as_the_runtime_load_id(tmp_path) -> None:
+    body = {
+        "text": "answer",
+        "meta_info": {
+            "finish_reason": {"type": "stop"},
+            "completion_tokens": 3,
+            "output_token_logprobs": [[-0.1, 20], [-0.2, 21], [-0.3, 22]],
+            "weight_version": "engine:8",
+        },
+    }
+    artifact = local_artifact(tmp_path)
+
+    async def run() -> None:
+        async def generate(request):
+            native = await request.json()
+            assert native["stream"] is False
+            assert "stream_interval" not in native["sampling_params"]
+            return web.json_response(body)
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=FakeTokenizer(),
+            )
+            response = await backend.inference(
+                artifact,
+                "/v1/chat/completions",
+                {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_completion_tokens": 3,
+                },
+            )
+        finally:
+            await server.close()
+
+        assert "training" not in response
+        assert response["choices"][0]["meta_info"]["runtime_load_id"] == "engine:8"
+
+    asyncio.run(run())
+    captured = SGLangGenerateClient().parse(body)
+    assert captured.rollout_log_probs == [-0.1, -0.2, -0.3]
+
+
+@pytest.mark.unit
+def test_chat_facade_parses_tool_calls(tmp_path) -> None:
+    async def run() -> None:
+        async def generate(request):
+            assert (await request.json())["input_ids"] == [10, 11]
+            return web.json_response(
+                {
+                    "text": '<tool_call>{"name":"read_file","arguments":{"path":"README.md"}}</tool_call>',
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.1, 20], [-0.2, 21]],
+                        "weight_version": "wv-tools",
+                    },
+                }
+            )
+
+        class FakeToolParser:
+            @staticmethod
+            def has_tool_call(text):
+                return text.startswith("<tool_call>")
+
+            @staticmethod
+            def parse_non_stream(text):
+                del text
+                return "", [
+                    SimpleNamespace(
+                        name="read_file",
+                        parameters='{"path":"README.md"}',
+                        tool_index=0,
+                    )
+                ]
+
+        parser_inputs = {}
+
+        parser_factory = RecordingClient(FakeToolParser, parser_inputs)
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            tokenizer = FakeTokenizer()
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=tokenizer,
+                tool_call_parser="qwen25",
+                client=parser_factory,
+            )
+            tools = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "description": "Read a file",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"path": {"type": "string"}},
+                            "required": ["path"],
+                        },
+                    },
+                }
+            ]
+            response = await backend.inference(
+                local_artifact(tmp_path),
+                "/v1/chat/completions",
+                {
+                    "messages": [{"role": "user", "content": "read README"}],
+                    "tools": tools,
+                    "tool_choice": "auto",
+                    "max_completion_tokens": 2,
+                },
+            )
+        finally:
+            await server.close()
+
+        assert parser_inputs == {"tools": tools, "parser_name": "qwen25"}
+        assert tokenizer.rendered_messages == (
+            [{"role": "user", "content": "read README"}],
+            {"tools": tools},
+        )
+        choice = response["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["message"]["content"] is None
+        assert choice["message"]["tool_calls"][0]["function"] == {
+            "name": "read_file",
+            "arguments": '{"path":"README.md"}',
+        }
+        assert "training" not in response
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_anthropic_facade_normalizes_messages_and_returns_no_training_block(tmp_path) -> None:
+    async def run() -> None:
+        async def generate(request):
+            native = await request.json()
+            assert native == {
+                "input_ids": [10, 11],
+                "sampling_params": {
+                    "max_new_tokens": 2,
+                    "temperature": 0.4,
+                    "stop": ["DONE"],
+                },
+                "return_logprob": True,
+                "stream": False,
+            }
+            return web.json_response(
+                {
+                    "text": "working\n</think>\nFinished.",
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.2, 20], [-0.4, 21]],
+                        "weight_version": "wv-anthropic",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            tokenizer = FakeTokenizer()
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=tokenizer,
+            )
+            response = await backend.inference(
+                local_artifact(tmp_path),
+                "/v1/messages",
+                {
+                    "model": "served-model",
+                    "system": [{"type": "text", "text": "Be concise."}],
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Hello"},
+                                {"type": "text", "text": "there"},
+                            ],
+                        }
+                    ],
+                    "max_tokens": 2,
+                    "temperature": 0.4,
+                    "stop_sequences": ["DONE"],
+                },
+            )
+        finally:
+            await server.close()
+
+        canonical_messages = [
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "Hello\nthere"},
+        ]
+        assert tokenizer.rendered_messages == (canonical_messages, {})
+        assert response["type"] == "message"
+        assert response["role"] == "assistant"
+        assert response["stop_reason"] == "end_turn"
+        assert response["usage"] == {"input_tokens": 2, "output_tokens": 2}
+        assert response["content"] == [
+            {"type": "thinking", "thinking": "working", "signature": ""},
+            {"type": "text", "text": "Finished."},
+        ]
+        assert "training" not in response
+        assert "meta_info" not in response, "only an engine abort adds meta_info"
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_anthropic_count_tokens_uses_the_exact_template_without_exposing_training(tmp_path) -> None:
+    tokenizer = FakeTokenizer()
+    backend = SGLangInferenceHandler(
+        "http://unused",
+        model_path="model",
+        tokenizer=tokenizer,
+    )
+
+    response = asyncio.run(
+        backend.inference(
+            local_artifact(tmp_path),
+            "/v1/messages/count_tokens",
+            {
+                "model": "served-model",
+                "system": "Be concise.",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+    )
+
+    assert tokenizer.rendered_messages == (
+        [
+            {"role": "system", "content": "Be concise."},
+            {"role": "user", "content": "hello"},
+        ],
+        {},
+    )
+    assert response == {"input_tokens": 2}
+
+
+@pytest.mark.unit
+def test_anthropic_facade_converts_tool_history_and_sampled_tool_use(tmp_path) -> None:
+    async def run() -> None:
+        async def generate(request):
+            assert (await request.json())["input_ids"] == [10, 11]
+            return web.json_response(
+                {
+                    "text": '<tool_call>{"name":"write_file","arguments":{"path":"out.txt"}}</tool_call>',
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.1, 20]],
+                        "weight_version": "wv-tools",
+                    },
+                }
+            )
+
+        class FakeToolParser:
+            @staticmethod
+            def has_tool_call(text):
+                return text.startswith("<tool_call>")
+
+            @staticmethod
+            def parse_non_stream(text):
+                del text
+                return "", [SimpleNamespace(name="write_file", parameters={"path": "out.txt"})]
+
+        parser_inputs = {}
+
+        parser_factory = RecordingClient(FakeToolParser, parser_inputs)
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            tokenizer = FakeTokenizer()
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=tokenizer,
+                tool_call_parser="qwen25",
+                client=parser_factory,
+            )
+            response = await backend.inference(
+                local_artifact(tmp_path),
+                "/v1/messages",
+                {
+                    "model": "served-model",
+                    "messages": [
+                        {"role": "user", "content": "Read the file"},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_read",
+                                    "name": "read_file",
+                                    "input": {"path": "in.txt"},
+                                }
+                            ],
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "toolu_read",
+                                    "content": [{"type": "text", "text": "contents"}],
+                                },
+                                {"type": "text", "text": "Now write it"},
+                            ],
+                        },
+                    ],
+                    "tools": [
+                        {
+                            "name": "write_file",
+                            "description": "Write a file",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                            },
+                        }
+                    ],
+                    "tool_choice": {"type": "any"},
+                    "max_tokens": 1,
+                },
+            )
+        finally:
+            await server.close()
+
+        openai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                    },
+                    "description": "Write a file",
+                },
+            }
+        ]
+        assert parser_inputs == {"tools": openai_tools, "parser_name": "qwen25"}
+        rendered_messages, rendered_kwargs = tokenizer.rendered_messages
+        assert rendered_messages[1]["tool_calls"][0]["function"]["arguments"] == {"path": "in.txt"}
+        assert rendered_messages[2] == {"role": "tool", "tool_call_id": "toolu_read", "content": "contents"}
+        assert rendered_messages[3] == {"role": "user", "content": "Now write it"}
+        assert rendered_kwargs == {"tools": openai_tools}
+        assert response["stop_reason"] == "tool_use"
+        assert response["content"][0]["type"] == "tool_use"
+        assert response["content"][0]["name"] == "write_file"
+        assert response["content"][0]["input"] == {"path": "out.txt"}
+        assert "training" not in response
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("finished", [True, False], ids=["finished", "missing-finish"])
+def test_pinned_stream_ends_with_its_terminal_event_only_after_a_finish_reason(finished) -> None:
+    artifact = InferenceArtifact("artifact-A", served_model=full_weight_name("/remote/model", "engine:6"))
+    # Each sampled token has its own log probability, so the client's entries show their alignment.
+    sampled = [("<20>", -0.25), ("<21>", -0.75)]
+
+    async def run() -> None:
+        async def generate(request):
+            assert request.headers["x-reef-served-model"] == artifact.served_model
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            for index, text in enumerate(("first", "later")):
+                event = {
+                    "text": text,
+                    "output_ids": [20 + index],
+                    "meta_info": {
+                        "completion_tokens": index + 1,
+                        "output_token_logprobs": [[sampled[index][1], 20 + index]],
+                        "finish_reason": {"type": "stop"} if index == 1 and finished else None,
+                    },
+                }
+                await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        async with TestServer(app) as server:
+            handler = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+            )
+            stream = await handler.inference_stream(
+                artifact,
+                "/v1/chat/completions",
+                {
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_completion_tokens": 2,
+                    "stream": True,
+                    "logprobs": True,
+                },
+            )
+            body = bytearray()
+            try:
+                with nullcontext() if finished else pytest.raises(ValueError, match="without a finish reason"):
+                    async for chunk in stream.chunks:
+                        body.extend(chunk)
+            finally:
+                await stream.close()
+            assert b'"content": "first"' in body
+            assert b'"content": "later"' in body
+            assert body.endswith(b"data: [DONE]\n\n") is finished
+            assert (stream.record_response is not None) is finished
+            streamed = [
+                (entry["token"], entry["logprob"])
+                for line in bytes(body).split(b"\n")
+                if line.startswith(b"data: {")
+                for choice in json.loads(line.removeprefix(b"data: "))["choices"]
+                for entry in (choice.get("logprobs") or {}).get("content", [])
+            ]
+            assert streamed == sampled
+            if finished:
+                recorded = stream.record_response["choices"][0]["logprobs"]["content"]
+                assert [(entry["token"], entry["logprob"]) for entry in recorded] == sampled
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None:
+    async def run() -> None:
+        async def generate(request):
+            native = await request.json()
+            assert native["stream"] is True
+            assert native["sampling_params"]["stream_interval"] == 1
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            event = {
+                "text": "answer",
+                "output_ids": [20],
+                "meta_info": {
+                    "finish_reason": {"type": "stop"},
+                    "completion_tokens": 1,
+                    "output_token_logprobs": [[-0.5, 20]],
+                    "weight_version": "engine:6",
+                },
+            }
+            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=FakeTokenizer(),
+            )
+            stream = await backend.inference_stream(
+                local_artifact(tmp_path),
+                "/v1/chat/completions",
+                {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_completion_tokens": 1,
+                    "logprobs": True,
+                    "stream": True,
+                },
+            )
+            body = b"".join([chunk async for chunk in stream.chunks])
+        finally:
+            await server.close()
+
+        assert b'"content": "answer"' in body
+        assert b'"logprobs": {"content":' in body
+        assert body.endswith(b"data: [DONE]\n\n")
+        recorded = stream_record(stream, body, complete=True)
+        assert recorded["choices"][0]["message"]["content"] == "answer"
+        assert [item["logprob"] for item in recorded["choices"][0]["logprobs"]["content"]] == [-0.5]
+        assert "training" not in recorded
+        assert recorded["stream_delivery"]["complete"] is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_streaming_anthropic_messages_emits_native_sse_and_records_the_message(tmp_path) -> None:
+    async def run() -> None:
+        release_final = asyncio.Event()
+
+        async def generate(request):
+            native = await request.json()
+            assert native["stream"] is True
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            first = {
+                "text": "ans",
+                "output_ids": [20],
+                "meta_info": {
+                    "finish_reason": None,
+                    "completion_tokens": 1,
+                    "output_token_logprobs": [[-0.5, 20]],
+                    "weight_version": "engine:6",
+                },
+            }
+            await response.write(f"data: {json.dumps(first)}\n\n".encode())
+            await release_final.wait()
+            final = {
+                "text": "wer",
+                "output_ids": [21],
+                "meta_info": {
+                    "finish_reason": {"type": "length"},
+                    "completion_tokens": 2,
+                    "output_token_logprobs": [[-0.25, 21]],
+                    "weight_version": "engine:8",
+                },
+            }
+            await response.write(f"data: {json.dumps(final)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=FakeTokenizer(),
+            )
+            stream = await backend.inference_stream(
+                live_artifact(),
+                "/v1/messages",
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 2,
+                    "stream": True,
+                },
+            )
+            iterator = stream.chunks.__aiter__()
+            chunks = [await anext(iterator), await anext(iterator), await anext(iterator)]
+            # message_start and the first real content delta arrive while the
+            # upstream generation is still blocked before its final token.
+            assert b'"type": "text_delta", "text": "ans"' in chunks[-1]
+            assert stream.record_response is None
+            release_final.set()
+            chunks.extend([chunk async for chunk in iterator])
+            body = b"".join(chunks)
+        finally:
+            await server.close()
+
+        text = body.decode()
+        assert "event: message_start" in text
+        assert '"type": "text_delta", "text": "ans"' in text
+        assert '"type": "text_delta", "text": "wer"' in text
+        assert '"stop_reason": "max_tokens"' in text
+        assert text.endswith('event: message_stop\ndata: {"type": "message_stop"}\n\n')
+        assert "[DONE]" not in text
+        recorded = stream_record(stream, body, complete=True)
+        assert recorded["type"] == "message"
+        assert recorded["content"] == [{"type": "text", "text": "answer"}]
+        assert "training" not in recorded
+        assert recorded["stream_delivery"]["complete"] is True
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/messages"])
+def test_streaming_records_an_engine_abort_that_the_service_detects(path) -> None:
+    async def run() -> None:
+        async def generate(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            event = {
+                "text": "ans",
+                "output_ids": [20],
+                "meta_info": {
+                    "finish_reason": {"type": "abort", "message": "Aborted"},
+                    "completion_tokens": 1,
+                    "output_token_logprobs": [[-0.5, 20]],
+                    "weight_version": "engine:6",
+                },
+            }
+            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+            )
+            stream = await backend.inference_stream(
+                live_artifact(),
+                path,
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 2,
+                    "stream": True,
+                },
+            )
+            [chunk async for chunk in stream.chunks]
+        finally:
+            await server.close()
+
+        assert inference_aborted(stream.record_response)
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() -> None:
+    async def run() -> None:
+        async def generate(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            events = [
+                {
+                    "text": "work</thi",
+                    "output_ids": [20],
+                    "meta_info": {
+                        "finish_reason": None,
+                        "completion_tokens": 1,
+                        "output_token_logprobs": [[-0.5, 20]],
+                    },
+                },
+                {
+                    "text": "nk>\nanswer",
+                    "output_ids": [21],
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "completion_tokens": 2,
+                        "output_token_logprobs": [[-0.25, 21]],
+                    },
+                },
+            ]
+            for event in events:
+                await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=FakeTokenizer(),
+                force_reasoning=True,
+            )
+            stream = await backend.inference_stream(
+                live_artifact(),
+                "/v1/messages",
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "max_tokens": 2,
+                    "stream": True,
+                },
+            )
+            body = b"".join([chunk async for chunk in stream.chunks])
+        finally:
+            await server.close()
+
+        text = body.decode()
+        assert '"type": "thinking_delta", "thinking": "work"' in text
+        assert '"type": "text_delta", "text": "answer"' in text
+        assert "</think>" not in text
+        recorded = stream_record(stream, body, complete=True)
+        assert recorded["content"] == [
+            {"type": "thinking", "thinking": "work", "signature": ""},
+            {"type": "text", "text": "answer"},
+        ]
+        assert "training" not in recorded
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_path) -> None:
+    raw_tool_call = '<tool_call>{"name":"write_file","arguments":{"path":"out.txt"}}</tool_call>'
+
+    class FakeStreamingToolParser:
+        @staticmethod
+        def has_tool_call(text):
+            return text.startswith("<tool_call>")
+
+        @staticmethod
+        def parse_stream_chunk(text):
+            del text
+            return "", [
+                SimpleNamespace(
+                    name="write_file",
+                    parameters='{"path":"out.txt"}',
+                    tool_index=0,
+                )
+            ]
+
+        @staticmethod
+        def parse_non_stream(text):
+            del text
+            return "", [SimpleNamespace(name="write_file", parameters={"path": "out.txt"})]
+
+    async def run() -> None:
+        async def generate(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            event = {
+                "text": raw_tool_call,
+                "output_ids": [20],
+                "meta_info": {
+                    "finish_reason": {"type": "stop"},
+                    "completion_tokens": 1,
+                    "output_token_logprobs": [[-0.5, 20]],
+                    "weight_version": "wv-tools",
+                },
+            }
+            await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=FakeTokenizer(),
+                tool_call_parser="qwen25",
+                client=RecordingClient(FakeStreamingToolParser),
+            )
+            stream = await backend.inference_stream(
+                local_artifact(tmp_path),
+                "/v1/messages",
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "write it"}],
+                    "tools": [
+                        {
+                            "name": "write_file",
+                            "input_schema": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                            },
+                        }
+                    ],
+                    "max_tokens": 1,
+                    "stream": True,
+                },
+            )
+            body = b"".join([chunk async for chunk in stream.chunks])
+        finally:
+            await server.close()
+
+        text = body.decode()
+        assert '"type": "tool_use"' in text
+        assert '"type": "input_json_delta", "partial_json": "{\\"path\\":\\"out.txt\\"}"' in text
+        assert "<tool_call>" not in text
+        recorded = stream_record(stream, body, complete=True)
+        assert recorded["stop_reason"] == "tool_use"
+        assert recorded["content"] == [
+            {
+                "type": "tool_use",
+                "id": recorded["content"][0]["id"],
+                "name": "write_file",
+                "input": {"path": "out.txt"},
+            }
+        ]
+        assert "training" not in recorded
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_openclaw_reads_canonical_anthropic_exchange_from_private_training_block() -> None:
+    canonical_messages = [{"role": "user", "content": "hello"}]
+    canonical_message = {"role": "assistant", "content": "answer"}
+    payload = {
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}],
+        "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+        "response": {
+            "type": "message",
+            "content": [{"type": "text", "text": "answer"}],
+            "training": {
+                "request_messages": canonical_messages,
+                "request_tools": [{"type": "function", "function": {"name": "read"}}],
+                "response_message": canonical_message,
+            },
+        },
+    }
+
+    assert main_turn_message(payload) == canonical_message
+    assert turn_request_messages(payload) == canonical_messages
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"n": 2}, "n=1"),
+        ({"tools": []}, "non-empty list"),
+        (
+            {"messages": [{"role": "user", "content": [{"type": "image_url"}]}]},
+            "text-only message content",
+        ),
+        ({"max_completion_tokens": 0}, "positive integer"),
+    ],
+)
+def test_chat_facade_rejects_requests_it_cannot_capture_exactly(tmp_path, overrides, message) -> None:
+    async def run() -> None:
+        backend = SGLangInferenceHandler(
+            "http://unused",
+            model_path="model",
+            tokenizer=FakeTokenizer(),
+        )
+        with pytest.raises(ValueError, match=message):
+            await backend.inference(
+                local_artifact(tmp_path),
+                "/v1/chat/completions",
+                {"messages": [{"role": "user", "content": "hello"}], **overrides},
+            )
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("split_reasoning", [True, False])
+def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path, split_reasoning: bool) -> None:
+    """Thinking text must ride reasoning_content, never the visible reply.
+
+    The chat template auto-opens <think>, so sampled text carries only the
+    closing tag; everything before the LAST </think> is chain-of-thought.
+    OpenAI-shaped consumers (agents, judges, user simulators) read content
+    verbatim — leaking reasoning there made every downstream judgment grade
+    the monologue instead of the reply. A subclass can preserve raw tags.
+    """
+
+    class ConfiguredHandler(SGLangInferenceHandler):
+        SPLIT_REASONING = split_reasoning
+
+    async def run() -> None:
+        async def generate(request):
+            return web.json_response(
+                {
+                    "text": "Okay, let me think. 2+3 is 5.\n</think>\n\nThe answer is 5.",
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.25, 20], [-0.5, 21], [-0.75, 22]],
+                        "weight_version": "wv-9",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            backend = ConfiguredHandler(
+                str(server.make_url("")).rstrip("/"),
+                model_path="model",
+                tokenizer=FakeTokenizer(),
+            )
+            response = await backend.inference(
+                local_artifact(tmp_path),
+                "/v1/chat/completions",
+                {
+                    "model": "served-model",
+                    "messages": [{"role": "user", "content": "what is 2+3?"}],
+                    "max_completion_tokens": 3,
+                },
+            )
+        finally:
+            await server.close()
+
+        message = response["choices"][0]["message"]
+        if split_reasoning:
+            assert message["content"] == "The answer is 5."
+            assert message["reasoning_content"] == "Okay, let me think. 2+3 is 5."
+        else:
+            assert message == {
+                "role": "assistant",
+                "content": "Okay, let me think. 2+3 is 5.\n</think>\n\nThe answer is 5.",
+            }
+        assert response["usage"]["completion_tokens"] == 3
+        assert "training" not in response
+
+    asyncio.run(run())

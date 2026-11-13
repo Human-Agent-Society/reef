@@ -136,10 +136,10 @@ class StubReefClient:
             self.reads.append(("catalog", {"rows": len(rows), "published": published}))
             return {"scenario": SCENARIO, "artifacts": rows}
         if path == "/reef/harness":
-            release = self.head if self.published_seen else SEED_ARTIFACT
-            self.reads.append(("manifest", release))
+            artifact_id = self.head if self.published_seen else SEED_ARTIFACT
+            self.reads.append(("manifest", artifact_id))
             return {
-                "artifact_id": release,
+                "artifact_id": artifact_id,
                 "parent_artifact_id": SEED_ARTIFACT,
                 "evaluation": {},
                 "files": {},
@@ -209,7 +209,7 @@ def _stage_native(runner: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path:
     """
     tree = tmp_path / "tree"
     tree.mkdir()
-    (tree / runner.RELEASE_FILE).write_text(json.dumps({"artifact_id": SEED_ARTIFACT}), encoding="utf-8")
+    (tree / runner.SNAPSHOT_FILE).write_text(json.dumps({"artifact_id": SEED_ARTIFACT}), encoding="utf-8")
     monkeypatch.setattr(runner, "TREE_DIR", tree)
     monkeypatch.setattr(runner, "SCRATCH_DIR", tmp_path / "scratch")
 
@@ -400,7 +400,7 @@ def test_the_native_run_stops_on_the_results_of_steps_that_publish_nothing(
     assert "/reef/harness" not in client.requested, "no step published, so the run must not follow the head"
 
 
-def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
+def test_the_native_run_follows_a_published_snapshot_through_to_the_second_pass(
     runner: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

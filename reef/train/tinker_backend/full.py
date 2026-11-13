@@ -10,10 +10,11 @@ parameterization, its base and its snapshots differ.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
-from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, HuggingFaceRevisionFiles, read_reference
+from reef.core.values import JsonValue
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import TinkerSampler
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
@@ -90,17 +91,16 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
             raise ValueError(f"the start {directory} holds {named}, not the base {self._revision.uri}")
         return FreshStart(self._model)
 
-    def check_artifact(self, files: ArtifactFiles) -> None:
-        """A full-parameter manifest of this component's model and service whose state resolves, or the base's files."""
-        if MANIFEST in files.paths():
-            self.check_manifest(files)
-            if REFERENCE_FILE not in files.paths():
-                raise ValueError(f"a {self.name} release holds {REFERENCE_FILE} beside its manifest")
-            revision = HuggingFaceRevision.from_dict(json.loads(files.read_bytes(REFERENCE_FILE)))
+    def check_remote_artifact(self, names: Mapping[str, JsonValue]) -> None:
+        """What ``SpindleFullFacts.check_artifact`` left of an import: the manifest's state resolves on the service
+        and its reference holds full weights on the Hub, or the files without a manifest are the base's files."""
+        if "manifest" in names:
+            super().check_remote_artifact(names)
+            revision = HuggingFaceRevision.from_dict(names["weights"])
             weights = HuggingFaceRevisionFiles(revision.repo, revision.commit).paths()
             if "config.json" not in weights or not any(path.endswith(".safetensors") for path in weights):
                 raise ValueError(f"{revision.uri} holds no full weights: config.json and safetensors")
-        elif files.checksum() != self.base_files_id():
+        elif names["files"] != self.base_files_id():
             raise ValueError(
                 f"the {self.name} training component trains only its base {self._revision.uri}: an import of full "
                 "weights holds the base's files, or a manifest of a full-parameter checkpoint of it"
@@ -108,7 +108,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     def import_start(self, artifact_dir: Path) -> str:
         """A manifest's start, else the base start: every artifact of this component without a manifest has the base's
-        files, since its base holds them and ``check_artifact`` admits no other. The base start follows the
+        files, since its base holds them and an import admits no other (``check_remote_artifact``). The base start follows the
         configuration; a root that refers to another base is refused."""
         if (artifact_dir / MANIFEST).exists():
             return self.import_manifest(artifact_dir)

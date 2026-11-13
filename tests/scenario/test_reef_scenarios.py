@@ -27,7 +27,7 @@ from reef.scenario.registry import InstanceState
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.component import ScenarioRoot, TrainingComponent
+from reef.train.component import ScenarioRoot, SnapshotStart, TrainingComponent
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import PipelineSettings
 
@@ -46,7 +46,7 @@ def test_artifact_state_and_metadata_are_not_parallel_public_types() -> None:
     assert importlib.util.find_spec("reef.scenarios") is None
 
 
-def test_scenario_owns_recipe_derived_policy_and_its_root_release() -> None:
+def test_scenario_owns_recipe_derived_policy_and_its_root_snapshot() -> None:
     scenario = build_default_dispatcher(
         scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     ).get_or_create_scenario("math")
@@ -276,10 +276,10 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
     from reef.storage.commits import CommitRecord, RecordProgress, parse_scenario_metadata, scenario_metadata_for
 
-    base = SnapshotRef("base-release", None)
-    head = SnapshotRef("checkpoint-release", base.revision)
+    base = SnapshotRef("base-snapshot", None)
+    head = SnapshotRef("checkpoint-snapshot", base.revision)
     # Persisted reef-scenario/8 metadata contains registration and recovery
-    # fields; the containing artifact supplies the checkpoint release identity.
+    # fields; the containing artifact supplies the checkpoint snapshot identity.
     metadata = {
         "format": "reef-scenario/8",
         "scenario": "math",
@@ -360,9 +360,9 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
         served_snapshot,
     )
 
-    base = SnapshotRef("base-release", None)
-    served = SnapshotRef("served-release", base.revision)
-    head = SnapshotRef("held-release", served.revision)
+    base = SnapshotRef("base-snapshot", None)
+    served = SnapshotRef("served-snapshot", base.revision)
+    head = SnapshotRef("held-snapshot", served.revision)
     progress = RecordProgress(0, 0, frozenset())
     source = RootSource("default")
     held = scenario_metadata_for(
@@ -383,7 +383,7 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
     )
     assert served_snapshot(activated, checkpoint_head=head) == head
     with pytest.raises(ValueError, match="active_artifact must be an object"):
-        served_snapshot({**held, "active_artifact": "served-release"}, checkpoint_head=head)
+        served_snapshot({**held, "active_artifact": "served-snapshot"}, checkpoint_head=head)
     with pytest.raises(ValueError, match="names no active_artifact"):
         scenario_metadata_for(name="math", source=source, active_artifact=served)
     with pytest.raises(ValueError, match="start_artifact exactly after commit number zero"):
@@ -429,7 +429,7 @@ def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) ->
 
 class _RootImportingComponent(StubTrainingComponent):
     """A stub training component whose default start holds ``model.txt`` = ``model``, and whose trainer starts from
-    an import of its scenario's root, as every component that imports releases does."""
+    an import of its scenario's root, as every component that imports snapshots does."""
 
     def __init__(self, model: str) -> None:
         super().__init__(shares_scenarios=True)
@@ -456,7 +456,7 @@ def weights_dispatcher(tmp_path, backend_factory, model: str) -> Dispatcher:
 
 
 @pytest.mark.unit
-def test_two_scenarios_own_distinct_root_releases(tmp_path) -> None:
+def test_two_scenarios_own_distinct_root_snapshots(tmp_path) -> None:
     dispatcher = weights_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(), "base-model")
     try:
         first, second = (dispatcher.get_or_create_scenario(name) for name in ("first", "second"))
@@ -491,14 +491,17 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
         wait_for_serving(second, "old")
         assert second.live.runtime.served == "old-model"
         assert old.served_artifact_id() == old.repository.resolve(old_root).artifact_id
-        old_start = Path(JobLoopState.from_dict(old.trainer.state).start)
-        assert (old_start / "model.txt").read_text() == "old-model"
+        # The trainer's start names the scenario's own root, with the inputs that the root was made from.
+        old_start = SnapshotStart.from_text(JobLoopState.from_dict(old.trainer.state).start)
+        assert old_start == SnapshotStart(old_root.revision, RootSource("default", inputs={"model": "old-model"}))
+        assert (old.repository.materialize(old_root).local_path / "model.txt").read_text() == "old-model"
         assert old.artifacts()[0]["source"] == {"kind": "default", "inputs": {"model": "old-model"}}
 
         new = second.get_or_create_scenario("new")
         new_root = new.repository.materialize(new.repository.start_artifact)
         assert (new_root.local_path / "model.txt").read_text() == "new-model"
-        assert (Path(JobLoopState.from_dict(new.trainer.state).start) / "model.txt").read_text() == "new-model"
+        new_start = SnapshotStart.from_text(JobLoopState.from_dict(new.trainer.state).start)
+        assert new_start is not None and new_start.revision == new.repository.start_artifact.revision
     finally:
         second.close()
 

@@ -55,7 +55,7 @@ def training_record(commit_number: int = 1) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         commit_number=commit_number,
-        snapshot=SnapshotRef(f"release-{commit_number}", "seed"),
+        snapshot=SnapshotRef(f"artifact-{commit_number}", "seed"),
         checkpoint=True,
         algorithm_state={"steps": commit_number},
         high_water_sequence=0,
@@ -63,7 +63,7 @@ def training_record(commit_number: int = 1) -> CommitRecord:
         component="weights",
         metrics={"score": 0.8},
         training_job_id=f"job-{commit_number}",
-        selection=ArtifactSelection({"weights": f"release-{commit_number}"}),
+        selection=ArtifactSelection({"weights": f"artifact-{commit_number}"}),
     )
 
 

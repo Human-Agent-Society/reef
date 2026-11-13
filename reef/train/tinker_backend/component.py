@@ -30,10 +30,10 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, TextIO
 
-from reef.artifact.files import ArtifactFiles
 from reef.core.chat_rendering import needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
+from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import read_json, write_json
 from reef.storage.job_data import JobDataKind
@@ -95,14 +95,15 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     Every process that uses the component reads and writes ``config.state_dir``; only the process that runs the
     jobs holds its lock (``start_jobs``). A split deployment gives control and the training service one directory.
     ``config.state_dir`` holds ``base/`` (the base start), ``imported/<digest>/`` (starts taken from
-    releases) and ``jobs/`` (see ``LocalJobComponent``). ``base/`` holds the files of the backend's default start
+    snapshots) and ``jobs/`` (see ``LocalJobComponent``). ``base/`` holds the files of the backend's default start
     (``facts.default_start()``), which ``base_start`` writes without a call to the service: a job from it starts a
     new model of the base model (``FreshStart``). The constructor writes nothing. A saved checkpoint is
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
     directory is both the start of a later job and the snapshot Reef publishes.
     The weights stay on the service. A subclass decides the parameterization:
     which checkpoints it trains (``facts.validated``), which directories start a new model (``start_at``), what a
-    job from such a start trains (``training_start``), and which snapshots it imports.
+    job from such a start trains (``training_start``), which snapshots it imports, and what it looks up on the
+    service for an import (``check_remote_artifact``).
 
     ``facts`` are the backend's facts of the same model and settings (``TinkerFacts`` or ``SpindleFullFacts``):
     the name, the artifact format, the sharing of scenarios and jobs, the parameters schema and ``validated`` are
@@ -183,19 +184,16 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         """
         return
 
-    def check_manifest(self, files: ArtifactFiles) -> None:
-        """Raise ``ValueError`` unless ``files`` hold a manifest that ``validated`` takes and whose state resolves."""
-        if MANIFEST not in files.paths():
-            raise ValueError(f"a Tinker artifact holds {MANIFEST}")
-        try:
-            checkpoint = TinkerCheckpoint.from_dict(json.loads(files.read_bytes(MANIFEST)))
-        except (TypeError, ValueError) as exc:
-            # A manifest from outside Reef may have any shape; ``from_dict`` refuses unknown fields with TypeError.
-            raise ValueError(f"{MANIFEST} is no Tinker checkpoint manifest: {exc}") from exc
-        self._client.check_remote(self.validated(checkpoint))
+    def check_remote_artifact(self, names: Mapping[str, JsonValue]) -> None:
+        """Raise ``ValueError`` unless the state path of ``names["manifest"]``, a manifest that the facts took
+        from an import (``check_artifact``), resolves on the service as a checkpoint that ``validated`` takes."""
+        manifest = names.get("manifest")
+        if not isinstance(manifest, Mapping):
+            raise ValueError("the check of a Tinker artifact names its manifest")
+        self._client.check_remote(self.validated(TinkerCheckpoint.from_dict(manifest)))
 
     def import_manifest(self, artifact_dir: Path) -> str:
-        """Take the manifest in ``release`` as a start: copy it into ``imported/<digest>/``; return that directory."""
+        """Take the manifest in ``artifact_dir`` as a start: copy it into ``imported/<digest>/``; return that directory."""
         checkpoint = self.facts.checkpoint_in(artifact_dir)
         digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
         imported = self._root / "imported" / digest
@@ -207,10 +205,6 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     @property
     def name(self) -> str:
         return self.facts.name
-
-    @property
-    def default_start_inputs(self) -> Mapping[str, str]:
-        return self.facts.default_start_inputs
 
     @property
     def artifact_format(self) -> ArtifactFormat | None:
@@ -490,12 +484,6 @@ class TinkerTrainingComponent(TinkerJobComponent):
             if not (self._base / MANIFEST).is_file():
                 self._client.initialize().write(self._base)
             return self.validated(TinkerCheckpoint.read(self._base))
-
-    def check_artifact(self, files: ArtifactFiles) -> None:
-        """A base root of this component's model, rank and service, or a manifest of a checkpoint of them whose
-        state path resolves on the service."""
-        if not self.is_own_base_root(files):
-            self.check_manifest(files)
 
     def import_start(self, artifact_dir: Path) -> str:
         """``base_start`` for a base root of this configuration, else the manifest's start (``import_manifest``)."""

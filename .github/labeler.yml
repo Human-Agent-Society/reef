@@ -34,8 +34,8 @@
           - "reef/artifact/components.py"
           - "tutorials/evolve-your-harness/**"
           - "recipes/gepa/**"
-          - "tests/reef_service/test_harness*.py"
-          - "tests/reef_service/test_*recipe*.py"
+          - "tests/reef_service/**/test_harness*.py"
+          - "tests/reef_service/**/test_*recipe*.py"
           - "tests/smoke/**"
 
 "area: packaging":
@@ -61,13 +61,13 @@
           - "reef/train/**"
           - "recipes/*/examples/*/serve.yaml"
           - "tests/reef_service/test_async*.py"
-          - "tests/reef_service/test_*artifact*.py"
+          - "tests/reef_service/**/test_*artifact*.py"
           - "tests/reef_service/test_*checkpoint*.py"
-          - "tests/reef_service/test_*runtime*.py"
+          - "tests/reef_service/**/test_*runtime*.py"
           - "tests/reef_service/test_sao*.py"
           - "tests/reef_service/test_slime*.py"
-          - "tests/reef_service/test_*training*.py"
-          - "tests/reef_service/test_*weight*.py"
+          - "tests/reef_service/**/test_*training*.py"
+          - "tests/reef_service/**/test_*weight*.py"
           - "tests/slime_backend/**"
 
 dependencies:

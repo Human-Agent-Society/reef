@@ -33,12 +33,13 @@ from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import SnapshotStart
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 
 
 def weights(directory: Path, content: bytes = b"w9") -> Path:
-    """A full-weight artifact: the layout of ``StubTrainingComponent``'s releases."""
+    """A full-weight artifact: the layout of ``StubTrainingComponent``'s artifacts."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -162,7 +163,8 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     activated = value.activate("math", imported.artifact_id)
     assert scenario.serving_artifact_id() == imported.artifact_id == activated.artifact_id
     value.train_from("math", imported.artifact_id)
-    assert JobLoopState.from_dict(scenario.trainer.state).start == str(runtime.imported[-1])
+    # The training start names the imported artifact's snapshot; the training service imports it for a job.
+    assert SnapshotStart.from_text(JobLoopState.from_dict(scenario.trainer.state).start) is not None
     value.close()
 
     # A restart keeps the chain tip at the last training step and lists the imports.
@@ -185,9 +187,9 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
             "training",
             "creation",
         ]
-        # Control resumes training before inference loads the selected import.
+        # Control names the training start and imports nothing; inference loads the selected import.
         wait_for_serving(restarted)
-        assert component.restore_order == ["training", "inference"]
+        assert component.restore_order == ["inference"]
         request = restarted.coordination.served_models.current_request("math")
         assert request.payload["artifact_id"] == imported.artifact_id
     finally:

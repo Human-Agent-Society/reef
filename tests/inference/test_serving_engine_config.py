@@ -85,7 +85,7 @@ def test_sglang_shares_prefixes_only_when_each_load_retracts_the_requests_in_fli
         SGLangInferenceService.from_config(engine_input(options={"disable-radix-cache": False}))
 
 
-def test_adapter_releases_size_the_engines_adapter_table_from_the_release_format_and_capacity():
+def test_adapter_artifacts_size_the_engines_adapter_table_from_the_artifact_format_and_capacity():
     config = SGLangInferenceService.from_config(engine_input(artifact_format=ADAPTER, adapter_capacity=4)).config
     assert {
         name: config.options[name]
@@ -152,8 +152,8 @@ def test_vllm_input_keeps_vllm_option_names_and_the_pause_mode():
     assert engine_input("vllm", options={"trust-remote-code": False})["options"]["trust_remote_code"] is False
 
 
-def test_vllm_refuses_adapter_releases():
-    # The serving assembly refuses more than one vLLM engine (tests/reef_service/test_training_startup.py).
+def test_vllm_refuses_adapter_artifacts():
+    # The serving assembly refuses more than one vLLM engine (tests/reef_service/deploy/test_training_startup.py).
     with pytest.raises(ValueError, match="vllm serves full weights only"):
         engine_input("vllm", artifact_format=ADAPTER)
 

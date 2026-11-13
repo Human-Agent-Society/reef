@@ -67,7 +67,7 @@ def _record(text: str = TEXT, requires: list | None = None) -> dict:
 
 
 def _row(metrics: dict, *, artifact_id: str = "rel-1", parent: str | None = "rel-0", **rest) -> dict:
-    """A catalog row of a one-component scenario, where the artifact id is the release id; activated unless
+    """A catalog row of a one-component scenario, where the artifact id is the snapshot's revision; activated unless
     ``rest`` says otherwise."""
     return {
         "artifact_id": artifact_id,
@@ -122,7 +122,7 @@ def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> No
     assert logo in build_artifact_page(0, [CREATION])
 
 
-def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> None:
+def test_the_logo_leads_to_the_active_artifact_the_request_is_asked_against() -> None:
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
     rows = [CREATION, _row(_answered(selected=True, patch=PATCH), active=True)]
     page = request_page(_record(), rows, link_query=QUERY, now=1_100.0)
@@ -303,7 +303,7 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
     assert "The evaluation could not run" not in version and "Candidate score" in version
 
 
-def test_the_next_action_of_a_published_release_names_what_it_requires_where_the_harness_runs() -> None:
+def test_the_next_action_of_a_published_artifact_names_what_it_requires_where_the_harness_runs() -> None:
     metrics = _answered(selected=True, patch=PATCH)
     metrics["training_request"]["requires"] = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your key"}]
     result = _section(request_page(_record(), [CREATION, _row(metrics)], now=1_100.0), "Result")

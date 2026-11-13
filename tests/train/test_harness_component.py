@@ -18,7 +18,7 @@ from tests.support.trajectories import recorded_trajectory
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.train.component import JobStatus, TrainingJob
+from reef.train.component import JobStatus, TrainingArtifactLayout, TrainingJob
 from reef.train.harness_backend.backend import JobProgress
 from reef.train.harness_backend.component import (
     PROGRESS_FILE,
@@ -40,10 +40,10 @@ def component_of(tmp_path: Path, method) -> HarnessTrainingComponent:
 
 def seed_start(component: HarnessTrainingComponent, tmp_path: Path) -> str:
     """The start of a job from the seed tree: the component's import of a snapshot that holds the seed."""
-    release = tmp_path / "seed-release"
-    if not release.is_dir():
-        PI_SEED.write(release)
-    return component.import_start(release)
+    artifact_dir = tmp_path / "seed-snapshot"
+    if not artifact_dir.is_dir():
+        PI_SEED.write(artifact_dir)
+    return component.import_start(artifact_dir)
 
 
 def job(component: HarnessTrainingComponent, name: str, *, start: str, previous: str | None = None):
@@ -175,15 +175,15 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     assert component.artifact_format is None and component.shares_scenarios
     assert component.facts.default_start().files == dict(PI_SEED.files)
     # An imported start is a copy of the snapshot's tree, under its checksum, without the repository's own files.
-    release = tmp_path / "release"
-    PI_SEED.apply(MARKER).write(release)
+    artifact_dir = tmp_path / "snapshot"
+    PI_SEED.apply(MARKER).write(artifact_dir)
     # An import's directory holds the tree alone.
-    component.check_artifact(DirectoryFiles(release))
-    (release / ".gitattributes").write_text("* filter=lfs\n")
-    (release / "reef-artifact.json").write_text("{}\n")
-    start = component.import_start(release)
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(artifact_dir))
+    (artifact_dir / ".gitattributes").write_text("* filter=lfs\n")
+    (artifact_dir / "reef-artifact.json").write_text("{}\n")
+    start = component.import_start(artifact_dir)
     assert Path(start).name == PI_SEED.apply(MARKER).checksum()
-    assert HarnessTree.read(Path(start)) == PI_SEED.apply(MARKER) and component.import_start(release) == start
+    assert HarnessTree.read(Path(start)) == PI_SEED.apply(MARKER) and component.import_start(artifact_dir) == start
     broken = tmp_path / "broken"
     HarnessTree({"rules.md": ""}).write(broken)
     with pytest.raises(ValueError, match="fails validation"):

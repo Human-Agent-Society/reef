@@ -102,7 +102,7 @@ class ComponentArtifacts:
 
     Values: ``artifacts`` is the scenario's reader, and ``component`` names a
     component of the scenario, non-empty.
-    Purpose: the scenario factory's trainer builder makes one per component
+    Purpose: ``reef.train.trainer_builder.build_trainers`` makes one per component
     for that component's trainer; a harness trainer reads its head through it.
     """
 

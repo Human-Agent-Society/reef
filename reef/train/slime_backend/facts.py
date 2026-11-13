@@ -78,7 +78,8 @@ class SlimeFacts(TrainingBackendFacts):
     The members are those of ``TrainingBackendFacts``. The snapshots hold full weights, or with LoRA the PEFT
     adapter of the rank, whose target modules carry the engines' names (``hf_lora_target_modules``). Slime's workers
     load ``hf_checkpoint`` when they start and cannot load a snapshot, so ``check_root_start`` accepts only a root
-    that came from the default start of the same ``default_start_inputs``. ``default_start`` is a base root of those
+    that came from the default start of the same ``default_start_inputs``, and ``check_import_start`` refuses every
+    snapshot. ``default_start`` is a base root of those
     inputs (``reef.artifact.base_root``): the workers make the startup weights themselves, the model and with LoRA
     the adapter that Megatron initializes, so the root holds no weight file. A component holds one job's weights at
     a time, so neither scenarios nor the jobs of one scenario share it.
@@ -195,8 +196,14 @@ class SlimeFacts(TrainingBackendFacts):
             )
             raise ValueError(
                 f"Slime trains the weights that it starts with, from the inputs {configured!r}, but the scenario's root "
-                f"release came from {started}; create the scenario again with this configuration"
+                f"snapshot came from {started}; create the scenario again with this configuration"
             )
+
+    def check_import_start(self, artifact_dir: Path) -> None:
+        raise ValueError(
+            "Slime continues training from its own latest checkpoint; it cannot load a published snapshot "
+            "into its workers"
+        )
 
 
 __all__ = [

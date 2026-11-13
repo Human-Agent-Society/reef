@@ -28,7 +28,7 @@ from reef.inference.tinker import TinkerInferenceRuntime
 from reef.service.deploy.training import training_deployment_for
 from reef.tinker.checkpoint import MANIFEST
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.component import TrainingJob, job_id_for
+from reef.train.component import TrainingArtifactLayout, TrainingJob, job_id_for
 from reef.train.tinker_backend import client as client_module
 from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient, TinkerSDKClient
@@ -197,15 +197,15 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
 
     status = train(component)
     assert client.starts == [FreshStart(MODEL)]
-    release = Path(status.checkpoints[0].artifact_path)
-    saved = TinkerCheckpoint.read(release)
+    artifact_dir = Path(status.checkpoints[0].artifact_path)
+    saved = TinkerCheckpoint.read(artifact_dir)
     assert saved.lora_rank is None and saved.service == SPINDLE
     # The snapshot refers to the checkpoint's weights, which the exporter put in the snapshot repo.
     assert exporter.exported == [(saved.state_path, HuggingFaceRevision(MODEL, COMMIT))]
-    assert read_reference(release) == HuggingFaceRevision(RELEASES, f"{1:040x}")
+    assert read_reference(artifact_dir) == HuggingFaceRevision(RELEASES, f"{1:040x}")
 
     # A job from a saved snapshot restores its checkpoint, whatever its reference names.
-    train(component, start=str(release))
+    train(component, start=str(artifact_dir))
     assert client.starts[-1] == saved
 
 
@@ -227,32 +227,32 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
     full = TinkerCheckpoint(MODEL, None, "tinker://f/state", "tinker://f/sampler", service=SPINDLE)
     full.write(tmp_path / "full")
     with pytest.raises(ValueError, match=f"holds {REFERENCE_FILE} beside its manifest"):
-        component.check_artifact(DirectoryFiles(tmp_path / "full"))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "full"))
     # A snapshot's reference must resolve to full weights.
     (tmp_path / "full" / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision(MODEL, COMMIT).to_dict()))
-    component.check_artifact(DirectoryFiles(tmp_path / "full"))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "full"))
     assert client.checked[-1] == full
     del hub.files["config.json"]
     with pytest.raises(ValueError, match="holds no full weights"):
-        component.check_artifact(DirectoryFiles(tmp_path / "full"))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "full"))
     hub.files["config.json"] = b"{}"
     TinkerCheckpoint(MODEL, 32, "tinker://l/state", "tinker://l/sampler", service=SPINDLE).write(tmp_path / "lora")
     with pytest.raises(ValueError, match="rank 32 LoRA, not all the parameters"):
-        component.check_artifact(DirectoryFiles(tmp_path / "lora"))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "lora"))
 
     copy = tmp_path / "copy"
     copy.mkdir()
     for path, data in FILES.items():
         (copy / path).write_bytes(data)
-    component.check_artifact(DirectoryFiles(copy))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(copy))
     (copy / "model.safetensors").write_bytes(b"other-weights")
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
-        component.check_artifact(DirectoryFiles(copy))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(copy))
     # The base of this component is its reference to the base revision, so it takes no base root.
     (tmp_path / "base-root").mkdir()
-    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.default_start_inputs).to_text())
+    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.facts.default_start_inputs).to_text())
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
-        component.check_artifact(DirectoryFiles(tmp_path / "base-root"))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "base-root"))
 
 
 @pytest.mark.unit
@@ -279,7 +279,7 @@ def test_the_component_trains_the_repo_of_its_base_on_a_spindle_deployment(tmp_p
 
 
 @pytest.mark.unit
-def test_spindles_sampler_serves_the_base_as_the_base_model_and_a_release_by_its_sampler(client, tmp_path):
+def test_spindles_sampler_serves_the_base_as_the_base_model_and_a_snapshot_by_its_sampler(client, tmp_path):
     runtime = TinkerInferenceRuntime(client, base_model=MODEL, service=SPINDLE, weight_kind="model")
     lora_runtime = TinkerInferenceRuntime(client, base_model=MODEL, service=SPINDLE)
     try:

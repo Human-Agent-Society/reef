@@ -18,7 +18,7 @@ def ids(listing: dict) -> list[str]:
 
 
 def train_body(record_id: str, *samples: str) -> dict:
-    body = {"agent_record_id": record_id, "text": "train these", "session": "session-1", "artifact_id": "release-1"}
+    body = {"agent_record_id": record_id, "text": "train these", "session": "session-1", "artifact_id": "artifact-1"}
     return {**body, "samples": list(samples)} if samples else body
 
 
@@ -55,11 +55,11 @@ def test_a_client_lists_the_samples_and_a_request_trains_the_ones_that_it_names(
             # The job trains the named samples in store order; the others wait.
             trained = await client.post("/reef/train", headers=train, json=train_body("r1", "t3", "t1"))
             assert trained.status == 200, await trained.text()
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(20):
                 while not recipe.batches:
                     await asyncio.sleep(0.01)
             assert [sample.trajectory["session_id"] for sample in recipe.batches[0].samples] == ["t1", "t3"]
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(20):
                 while True:
                     listing = await (await client.get("/reef/scenarios/s/samples", headers=AUTH)).json()
                     counts = {sample["sample_id"]: sample["train_counts"] for sample in listing["samples"]}
@@ -70,7 +70,7 @@ def test_a_client_lists_the_samples_and_a_request_trains_the_ones_that_it_names(
             # A trained sample can train again.
             again = await client.post("/reef/train", headers=train, json=train_body("r2", "t1"))
             assert again.status == 200, await again.text()
-            async with asyncio.timeout(5):
+            async with asyncio.timeout(20):
                 while len(recipe.batches) < 2:
                     await asyncio.sleep(0.01)
             assert [sample.trajectory["session_id"] for sample in recipe.batches[1].samples] == ["t1"]

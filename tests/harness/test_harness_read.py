@@ -54,7 +54,7 @@ def _service(tmp_path, *, recipe, live: LiveObjects | None = None) -> RequestSer
     return RequestService(dispatcher)
 
 
-def test_the_manifest_serves_the_release_rendered_or_as_its_source_tree(tmp_path) -> None:
+def test_the_manifest_serves_the_artifact_rendered_or_as_its_source_tree(tmp_path) -> None:
     service = _service(tmp_path, recipe=_HarnessRecipe(rules="rule"))
     rendered = service.harness_manifest({"x-reef-scenario": "delivery"})
     assert rendered["files"] == PI_RULES_RENDER

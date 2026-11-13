@@ -11,12 +11,13 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from contextlib import closing
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from tests.support.component_trainers import checked_commit
 from tests.support.harness_jobs import harness_recipe
 from tests.support.harness_service import harness_repository
 from tests.support.policy_recipe import TestPolicyRecipe
@@ -25,24 +26,23 @@ from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
-from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
-from tests.support.trainers import OneTrainerBuilder
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
-from reef.recipe.base import Recipe
+from reef.scenario import Scenario
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_snapshot
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
-from reef.train import Trainer
-from reef.train.component import SavedCheckpoint, TrainingJob
-from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.pipeline import TrainingPipeline
+from reef.train import TrainingCommit
+from reef.train.component import SavedCheckpoint, SnapshotStart, TrainingJob
+from reef.train.jobs import JobLoopState
+from reef.train.pipeline import PipelineSpec
 
 
 def sample_record(
@@ -56,7 +56,7 @@ def sample_record(
     return CommitRecord(
         scenario="math",
         commit_number=commit_number,
-        snapshot=SnapshotRef(revision=f"release:{snapshot_label}:{commit_number}", parent_revision="base"),
+        snapshot=SnapshotRef(revision=f"snapshot:{snapshot_label}:{commit_number}", parent_revision="base"),
         checkpoint=checkpoint,
         algorithm_state={"steps": commit_number},
         high_water_sequence=commit_number * 2,
@@ -93,7 +93,7 @@ def test_commit_record_round_trips_through_the_history(open_history) -> None:
     assert [record.commit_number for record in records] == [1, 2]
     first, second = records
     assert first.scenario == "math"
-    assert first.snapshot == SnapshotRef("release:w1:1", "base")
+    assert first.snapshot == SnapshotRef("snapshot:w1:1", "base")
     assert first.checkpoint is False
     assert first.algorithm_state == {"steps": 1}
     assert first.high_water_sequence == 2
@@ -163,12 +163,12 @@ def test_commit_history_tracks_the_current_training_run_position(open_history) -
     assert log.training_run_position() == (3, 1)
 
 
-def operation_record(operation: str, commit_number: int, release_id: str, **changes) -> CommitRecord:
-    """An activation or a new training start at ``commit_number`` naming ``release_id``, with ``changes`` applied."""
+def operation_record(operation: str, commit_number: int, revision: str, **changes) -> CommitRecord:
+    """An activation or a new training start at ``commit_number`` naming ``revision``, with ``changes`` applied."""
     values = {
         "scenario": "math",
         "commit_number": commit_number,
-        "snapshot": SnapshotRef(release_id, None),
+        "snapshot": SnapshotRef(revision, None),
         "checkpoint": False,
         "algorithm_state": None,
         "high_water_sequence": 0,
@@ -414,46 +414,14 @@ def train_pair(dispatcher: Dispatcher, index: int, artifact_id: str | None = Non
 
 
 class _SavedArtifactJobs(StubTrainingComponent):
-    """A training component whose every job saves the checkpoint ``artifact_path``; ``data_ids`` lists the data of
-    the jobs it ran."""
+    """A training component whose every job saves the checkpoint ``artifact_path``."""
 
     def __init__(self, artifact_path: Path) -> None:
         super().__init__(name="saved", shares_scenarios=True)
         self.artifact_path = artifact_path
-        self.data_ids: list[str] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        self.data_ids.append(job.data_id)
         return (SavedCheckpoint(0, str(self.artifact_path), str(self.artifact_path)),)
-
-
-class _SavedArtifactTrainers(OneTrainerBuilder):
-    """Builds a trainer whose jobs run on ``backend``, on the trainer's own thread."""
-
-    def __init__(self, backend: _SavedArtifactJobs) -> None:
-        self.backend = backend
-
-    def build_trainer(
-        self,
-        spec,
-        scenario,
-        records,
-        *,
-        algorithm_state,
-        experiment_logger,
-        task_storage,
-        artifacts,
-        samples,
-        root,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=partial(threshold_pipeline, job_samples=1),
-            job_loop=JobLoop(self.backend, scenario=scenario),
-            algorithm_state=algorithm_state,
-            root=root,
-        )
 
 
 def build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
@@ -461,17 +429,30 @@ def build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
     artifact_path.mkdir()
     (artifact_path / "model.txt").write_text("trained")
     backend = _SavedArtifactJobs(artifact_path)
-    dispatcher = Dispatcher(
-        Recipe(),
+    dispatcher = build_training_dispatcher(
+        backend,
+        tmp_path,
         repository_factory(tmp_path),
-        local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        agent_record_dir=agent_record_dir,
         # The tests drive the steps themselves; a local cycle would race them for the batch.
         hold_local_cycles=True,
-        coordination=memory_coordination(),
-        trainer_builder=_SavedArtifactTrainers(backend),
     )
     return dispatcher, backend
+
+
+def checkpoint_commit(scenario: Scenario) -> TrainingCommit:
+    """The commit of the running job's checkpoint, once the training worker ran the job and reported it."""
+    results: list[TrainingCommit] = []
+
+    def reported() -> bool:
+        result = scenario.next_commit()
+        if result is not None:
+            results.append(result)
+        return bool(results)
+
+    wait_until(reported, message="the training worker did not report the job's checkpoint")
+    assert results[0].artifact is not None
+    return results[0]
 
 
 @pytest.mark.unit
@@ -492,8 +473,16 @@ def test_each_commit_appends_one_atomic_record_and_a_restart_recovers_from_the_l
     submitted, _, finished = records[:3]
     # The submission consumes the batch's records; the later commits of the job consume none.
     assert submitted.algorithm_state["jobs"] == [
-        {"job_id": first_job, "start": component.submitted[0].start, "checkpoints_handled": 0, "train_from": None}
+        {
+            "job_id": first_job,
+            "start": submitted.algorithm_state["start"],
+            "checkpoints_handled": 0,
+            "train_from": None,
+        }
     ]
+    # Control named the root snapshot; the component got its own start of it.
+    assert SnapshotStart.from_text(submitted.algorithm_state["start"]) is not None
+    assert SnapshotStart.from_text(component.submitted[0].start) is None
     assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id(stage_item_id("math", "r1:0"))})
     assert submitted.high_water_sequence == 2
     assert finished.algorithm_state["finished_jobs"] == 1
@@ -530,58 +519,27 @@ def test_each_commit_appends_one_atomic_record_and_a_restart_recovers_from_the_l
     assert recovered.trainer.state["start"] == str(tmp_path / "exported" / "2")
 
 
-class ProtectAllPipeline(TrainingPipeline):
-    """Pairs like SFT but never releases a row: every pushed id is protected."""
-
-    def __init__(self, context) -> None:
-        super().__init__(
-            context,
-            record2sample=ThresholdSamples(context),
-            sample2job=ThresholdJobData(context, None, 1),
-        )
-        self._seen: set[str] = set()
-
-    def push(self, item) -> None:
-        self._seen.add(item.agent_record_id)
-        super().push(item)
+class ProtectAllSamples(ThresholdSamples):
+    """Pairs like SFT but never releases a row: no record is releasable."""
 
     def releasable_record_ids(self) -> frozenset[str]:
         return frozenset()
 
 
-class ProtectAllTrainers(OneTrainerBuilder):
-    """Builds the weight trainer of the recipe over ``ProtectAllPipeline``."""
+@dataclass(frozen=True)
+class ProtectAllRecipe(TestPolicyRecipe):
+    """The test policy recipe over ``ProtectAllSamples``."""
 
-    def build_trainer(
-        self,
-        spec,
-        scenario,
-        records,
-        *,
-        algorithm_state,
-        experiment_logger,
-        task_storage,
-        artifacts,
-        samples,
-        root,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=ProtectAllPipeline,
-            job_loop=JobLoop(spec.job_component, scenario=scenario),
-            job_parameters=spec.job_parameters,
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            root=root,
-        )
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(ProtectAllSamples, ThresholdJobData)
 
 
 @pytest.mark.unit
 def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     """Consumed rows must never be trained twice, even when they survive compaction.
 
-    The protect-all pipeline keeps every row physically present, and recovery
+    The protect-all stage keeps every row physically present, and recovery
     reads from sequence 0, so it must skip the consumed pair that the history
     names, or the pair would train again.
     """
@@ -590,13 +548,12 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
 
     def build(component):
         return Dispatcher(
-            TestPolicyRecipe(),
+            ProtectAllRecipe(),
             backend_factory,
             live=live_objects(component),
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),
             coordination=memory_coordination(),
-            trainer_builder=ProtectAllTrainers(),
         )
 
     first_component = SourceRecordingComponent(tmp_path / "first")
@@ -968,18 +925,18 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         agent_record_dir=agent_record_dir,
     )
     scenario = dispatcher.get_or_create_scenario("math")
-    scenario.records.append(token_inference("i1"))
+    wait_for_serving(dispatcher)
+    scenario.records.append(token_inference("i1", artifact_id=scenario.serving_artifact_id()))
     scenario.records.append(report("r1", "i1"))
     make_samples(scenario)
     # The job's submission consumes the batch; its checkpoint is the commit that publishes the artifact.
-    submitted = scenario.next_commit()
+    submitted = checked_commit(scenario)
     assert submitted is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
     scenario.commit(submitted)
     submitted_state = dict(scenario.trainer.state)
-    result = scenario.next_commit()
-    assert result is not None and result.artifact is not None
+    result = checkpoint_commit(scenario)
     committer = scenario._committer
 
     if failure_point == "commit_history":
@@ -1015,7 +972,8 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
     scenario.records.append(token_inference("i2"))
     scenario.commit(result)
 
-    assert backend.data_ids == [pending.data_id]
+    # The component ran the one job of the pending batch, once.
+    assert [job.job_id for job in backend.submitted] == [submitted.training_job_id]
     assert scenario.trainer.state == result.state
     assert scenario.current_snapshot() != active
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1", "i2"]
@@ -1030,10 +988,11 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
         agent_record_dir=tmp_path / "records",
     )
     scenario = dispatcher.get_or_create_scenario("math")
-    scenario.records.append(token_inference("i1"))
+    wait_for_serving(dispatcher)
+    scenario.records.append(token_inference("i1", artifact_id=scenario.serving_artifact_id()))
     scenario.records.append(report("r1", "i1"))
     make_samples(scenario)
-    result = scenario.next_commit()
+    result = checked_commit(scenario)
     assert result is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
@@ -1072,7 +1031,9 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
     assert scenario.trainer.pending_job_data is None
     assert len(scenario.store.history()) == 1
     assert scenario.repository.require_current_artifact().revision == recorded_snapshot
-    assert backend.data_ids == [pending.data_id]
+    # The training worker hands the queued job to the component on its own thread.
+    wait_until(lambda: bool(backend.submitted), message="the training worker did not run the job")
+    assert [job.job_id for job in backend.submitted] == [result.training_job_id]
     dispatcher.close()
 
 
@@ -1093,7 +1054,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
     scenario.records.append(report("r1", "i1"))
     make_samples(scenario)
     # The job's submission is the step that consumes the batch.
-    result = scenario.next_commit()
+    result = checked_commit(scenario)
     assert result is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
