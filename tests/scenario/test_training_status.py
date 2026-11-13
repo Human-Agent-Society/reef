@@ -12,7 +12,7 @@ from __future__ import annotations
 import tempfile
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Thread
 from types import SimpleNamespace
@@ -20,17 +20,15 @@ from typing import Literal
 
 import pytest
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, live_objects
 from tests.support.samples import made_task
 from tests.support.threshold_processor import ThresholdJobData
-from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.job_data import JobOutcome
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import TrainingErrors, local_error_source
 from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, LocalTrainingWorkers
-from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import NoSamples
 from reef.scenario.live_objects import LiveObjects
@@ -38,8 +36,7 @@ from reef.storage.samples import stage_item_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
-from reef.train.pipeline import TrainingPipeline
-from reef.train.trainer import Trainer
+from reef.train.pipeline import PipelineSpec
 from reef.train.types import Sample
 
 pytestmark = pytest.mark.unit
@@ -319,12 +316,14 @@ class BackgroundStep(NoSamples):
     """Run one step from no record, as the rounds of generated tasks do, and make the step's one task.
 
     The first look starts the step. The step runs until a look after ``finished`` is set; that look ends it, and
-    the stage then makes the step's one task from no record set.
+    the stage then makes the step's one task from no record set. ``finished`` is a class attribute, which
+    ``background_step_dispatcher`` replaces for each dispatcher.
     """
 
-    def __init__(self, finished: Event) -> None:
+    finished = Event()
+
+    def __init__(self) -> None:
         super().__init__()
-        self.finished = finished
         self.step: Literal["not started", "running", "ended"] = "not started"
         self.made = False
 
@@ -345,68 +344,32 @@ class BackgroundStep(NoSamples):
         return (("generated-task", made_task("generated-task")),)
 
 
-@dataclass(frozen=True, kw_only=True)
+@dataclass(frozen=True)
 class BackgroundStepRecipe(TestPolicyRecipe):
-    """A weights recipe that trains the task of a ``BackgroundStep``; ``step_finished`` ends the step."""
+    """A weights recipe that trains the task of a ``BackgroundStep``."""
 
-    step_finished: Event = field(default_factory=Event, compare=False)
-
-    def background_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        return TrainingPipeline(
-            context,
-            record2sample=BackgroundStep(self.step_finished),
-            sample2job=ThresholdJobData(context, None, 1),
-        )
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(BackgroundStep, ThresholdJobData)
 
 
-class BackgroundStepTrainers(OneTrainerBuilder):
-    """Builds the weight trainer of ``recipe``, which trains the task of a ``BackgroundStep``."""
-
-    def __init__(self, recipe: BackgroundStepRecipe) -> None:
-        self.recipe = recipe
-
-    def build_trainer(
-        self,
-        spec,
-        scenario,
-        records,
-        *,
-        algorithm_state,
-        experiment_logger,
-        task_storage,
-        artifacts,
-        samples,
-        root,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=self.recipe.background_pipeline,
-            # The jobs' data goes to the deployment's data store, whose task file store keeps the step's task.
-            job_loop=JobLoop(spec.job_component, scenario=scenario, data_store=spec.data_store),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            samples=samples,
-            root=root,
-        )
-
-
-def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundStepRecipe, StubTrainingComponent]:
-    """A dispatcher of ``BackgroundStepRecipe`` with no scenario yet, and the component that runs its jobs."""
+def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, Event, StubTrainingComponent]:
+    """A dispatcher of ``BackgroundStepRecipe`` with no scenario yet, the event that ends the step of its scenarios'
+    ``BackgroundStep``, and the component that runs its jobs."""
     initial = tmp_path / "initial"
     initial.mkdir()
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    recipe = BackgroundStepRecipe()
+    BackgroundStep.finished = Event()
     dispatcher = Dispatcher(
-        recipe,
+        # One task is one job; the stage takes no config.
+        BackgroundStepRecipe(pipeline_stages=job_sized_stages(BackgroundStepRecipe.pipeline_spec())),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
-        trainer_builder=BackgroundStepTrainers(recipe),
     )
-    return dispatcher, recipe, component
+    return dispatcher, BackgroundStep.finished, component
 
 
 def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
@@ -427,10 +390,10 @@ def test_a_scenario_created_after_start_trains_the_job_data_its_pipeline_makes_w
     # What POST /reef/scenarios does for a recipe that needs no record, such as generated tasks: no record or
     # upload ever wakes the worker, so the worker must start with the scenario and poll while the step runs.
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
-    dispatcher, recipe, component = background_step_dispatcher(tmp_path)
+    dispatcher, step_finished, component = background_step_dispatcher(tmp_path)
     try:
         dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
-        recipe.step_finished.set()
+        step_finished.set()
         assert_trains_the_generated_task(component)
     finally:
         dispatcher.close()
@@ -454,12 +417,12 @@ def test_a_status_read_leaves_a_finished_step_to_the_worker_which_trains_its_job
         if waits == 2:
             # The worker ran its first step, which found the step running; no record wakes it again.
             ready.clear()
-            recipe.step_finished.set()
+            step_finished.set()
             read_ready.append(dispatcher.build_training_status()["scenarios"][scenario]["job_data_ready"])
         return wait(self, scenario, component, ready)
 
     monkeypatch.setattr(LocalTrainingWorkers, "wait", wait_after_a_status_read)
-    dispatcher, recipe, training_component = background_step_dispatcher(tmp_path)
+    dispatcher, step_finished, training_component = background_step_dispatcher(tmp_path)
     try:
         dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
         assert_trains_the_generated_task(training_component)

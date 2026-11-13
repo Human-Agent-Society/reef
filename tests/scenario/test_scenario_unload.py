@@ -5,34 +5,34 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
-from functools import partial
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 from tests.support.polling import wait_until
-from tests.support.runtime_stubs import StubTrainingComponent
-from tests.support.threshold_processor import threshold_pipeline
-from tests.support.trainers import OneTrainerBuilder
+from tests.support.runtime_stubs import StubTrainingComponent, harness_live_objects, job_sized_stages
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ScenarioCapacityFullError, ScenarioLimitReachedError
 from reef.dispatcher import Dispatcher
+from reef.evaluation.harness import EvaluationSettings
 from reef.recipe import Recipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.scenario import Scenario
 from reef.scenario.admission import LoadAdmission, LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import Trainer
 from reef.train.component import SavedCheckpoint, TrainingJob
-from reef.train.jobs import JobLoop
+from reef.train.harness_backend.settings import EvolutionSettings
+from reef.train.pipeline import PipelineSpec
 
 
 class StepJobs(StubTrainingComponent):
     """A training component whose ``n``-th job saves one checkpoint holding ``model.txt`` = ``step <n>``. With
-    ``block``, a job waits in ``submit``, so the trainer's cycle waits with it."""
+    ``block``, a job waits in ``submit``, on the thread of the training worker, so the job keeps running."""
 
     def __init__(self, artifact_dir: Path) -> None:
         super().__init__(artifact_dir, name="steps", shares_scenarios=True)
@@ -51,35 +51,14 @@ class StepJobs(StubTrainingComponent):
         return (SavedCheckpoint(0, str(path), str(path)),)
 
 
-class StepTrainers(OneTrainerBuilder):
-    """Builds a trainer whose jobs run on ``backend``, on the trainer's own thread; None builds one that trains nothing."""
-
-    def __init__(self, backend: StepJobs | None) -> None:
-        self.backend = backend
-
-    def build_trainer(
-        self,
-        spec,
-        scenario,
-        records,
-        *,
-        algorithm_state,
-        experiment_logger,
-        task_storage,
-        artifacts,
-        samples,
-        root,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
-            pipeline_factory=partial(threshold_pipeline, job_samples=None if self.backend is None else 1),
-            job_loop=None if self.backend is None else JobLoop(self.backend, scenario=scenario),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            root=root,
-        )
+def step_recipe() -> HarnessEvolutionRecipe:
+    """A harness recipe whose trainer makes one job of each scored report. A scenario of it can be idle; a scenario
+    that trains weights never is."""
+    return HarnessEvolutionRecipe(
+        evolution=EvolutionSettings(),
+        evaluation=EvaluationSettings(policy="none"),
+        pipeline_stages=job_sized_stages(PipelineSpec(ThresholdSamples, ThresholdJobData)),
+    )
 
 
 def make_dispatcher(
@@ -94,14 +73,15 @@ def make_dispatcher(
     initial.mkdir(exist_ok=True)
     (initial / "model.txt").write_text("initial", encoding="utf-8")
     return Dispatcher(
-        Recipe(),
+        # A dispatcher with no backend trains nothing: its recipe only reads records.
+        Recipe() if backend is None else step_recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=admission,
         scenario_idle_unload_seconds=idle_unload_seconds,
         coordination=memory_coordination(),
-        trainer_builder=StepTrainers(backend),
+        live=None if backend is None else harness_live_objects(backend),
     )
 
 
@@ -188,7 +168,7 @@ def test_scenario_with_untrained_records_stays_loaded(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_scenario_with_a_running_cycle_stays_loaded(tmp_path) -> None:
+def test_scenario_with_a_running_job_stays_loaded(tmp_path) -> None:
     backend = StepJobs(tmp_path / "candidates")
     dispatcher = make_dispatcher(tmp_path, backend=backend)
     try:

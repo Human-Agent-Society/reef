@@ -3,31 +3,36 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
-from tests.support.runtime_stubs import RecordingComponent
+from tests.support.runtime_stubs import (
+    RecordedJob,
+    RecordingComponent,
+    StubFacts,
+    StubInferenceRuntime,
+    job_sized_stages,
+)
 from tests.support.samples import made_task
-from tests.support.trainers import OneTrainerBuilder
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
-from reef.inference.http import InferenceProxyRuntime
 from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
+from reef.recipe.base import WeightTrainingRecipe
 from reef.record2sample import ReportSamples
-from reef.sample2job import Sample2Job
+from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import JobData, Trainer
-from reef.train.jobs import JobLoop
-from reef.train.pipeline import TrainingPipeline
+from reef.train import JobData
+from reef.train.job_queue import TrainingJobWorker
+from reef.train.pipeline import PipelineSpec
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
 
@@ -55,64 +60,40 @@ class FeedbackSamples(ReportSamples):
 
 
 class FeedbackJobData(Sample2Job):
+    @classmethod
+    def from_config(cls, config, *, context, record2sample, environ):
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
+        return cls(context, settings.buffer_size, settings.job_samples)
+
     def make_job_data(self, samples, data_id):
         return JobData(data_id, samples)
 
 
-def feedback_pipeline(context):
-    return TrainingPipeline(
-        context,
-        record2sample=FeedbackSamples(context),
-        sample2job=FeedbackJobData(context, None, 2),
-    )
-
-
 @dataclass(frozen=True, kw_only=True)
-class LearningRecipe(Recipe):
-    batches: list[JobData] = field(default_factory=list)
+class LearningRecipe(WeightTrainingRecipe):
+    """A weight recipe that makes one sample of each scored report and trains two samples in a job.
+    ``dispatcher_for`` gives its scenarios a ``RecordingComponent`` that keeps the jobs in ``batches``."""
+
+    batches: list[RecordedJob] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.pipeline_stages is None:
+            object.__setattr__(self, "pipeline_stages", job_sized_stages(self.pipeline_spec(), job_samples=2))
+        super().__post_init__()
+
+    @classmethod
+    def pipeline_spec(cls):
+        return PipelineSpec(FeedbackSamples, FeedbackJobData)
 
     @property
     def report_type(self):
         return ScoredRolloutReport
 
 
-class LearningTrainers(OneTrainerBuilder):
-    """Builds the trainer of ``recipe``: its jobs run on a ``RecordingComponent`` that keeps them in
-    ``recipe.batches``, on the trainer's own thread."""
-
-    def __init__(self, recipe: LearningRecipe) -> None:
-        self.recipe = recipe
-
-    def build_trainer(
-        self,
-        spec,
-        scenario,
-        records,
-        *,
-        algorithm_state,
-        experiment_logger,
-        task_storage,
-        artifacts,
-        samples,
-        root,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=feedback_pipeline,
-            job_loop=JobLoop(RecordingComponent(self.recipe.batches), scenario=scenario),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            report_type=spec.report_type,
-            training_mode=spec.training_mode,
-            root=root,
-        )
-
-
 def served_live() -> LiveObjects:
     """Live objects whose runtime names an HTTP engine and a model, so a recipe's scenarios have a served model; the
     app's ``inference_handler`` answers for that engine."""
-    return LiveObjects(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="example-model"))
+    return LiveObjects(runtime=StubInferenceRuntime(base_url="http://engine.test", model_path="example-model"))
 
 
 class EchoHandler(InferenceHandler):
@@ -125,13 +106,21 @@ class EchoHandler(InferenceHandler):
 
 
 def dispatcher_for(tmp_path, recipe, live=None):
+    """A dispatcher for ``recipe`` on ``live``. A ``LearningRecipe`` also gets a ``RecordingComponent``, whose jobs
+    the dispatcher's training worker runs, and a stub runtime when ``live`` has none."""
+    if isinstance(recipe, LearningRecipe):
+        component = RecordingComponent(recipe.batches)
+        live = replace(
+            LiveObjects(runtime=StubInferenceRuntime()) if live is None else live,
+            training_component=component,
+            training_facts=StubFacts(component),
+        )
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
-        trainer_builder=LearningTrainers(recipe) if isinstance(recipe, LearningRecipe) else None,
     )
 
 
@@ -147,7 +136,7 @@ async def wait_for_training(scenario, recipe, count):
             for record in scenario.store.history()
         )
 
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(20):
         while trained() < count or ended() < len(recipe.batches):
             await asyncio.sleep(0.01)
     assert trained() == count
@@ -199,9 +188,14 @@ def test_record_import_takes_a_long_trajectory_and_keeps_its_body_limit(tmp_path
 
 
 @pytest.mark.parametrize("bulk", (False, True))
-def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk):
+def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk, monkeypatch):
+    # The trainer's worker and the training worker look again soon, so the four jobs end within the waits.
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     recipe = LearningRecipe()
     dispatcher = dispatcher_for(tmp_path, recipe, served_live())
+    for worker in dispatcher.workers.workers:
+        if isinstance(worker, TrainingJobWorker):
+            worker.poll_seconds = 0.01
     handler = EchoHandler()
 
     async def run():

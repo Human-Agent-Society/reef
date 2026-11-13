@@ -64,7 +64,7 @@ from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
 from reef.train.component import ScenarioRoot
 from reef.train.trainer import ComponentTrainer
-from reef.train.trainer_builder import ComponentTrainerSpecs, SpecTrainerBuilder, TrainerBuilder, TrainerSpec
+from reef.train.trainer_builder import ComponentTrainerSpecs, TrainerSpec, build_trainers
 from reef.train.training_requests import TrainingRequestQueue
 
 
@@ -305,7 +305,7 @@ def with_record2sample_configs(
 ) -> Recipe:
     """``recipe`` with a scenario's own record-to-sample keys ``configs``, by component name
     (``ScenarioSettings.record2sample_config``), over the record-to-sample config of each component's recipe
-    (``Recipe.with_record2sample_config``). The trainer builder builds the scenario's trainers from the result.
+    (``Recipe.with_record2sample_config``). ``build_trainers`` builds the scenario's trainers from the result.
 
     ``components`` is what the scenario serves. Empty ``configs`` return ``recipe``. A composite gives each child
     the keys under the child's component name. Any other recipe takes the keys of the one component that its
@@ -368,12 +368,9 @@ class ScenarioFactory:
         experiment_reports: ExperimentReportQueue | None = None,
         served_models: ServedModels | None = None,
         training_requests: TrainingRequestQueue | None = None,
-        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         self._recipe = recipe
         self.live = LiveObjects() if live is None else live
-        #: Builds each scenario's trainers from the recipe's specs; None is ``SpecTrainerBuilder``.
-        self.trainer_builder = SpecTrainerBuilder() if trainer_builder is None else trainer_builder
         #: The training requests of every scenario; None builds scenarios that take no request.
         self._training_requests = training_requests
         self.served_models = served_models
@@ -608,7 +605,7 @@ class ScenarioFactory:
             record2sample_config = self._storage.read_settings(name).record2sample_config
             recipe = with_record2sample_configs(self._recipe, components, record2sample_config)
             try:
-                trainers = self.trainer_builder.build_trainers(
+                trainers = build_trainers(
                     read_trainer_specs(recipe, self.live),
                     name,
                     store.records,
