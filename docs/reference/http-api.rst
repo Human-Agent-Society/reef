@@ -1192,11 +1192,14 @@ The body takes these fields:
   tasks, and their scores compare. The stored request names the tasks in
   ``task_names``, and a stored ``collection`` leaves out a benchmark with no
   chosen task.
-- ``sample_seed``: an integer that changes which tasks ``num_samples``
-  chooses, or null (the default). Reef then ranks the digests of
-  ``"<sample_seed>:<task name>"``. Send a new random seed to run another
-  random part of the tasks, and the same seed to run the same part again. Reef
-  returns 400 for a ``sample_seed`` without ``num_samples``.
+- ``sample_seed``: an integer, or null (the default). With a seed, Reef runs
+  the tasks in a random order that the seed fixes: it ranks the SHA-256
+  digests of ``"<sample_seed>:<task name>"``. With ``num_samples``, the
+  evaluation runs the first ``num_samples`` tasks of that order, so a new
+  random seed runs another random part of the tasks. Without ``num_samples``,
+  it runs every task in that order. The same seed gives the same tasks in the
+  same order again. The stored ``task_names`` are in the order that the
+  evaluation runs them.
 - ``rollouts_per_task``: the rollouts of each task, 1 by default.
 - ``environment``: the Harbor environment type, ``docker`` by default.
 - ``max_concurrent_rollouts``: the most rollouts of this evaluation that run

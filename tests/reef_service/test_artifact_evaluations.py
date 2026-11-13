@@ -672,15 +672,25 @@ def test_an_evaluation_with_num_samples_runs_that_many_tasks_chosen_by_their_nam
             assert named["request"]["task_names"] == ["sort"]
 
             # A seed changes the choice, and the same seed gives the same choice again.
-            for refused in ({"sample_seed": 7}, {"num_samples": 1, "sample_seed": "7"}):
-                response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json={**body, **refused})
-                assert response.status == 400, await response.text()
+            response = await client.post(
+                "/reef/scenarios/s/evaluations", headers=AUTH, json={**body, "num_samples": 1, "sample_seed": "7"}
+            )
+            assert response.status == 400, await response.text()
             seeded = [
                 (await _accepted({"num_samples": 1, "sample_seed": seed}))["request"]["task_names"]
                 for seed in (0, 0, 1, 2, 3, 4, 5, 6, 7)
             ]
             assert seeded[0] == seeded[1]
             assert {name for names in seeded for name in names} == {"add", "sort", "sum"}
+            # A seed alone runs every task, in the random order of the seed: the choice with num_samples is its start.
+            orders = [
+                (await _accepted({"sample_seed": seed}))["request"]["task_names"]
+                for seed in (0, 0, 1, 2, 3, 4, 5, 6, 7)
+            ]
+            assert orders[0] == orders[1]
+            assert all(sorted(order) == ["add", "sort", "sum"] for order in orders)
+            assert [order[:1] for order in orders] == seeded
+            assert len({tuple(order) for order in orders}) > 1
 
             # On a collection, the choice is among its eval tasks, and a benchmark with no chosen task is left out.
             for item_id, benchmarks in (("add", ["lite", "full"]), ("sort", ["full"])):
