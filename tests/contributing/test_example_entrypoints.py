@@ -16,6 +16,7 @@ from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from packaging.requirements import Requirement
 
 ROOT = Path(__file__).resolve().parents[2]
 # An example lives beside its method under recipes/<method>/examples/; the
@@ -31,6 +32,7 @@ REEF_EVAL_EXAMPLE_DIRS = (
     *EXAMPLE_DIRS.values(),
     ROOT / "recipes" / "openclawrl" / "examples" / "openclawrl",
     ROOT / "recipes" / "sdpo" / "examples" / "sciknoweval",
+    ROOT / "recipes" / "meta_harness" / "examples" / "terminal_bench",
 )
 
 
@@ -39,7 +41,16 @@ REEF_EVAL_EXAMPLE_DIRS = (
 def test_reef_eval_examples_declare_their_runtime_dependency(example_dir: Path) -> None:
     project = tomllib.loads((example_dir / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     assert project["requires-python"] == ">=3.12"
-    assert "reef-eval[harbor]" in project["dependencies"]
+    # Some run.sh files make an ephemeral uv environment for the driver with the "harbor" extra of reef-eval. The
+    # other examples install beside Reef, where that extra replaces Reef's Harbor version with the version it pins.
+    ephemeral = "reef-eval[harbor]" in (example_dir / "run.sh").read_text(encoding="utf-8")
+    requirements = {found.name: found for found in map(Requirement, project["dependencies"])}
+    assert requirements["reef-eval"].extras == ({"harbor"} if ephemeral else set())
+    if not ephemeral:
+        # The harness imports Harbor and must accept the version selected by Reef's lockfile.
+        packages = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))["package"]
+        harbor_version = next(package["version"] for package in packages if package["name"] == "harbor")
+        assert requirements["harbor"].specifier.contains(harbor_version), str(requirements["harbor"])
 
 
 def _install_harbor_protocol(monkeypatch) -> None:
@@ -238,7 +249,8 @@ def test_tttd_entrypoint_rejects_an_unknown_task(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_tttd_entrypoint_fails_when_harbor_reports_an_error(monkeypatch) -> None:
+@pytest.mark.parametrize("example", ["basic", "tttd"])
+def test_entrypoint_fails_when_harbor_reports_an_error(monkeypatch, example) -> None:
     class Lab:
         def __init__(self, _path):
             pass
@@ -251,7 +263,7 @@ def test_tttd_entrypoint_fails_when_harbor_reports_an_error(monkeypatch) -> None
     monkeypatch.setitem(sys.modules, "reef_eval", reef_eval)
 
     with pytest.raises(RuntimeError, match="Harbor trial failed: environment failed"):
-        runpy.run_path(str(EXAMPLE_DIRS["tttd"] / "run.py"))
+        runpy.run_path(str(EXAMPLE_DIRS[example] / "run.py"))
 
 
 class _Environment:
@@ -287,6 +299,53 @@ def test_basic_harness_runs_inference_and_preserves_its_receipt(monkeypatch) -> 
     assert environment.commands and "42" in environment.commands[0]
     assert context.metadata["reef"] == {"agent_record_ids": ["receipt-basic"]}
     assert (context.n_input_tokens, context.n_output_tokens) == (3, 1)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("states", "failure"),
+    [(["pending", "starting", "ready"], None), (["starting", "failed"], "inference did not start: no GPU is free")],
+    ids=["ready", "failed"],
+)
+def test_basic_harness_waits_for_inference_after_it_creates_the_scenario(monkeypatch, states, failure) -> None:
+    agent_module, _ = _load_harness(monkeypatch, "basic")
+
+    async def call_inline(function, *args):
+        return function(*args)
+
+    async def skip_sleep(seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(agent_module.asyncio, "to_thread", call_inline)
+    monkeypatch.setattr(agent_module.asyncio, "sleep", skip_sleep)
+    requests: list[tuple[str, str]] = []
+
+    class Client:
+        """Stateless client used by this test to observe the basic harness's startup sequence.
+
+        Both methods append their method and path to requests. After one POST, each GET returns the next
+        parametrized state and an error only for failed. An extra GET raises IndexError.
+        """
+
+        def post(self, path: str, scenario: str, payload: dict[str, str]) -> None:
+            requests.append(("POST", path))
+
+        def get(self, path: str) -> dict[str, str | None]:
+            requests.append(("GET", path))
+            state = states[len(requests) - 2]
+            return {"state": state, "error": "no GPU is free" if state == "failed" else None}
+
+    agent = object.__new__(agent_module.HarborAgent)
+    agent._client = Client()
+
+    if failure is None:
+        asyncio.run(agent.setup(_Environment()))
+    else:
+        with pytest.raises(RuntimeError, match=failure):
+            asyncio.run(agent.setup(_Environment()))
+
+    status_path = "/reef/scenarios/basic-arithmetic/inference/status"
+    assert requests == [("POST", "/reef/scenarios"), *[("GET", status_path)] * len(states)]
 
 
 @pytest.mark.unit

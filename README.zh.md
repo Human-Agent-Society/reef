@@ -120,10 +120,10 @@ python3 -c "import reef; print(reef.__version__)"
 Reef 支持两类学习载体：模型**权重**和 Agent 的 **harness**。每个部署使用的 recipe
 决定其 scenario 更新哪一种载体。
 
-作为最小示例，将 Reef 启动为纯推理服务：
+作为最小示例，将 Reef 启动为纯推理服务。运行环境需要已安装 SGLang 和支持 GPU 的 PyTorch：
 
 ```bash
-uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 ### 模型权重训练部署
@@ -143,7 +143,7 @@ reef serve -c recipes/sao/examples/imo_answerbench/serve.yaml \
   --inference.model-path "$MODEL_PATH" \
   --reef.port "8900"
 
-curl -f http://127.0.0.1:8900/healthz          # ready to serve
+curl -f http://127.0.0.1:8900/healthz          # the service is up
 ```
 
 #### 发送推理请求并上报反馈
@@ -152,8 +152,9 @@ curl -f http://127.0.0.1:8900/healthz          # ready to serve
 rollout 执行一次训练。
 
 Reef 的推理端点兼容 OpenAI 和 Anthropic：`/v1/chat/completions`、`/v1/responses` 与 `/v1/messages`
-直接接收相应模型提供商的请求体。请求需包含 `x-reef-scenario` 请求头；新的名称会使用
-部署配置的 recipe 创建 scenario。请求本身不选择 recipe。
+直接接收相应模型提供商的请求体。请求需包含 `x-reef-scenario` 请求头。推理请求不会创建 scenario，
+也不选择 recipe。请先用 `POST /reef/scenarios` 创建 scenario，它会使用部署配置的 recipe；然后等待
+`GET /reef/scenarios/{scenario}/inference/status` 返回 `ready`。
 
 响应体使用模型提供商的 OpenAI 兼容格式。Reef 会添加 `x-reef-agent-record-id` 响应头，
 其值是后续报告用来标识本次交互的**回执**。报告可以包含数值 `score`、文本或结构化
@@ -161,13 +162,33 @@ Reef 的推理端点兼容 OpenAI 和 Anthropic：`/v1/chat/completions`、`/v1/
 
 ```python
 import os
+import time
+
 import httpx
 
+scenario = "hello-reef"
 reef = httpx.Client(
     base_url="http://127.0.0.1:8900",
-    headers={"Authorization": f"Bearer {os.environ['REEF_TOKEN']}", "x-reef-scenario": "hello-reef"},
+    headers={"Authorization": f"Bearer {os.environ['REEF_TOKEN']}", "x-reef-scenario": scenario},
     timeout=300,
 )
+
+# Create the scenario; a repeated request returns the existing scenario
+reef.post("/reef/scenarios", json={"name": scenario}).raise_for_status()
+
+# Wait until inference is ready for the scenario
+deadline = time.monotonic() + 1800
+while True:
+    startup = reef.get(f"/reef/scenarios/{scenario}/inference/status")
+    startup.raise_for_status()
+    status = startup.json()
+    if status["state"] == "ready":
+        break
+    if status["state"] == "failed":
+        raise RuntimeError(f"Inference startup failed: {status['error']}")
+    if time.monotonic() > deadline:
+        raise TimeoutError(f"Inference is still {status['state']} after 30 minutes; read the Reef logs")
+    time.sleep(1)
 
 # Send a provider-compatible inference request
 response = reef.post(

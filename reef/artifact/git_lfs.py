@@ -1242,7 +1242,8 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
     ) -> None:
         super().__init__()
         self._backend_type = backend_type
-        self._repository = repository
+        # Git reads a relative remote path from the top of the work tree that holds the working directory.
+        self._repository = repository.absolute() if isinstance(repository, Path) else repository
         self._work_dir = Path(work_dir)
         self._cache_dir = Path(cache_dir)
         self._refs = refs

@@ -5,7 +5,7 @@ Local inference needs no YAML file:
 
 .. code:: bash
 
-   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+   reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 
 This starts SGLang on an automatically selected loopback port, waits for its
 health endpoint, then starts Reef on ``127.0.0.1:8900``. Use
@@ -838,7 +838,7 @@ For managed SGLang, use:
 
 .. code:: bash
 
-   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
+   reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
      --inference.options.mem-fraction-static 0.8 \
      --inference.options.trust-remote-code true
 

@@ -205,7 +205,7 @@ following commands from the repository root:
 
    git submodule update --init third_party/reef-client
    python -m pip install -e ./third_party/reef-client
-   python -m pip install -e . "reef-eval[harbor]"
+   python -m pip install -e .
    cd recipes/tttd/examples/tttd
 
 ``run.sh`` downloads ``Qwen/Qwen3-8B`` into ``work/model`` on its first run,

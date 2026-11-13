@@ -99,16 +99,25 @@ Tell Reef how it went
 ---------------------
 
 Reef learns from calls that have feedback. Score the session with one report
-that names its model calls: ``0`` for a failure, ``1`` for a success. The
-``feedback`` text says what went wrong. The commands use ``jq``.
+that names its last model call: ``0`` for a failure, ``1`` for a success. Reef
+adds the earlier calls of the session. The ``feedback`` text says what went
+wrong. These commands assume this session is the scenario's only active
+client. Run them immediately after it ends; they read the newest recorded
+call. The commands use ``jq``.
 
 .. code:: bash
 
-   CALLS=$(curl -s "http://127.0.0.1:8901/reef/scenarios/$SCENARIO/records?request_type=inference&limit=100" \
-     | jq -c '[.records[].agent_record_id]')
+   # The newest inference record. Reef lists the records oldest first, at most 100 for each request.
+   RECORDS="http://127.0.0.1:8901/reef/scenarios/$SCENARIO/records?request_type=inference&limit=100"
+   AFTER=0
+   while [ "$AFTER" != null ]; do
+     PAGE=$(curl -sf "$RECORDS&after_sequence=$AFTER") || break
+     AFTER=$(jq '.next_after_sequence' <<< "$PAGE")
+   done
+   LAST=$(jq -c '[.records[-1].agent_record_id]' <<< "$PAGE")
    curl -s -X POST http://127.0.0.1:8901/reef/report \
      -H "x-reef-scenario: $SCENARIO" -H "Content-Type: application/json" \
-     -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
+     -d "{\"references\": $LAST, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
 
 With a deployment token, add ``-H "Authorization: Bearer $REEF_TOKEN"`` to
 each ``curl``. A program that calls the model itself reads each call's

@@ -137,7 +137,7 @@ receipt. The next problem is served by the weights the previous one produced.
 .. code:: bash
 
    cd recipes/sao/examples/imo_answerbench
-   pip install -e . "reef-eval[harbor]"
+   pip install -e .
    hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
    ./run.sh
 
