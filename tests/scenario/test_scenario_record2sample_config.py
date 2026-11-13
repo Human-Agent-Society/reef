@@ -13,7 +13,7 @@ from tests.support.harness_service import harness_dispatcher
 
 from reef.core import AgentRecord
 from reef.core.config import config_option
-from reef.core.plugins import PluginSettings
+from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
@@ -123,4 +123,21 @@ def test_a_samples_process_loads_the_scenario_again_when_control_changed_its_con
 
     LocalSampleProducers(dispatcher.registry, None).produce("s", "records", NoProgress("selection-1"))
 
+    assert window(dispatcher) == 2
+
+
+def test_the_setter_repairs_a_stored_config_that_no_longer_loads(dispatcher):
+    # A config stored before an upgrade sets a removed key: the scenario refuses to load with it.
+    settings = dispatcher.storage.read_settings("s")
+    dispatcher.storage.write_settings("s", replace(settings, record2sample_config={"records": {"max_staleness": 1}}))
+    with pytest.raises(PluginConfigError, match="max_staleness was removed"):
+        dispatcher.registry.reload("s")
+
+    with pytest.raises(ValueError, match="refused record2sample_config"):
+        dispatcher.set_record2sample_config("s", {"records": {"window": -1}})
+    assert dispatcher.stored_settings("s").record2sample_config == {"records": {"max_staleness": 1}}
+
+    assert dispatcher.set_record2sample_config("s", {"records": {"window": 2}}) == {
+        "record2sample_config": {"records": {"window": 2}}
+    }
     assert window(dispatcher) == 2
