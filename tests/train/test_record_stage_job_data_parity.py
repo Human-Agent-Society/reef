@@ -202,7 +202,10 @@ class StreamRun:
                     self.records.append(step)
                 elif isinstance(step, Serve):
                     if self.served.artifact_ids[-1:] != (step.artifact_id,):
-                        self.served = ServedArtifacts((*self.served.artifact_ids, step.artifact_id))
+                        self.served = ServedArtifacts(
+                            (*self.served.artifact_ids, step.artifact_id),
+                            commit_number=len(self.served.artifact_ids),
+                        )
                 elif isinstance(step, Train):
                     payload = {
                         "text": step.request_id,

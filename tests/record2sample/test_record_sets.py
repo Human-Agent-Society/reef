@@ -137,11 +137,12 @@ def test_lag_counts_the_artifacts_the_scenario_served() -> None:
     assert not any(lags_behind(group, ServedArtifacts(), 0) for group in samples.values())
 
 
-def test_served_artifacts_have_no_equal_neighbors_and_name_what_serves() -> None:
+def test_served_artifacts_have_no_equal_neighbors_and_a_non_negative_commit_number() -> None:
     with pytest.raises(ValueError, match="no two neighbors equal"):
         ServedArtifacts(("a1", "a1"))
-    assert ServedArtifacts().served_state is None
-    assert ServedArtifacts(("a1", "a2"), frozenset({"b", "a"})).served_state == "a2 a b"
+    for commit_number in (-1, True, 1.0):
+        with pytest.raises(ValueError, match="commit_number must be a non-negative int"):
+            ServedArtifacts(("a1",), commit_number=commit_number)  # type: ignore[arg-type]
 
 
 def test_the_default_stage_is_on_policy() -> None:

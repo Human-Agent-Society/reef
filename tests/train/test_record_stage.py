@@ -349,7 +349,7 @@ def test_a_sample_that_the_samples_service_marks_stale_stays_stored_and_never_tr
     processor.push(report("r1", "i1"))
     processor.push(inference("i2", version="e:2"))
     processor.push(report("r2", "i2"))
-    assert processor.mark_stale(ServedArtifacts(("e:1", "e:2")))
+    assert processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=3))
     batch = processor.build_job_data(1)
     assert [item.source_agent_record_ids for item in batch.samples] == [("i2", "r2")]
     # The stale sample stays in the store with its mark, and the records that made it stay consumed.
@@ -359,8 +359,8 @@ def test_a_sample_that_the_samples_service_marks_stale_stays_stored_and_never_tr
     ]
     assert {"r1", "i1"} <= processor.record2sample.releasable_record_ids()
     # The judgment is stored once; judging again against the same artifacts changes nothing.
-    assert processor.store.judged("e:2")
-    assert not processor.mark_stale(ServedArtifacts(("e:1", "e:2")))
+    assert processor.store.judged_commit() == 3
+    assert not processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=3))
     # A sample stored after the judgment is judged as it is stored: no reader sees it unmarked.
     processor.push(inference("i3", version="e:1"))
     processor.push(report("r3", "i3"))
@@ -587,10 +587,10 @@ def test_the_records_of_an_artifact_served_beside_train_while_it_serves() -> Non
         "i1", SampleResult.ready((policy_trajectory("i1", [1], [1], [0.0], 1.0, artifact_id="beside"),))
     )
     processor.produce()
-    processor.mark_stale(ServedArtifacts(("active",), frozenset({"beside"})))
+    processor.mark_stale(ServedArtifacts(("active",), frozenset({"beside"}), commit_number=1))
     assert processor.ready(1) and len(auto_ids(processor)) == 1
     # Once the artifact no longer serves beside the active one, its sample is stale.
-    processor.mark_stale(ServedArtifacts(("active",)))
+    processor.mark_stale(ServedArtifacts(("active",), commit_number=2))
     assert not processor.ready(1) and auto_ids(processor) == ()
 
 

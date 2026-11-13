@@ -87,6 +87,10 @@ class Scenario:
         #: instance loaded before that. A new pipeline reads the last job end from its own state.
         self.loaded_commit_number = commit_number
         self.job_ends_read_commit_number: dict[str, int] = {}
+        #: For a store without a durable history: the artifacts that this instance saw selected, oldest first, and the
+        #: commit number at the last change (``served_artifacts``).
+        self.selected_artifacts: list[str] = []
+        self.selected_commit_number = 0
         #: Every trainer of this scenario with the component it evolves, in recipe order.
         self.trainers = validate_component_trainers(trainers, binding.components)
         self._artifact_chain = ArtifactSnapshotChain(repository)
@@ -371,27 +375,40 @@ class Scenario:
         )
 
     def served_artifacts(self) -> ServedArtifacts:
-        """The artifacts that the scenario served, as its commit history holds them: the served component's artifacts
-        that the creation and each activating commit bound, and those that it serves beside its active selection.
-        Before the first commit, it is the artifact that the scenario was created with. It is empty for a store without
-        a durable history, which no other process can read, and for a scenario that loads no weights, which serves one
-        fixed model: then no data goes stale. The samples service judges samples against it, and control names it to
-        wait for that judgment."""
+        """The artifacts that the scenario served (``ServedArtifacts``).
+
+        With a durable store, they come from the newest commit history that the store holds, not from the commit
+        that this instance loaded: a samples service in another process reads the activations of control without a
+        reload. Before the first commit, the scenario serves the artifact that it was created with. A store without a
+        durable history is the memory of one process, so the instance keeps the artifacts that it saw selected, in
+        order, with the commit number at each change. A scenario that loads no weights serves one fixed model: the
+        result is empty, and no data goes stale."""
         served_component = self.served_component()
-        if (
-            self._binding.components.loaded_component is None
-            or self.runtime is None
-            or served_component is None
-            or not self.store.durable
-        ):
+        if self._binding.components.loaded_component is None or self.runtime is None or served_component is None:
             return ServedArtifacts()
-        history = self.snapshot_queries.served_history(
-            self._committer.commit_number, served_component, self._committer.component_names()
-        )
-        if not history:
-            # No commit yet: the scenario serves the artifact that it was created with.
+        if not self.store.durable:
+            selected = self.serving_artifact_id()
+            if not self.selected_artifacts or self.selected_artifacts[-1] != selected:
+                self.selected_artifacts.append(selected)
+                self.selected_commit_number = self._committer.commit_number
+            return ServedArtifacts(tuple(self.selected_artifacts), frozenset(), self.selected_commit_number)
+        records = self.snapshot_queries.records()
+        if not records:
             return ServedArtifacts((self.serving_artifact_id(),))
-        return ServedArtifacts(history, frozenset(self.served_beside()))
+        newest = records[-1].commit_number
+        components = self._committer.component_names()
+        with self.snapshot_queries.publication_lock:
+            history = self.snapshot_queries.served_history(newest, served_component, components)
+            beside = self.snapshot_queries.served_beside(newest, components)
+        changed = max(
+            (
+                record.commit_number
+                for record in records
+                if record.activates or record.operation in ("serve", "stop_serving")
+            ),
+            default=0,
+        )
+        return ServedArtifacts(history, frozenset(beside), changed)
 
     def next_job_listing(self, component: str | None = None) -> Mapping[str, Any]:
         """The training mode of ``component``'s trainer and the samples of its next automatic job

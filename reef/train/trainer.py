@@ -32,7 +32,7 @@ from reef.record2sample.staleness import ServedArtifacts
 from reef.storage.commits import CommitRecord
 from reef.storage.record_items import used_record, used_records
 from reef.storage.records import RecordStore
-from reef.storage.samples import CONSUMED_SAMPLE_PREFIX, SAMPLE_KINDS, SampleKind, TrainerSamples, memory_samples
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples, memory_samples
 from reef.storage.tasks import TaskStorage
 from reef.train.component import JobCheckPendingError, ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
@@ -582,11 +582,6 @@ class Trainer:
                 self.read_job_end(JobLoopState.from_dict(record.algorithm_state or {}))
                 self.consumed_record_ids.update(record.consumed_ids)
                 self.committed_record_ids.update(record.consumed_ids)
-                self._pipeline.forget_trained(
-                    consumed.removeprefix(CONSUMED_SAMPLE_PREFIX)
-                    for consumed in record.consumed_ids
-                    if consumed.startswith(CONSUMED_SAMPLE_PREFIX)
-                )
 
     def read_job_end(self, state: JobLoopState) -> None:
         """Give the pipeline ``state``'s last job end unless it has read that end. The caller holds the lock."""

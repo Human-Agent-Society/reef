@@ -106,7 +106,7 @@ class StoredSample:
 class ListedSample:
     """What a listing shows of one sample: the values of ``StoredSample`` without its content.
 
-    Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component``, ``group`` and ``held_set``
+    Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component``, ``group``, ``held_set`` and ``stale``
     are those of ``StoredSample``. ``kind`` is the kind of its item, and ``digest`` is the digest of its item: of a task, the
     digest of its files.
 
@@ -123,6 +123,7 @@ class ListedSample:
     component: str | None
     group: str | None
     held_set: str | None = None
+    stale: bool = False
 
 
 class TrainingState(ABC):
@@ -130,7 +131,8 @@ class TrainingState(ABC):
 
     Values: the train count of each sample ID and trainer, a positive int, and the IDs of the records that each
     trainer's stages consumed. Under the key ``judged:<trainer>`` (``JUDGED_KEY_PREFIX``) in place of a trainer, the
-    consumed IDs are the served states that the samples service judged that trainer's samples against. The train count of a sample and a trainer is the number of that trainer's commits that
+    consumed IDs are the commit numbers, in decimal, of the served histories at which the samples service judged
+    that trainer's samples. The train count of a sample and a trainer is the number of that trainer's commits that
     list the sample (``consumed_sample_id``), so only a commit changes it. A train count stays when its item leaves
     the scenario, so an item that comes back keeps it.
 
@@ -236,6 +238,7 @@ class SampleStore:
             None if own is None else own["component"],
             None if own is None else item.metadata.get("group"),
             use.held_set,
+            own is not None and item.metadata.get(STALE_KEY) is True,
         )
 
     def own_origin(self, item: StoredItem) -> Mapping[str, Any] | None:
@@ -447,14 +450,17 @@ class TrainerSamples:
         for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT):
             self.store.data.update(self.store.owner, list(batch), {STALE_KEY: True})
 
-    def judged(self, served_state: str) -> bool:
-        """Whether the samples service judged the samples of ``trainer`` against ``served_state``
-        (``ServedArtifacts.served_state``)."""
-        return served_state in self.store.state.consumed_record_ids(f"{JUDGED_KEY_PREFIX}{self.trainer}")
+    def judged_commit(self) -> int:
+        """The newest ``ServedArtifacts.commit_number`` at which the samples service judged the samples of
+        ``trainer``, or -1 before the first judgment. The training state keeps rows only: one for each judgment, and
+        the largest one counts, so a row written twice or out of order changes nothing."""
+        judged = self.store.state.consumed_record_ids(f"{JUDGED_KEY_PREFIX}{self.trainer}")
+        return max((int(commit_number) for commit_number in judged), default=-1)
 
-    def write_judged(self, served_state: str) -> None:
-        """Store that the samples service judged the samples of ``trainer`` against ``served_state``."""
-        self.store.state.consume_records(f"{JUDGED_KEY_PREFIX}{self.trainer}", [served_state])
+    def write_judged(self, commit_number: int) -> None:
+        """Store that the samples service judged the samples of ``trainer`` at the served history of
+        ``commit_number``."""
+        self.store.state.consume_records(f"{JUDGED_KEY_PREFIX}{self.trainer}", [str(commit_number)])
 
     def ended_record_ids(self) -> frozenset[str]:
         """The records that the stages of ``trainer`` ended (``end_records``), whether a commit names them or not."""

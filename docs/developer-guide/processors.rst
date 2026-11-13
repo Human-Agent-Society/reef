@@ -453,24 +453,29 @@ key of its own unless its method defines a bound. The check has these steps:
    payload in ``extra.reef.records``, and ``TrajectorySample.artifact_id``
    reads the ``artifact_id`` of its last call. A task rollout of a training
    component names its artifact in ``training.artifact_id`` instead.
-2. In each step, after it stores the new samples, the samples service reads
-   the artifacts that the scenario served from the commit history
-   (``ServedArtifacts``): the served component's artifact of the creation and
-   of each activating commit, oldest first, and the artifacts that the scenario
-   serves beside its active selection. Every commit asks for a step, so an
-   activation reaches the samples service at once. A reload or a restart reads
-   the same history.
-3. It asks the stage about each group of the trainer's stored samples that no
-   job trained (``TrainingPipeline.mark_stale``). It marks every sample of a stale
-   group in the store (item metadata ``stale``). Then it stores that it judged
-   the samples against what the scenario serves now.
+2. In each step, the samples service reads the artifacts that the scenario
+   served from the newest commit history in the store (``ServedArtifacts``):
+   the served component's artifact of the creation and of each activating
+   commit, oldest first, the artifacts that the scenario serves beside its
+   active selection, and the number of the newest commit that changed them.
+   A samples service in another process reads control's commits without a
+   reload. Every commit asks for a step, so an activation reaches the samples
+   service at once.
+3. When that commit number is newer than the last one it judged at, it asks
+   the stage about each group of the trainer's stored samples that no job
+   trained and that carry no mark (``TrainingPipeline.mark_stale``), reading
+   them in pages. It marks every sample of a stale group in the store (item
+   metadata ``stale``), and stores the commit number as judged. It judges the
+   samples that it stores later in the step as it writes them.
 4. Control's automatic jobs leave a marked sample out. An automatic job waits
-   until the samples service judged the samples against what the scenario
-   serves now, so it never takes a sample that the next judgment would mark.
+   until the samples service judged at the commit number of what the scenario
+   serves now. A commit number never recurs, so a rollback to an artifact that
+   served before waits for a new judgment too.
 
-A stale sample stays in the store, with its mark, and is never judged again.
-The records that made it stay consumed, so a restart rebuilds the same
-decision. A training request can still name it: the client chose it.
+A stale sample stays in the store, with its mark, and is never judged again: an
+artifact that serves again does not make its samples fresh. The records that
+made it stay consumed, so a restart rebuilds the same decision. A training
+request can still name it: the client chose it.
 
 The rule of each built-in stage:
 
@@ -492,8 +497,10 @@ The rule of each built-in stage:
 The lag counts only the artifacts that this scenario served. A publication of
 another scenario on a shared engine does not age the data. Before the first
 commit, the scenario serves the artifact that it was created with. A scenario
-that has no runtime, no component of a weight kind for the runtime to load, or
-no durable commit history has no served artifacts: no data is stale.
+that has no runtime, or no component of a weight kind for the runtime to load,
+has no served artifacts: no data is stale. A scenario store without a durable
+history (an in-memory store, which only tests use) keeps the artifacts that the
+process saw selected, so its samples service and control share that memory.
 
 Reef's check is the only staleness filter that Reef runs. A training
 framework can have its own off-policy limit. Such a limit goes in that

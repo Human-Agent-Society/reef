@@ -11,32 +11,29 @@ from reef.core.job_data import Sample, TrajectorySample
 
 @dataclass(frozen=True)
 class ServedArtifacts:
-    """The artifacts that a scenario served, as its commit history holds them.
+    """The artifacts that a scenario served, as its commit history holds them, and the commit that last changed them.
 
     Values: ``artifact_ids`` is a finite tuple of artifact IDs, oldest first, with no two neighbors equal: the
     artifacts of the served component that the scenario's creation and each activating commit bound. The last one
     is the artifact that the scenario serves now. ``beside_artifact_ids`` is the set of artifacts that the scenario
-    serves beside its active selection. Both are empty for a scenario that loads no weights: it serves one fixed
-    model. The constructor refuses equal neighbors.
-    Purpose: ``Scenario.served_artifacts`` makes it from the commit history. The samples service gives it to
-    ``Record2Sample.is_stale``, and stores ``served_state`` when its judgment is done; control waits for that before
-    an automatic job.
+    serves beside its active selection. ``commit_number`` is a non-negative int: the number of the newest commit that
+    changed what the scenario serves (an activation, a restore, a sync, a serve or a stop of serving), or 0 before
+    any. A commit number never recurs, so it names one point of the served history. All are empty or 0 for a scenario
+    that serves no artifact of its own. The constructor refuses equal neighbors and a negative or non-int
+    ``commit_number``.
+    Purpose: ``Scenario.served_artifacts`` makes it. The samples service gives it to ``Record2Sample.is_stale`` and
+    stores ``commit_number`` when its judgment is done; control waits for that before an automatic job.
     """
 
     artifact_ids: tuple[str, ...] = ()
     beside_artifact_ids: frozenset[str] = frozenset()
+    commit_number: int = 0
 
     def __post_init__(self) -> None:
         if any(first == second for first, second in pairwise(self.artifact_ids)):
             raise ValueError("served artifact IDs have no two neighbors equal")
-
-    @property
-    def served_state(self) -> str | None:
-        """The name of what the scenario serves: the newest artifact, then the artifacts served beside it in sorted
-        order, separated by spaces. None when the scenario loads no weights."""
-        if not self.artifact_ids:
-            return None
-        return " ".join((self.artifact_ids[-1], *sorted(self.beside_artifact_ids)))
+        if isinstance(self.commit_number, bool) or not isinstance(self.commit_number, int) or self.commit_number < 0:
+            raise ValueError(f"commit_number must be a non-negative int, got {self.commit_number!r}")
 
 
 def lags_behind(samples: Sequence[Sample], served: ServedArtifacts, max_artifact_lag: int) -> bool:

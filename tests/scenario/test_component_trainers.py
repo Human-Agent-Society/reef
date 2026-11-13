@@ -58,13 +58,14 @@ from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.samples import LocalSampleProducers
 from reef.execution.jobs import SupportsReceipt
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.record2sample.assembly import SampleAssemblySettings
-from reef.record2sample.service import SAMPLES_QUEUE
+from reef.record2sample.service import SAMPLES_QUEUE, Selection
 from reef.record2sample.staleness import ServedArtifacts, lags_behind
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData
@@ -1242,6 +1243,82 @@ def test_a_weights_step_marks_the_older_weights_samples_stale_and_the_harness_st
     assert append_commit(scenario, HARNESS) is not None
     assert append_commit(scenario, HARNESS) is not None
     assert scenario.trainer_for(HARNESS).state["finished_jobs"] == 2
+
+
+class NoSelectionProgress(Selection):
+    """A selection whose progress nobody reads."""
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        return
+
+
+def on_policy_weights(dispatchers: _Dispatchers, **options: Any) -> tuple[Dispatcher, Scenario]:
+    """A dispatcher whose weights trainer is on-policy and that runs no samples service: the test makes the samples.
+    Its scenario serves, and holds no row yet."""
+    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={}))
+    dispatcher, _ = dispatchers.open(
+        recipe=two_trainer_recipe(weights=weights),
+        hold_local_cycles=True,
+        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
+        **options,
+    )
+    scenario = _scenario(dispatcher)
+    wait_for_serving(dispatcher, "agent")
+    return dispatcher, scenario
+
+
+@pytest.mark.unit
+def test_a_rollback_to_an_artifact_judged_before_waits_for_a_new_judgment(dispatchers: _Dispatchers) -> None:
+    """A serves; a weights step activates B; row 2, answered by B, is judged fresh. An activation of A makes the
+    history A, B, A: row 2 is one artifact behind. No automatic job takes it before the samples service judges the
+    new history, and that judgment marks it stale."""
+    dispatcher, scenario = on_policy_weights(dispatchers)
+    root = scenario.serving_artifact_id()
+    _append_records(scenario, 1)
+    assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
+    _append_records(scenario, 2)
+    make_samples(scenario)
+    pipeline = scenario.trainer_for(WEIGHTS).pipeline
+    row_two = stage_item_id("agent", f"{WEIGHTS}:r2:0")
+    assert [stored.stale for stored in pipeline.store.read([row_two])] == [False]
+
+    dispatcher.activate("agent", root, WEIGHTS)
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+    assert not pipeline.judged(scenario.served_artifacts())
+    assert checked_commit(scenario, WEIGHTS) is None, "no job before the new judgment"
+    make_samples(scenario)
+    assert [stored.stale for stored in pipeline.store.read([row_two])] == [True]
+    assert checked_commit(scenario, WEIGHTS) is None, "row 2 is stale and nothing else waits"
+
+
+@pytest.mark.unit
+def test_a_samples_service_in_its_own_process_judges_control_activations(dispatchers: _Dispatchers) -> None:
+    """Control and a samples-only process share the storage. After a weights commit in control activates new
+    weights, the samples process judges the new history without a reload, and control's next automatic job runs."""
+    repository = _repository(dispatchers.tmp_path)
+    _, scenario = on_policy_weights(dispatchers, backend_factory=repository)
+    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={}))
+    samples_process, _ = dispatchers.open(
+        recipe=two_trainer_recipe(weights=weights),
+        hold_local_cycles=True,
+        components=frozenset({"samples"}),
+        backend_factory=repository,
+    )
+    producers = LocalSampleProducers(samples_process.registry, None)
+
+    def produce() -> None:
+        producers.produce("agent", WEIGHTS, NoSelectionProgress("selection"))
+
+    _append_records(scenario, 1)
+    produce()
+    assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+    pipeline = scenario.trainer_for(WEIGHTS).pipeline
+    assert not pipeline.judged(scenario.served_artifacts())
+    _append_records(scenario, 2)
+    produce()
+    assert pipeline.judged(scenario.served_artifacts())
+    assert append_commit(scenario, WEIGHTS, make=False) == [("i2", "r2")]
 
 
 @pytest.mark.unit

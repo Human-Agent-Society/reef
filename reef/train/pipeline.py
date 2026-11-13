@@ -108,8 +108,9 @@ class PipelineSettings:
         if {"max_staleness", "max-staleness"} & set(self.record2sample.config):
             raise PluginConfigError(
                 "pipeline.record2sample.config.max_staleness was removed: the samples service asks the "
-                "record-to-sample stage which samples are stale. Remove the key. On-policy stages train only data "
-                "of the served artifact; an SAO stage takes its lag bound as max_artifact_lag."
+                "record-to-sample stage which samples are stale. Remove the key from the deployment file, or from a "
+                "scenario's record2sample_config with POST /reef/scenarios/{scenario}/update. On-policy stages train "
+                "only data of the served artifact; an SAO stage takes its lag bound as max_artifact_lag."
             )
 
     @classmethod
@@ -243,12 +244,6 @@ class TrainingPipeline:
         self.trained_sample_ids: set[str] = set()
         #: The ended records of the stage that this pipeline stored and no commit named yet.
         self.stored_ended_record_ids: set[str] = set()
-        #: The samples that this trainer's stages stored, that no job of it trained and that the samples service
-        #: did not mark stale, by group (the stored group, or the sample ID of a sample without one), each by sample
-        #: ID: what ``mark_stale`` asks the stage about. The samples service keeps it.
-        self.offered: dict[str, dict[str, Sample]] = {}
-        #: The sequence of the last stored sample that ``mark_stale`` read.
-        self.offered_sequence = 0
         #: The artifacts that the scenario served, as the samples service's last judgment read them: a sample that
         #: the stage finds stale against them is stored with the stale mark.
         self.served = ServedArtifacts()
@@ -459,58 +454,64 @@ class TrainingPipeline:
         self.record2sample.job_ended(outcome)
 
     def mark_stale(self, served: ServedArtifacts) -> bool:
-        """The samples service's staleness check: ask the stage about each group of offered samples
-        (``Record2Sample.is_stale``) and mark the samples of each stale group in the store
-        (``TrainerSamples.mark_stale``); then store that the samples were judged against ``served``
-        (``TrainerSamples.write_judged``). Return whether a sample was marked or the judged state is new.
+        """The samples service's staleness check against ``served``; return whether it judged anew.
 
-        The offered samples are the samples that this trainer's stages stored, that no job of it trained and that
-        carry no mark: the pipeline reads those stored since the last call. A stale group never comes back, and its
-        records stay consumed, so a restart rebuilds the same decision from the store. The samples that the pipeline
-        stores after the call are judged against ``served`` when they are stored (``write_record_samples``).
+        It does nothing when ``served`` names no artifact, or when the samples were judged at ``served.commit_number``
+        or later (``TrainerSamples.judged_commit``). Else it asks the stage about each group of this trainer's stored
+        samples that no job trained and that carry no stale mark (``Record2Sample.is_stale``), marks every sample of
+        a stale group (``TrainerSamples.mark_stale``), and stores ``served.commit_number`` as judged
+        (``TrainerSamples.write_judged``). The samples that the pipeline stores later are judged against ``served``
+        when they are stored (``write_record_samples``), so a sample is judged once when it is written and again only
+        when the served history moves.
+
+        A mark is permanent: an artifact that serves again does not make its samples fresh, and their records stay
+        consumed, so a restart reads the same decision from the store. For an on-policy stage that is the
+        conservative choice. Memory: one ID and group for each candidate sample, and the content of at most
+        ``MAX_QUERY_LIMIT`` samples (and the rest of one group) at a time. Manual mode judges the same way.
         """
         self.served = served
+        if not served.artifact_ids or self.store.judged_commit() >= served.commit_number:
+            return False
         trainer = self.store.trainer
-        while listed := self.store.store.listing(after_sequence=self.offered_sequence, limit=MAX_QUERY_LIMIT):
-            self.offered_sequence = listed[-1].sequence
-            own = [
-                entry.sample_id
-                for entry in listed
-                if entry.component == trainer and not entry.train_counts.get(trainer)
-            ]
-            for stored in self.store.read(own) if own else ():
-                if not stored.stale:
-                    self.offered.setdefault(stored.group or stored.sample_id, {})[stored.sample_id] = stored.sample
-        stale_groups = [
-            group
-            for group, samples in self.offered.items()
-            if self.record2sample.is_stale(tuple(samples.values()), served)
-        ]
-        stale_ids = [sample_id for group in stale_groups for sample_id in self.offered.pop(group)]
-        if stale_ids:
-            self.store.mark_stale(stale_ids)
-        state = served.served_state
-        if state is None or self.store.judged(state):
-            return bool(stale_ids)
-        self.store.write_judged(state)
+        groups: dict[str, list[str]] = {}
+        after_sequence = 0
+        while listed := self.store.store.listing(after_sequence=after_sequence, limit=MAX_QUERY_LIMIT):
+            after_sequence = listed[-1].sequence
+            for entry in listed:
+                if entry.component == trainer and not entry.stale and not entry.train_counts.get(trainer):
+                    members = groups.setdefault(entry.group or entry.sample_id, [])
+                    if entry.sample_id not in members:
+                        members.append(entry.sample_id)
+        batch: list[list[str]] = []
+        for members in groups.values():
+            batch.append(members)
+            if sum(map(len, batch)) >= MAX_QUERY_LIMIT:
+                self.mark_stale_groups(batch, served)
+                batch = []
+        self.mark_stale_groups(batch, served)
+        self.store.write_judged(served.commit_number)
         return True
 
-    def forget_trained(self, sample_ids: Iterable[str]) -> None:
-        """Take ``sample_ids``, samples that a job of this trainer trained, out of the offered samples."""
-        trained = set(sample_ids)
-        for group in list(self.offered):
-            samples = self.offered[group]
-            for sample_id in trained & samples.keys():
-                samples.pop(sample_id)
-            if not samples:
-                self.offered.pop(group)
+    def mark_stale_groups(self, groups: Sequence[Sequence[str]], served: ServedArtifacts) -> None:
+        """Read the samples of ``groups``, each a list of sample IDs of one group, and mark every sample of each group
+        that the stage finds stale against ``served``."""
+        sample_ids = [sample_id for members in groups for sample_id in members]
+        samples = {stored.sample_id: stored.sample for stored in self.store.read(sample_ids)}
+        stale = [
+            sample_id
+            for members in groups
+            if self.record2sample.is_stale(tuple(samples[member] for member in members if member in samples), served)
+            for sample_id in members
+        ]
+        if stale:
+            self.store.mark_stale(stale)
 
     def judged(self, served: ServedArtifacts) -> bool:
-        """Whether the samples service judged this trainer's samples against what ``served`` serves: always for a
-        scenario that loads no weights. An automatic job waits for it, so that it takes no sample that the samples
-        service would mark stale."""
-        state = served.served_state
-        return state is None or self.store.judged(state)
+        """Whether the samples service judged this trainer's samples at ``served.commit_number`` or later: always for
+        a scenario that serves no artifact. An automatic job waits for it, so that it takes no sample that the
+        samples service would mark stale. A commit number never recurs, so a rollback to an artifact judged before
+        is a new judgment."""
+        return not served.artifact_ids or self.store.judged_commit() >= served.commit_number
 
     # --------------------------------------------------------- job data cycle
 
