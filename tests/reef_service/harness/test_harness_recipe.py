@@ -75,7 +75,7 @@ from reef.evaluation.harness import (
 )
 from reef.evaluation.harness.runner import run_task
 from reef.execution.executor.config import ExecutorSettings
-from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor
+from reef.execution.sandbox.process import BwrapExecutor, LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.tasks.run import TaskResult
@@ -568,7 +568,7 @@ def test_recipe_selects_the_run_executor(monkeypatch: pytest.MonkeyPatch) -> Non
     assert type(harness_component(from_config(evolution_config())[1]).executor).__name__ == "LocalExecutor"
     local = harness_component(from_config(evolution_config(executor="local"))[1])
     assert type(local.executor).__name__ == "LocalExecutor"
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SandboxExecutor)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(ConfigError, match="bubblewrap"):
         from_config(evolution_config(executor="sandbox"))

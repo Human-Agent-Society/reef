@@ -32,7 +32,7 @@ from tests.support.harness_render import (
 from tests.support.trajectories import recorded_trajectory
 
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
-from reef.execution.sandbox.process import SandboxExecutor
+from reef.execution.sandbox.process import BwrapExecutor
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.runners.native import (
@@ -1466,8 +1466,8 @@ def test_a_sandboxed_run_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) ->
         files = render_tree(HarnessTree({**NATIVE_SEED_TOOLS, **probe}), NATIVE, binding.config_overlays(NATIVE))
         # The launcher and the checkout live outside the run root, so the jail binds them like a base path.
         checkout = Path(__file__).resolve().parents[2]
-        executor = SandboxExecutor(
-            egress_hosts=(model.base_url,), base_paths=(*SandboxExecutor.base_paths, str(tmp_path), str(checkout))
+        executor = BwrapExecutor(
+            egress_hosts=(model.base_url,), base_paths=(*BwrapExecutor.base_paths, str(tmp_path), str(checkout))
         )
         result = run_task(
             NATIVE, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor

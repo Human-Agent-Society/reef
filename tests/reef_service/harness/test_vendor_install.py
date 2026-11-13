@@ -26,7 +26,7 @@ from tests.support.harness_jobs import (
 from tests.support.harness_service import backend_step
 
 from reef.execution.executor.config import ExecutorSettings
-from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailableError
+from reef.execution.sandbox.process import BwrapExecutor, LocalExecutor, ProgramExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import (
     DEFAULT_PREFIX_ROOT,
@@ -394,9 +394,9 @@ def test_sandboxed_backend_binds_the_vendor_tree_readonly(monkeypatch, tmp_path,
         seen.append(executor.bwrap_argv(argv, **{k: v for k, v in kwargs.items() if k != "timeout"}))
         return LocalExecutor().launch(argv, **kwargs)
 
-    monkeypatch.setattr(SandboxExecutor, "launch", launch)
-    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
-    original = SandboxExecutor(egress_hosts=("localhost",))
+    monkeypatch.setattr(BwrapExecutor, "launch", launch)
+    monkeypatch.setattr(BwrapExecutor, "preflight", lambda self: None)
+    original = BwrapExecutor(egress_hosts=("localhost",))
     backend = _backend(tmp_path, None, executor=original)
     _step(backend)
     assert len(seen) == 2
@@ -414,8 +414,8 @@ def test_sandboxed_backend_binds_the_vendor_tree_readonly(monkeypatch, tmp_path,
 @pytest.mark.unit
 def test_an_explicit_binary_does_not_add_a_vendor_mount(monkeypatch, tmp_path) -> None:
     calls = _counting_resolver(monkeypatch, "/should/not/be/used")
-    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
-    sandbox = SandboxExecutor()
+    monkeypatch.setattr(BwrapExecutor, "preflight", lambda self: None)
+    sandbox = BwrapExecutor()
     explicit = str(make_pi_binary(tmp_path))
     _backend(tmp_path, explicit, executor=sandbox)
     # The recipe binds the program as the executor does here: an explicit binary keeps the executor's own mounts.
@@ -425,7 +425,7 @@ def test_an_explicit_binary_does_not_add_a_vendor_mount(monkeypatch, tmp_path) -
 
 @pytest.mark.integration
 def test_vendor_binary_runs_in_a_real_sandbox_with_a_readonly_install(monkeypatch, tmp_path) -> None:
-    sandbox = SandboxExecutor()
+    sandbox = BwrapExecutor()
     try:
         sandbox.preflight()
     except SandboxUnavailableError as error:

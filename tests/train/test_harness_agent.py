@@ -24,7 +24,7 @@ from reef.core.errors import ConfigError
 from reef.core.plugins import PluginConfigError
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.modal import ModalExecutor
-from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, SandboxUnavailableError
+from reef.execution.sandbox.process import BwrapExecutor, LocalExecutor, SandboxUnavailableError
 from reef.execution.sandbox.remote import deployment_owner
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.tasks.model_binding import ModelBinding
@@ -199,7 +199,7 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     assert claude is not None and (claude.adapter, claude.binary) == ("claude", "/opt/claude")
     unset = agent_settings({}, {"REEF_AGENT_SANDBOX": "none"}, state_dir=state_dir)
     assert unset is not None and isinstance(unset.executor, LocalExecutor)
-    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox", lambda: SandboxExecutor)
+    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox", lambda: BwrapExecutor)
     with pytest.raises(ValueError, match="one of 'bwrap', 'e2b', 'modal', 'none' on this host"):
         agent_settings({"sandbox": "docker"}, {}, state_dir=state_dir)
     # Each host runs one local sandbox: the other host's name is refused at startup, not at preflight.
@@ -235,8 +235,8 @@ def test_agent_settings_choose_the_adapter_and_the_isolation(monkeypatch, tmp_pa
     def unavailable(self) -> None:
         raise SandboxUnavailableError("no bwrap here")
 
-    monkeypatch.setattr(SandboxExecutor, "preflight", unavailable)
-    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox", lambda: SandboxExecutor)
+    monkeypatch.setattr(BwrapExecutor, "preflight", unavailable)
+    monkeypatch.setattr("reef.train.harness_backend.agent.settings.host_sandbox", lambda: BwrapExecutor)
     # Unset on a host that cannot isolate: the agent is off and the served model answers in text.
     assert agent_settings({}, {}, state_dir=state_dir) is None
     with pytest.raises(ValueError, match="no bwrap here"):

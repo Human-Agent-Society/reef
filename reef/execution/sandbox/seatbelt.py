@@ -13,8 +13,8 @@ from typing import ClassVar
 
 from reef.execution.sandbox.process import (
     ISOLATION_ENV,
-    LocalSandboxExecutor,
     ProcessOutcome,
+    SandboxExecutor,
     SandboxUnavailableError,
     inherited_environment,
     run_process,
@@ -36,10 +36,10 @@ PROFILE_HEAD = """(version 1)
 
 
 @dataclass(frozen=True)
-class SeatbeltExecutor(LocalSandboxExecutor):
-    """Run the binary under a Seatbelt profile, the macOS counterpart of ``SandboxExecutor``.
+class SeatbeltExecutor(SandboxExecutor):
+    """Run the binary under a Seatbelt profile, the macOS counterpart of ``BwrapExecutor``.
 
-    Values: those of ``LocalSandboxExecutor``, except that ``limits.memory_bytes`` must be zero: macOS refuses
+    Values: those of ``SandboxExecutor``, except that ``limits.memory_bytes`` must be zero: macOS refuses
     ``RLIMIT_AS``. The profile lets a run read the base paths and the run root, and write only the workspace, the
     declared writable paths and a private temporary directory. Read-only inputs inside a writable path stay
     read-only. The environment holds only the inherited minimum, the run's variables and ``env``. Unlike pasta, an
@@ -47,7 +47,7 @@ class SeatbeltExecutor(LocalSandboxExecutor):
 
     Seatbelt profiles do not nest: a process under a profile cannot apply another one. A native loop in this sandbox
     therefore runs its tool calls under the run's profile (``REEF_NATIVE_ENFORCE=none``), not a narrower profile per
-    tool. ``SandboxExecutor`` narrows each call on Linux.
+    tool. ``BwrapExecutor`` narrows each call on Linux.
     """
 
     kind: ClassVar[str] = "seatbelt"

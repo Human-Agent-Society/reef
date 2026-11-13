@@ -24,7 +24,7 @@ from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider, Multimo
 from recipes.beta.reefine.trial import trial_script
 from reef.core.training_request import TrainingRequest
 from reef.execution.sandbox.e2b import E2BSession
-from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramTimeoutError, SandboxExecutor
+from reef.execution.sandbox.process import BwrapExecutor, LocalExecutor, ProcessOutcome, ProgramTimeoutError
 from reef.execution.sandbox.remote import pack
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import reply_tool_calls, tool_summary
@@ -546,7 +546,7 @@ def test_the_gateway_notes_each_tool_the_agent_calls_and_what_it_says(upstream) 
 
 @pytest.mark.unit
 def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(tmp_path) -> None:
-    executor = SandboxExecutor(network="isolated", forward_ports=(4123,))
+    executor = BwrapExecutor(network="isolated", forward_ports=(4123,))
     argv = executor.bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path / "workspace", env={})
     separator = argv.index("--")
     assert argv[:separator] == [
@@ -564,12 +564,12 @@ def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(
         "none",
     ]
     assert argv[separator + 1] == "bwrap" and "--unshare-net" not in argv
-    assert "--unshare-net" in SandboxExecutor().bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path, env={})
+    assert "--unshare-net" in BwrapExecutor().bwrap_argv(["pi"], root=tmp_path, workspace=tmp_path, env={})
     # A run's session adds its ports to the isolated network's; the default network already reaches the host.
     session = executor.open_session(forward_ports=(4124,), timeout_s=60)
-    assert isinstance(session, SandboxExecutor) and session.forward_ports == (4123, 4124)
+    assert isinstance(session, BwrapExecutor) and session.forward_ports == (4123, 4124)
     assert executor.open_session(forward_ports=(4123,), timeout_s=60) is executor
-    assert SandboxExecutor().open_session(forward_ports=(4124,), timeout_s=60) == SandboxExecutor()
+    assert BwrapExecutor().open_session(forward_ports=(4124,), timeout_s=60) == BwrapExecutor()
 
 
 @pytest.mark.unit

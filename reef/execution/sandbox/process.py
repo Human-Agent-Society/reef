@@ -8,12 +8,13 @@ development run and a hosted one, so that step is the seam:
 * :class:`LocalExecutor` runs the binary as a plain subprocess in its own
   session, exactly as before. It is the default, used for development and the
   hermetic tests.
-* :class:`SandboxExecutor` runs the same binary inside a bubblewrap jail: a
-  fresh non-root namespace, a read-only base filesystem with only the run
-  root exposed (its workspace and declared runtime state writable, rendered
-  inputs read-only), only explicitly forwarded deployment environment, resource limits,
-  network disabled unless an egress allowlist is configured, and death with
-  the parent.
+* :class:`SandboxExecutor` runs the same binary in a sandbox that the host's
+  kernel enforces: a read-only base filesystem with only the run root exposed
+  (its workspace and declared runtime state writable, rendered inputs
+  read-only), only explicitly forwarded deployment environment, resource
+  limits, and network disabled unless an egress allowlist is configured.
+  :class:`BwrapExecutor` is the bubblewrap jail on Linux; ``SeatbeltExecutor``
+  in :mod:`reef.execution.sandbox.seatbelt` is the Seatbelt profile on macOS.
 
 A deployment selects the executor by config; a hosted deployment that requires
 the sandbox refuses to start when the sandbox runtime is unavailable, through
@@ -362,7 +363,7 @@ def parse_env_from(section: Mapping[str, object], environ: Mapping[str, str]) ->
 
 
 @dataclass(frozen=True)
-class LocalSandboxExecutor(ProgramExecutor):
+class SandboxExecutor(ProgramExecutor):
     """Run the binary on the Reef host inside a sandbox that the host's kernel enforces.
 
     Values: ``egress_hosts`` are the endpoints a run must reach; empty, the ``default`` network allows no network
@@ -431,7 +432,7 @@ class LocalSandboxExecutor(ProgramExecutor):
 
 
 @dataclass(frozen=True)
-class SandboxExecutor(LocalSandboxExecutor):
+class BwrapExecutor(SandboxExecutor):
     """Run the binary inside a bubblewrap jail.
 
     bubblewrap (``bwrap``) is an unprivileged, daemonless sandbox: it builds a

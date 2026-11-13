@@ -16,10 +16,10 @@ import reef
 from reef.core.errors import ReefError
 from reef.execution.sandbox.config import build_executor, host_sandbox
 from reef.execution.sandbox.process import (
+    BwrapExecutor,
     LocalExecutor,
     ProgramLaunchError,
     ProgramTimeoutError,
-    SandboxExecutor,
     SandboxLimits,
     SandboxUnavailableError,
 )
@@ -126,10 +126,10 @@ def test_build_executor_rejects_an_unknown_kind() -> None:
 
 
 def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SandboxExecutor)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(SandboxUnavailableError, match="bubblewrap"):
-        SandboxExecutor().preflight()
+        BwrapExecutor().preflight()
     with pytest.raises(ReefError, match="bubblewrap"):
         build_executor({"executor": "sandbox"})
 
@@ -150,7 +150,7 @@ def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     seen = _probe_result(monkeypatch, 1, "bwrap: No permissions to create a new namespace\n")
     with pytest.raises(SandboxUnavailableError, match=r"cannot nest a bubblewrap jail.*No permissions"):
-        SandboxExecutor().preflight()
+        BwrapExecutor().preflight()
     # A run jail with a tool jail inside it around true: the shape every sandboxed tool call takes.
     argv = seen[0]
     task_run, tool = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
@@ -163,14 +163,14 @@ def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
     for jail in (task_run, tool):
         assert jail[jail.index("/usr") - 1 : jail.index("/usr") + 2] == ["--ro-bind", "/usr", "/usr"]
     _probe_result(monkeypatch, 0)
-    SandboxExecutor().preflight()
+    BwrapExecutor().preflight()
 
     def refuse(argv, **kwargs):
         raise OSError("boom")
 
     monkeypatch.setattr("reef.execution.sandbox.process.subprocess.run", refuse)
     with pytest.raises(SandboxUnavailableError, match="cannot nest a bubblewrap jail on this host: boom"):
-        SandboxExecutor().preflight()
+        BwrapExecutor().preflight()
 
 
 def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_path: Path) -> None:
@@ -179,7 +179,7 @@ def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_p
     root = tmp_path / "root"
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
-    sandbox = SandboxExecutor()
+    sandbox = BwrapExecutor()
     argv = sandbox.bwrap_argv([sys.executable, "-c", "pass"], root=root, workspace=workspace, env={"A": "b"})
 
     assert argv[0] == "bwrap"
@@ -213,7 +213,7 @@ def test_sandbox_opens_the_workspace_and_runtime_state_but_rebinds_inputs_read_o
     state.mkdir()
     config.write_text("model = 'm'\n")
 
-    argv = SandboxExecutor().bwrap_argv(
+    argv = BwrapExecutor().bwrap_argv(
         ["true"],
         root=root,
         workspace=workspace,
@@ -236,13 +236,13 @@ def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    sandbox = SandboxExecutor(egress_hosts=("127.0.0.1:8000",))
+    sandbox = BwrapExecutor(egress_hosts=("127.0.0.1:8000",))
     argv = sandbox.bwrap_argv(["true"], root=tmp_path, workspace=workspace, env={})
     assert "--unshare-net" not in argv
 
 
 def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SandboxExecutor)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
     _probe_result(monkeypatch, 0)
     executor = build_executor(
@@ -251,7 +251,7 @@ def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
             "sandbox": {"egress_hosts": ["127.0.0.1:8000"], "limits": {"cpu_seconds": 30, "memory_bytes": 1 << 30}},
         }
     )
-    assert isinstance(executor, SandboxExecutor)
+    assert isinstance(executor, BwrapExecutor)
     assert executor.egress_hosts == ("127.0.0.1:8000",)
     assert executor.limits == SandboxLimits(cpu_seconds=30, memory_bytes=1 << 30)
 
@@ -259,13 +259,13 @@ def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
 def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path: Path) -> None:
     from reef.execution.sandbox.process import ISOLATION_ENV
 
-    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SandboxExecutor)
-    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
+    monkeypatch.setattr(BwrapExecutor, "preflight", lambda self: None)
     executor = build_executor(
         {"executor": "sandbox", "sandbox": {"env_from": ["REMOTE_KEY"]}},
         environ={"REMOTE_KEY": "deliberately-forwarded", "UNRELATED_SECRET": "must-not-leak"},
     )
-    assert isinstance(executor, SandboxExecutor)
+    assert isinstance(executor, BwrapExecutor)
     argv = executor.bwrap_argv(
         ["true"], root=tmp_path, workspace=tmp_path / "workspace", env={ISOLATION_ENV: "forged"}
     )
@@ -284,7 +284,7 @@ def test_sandbox_refuses_invalid_env_from(names) -> None:
         build_executor({"executor": "sandbox", "sandbox": {"env_from": names}})
 
 
-@pytest.mark.parametrize(("platform", "sandbox"), [("darwin", SeatbeltExecutor), ("linux", SandboxExecutor)])
+@pytest.mark.parametrize(("platform", "sandbox"), [("darwin", SeatbeltExecutor), ("linux", BwrapExecutor)])
 def test_host_sandbox_follows_the_platform(monkeypatch, platform: str, sandbox: type) -> None:
     monkeypatch.setattr("reef.execution.sandbox.config.sys.platform", platform)
     assert host_sandbox() is sandbox

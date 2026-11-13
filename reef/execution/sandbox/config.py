@@ -13,8 +13,8 @@ from reef.core.plugins import PluginConfigError, resolve_plugin_class
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.modal import ModalExecutor
 from reef.execution.sandbox.process import (
+    BwrapExecutor,
     LocalExecutor,
-    LocalSandboxExecutor,
     ProgramExecutor,
     SandboxExecutor,
     SandboxUnavailableError,
@@ -26,9 +26,9 @@ from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 REMOTE_EXECUTORS: Mapping[str, type[RemoteExecutor]] = {"e2b": E2BExecutor, "modal": ModalExecutor}
 
 
-def host_sandbox() -> type[LocalSandboxExecutor]:
+def host_sandbox() -> type[SandboxExecutor]:
     """The local sandbox this host runs: Seatbelt on macOS, else bubblewrap."""
-    return SeatbeltExecutor if sys.platform == "darwin" else SandboxExecutor
+    return SeatbeltExecutor if sys.platform == "darwin" else BwrapExecutor
 
 
 def remote_executor(
