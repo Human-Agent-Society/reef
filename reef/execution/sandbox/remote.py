@@ -204,21 +204,6 @@ def parse_forward_ports(section: Mapping[str, object]) -> tuple[int, ...]:
     return tuple(dict.fromkeys(ports))
 
 
-def parse_env_from(section: Mapping[str, object], environ: Mapping[str, str]) -> dict[str, str]:
-    """``sandbox.env_from``: the named host variables and their values; each must be set and non-empty."""
-    names = section.get("env_from", [])
-    if not isinstance(names, (list, tuple)) or not all(
-        isinstance(name, str) and name.isidentifier() for name in names
-    ):
-        raise SandboxUnavailableError("sandbox.env_from must list environment variable names")
-    env = {}
-    for name in names:
-        if not environ.get(name):
-            raise SandboxUnavailableError(f"sandbox.env_from requires environment variable {name!r}")
-        env[name] = environ[name]
-    return env
-
-
 def check_options(provider: str, section: Mapping[str, object], provider_options: frozenset[str]) -> None:
     """Refuse an option no remote sandbox takes, and the local sandbox's ``egress_hosts`` and ``limits``."""
     unknown = set(section) - provider_options - {"forward_ports", "env_from", "egress_hosts", "limits"}

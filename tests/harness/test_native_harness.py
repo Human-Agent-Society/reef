@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -31,7 +32,8 @@ from tests.support.harness_render import (
 from tests.support.trajectories import recorded_trajectory
 
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
-from reef.execution.sandbox.process import SandboxExecutor
+from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.runners.native import (
     _DEFAULTS,
@@ -1464,8 +1466,8 @@ def test_a_sandboxed_run_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) ->
         files = render_tree(HarnessTree({**NATIVE_SEED_TOOLS, **probe}), NATIVE, binding.config_overlays(NATIVE))
         # The launcher and the checkout live outside the run root, so the jail binds them like a base path.
         checkout = Path(__file__).resolve().parents[2]
-        executor = SandboxExecutor(
-            egress_hosts=(model.base_url,), base_paths=(*SandboxExecutor.base_paths, str(tmp_path), str(checkout))
+        executor = BwrapExecutor(
+            egress_hosts=(model.base_url,), base_paths=(*BwrapExecutor.base_paths, str(tmp_path), str(checkout))
         )
         result = run_task(
             NATIVE, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor
@@ -1481,6 +1483,33 @@ def test_a_sandboxed_run_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) ->
     # The loop keeps the model endpoint while the probe, one jail deeper, sees only loopback, a read only
     # workspace and no shell; the file still round trips through two jails that declare write and read.
     assert json.loads(results[0]["content"]) == {"exec": "FileNotFoundError", "network": "lo only", "write": "EROFS"}
+    assert results[2]["content"] == "hello"
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or shutil.which("sandbox-exec") is None, reason="needs macOS")
+def test_a_seatbelt_run_runs_tool_calls_under_the_run_profile(tmp_path: Path) -> None:
+    with _ProbingModel() as model:
+        binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+        probe = native_tool("probe", PROBE, description="probe")
+        files = render_tree(HarnessTree({**NATIVE_SEED_TOOLS, **probe}), NATIVE, binding.config_overlays(NATIVE))
+        checkout = Path(__file__).resolve().parents[2]
+        interpreter = (sys.prefix, sys.base_prefix, str(Path(sys.executable).resolve().parent))
+        executor = SeatbeltExecutor(
+            egress_hosts=(model.base_url,),
+            base_paths=(*SeatbeltExecutor.base_paths, str(tmp_path), str(checkout), *interpreter),
+        )
+        result = run_task(
+            NATIVE, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor
+        )
+    assert result.exit_code == 0, result.stderr
+    # Seatbelt profiles do not nest, so every call runs under the run's profile and nothing is narrowed per tool.
+    assert result.trajectory[0]["data"]["enforcement"] == "none"
+    results = [event["data"] for event in result.trajectory if event["type"] == "tool/result"]
+    assert [(r["name"], r["is_error"]) for r in results] == [
+        ("probe", False),
+        ("write_file", False),
+        ("read_file", False),
+    ]
     assert results[2]["content"] == "hello"
 
 

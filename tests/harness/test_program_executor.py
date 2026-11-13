@@ -4,6 +4,8 @@ and the fail-fast contract when a required sandbox cannot isolate."""
 from __future__ import annotations
 
 import os
+import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -12,15 +14,16 @@ import pytest
 
 import reef
 from reef.core.errors import ReefError
-from reef.execution.sandbox.config import build_executor
+from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.config import build_executor, host_sandbox
 from reef.execution.sandbox.process import (
     LocalExecutor,
     ProgramLaunchError,
     ProgramTimeoutError,
-    SandboxExecutor,
     SandboxLimits,
     SandboxUnavailableError,
 )
+from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 
 
 def _script(tmp_path: Path, body: str, name: str = "prog") -> Path:
@@ -123,9 +126,10 @@ def test_build_executor_rejects_an_unknown_kind() -> None:
 
 
 def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: None)
     with pytest.raises(SandboxUnavailableError, match="bubblewrap"):
-        SandboxExecutor().preflight()
+        BwrapExecutor().preflight()
     with pytest.raises(ReefError, match="bubblewrap"):
         build_executor({"executor": "sandbox"})
 
@@ -138,15 +142,15 @@ def _probe_result(monkeypatch, returncode: int, stderr: str = "") -> list[list[s
         seen.append(list(argv))
         return subprocess.CompletedProcess(argv, returncode, "", stderr)
 
-    monkeypatch.setattr("reef.execution.sandbox.process.subprocess.run", run)
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.subprocess.run", run)
     return seen
 
 
 def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
     seen = _probe_result(monkeypatch, 1, "bwrap: No permissions to create a new namespace\n")
     with pytest.raises(SandboxUnavailableError, match=r"cannot nest a bubblewrap jail.*No permissions"):
-        SandboxExecutor().preflight()
+        BwrapExecutor().preflight()
     # A run jail with a tool jail inside it around true: the shape every sandboxed tool call takes.
     argv = seen[0]
     task_run, tool = argv[: argv.index("--")], argv[argv.index("--") + 1 :]
@@ -159,23 +163,23 @@ def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
     for jail in (task_run, tool):
         assert jail[jail.index("/usr") - 1 : jail.index("/usr") + 2] == ["--ro-bind", "/usr", "/usr"]
     _probe_result(monkeypatch, 0)
-    SandboxExecutor().preflight()
+    BwrapExecutor().preflight()
 
     def refuse(argv, **kwargs):
         raise OSError("boom")
 
-    monkeypatch.setattr("reef.execution.sandbox.process.subprocess.run", refuse)
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.subprocess.run", refuse)
     with pytest.raises(SandboxUnavailableError, match="cannot nest a bubblewrap jail on this host: boom"):
-        SandboxExecutor().preflight()
+        BwrapExecutor().preflight()
 
 
 def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
-    monkeypatch.setattr("reef.execution.sandbox.process.os.environ", {"PATH": "/usr/bin"})
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.os.environ", {"PATH": "/usr/bin"})
     root = tmp_path / "root"
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
-    sandbox = SandboxExecutor()
+    sandbox = BwrapExecutor()
     argv = sandbox.bwrap_argv([sys.executable, "-c", "pass"], root=root, workspace=workspace, env={"A": "b"})
 
     assert argv[0] == "bwrap"
@@ -199,7 +203,7 @@ def test_sandbox_opens_the_workspace_and_runtime_state_but_rebinds_inputs_read_o
     monkeypatch, tmp_path: Path
 ) -> None:
     """A read-only input stays read-only inside a writable directory, the workspace too, as a remote jail keeps it."""
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
     root = tmp_path / "root"
     workspace = root / "workspace"
     material = workspace / "material"
@@ -209,7 +213,7 @@ def test_sandbox_opens_the_workspace_and_runtime_state_but_rebinds_inputs_read_o
     state.mkdir()
     config.write_text("model = 'm'\n")
 
-    argv = SandboxExecutor().bwrap_argv(
+    argv = BwrapExecutor().bwrap_argv(
         ["true"],
         root=root,
         workspace=workspace,
@@ -229,16 +233,17 @@ def test_sandbox_opens_the_workspace_and_runtime_state_but_rebinds_inputs_read_o
 
 
 def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    sandbox = SandboxExecutor(egress_hosts=("127.0.0.1:8000",))
+    sandbox = BwrapExecutor(egress_hosts=("127.0.0.1:8000",))
     argv = sandbox.bwrap_argv(["true"], root=tmp_path, workspace=workspace, env={})
     assert "--unshare-net" not in argv
 
 
 def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
     _probe_result(monkeypatch, 0)
     executor = build_executor(
         {
@@ -246,7 +251,7 @@ def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
             "sandbox": {"egress_hosts": ["127.0.0.1:8000"], "limits": {"cpu_seconds": 30, "memory_bytes": 1 << 30}},
         }
     )
-    assert isinstance(executor, SandboxExecutor)
+    assert isinstance(executor, BwrapExecutor)
     assert executor.egress_hosts == ("127.0.0.1:8000",)
     assert executor.limits == SandboxLimits(cpu_seconds=30, memory_bytes=1 << 30)
 
@@ -254,12 +259,13 @@ def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
 def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path: Path) -> None:
     from reef.execution.sandbox.process import ISOLATION_ENV
 
-    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
+    monkeypatch.setattr(BwrapExecutor, "preflight", lambda self: None)
     executor = build_executor(
         {"executor": "sandbox", "sandbox": {"env_from": ["REMOTE_KEY"]}},
         environ={"REMOTE_KEY": "deliberately-forwarded", "UNRELATED_SECRET": "must-not-leak"},
     )
-    assert isinstance(executor, SandboxExecutor)
+    assert isinstance(executor, BwrapExecutor)
     argv = executor.bwrap_argv(
         ["true"], root=tmp_path, workspace=tmp_path / "workspace", env={ISOLATION_ENV: "forged"}
     )
@@ -274,5 +280,134 @@ def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path
 
 @pytest.mark.parametrize("names", ["REMOTE_KEY", [None], [""]])
 def test_sandbox_refuses_invalid_env_from(names) -> None:
-    with pytest.raises(ReefError, match="env_from must be a list"):
+    with pytest.raises(ReefError, match="env_from must list environment variable names"):
         build_executor({"executor": "sandbox", "sandbox": {"env_from": names}})
+
+
+@pytest.mark.parametrize(("platform", "sandbox"), [("darwin", SeatbeltExecutor), ("linux", BwrapExecutor)])
+def test_host_sandbox_follows_the_platform(monkeypatch, platform: str, sandbox: type) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.config.sys.platform", platform)
+    assert host_sandbox() is sandbox
+
+
+def test_build_executor_selects_seatbelt_on_macos(monkeypatch) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: SeatbeltExecutor)
+    monkeypatch.setattr(SeatbeltExecutor, "preflight", lambda self: None)
+    executor = build_executor(
+        {"executor": "sandbox", "sandbox": {"egress_hosts": ["127.0.0.1:8000"], "limits": {"cpu_seconds": 30}}}
+    )
+    assert isinstance(executor, SeatbeltExecutor)
+    assert executor.egress_hosts == ("127.0.0.1:8000",)
+    assert executor.limits == SandboxLimits(cpu_seconds=30)
+
+
+def test_seatbelt_preflight_fails_fast_without_sandbox_exec(monkeypatch) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.seatbelt.shutil.which", lambda name: None)
+    with pytest.raises(SandboxUnavailableError, match="requires sandbox-exec"):
+        SeatbeltExecutor().preflight()
+
+
+def test_seatbelt_preflight_refuses_a_memory_limit(monkeypatch) -> None:
+    monkeypatch.setattr("reef.execution.sandbox.seatbelt.shutil.which", lambda name: "/usr/bin/sandbox-exec")
+    with pytest.raises(SandboxUnavailableError, match="memory_bytes"):
+        SeatbeltExecutor(limits=SandboxLimits(memory_bytes=1 << 30)).preflight()
+
+
+def test_seatbelt_passes_paths_as_parameters_not_profile_text(tmp_path: Path) -> None:
+    quoted = tmp_path / 'a "quoted" dir'
+    workspace = quoted / "workspace"
+    workspace.mkdir(parents=True)
+    argv = SeatbeltExecutor().seatbelt_argv(["true"], root=quoted, workspace=workspace, temporary=tmp_path)
+    assert argv[:2] == ["sandbox-exec", "-p"]
+    assert '"quoted"' not in argv[2]
+    assert f"-DWRITE_0={workspace.resolve()}" in argv
+    assert "(deny network*)" in argv[2]
+
+
+macos_only = pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("sandbox-exec"), reason="needs macOS")
+
+
+def _seatbelt(**options) -> SeatbeltExecutor:
+    """A Seatbelt executor that can also read this interpreter, which tests run as the program."""
+    base = (*SeatbeltExecutor().base_paths, sys.prefix, sys.base_prefix, str(Path(sys.executable).resolve().parent))
+    return SeatbeltExecutor(base_paths=base, **options)
+
+
+@macos_only
+def test_seatbelt_confines_reads_and_writes_to_the_run(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    workspace = root / "workspace"
+    inputs = workspace / "inputs"
+    inputs.mkdir(parents=True)
+    (inputs / "given.txt").write_text("given")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+    probe = f"""
+import os, pathlib
+def attempt(action):
+    try:
+        action()
+        return "allowed"
+    except OSError:
+        return "denied"
+print(attempt(lambda: pathlib.Path("made.txt").write_text("x")))
+print(attempt(lambda: pathlib.Path("inputs/given.txt").write_text("changed")))
+print(attempt(lambda: pathlib.Path({str(root / "root.txt")!r}).write_text("x")))
+print(attempt(lambda: pathlib.Path({str(outside / "secret.txt")!r}).read_text()))
+print(attempt(lambda: pathlib.Path(os.environ["TMPDIR"], "scratch").write_text("x")))
+print(os.environ["REEF_NATIVE_ENFORCE"], os.environ["REEF_SANDBOX_ISOLATION"], "LEAK" in os.environ)
+"""
+    outcome = _seatbelt().launch(
+        [sys.executable, "-c", probe],
+        root=root,
+        workspace=workspace,
+        env={},
+        timeout=60,
+        readonly_paths=(inputs,),
+    )
+    assert outcome.exit_code == 0, outcome.stderr
+    assert outcome.stdout.split("\n")[:6] == [
+        "allowed",
+        "denied",
+        "denied",
+        "denied",
+        "allowed",
+        "none seatbelt False",
+    ]
+
+
+def _listener() -> tuple[socket.socket, int]:
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen()
+    return server, server.getsockname()[1]
+
+
+@macos_only
+@pytest.mark.parametrize("network", ["default", "isolated"])
+def test_seatbelt_network_reaches_only_forwarded_loopback_ports(tmp_path: Path, network: str) -> None:
+    allowed, allowed_port = _listener()
+    blocked, blocked_port = _listener()
+    probe = f"""
+import socket
+for port in ({allowed_port}, {blocked_port}):
+    try:
+        socket.create_connection(("127.0.0.1", port), timeout=3).close()
+        print("open")
+    except OSError:
+        print("closed")
+"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    executor = _seatbelt(network=network, forward_ports=(allowed_port,))
+    try:
+        outcome = executor.launch(
+            [sys.executable, "-c", probe], root=tmp_path, workspace=workspace, env={}, timeout=60
+        )
+    finally:
+        allowed.close()
+        blocked.close()
+    assert outcome.exit_code == 0, outcome.stderr
+    expected = ["open", "closed"] if network == "isolated" else ["closed", "closed"]
+    assert outcome.stdout.split() == expected
