@@ -861,6 +861,19 @@ class ArtifactEvaluations:
             names = request.task_names or held
         if not names:
             raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
+        sampled = settings.sampled_task_names(names)
+        if collection is not None and len(sampled) < len(names):
+            # The stored collection names the tasks that run: a benchmark with no sampled task is left out.
+            sampled_names = frozenset(sampled)
+            collection = replace(
+                collection,
+                benchmarks=tuple(
+                    (benchmark, kept)
+                    for benchmark, task_names in collection.benchmarks
+                    if (kept := tuple(name for name in task_names if name in sampled_names))
+                ),
+            )
+        names = sampled
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
         if item is None:
