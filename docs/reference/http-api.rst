@@ -1366,7 +1366,8 @@ score, rewards, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``,
   ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting``
-  while ``max_concurrent_rollouts`` keeps the rollout out of the queue.
+  while ``max_concurrent_rollouts`` keeps the rollout out of the queue, also
+  when a retry runs the rollout again.
 - ``attempt_count`` is how many times a worker took the rollout.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at``
   when it finished or failed, in epoch seconds. Each is null until then.
@@ -1426,6 +1427,9 @@ the rollouts of an evaluation that ended with no score once more. It answers
   evaluation ended it, or when it finished with a failed score. Each of them
   goes back to the queue. Its earlier attempts stay, so its ``attempt_count``
   goes on and the calls of each attempt stay readable.
+- A retry keeps ``max_concurrent_rollouts``. When the evaluation has fewer free
+  places than rollouts to run again, the others are ``waiting`` and go back to
+  the queue as earlier rollouts end.
 - A rollout that has a score keeps it. A rollout that has not ended stays as
   it is.
 - An evaluation that runs goes on, with those rollouts in the queue again.
