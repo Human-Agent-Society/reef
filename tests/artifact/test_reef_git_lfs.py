@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -30,7 +31,7 @@ from reef.artifact import (
 )
 from reef.artifact.composite import compose_snapshot, link_or_copy
 from reef.artifact.git_client import GitClient
-from reef.artifact.git_lfs import HUB_REFS, same_file, token_config
+from reef.artifact.git_lfs import HUB_REFS, _GitWorkspace, local_directory, same_file, token_config
 from reef.core.plugins import PluginConfigError
 
 
@@ -1136,3 +1137,126 @@ def test_a_reader_of_named_files_fetches_those_files_alone(
     assert reader.materialize_component_files(root, name, ()).local_path is not None
     for path in reader_dir.rglob("*"):
         assert not path.is_file() or weights[:64] not in path.read_bytes(), path
+
+
+def object_bytes(repository: Path) -> int:
+    """The bytes of the LFS objects that the local ``repository`` holds."""
+    return sum(path.stat().st_size for path in (repository / "lfs" / "objects").rglob("*") if path.is_file())
+
+
+@pytest.mark.unit
+def test_a_repository_is_local_when_a_path_or_a_file_url_names_its_directory(tmp_path: Path) -> None:
+    assert local_directory(str(tmp_path)) == tmp_path
+    assert local_directory(tmp_path.as_uri()) == tmp_path
+    assert local_directory(str(tmp_path / "missing")) is None
+    assert local_directory("https://huggingface.co/org/reef-artifacts") is None
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("named_by", ["path", "file URL"])
+def test_discarded_content_leaves_no_lfs_object_and_no_copy_on_the_host(
+    named_by: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Five checkpoints are stored and one is committed. Once the five are discarded, the repository holds the
+    object of the committed one only, control's cache of a discarded one is gone, and after its next store the
+    trainer's clone links no discarded object either."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    byte_count = 4 * 1024 * 1024
+    remote = tmp_path / "artifacts.git"
+    repository: str | Path = remote
+    if named_by == "file URL":
+        run_git("init", "--bare", "-q", str(remote))
+        repository = remote.as_uri()
+
+    def backend(name: str) -> GitLFSRepositoryBackend:
+        return GitLFSRepositoryBackend(
+            "agent", repository, work_dir=tmp_path / name / "work", cache_dir=tmp_path / name / "cache"
+        )
+
+    training, control = backend("training"), backend("control")
+    root = control.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
+    export = tmp_path / "export"
+    for step in range(5):
+        export.mkdir()
+        (export / "model.safetensors").write_bytes(os.urandom(byte_count))
+        training.store_content(f"job:{step}", export)
+        shutil.rmtree(export)
+    published = control.publish_stored(
+        StoredFiles(content="job:2"), metadata={"artifact_id": "a1"}, expected_parent=root
+    )
+    # An admission check made a discarded checkpoint local in control.
+    committed = (control.materialize_content("job:2") / "model.safetensors").read_bytes()
+    control.materialize_content("job:0")
+    assert object_bytes(remote) == 5 * byte_count
+    assert copies_of(tmp_path, byte_count) == 5
+
+    for step in range(5):
+        control.discard_content(f"job:{step}")
+    assert object_bytes(remote) == byte_count
+    assert copies_of(tmp_path / "control", byte_count) == 0
+    # The trainer's clone drops its links to the removed objects when it stores next.
+    export.mkdir()
+    (export / "records.txt").write_text("step 5\n")
+    training.store_content("job:records", export)
+    assert copies_of(tmp_path, byte_count) == 1
+    served = backend("inference").materialize(published).local_path
+    assert served is not None and (served / "model.safetensors").read_bytes() == committed
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("bytes_of", ["new bytes", "the discarded content's bytes"])
+def test_a_reclamation_during_a_store_keeps_the_objects_whose_ref_is_not_pushed_yet(
+    bytes_of: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The push of ``store_content`` uploads the objects, then moves the ref. A discard that runs between the two
+    sees objects that no ref references: those of the new content, or, when the new content has the bytes of the
+    discarded one, the object that the upload found on the remote. The reclamation waits for no write and removes
+    nothing while one holds the objects lock; the next one removes only what no ref references."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    remote = tmp_path / "artifacts.git"
+
+    def backend(name: str) -> GitLFSRepositoryBackend:
+        return GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / name / "work", cache_dir=tmp_path / name)
+
+    training, control = backend("training"), backend("control")
+    control.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
+    old_weights = os.urandom(4096)
+    new_weights = os.urandom(4096) if bytes_of == "new bytes" else old_weights
+    for name, weights in (("old", old_weights), ("new", new_weights)):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "model.safetensors").write_bytes(weights)
+    training.store_content("job:old", tmp_path / "old")
+
+    uploaded, release = Event(), Event()
+    push = _GitWorkspace.push
+
+    def paused_push(workspace: _GitWorkspace, *refs: str, uploads_lfs: bool = True) -> None:
+        if workspace.work_dir == (tmp_path / "training" / "work").resolve() and any("contents" in r for r in refs):
+            # The LFS pre push hook uploads the clone's objects: the repository holds them, and no ref yet.
+            clone_objects = workspace.clone_dir / ".git" / "lfs" / "objects"
+            for stored in clone_objects.rglob("*/*/*"):
+                target = remote / "lfs" / "objects" / stored.relative_to(clone_objects)
+                if not target.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    os.link(stored, target)
+            uploaded.set()
+            assert release.wait(30)
+        push(workspace, *refs, uploads_lfs=uploads_lfs)
+
+    monkeypatch.setattr(_GitWorkspace, "push", paused_push)
+    with ThreadPoolExecutor(1) as pool:
+        stored = pool.submit(training.store_content, "job:new", tmp_path / "new")
+        assert uploaded.wait(30)
+        objects = {path.name for path in (remote / "lfs" / "objects").rglob("*/*/*")}
+        control.discard_content("job:old")
+        assert run_git("lfs", "ls-files", "--all", cwd=remote) == ""
+        assert control.reclaim_content(()) == ()
+        assert {path.name for path in (remote / "lfs" / "objects").rglob("*/*/*")} == objects
+        release.set()
+        stored.result(timeout=30)
+
+    removed = control.reclaim_content(())
+    assert removed == (() if bytes_of != "new bytes" else (hashlib.sha256(old_weights).hexdigest(),))
+    assert (control.materialize_content("job:new") / "model.safetensors").read_bytes() == new_weights

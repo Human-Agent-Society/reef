@@ -783,6 +783,30 @@ each snapshot to the Hub as it publishes it:
   to publish what Reef trains.
 - Archiving a deleted scenario's ref works with a local repository only.
 
+The training service stores each checkpoint in the repository before a
+commit takes it. Reef discards a checkpoint after its commit, when the sweep
+deletes its ended job, and when its scenario is deleted. What happens to its
+Git LFS objects depends on where the repository is:
+
+- A local repository, named by a path or a ``file://`` URL: the discard
+  removes each LFS object that no ref references any more. Snapshots, pending
+  snapshots and archived scenarios keep their objects. A materialized file is
+  a link to its object, so a cache entry of discarded content in another
+  process keeps its bytes until that entry goes. The training service's clone
+  drops its links when it stores its next checkpoint. While a store pushes,
+  a removal does nothing, and the next discard removes what it left. The
+  processes coordinate through the lock file ``reef-objects.lock`` in the
+  repository, so they must run on one host.
+- A remote Git server or the Hugging Face Hub: the objects stay on the remote
+  after Reef deletes the ref. Reef's clone in the work directory also keeps a
+  copy of each object that it uploaded. To free the remote's space, stop every
+  Reef service that writes the repository, and then remove the objects that no
+  ref references with the server's own tools. On the Hub,
+  ``HfApi.list_lfs_files`` and ``HfApi.permanently_delete_lfs_files`` of
+  ``huggingface_hub`` do this. Reef does not remove them itself, because a store
+  on another host can upload an object before it pushes the ref that
+  references it.
+
 Choose the task file store
 --------------------------
 
