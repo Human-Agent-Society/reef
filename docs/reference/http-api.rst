@@ -2132,7 +2132,7 @@ the trainer of that component. The stage class stays the deployment's:
 
 .. code:: json
 
-   {"record2sample_config": {"weights": {"max_staleness": 2}}}
+   {"record2sample_config": {"weights": {"accept_multi_turn_policy_samples": true}}}
 
 The request replaces the stored mapping as a whole. Send ``{}`` to use the
 deployment's config again. The response holds the stored
@@ -2204,7 +2204,7 @@ replica.
 
 The record names the artifact that answered in ``artifact_id``, and holds the
 bucket and the weights in ``metadata.traffic``. While the scenario serves an
-artifact, the staleness check does not refuse its records, whatever its weight
+artifact, the samples service does not mark its records' samples stale, whatever its weight
 (`Call one served artifact`_). A job can then hold samples of several
 artifacts. Each sample keeps its own ``artifact_id`` and recorded log
 probabilities.
@@ -2226,7 +2226,7 @@ scenario:
      "serving_config": {"weights": {"temperature": 0.6}},
      "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}},
      "served": {"weights": {"artifact:a": 95, "artifact:b": 5}},
-     "record2sample_config": {"weights": {"max_staleness": 2}},
+     "record2sample_config": {"weights": {"accept_multi_turn_policy_samples": true}},
      "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
    }
 
@@ -2460,8 +2460,8 @@ Artifact of a recorded response
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 An inference record holds the provider exchange and ``artifact_id``, the
-artifact that answered: the same ID as ``x-reef-artifact-id``. The staleness
-check reads it (see `Staleness
+artifact that answered: the same ID as ``x-reef-artifact-id``. The samples
+service's staleness check reads it (see `Staleness
 <../developer-guide/processors.rst#staleness>`__). Serving returns no training
 tensors. Reef removes any ``training`` block that an engine handler returns
 from the record, from the client's answer, and from rollout and evaluation
@@ -3119,11 +3119,11 @@ The activation rule and a restore change the active artifact alone. The
 artifacts served beside it stay served. Training continues from each
 trainer's independently selected training start.
 
-The staleness check of a recipe does not refuse a sample while the scenario
-serves the artifact that produced it beside the active one. After that
-artifact stops serving, the check counts only the artifacts that the scenario
-served as active: it refuses a sample whose artifact was not active within
-``max_staleness`` artifacts.
+The samples service does not mark a sample stale while the scenario serves the
+artifact that produced it beside the active one. After that artifact stops
+serving, the check counts only the artifacts that the scenario served as
+active: an on-policy stage marks a sample whose artifact is not the active
+one.
 
 The runtime limits how many weight artifacts a scenario serves together
 (`Runtime limits <../user-guide/operate.rst#set-what-a-scenario-serves>`__).

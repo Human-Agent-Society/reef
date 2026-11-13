@@ -22,6 +22,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.recipe.sft import SFTJobData, SFTRecipe, SFTSamples, SFTSettings
+from reef.record2sample.staleness import ServedArtifacts
 from reef.sample2job import DistillJobData
 from reef.storage.data import NewItem
 from reef.train import PipelineContext
@@ -292,9 +293,8 @@ def test_a_template_that_rewrites_the_generation_prompt_is_left_out(
 @pytest.mark.unit
 def test_a_held_sample_never_becomes_stale() -> None:
     pipeline = _pipeline_with_report()
-    # Two later artifacts: with max_staleness 0 a sampled policy row would be dropped.
-    pipeline.observe_serving_artifact_id("slime-v4")
-    pipeline.observe_serving_artifact_id("slime-v5")
+    # Two later artifacts: an on-policy stage would mark a sampled policy row stale.
+    pipeline.mark_stale(ServedArtifacts(("slime-v4", "slime-v5")))
 
     assert pipeline.ready(1)
     assert len(pipeline.build_job_data(1).samples) == 1

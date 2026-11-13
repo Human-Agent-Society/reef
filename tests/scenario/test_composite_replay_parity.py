@@ -12,7 +12,7 @@ train the same and keep the same rows.
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
@@ -21,7 +21,7 @@ from typing import Any, Self
 import pytest
 from tests.support.component_trainers import (
     HARNESS,
-    MAX_STALENESS,
+    MAX_ARTIFACT_LAG,
     WEIGHTS,
     JudgedAtOnce,
     Judgment,
@@ -52,6 +52,7 @@ from reef.execution.workers import SERVICE_COMPONENTS
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.record2sample.assembly import SampleAssemblySettings
+from reef.record2sample.staleness import ServedArtifacts, lags_behind
 from reef.scenario import Scenario
 from reef.train.harness_backend.settings import EvolutionSettings
 from reef.train.pipeline import PipelineSettings
@@ -89,7 +90,10 @@ class _SessionSamples(JudgedSamples):
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(_SessionJudging(), JudgedAtOnce(), max_staleness=MAX_STALENESS)
+        return cls(_SessionJudging(), JudgedAtOnce())
+
+    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
+        return lags_behind(samples, served, MAX_ARTIFACT_LAG)
 
     def make_sample(self, record: AgentRecord, judgment: Judgment) -> Any:
         if record.payload.get("declined"):
@@ -150,8 +154,16 @@ def step_stages() -> PipelineSettings:
 
 def tttd_stages() -> PipelineSettings:
     """The TTTD recipe's stages, one group of two rollouts per step."""
-    config = {"groups_per_step": 1, "rollouts_per_group": 2, "max_staleness": MAX_STALENESS}
-    return component_stages(TTTDSamples, TTTDJobData, record2sample_config=config)
+    config = {"groups_per_step": 1, "rollouts_per_group": 2}
+    return component_stages(LaggingTTTDSamples, TTTDJobData, record2sample_config=config)
+
+
+class LaggingTTTDSamples(TTTDSamples):
+    """The TTTD stage, whose samples train up to ``MAX_ARTIFACT_LAG`` artifacts behind the served one, as the other
+    stages of these tests do."""
+
+    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
+        return lags_behind(samples, served, MAX_ARTIFACT_LAG)
 
 
 @dataclass(frozen=True)

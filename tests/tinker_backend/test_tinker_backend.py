@@ -942,7 +942,6 @@ def test_serve_skips_the_model_download_for_a_hosted_backend(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "options",
     [
-        {"max_staleness": 1},
         {"lora_rank": 0},
         {"learning_rate": 0},
         {"kl_coef": -1},

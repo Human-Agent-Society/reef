@@ -203,7 +203,7 @@ def test_invalid_field_values_surface_as_recipe_config_errors() -> None:
 
 
 @pytest.mark.unit
-def test_the_recipe_refuses_max_staleness_which_the_record_stage_owns() -> None:
+def test_the_recipe_config_refuses_max_staleness() -> None:
     with pytest.raises(RecipeConfigError, match=r"does not consume config key.*'max_staleness'"):
         load_recipe(ConfiguredRecipe, {"data": {"max-staleness": 2}}, {})
 
@@ -291,5 +291,5 @@ def test_opd_config_keeps_objective_options_out_of_recipe_fields() -> None:
     from recipes.opd import OPDRecipe
 
     # The stage settings belong to the pipeline section, and the objective options to the backend.
-    for name in ("batch_size", "max_staleness", "max_teacher_tokens", "teacher_checkpoint", "tokenizer_path"):
+    for name in ("batch_size", "max_teacher_tokens", "teacher_checkpoint", "tokenizer_path"):
         assert name not in {argument.name for argument in config_arguments(OPDRecipe)}

@@ -26,6 +26,7 @@ from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
 
 from recipes.sao import SAOJobData, SAOSamples
+from recipes.sao.processor import SAOSettings
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents
@@ -37,7 +38,6 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
-from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
@@ -62,7 +62,7 @@ NUM_GPUS = 0
 def sao_pipeline(context: PipelineContext, *, accept_multi_turn: bool = False) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2sample=SAOSamples(context, SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
+        record2sample=SAOSamples(context, SAOSettings(accept_multi_turn_policy_samples=accept_multi_turn)),
         sample2job=SAOJobData(context, None, None),
     )
 
@@ -278,7 +278,7 @@ def test_cookbook_processors_wait_for_references_before_rejecting_a_report_of_se
         context = PipelineContext("math")
         processor = TrainingPipeline(
             context,
-            record2sample=SAOSamples(context, SampleAssemblySettings()),
+            record2sample=SAOSamples(context, SAOSettings()),
             sample2job=SAOJobData(context, None, None),
         )
     processor.push(served_call("i1", 1))

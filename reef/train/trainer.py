@@ -28,6 +28,7 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.record2sample.service import ProducedSamples, Selection
+from reef.record2sample.staleness import ServedArtifacts
 from reef.storage.commits import CommitRecord
 from reef.storage.record_items import used_record, used_records
 from reef.storage.records import RecordStore
@@ -335,13 +336,6 @@ class Trainer:
         with self._lock:
             self._pipeline.queue_requests(requests, failures)
 
-    def restore_served_artifacts(self, artifact_ids: Iterable[str], beside: Iterable[str] = ()) -> None:
-        """Set the artifacts that the scenario served, oldest first, and those that it serves ``beside`` its active
-        selection, for the staleness check of the pipeline."""
-        with self._lock:
-            self._pipeline.served_artifacts.restore(tuple(artifact_ids))
-            self._pipeline.served_artifacts.restore_beside(beside)
-
     def fail_pending_request(self, error: str) -> str | None:
         """Mark the reserved request as failed, so its next job data is a skip row; return its ID, or None when no
         request is reserved. ``Scenario.fail_pending_request`` stores the failure."""
@@ -527,12 +521,16 @@ class Trainer:
         if item.request_type in self.pipeline.required_request_types:
             self._pipeline.push(item)
 
-    def produce_samples(self, selection: Selection | None = None) -> ProducedSamples:
-        """Read the job ends of this trainer's state, push every record that arrived since the last call into the
-        pipeline and make samples of the formed record sets; return whether the trainer received new input (samples or
-        requests), whether background work of the pipeline still runs, and when a set that waits for time alone is
-        due, so the samples service comes back. ``selection`` gets the counts so far after each page of records and
-        after the stage runs, and names the task in the samples that the step stores."""
+    def produce_samples(
+        self, selection: Selection | None = None, served: ServedArtifacts | None = None
+    ) -> ProducedSamples:
+        """Read the job ends of this trainer's state, judge the stored samples against ``served``
+        (``TrainingPipeline.mark_stale``; nothing is stale without it), then push every record that arrived since the last
+        call into the pipeline and make samples of the formed record sets, which are judged as they are stored.
+        Return whether the trainer received new input (samples, requests, or a new judgment), whether background
+        work of the pipeline still runs, and when a set that waits for time alone is due, so the samples service comes
+        back. ``selection`` gets the counts so far after each page of records and after the stage runs, and names the
+        task in the samples that the step stores."""
         with self._lock:
             if not self.trains:
                 return ProducedSamples(changed=False, background=False)
@@ -550,20 +548,29 @@ class Trainer:
                         self._pipeline.stored_sample_count - before_samples,
                     )
 
-            self._pipeline.selection_task = None if selection is None else selection.task_id
+            # Each write of the step checks first that the selection's worker still holds it.
+            self._pipeline.selection = selection
             try:
-                first_sequence = self.read_records(report)
-                stored = self._pipeline.produce()
+                # The samples service judges the stored samples first, so that the samples that this step stores are
+                # judged against the same artifacts when they are stored.
+                judged = self._pipeline.mark_stale(ServedArtifacts() if served is None else served)
+                self._pipeline.selection_task = None if selection is None else selection.task_id
+                try:
+                    first_sequence = self.read_records(report)
+                    stored = self._pipeline.produce()
+                finally:
+                    self._pipeline.selection_task = None
+                report()
+                self._pipeline.settle_ended_records(self.committed_record_ids)
+                self.skipped_record_ids -= self.committed_record_ids
+                if self.skipped_record_ids:
+                    self._pipeline.check_lease()
+                    self._pipeline.store.end_records(self.skipped_record_ids)
             finally:
-                self._pipeline.selection_task = None
-            report()
-            self._pipeline.settle_ended_records(self.committed_record_ids)
-            self.skipped_record_ids -= self.committed_record_ids
-            if self.skipped_record_ids:
-                self._pipeline.store.end_records(self.skipped_record_ids)
+                self._pipeline.selection = None
             due = self._pipeline.next_due()
             return ProducedSamples(
-                changed=stored,
+                changed=stored or judged,
                 background=self._pipeline.background_jobs_running(),
                 records_read=self._data_offset + self._used_read - before_records,
                 samples_created=self._pipeline.stored_sample_count - before_samples,
@@ -665,17 +672,16 @@ class Trainer:
         with self._lock:
             return self.pending_commit.result if isinstance(self.pending_commit, PendingTrainingResult) else None
 
-    def reserve_job(self, serving_artifact_id: str | None = None, *, automatic_jobs: bool = True) -> JobData | None:
+    def reserve_job(self, *, automatic_jobs: bool = True) -> JobData | None:
         """Reserve the data of the job that the trainer submits next, or return the reserved data. Return None when
         the trainer accepts no job now (``accepts_job``), when no job data is ready, and while a result waits for
-        its commit. ``serving_artifact_id`` is the artifact that serves the scenario now, for the staleness check of
-        the pipeline. Without ``automatic_jobs``, only a request's job data is ready."""
+        its commit. Without ``automatic_jobs``, only a request's job data is ready."""
         with self._lock:
             if isinstance(self.pending_commit, PendingTrainingResult):
                 return None
             if self.pending_commit is None and not self.accepts_job():
                 return None
-            return self.reserve_job_data(serving_artifact_id, automatic_jobs)
+            return self.reserve_job_data(automatic_jobs)
 
     def submit_job(
         self, data: JobData, *, start: str | None = None, train_from_artifact_id: str | None = None
@@ -736,9 +742,7 @@ class Trainer:
             )
             return result
 
-    def advance_job(
-        self, *, serving_artifact_id: str | None = None, train_from_artifact_id: str | None = None
-    ) -> TrainingCommit | None:
+    def advance_job(self, *, train_from_artifact_id: str | None = None) -> TrainingCommit | None:
         """Move the trainer's jobs forward and return the next commit, if any: the result that waits for its commit,
         else news of a running job (``poll_jobs``), else the submission of the next job, which continues the
         training start (``reserve_job``, ``submit_job``). A scenario gives the job of a request that names
@@ -746,7 +750,7 @@ class Trainer:
         result = self.pending_result() or self.poll_jobs()
         if result is not None or not self.trains:
             return result
-        data = self.reserve_job(serving_artifact_id)
+        data = self.reserve_job()
         return None if data is None else self.submit_job(data, train_from_artifact_id=train_from_artifact_id)
 
     def skip_failed_request(self, data: JobData, request: TrainingRequest, error: str) -> TrainingCommit:
@@ -759,16 +763,11 @@ class Trainer:
             self.pending_commit = replace(pending, consumed_ids=self._pipeline.discard_request(request.id))
         return TrainingCommit(dict(self._state), {"skipped": "request failed", "error": error})
 
-    def reserve_job_data(self, serving_artifact_id: str | None, automatic_jobs: bool = True) -> JobData | None:
-        """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.
-
-        ``serving_artifact_id`` is the artifact that serves the scenario now.
-        The staleness check of the pipeline measures the lag of each buffered record sample against it.
-        """
+    def reserve_job_data(self, automatic_jobs: bool = True) -> JobData | None:
+        """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the
+        lock."""
         if self.pending_commit is not None:
             return self.pending_commit.data
-        if serving_artifact_id is not None:
-            self._pipeline.observe_serving_artifact_id(serving_artifact_id)
         # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
         # Without a sample count the pipeline starts no automatic job (``TrainingPipeline.holds_job_data``).
         sample_count = self.job_samples if automatic_jobs else None

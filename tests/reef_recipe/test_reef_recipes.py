@@ -45,26 +45,24 @@ def tttd_grid(groups_per_step: int, rollouts_per_group: int) -> PipelineSettings
 
 @pytest.mark.unit
 @pytest.mark.parametrize("recipe_type", [OpenClawRLRecipe, SAORecipe, TTTDRecipe])
-def test_training_recipes_take_max_staleness_in_their_record2sample_config(recipe_type) -> None:
-    default = recipe_type(pipeline_stages=pipeline_stages(recipe_type, {}))
-    assert (
-        recipe_trainer(
-            default, live_objects(), "scenario", memory_records("scenario"), root=STUB_ROOT
-        ).pipeline.record2sample.max_staleness
-        == 0
-    )
-    section = {"record2sample": {"config": {"max_staleness": 2}}}
-    recipe = recipe_type(pipeline_stages=pipeline_stages(recipe_type, section))
-    assert (
-        recipe_trainer(
+def test_a_pipeline_section_that_sets_max_staleness_is_refused_with_what_to_do(recipe_type) -> None:
+    for key in ("max_staleness", "max-staleness"):
+        with pytest.raises(PluginConfigError, match=r"max_staleness was removed.*Remove the key.*max_artifact_lag"):
+            pipeline_stages(recipe_type, {"record2sample": {"config": {key: 0}}})
+
+
+@pytest.mark.unit
+def test_sao_takes_its_lag_bound_in_its_own_settings() -> None:
+    def stage(config: dict):
+        recipe = SAORecipe(pipeline_stages=pipeline_stages(SAORecipe, {"record2sample": {"config": config}}))
+        return recipe_trainer(
             recipe, live_objects(), "scenario", memory_records("scenario"), root=STUB_ROOT
-        ).pipeline.record2sample.max_staleness
-        == 2
-    )
-    negative = {"record2sample": {"config": {"max_staleness": -1}}}
-    refused = recipe_type(pipeline_stages=pipeline_stages(recipe_type, negative))
-    with pytest.raises(PluginConfigError, match="max_staleness must be a non-negative int"):
-        recipe_trainer(refused, live_objects(), "scenario", memory_records("scenario"), root=STUB_ROOT)
+        ).pipeline.record2sample
+
+    assert stage({}).max_artifact_lag == 0
+    assert stage({"max_artifact_lag": 18}).max_artifact_lag == 18
+    with pytest.raises(PluginConfigError, match="max_artifact_lag must be a non-negative int"):
+        stage({"max_artifact_lag": -1})
 
 
 def test_recipe_class_resolver_has_no_method_short_names() -> None:

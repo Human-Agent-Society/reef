@@ -21,12 +21,13 @@ from enum import Enum
 from typing import Any, Self
 
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
+from reef.core.plugins import NoSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
 from reef.core.trajectories import make_trajectory
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.pipeline_context import PipelineContext
-from reef.record2sample.base import Record2Sample, Record2SampleSettings, SampleResult
+from reef.record2sample.base import Record2Sample, SampleResult
 from reef.record2sample.sets import RecordSet, RecordSetUnit
 
 logger = logging.getLogger(__name__)
@@ -249,9 +250,8 @@ class ReportSamples(Record2Sample):
     * ``grouping``: which reports train, and how they form groups; ``None`` trains every valid report by itself.
     * ``exclusive_sources``: a report that ends owns its referenced inference records outright. Use it when each
       report has its own inferences, as one scored rollout or one distillation sample does.
-    * ``max_staleness``: the staleness limit of ``Record2Sample``.
 
-    Config: ``Record2SampleSettings``.
+    It takes no config.
     """
 
     def __init__(
@@ -260,9 +260,8 @@ class ReportSamples(Record2Sample):
         grouping: ReportGrouping | None = None,
         *,
         exclusive_sources: bool = False,
-        max_staleness: int = 0,
     ) -> None:
-        super().__init__(max_staleness=max_staleness)
+        super().__init__()
         self.scenario = context.scenario
         self.report_type = context.report_type
         self.admitted_report_type = context.admitted_report_type
@@ -283,8 +282,8 @@ class ReportSamples(Record2Sample):
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
         """Every valid report trains by itself. A subclass with a grouping or settings overrides it."""
-        settings = Record2SampleSettings.parse(config, plugin_class=cls)
-        return cls(context, max_staleness=settings.max_staleness)
+        NoSettings.parse(config, plugin_class=cls)
+        return cls(context)
 
     def make_sample(self, context: ReportContext) -> Sample | SkippedReport:
         """Assemble valid feedback into data; raise on a broken training contract.

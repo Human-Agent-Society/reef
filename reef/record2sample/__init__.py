@@ -21,10 +21,10 @@ Entry point: ``Record2Sample`` in ``base.py``.
 * Before sample creation, ``form`` rejects any set containing an incomplete inference
   (``reef.core.errors.inference_incomplete``): an engine abort, or a stream whose delivery did not complete. This
   includes report references. Replay applies the same check; stored response data stays unchanged.
-* Every stage runs the staleness check. It is the only place where Reef compares the artifact that produced
-  training data with the artifact that the scenario serves, and drops data that is more than ``max_staleness``
-  artifacts behind. ``max_staleness`` is the stage's setting (``Record2SampleSettings``,
-  ``pipeline.record2sample.config.max_staleness``).
+* Every stage decides when its stored samples go stale (``Record2Sample.is_stale``). It is the only place where
+  Reef compares the artifact that produced training data with the artifacts that the scenario served. The samples
+  service asks it and marks the stale samples in the store; control's automatic jobs leave them out. The default
+  is on-policy; a stage whose method accepts a bounded lag, or none, overrides it.
 
 Stages:
 
@@ -52,8 +52,8 @@ Values and shared parts:
 
 * ``RecordSet`` and ``RecordSetUnit`` (``sets.py``): the records whose samples are made together, and the record
   sets whose samples the pipeline stores as one group, which trains together.
-* ``is_stale`` (``staleness.py``): whether training data is more than ``max_staleness`` artifacts behind the
-  artifact that the scenario serves.
+* ``ServedArtifacts`` and ``lags_behind`` (``staleness.py``): the artifacts that the scenario served, and whether
+  training data lags more than a given number of them behind the served one.
 * ``SampleAssembly`` (``assembly.py``): a report and its inference records into one policy sample, or one
   multi-turn sample. ``samples.py``: readers of recorded inferences and the policy sample builders.
 
@@ -65,14 +65,7 @@ The modules in this directory depend only on ``reef.core``, ``reef.execution.job
 and ``reef.pipeline_context``. Thus the trainer can use them without the generator service.
 """
 
-from reef.record2sample.base import (
-    InferenceRecordSamples,
-    NoSamples,
-    Record2Sample,
-    Record2SampleSettings,
-    SampleResult,
-    SampleStatus,
-)
+from reef.record2sample.base import InferenceRecordSamples, NoSamples, Record2Sample, SampleResult, SampleStatus
 from reef.record2sample.judging import JudgedSamples, JudgedSet, RecordJudging
 from reef.record2sample.reports import (
     GroupDecision,
@@ -93,7 +86,6 @@ __all__ = [
     "JudgedSet",
     "NoSamples",
     "Record2Sample",
-    "Record2SampleSettings",
     "RecordJudging",
     "RecordSet",
     "RecordSetUnit",

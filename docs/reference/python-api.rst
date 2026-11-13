@@ -430,9 +430,6 @@ deployment from its configuration alone:
      - the adapter that ``GET /reef/harness`` renders the harness artifacts
        for (``evolution.adapter`` of the harness recipe), or ``None``; the
        scenario list names it for every scenario
-   * - ``reef.recipe.deployment.scenario_state_dirs(recipe, scenario)``
-     - the directories of the record-to-sample stages that a scenario delete
-       archives; a training service archives its own
    * - ``reef.scenario.factory.scenario_report_type(recipe)``
      - the report contract that ingress checks: the one that the recipes
        share, or a contract that a report meets when any recipe's parses it
@@ -1428,12 +1425,13 @@ sample2job=...)``):
   ``JudgedSamples``, after an asynchronous ``judge`` derives new feedback. A
   stage with slow work keeps its records and forms the set in
   ``advance(now)`` when the work ends (see `Slow work
-  <../developer-guide/processors.rst#slow-work>`__). The stage's staleness
-  check (``is_stale``) keeps samples with data more than ``max_staleness``
-  artifacts behind the served artifact out of the next automatic job. ``max_staleness``
-  is the stage's own setting, from ``Record2SampleSettings`` (see `the
-  staleness check <../developer-guide/processors.rst#staleness>`__). The
-  default, ``NoSamples``, makes no sample, so nothing trains.
+  <../developer-guide/processors.rst#slow-work>`__). The stage's
+  ``is_stale(samples, served)`` decides whether a group of its stored samples
+  may still train against the artifacts that the scenario served
+  (``ServedArtifacts``); the samples service marks the stale ones, and the
+  automatic jobs leave them out. The default is on-policy (see `the staleness
+  check <../developer-guide/processors.rst#staleness>`__). The default stage,
+  ``NoSamples``, makes no sample, so nothing trains.
   ``uploaded_sample(trajectory) -> TrajectorySample`` turns an uploaded ATIF
   trajectory into its training sample. It must be pure, and it raises
   ``ValueError`` to skip the trajectory (see `Uploaded trajectories
@@ -1473,9 +1471,9 @@ fails when the first scenario builds its pipeline. A sample-to-job stage that
 needs the record-to-sample stage as a specific class checks it with
 ``isinstance`` and raises ``PluginConfigError`` otherwise. A value that both
 stages need belongs to the record-to-sample stage; the sample-to-job stage
-reads it from the stage object that it receives. A ``Record2Sample`` that keeps
-per-scenario state also implements ``scenario_state_dirs(config, scenario)``,
-so a scenario delete archives it. Reef owns replay, retention, deduplication, pending job data,
+reads it from the stage object that it receives. A ``Record2Sample`` keeps its
+state in memory and in the store, not in a directory of its own, so a scenario
+delete archives nothing for it. Reef owns replay, retention, deduplication, pending job data,
 and exactly-once consumption; the method implements only the hooks below.
 They run synchronously on the trainer thread, so they must not block on
 network or model latency. Reports must reference existing inference records
@@ -1511,7 +1509,7 @@ A reported-feedback recipe implements these hooks:
      - Shape the flat tuple of selected tasks into job data with the ID ``data_id``.
 
 The recipe owns the report policy. Its record-to-sample stage is a subclass of
-``ReportSamples(context, grouping=None, *, exclusive_sources=False, max_staleness=0)``.
+``ReportSamples(context, grouping=None, *, exclusive_sources=False)``.
 With no ``grouping``, it trains every report by itself. With
 ``exclusive_sources=True``, a report that ends owns its inference records.
 A report references the last call of each trajectory that it scores;
@@ -1549,8 +1547,7 @@ report's trajectories one ATIF trajectory sample with the report's score.
 ``ReportSamples`` adds the calls and the report id to
 ``source_agent_record_ids``.
 
-``TrajectorySamples(context, *, trajectory_idle_seconds=300.0,
-max_staleness=0)`` is the stage of a method that needs no report. It forms a
+``TrajectorySamples(context, *, trajectory_idle_seconds=300.0)`` is the stage of a method that needs no report. It forms a
 ``TrajectorySet`` of a trajectory's calls once the trajectory's last call has
 had no continuing call and no retry for ``trajectory_idle_seconds``, counted
 from the call's ``created_at``, and makes
@@ -1582,8 +1579,7 @@ Computed feedback
 
 Use this engine when later traffic completes an earlier record and judging it
 calls a model or another slow service. The recipe writes a ``RecordJudging``.
-Its record-to-sample stage is a ``JudgedSamples(judging, worker, *,
-max_staleness=0)`` subclass that implements ``make_sample``, and its
+Its record-to-sample stage is a ``JudgedSamples(judging, worker)`` subclass that implements ``make_sample``, and its
 ``Sample2Job`` shapes the judged samples into job data.
 
 +------------------------------------------+-----------------------------------+
@@ -1752,7 +1748,7 @@ when the component records them, the sampler's ``topk_indices`` and
 other extensions. Training arrays are JSON lists. ``item.artifact_id`` is the
 artifact that produced the trajectory: ``training.artifact_id``, else the
 ``artifact_id`` of the last recorded call (``records[-1].payload``), or None
-for an upload. The staleness check reads it.
+for an upload. The samples service's staleness check reads it.
 
 ``TrajectorySample.group_id`` is an optional string, scoped to the job data.
 None means an independent trajectory. Group-relative policy algorithms require
@@ -1816,8 +1812,8 @@ Chat rendering
 Serving returns no tokens and no log-probabilities. A training component
 renders each trajectory sample with its model's chat template, and computes
 the log-probabilities that its objective needs with the weights of the job's
-start. These are exact when ``max_staleness`` is 0 and an approximation above
-it. ``reef.core.chat_rendering`` holds the shared rendering:
+start. These are exact for an on-policy stage and an approximation for a
+stage that accepts a lag. ``reef.core.chat_rendering`` holds the shared rendering:
 
 - ``ChatTemplate`` renders messages and tools to token IDs.
   ``TokenizerChatTemplate(tokenizer, template_kwargs)`` is the chat template of
@@ -2412,8 +2408,9 @@ These members state what the runtime serves:
 
 ``Scenario.serving_artifact_id()`` names the selected artifact.
 ``Scenario.served_artifact_id()`` reads the published route when a dispatcher
-owns the scenario. Training staleness checks use this served identity.
-Automatic weight training waits while the selected artifact has no matching
+owns the scenario. ``Scenario.served_artifacts()`` reads the artifacts that the
+scenario served from the commit history; the samples service judges samples
+against them. Automatic weight training waits while the selected artifact has no matching
 served route. Manual training does not wait, since a request names its samples.
 Deployments without inference keep their existing training behavior.
 Startup status is available through the inference service's

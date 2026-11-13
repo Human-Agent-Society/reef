@@ -69,7 +69,7 @@ The DIS ratio compares the current policy against the old-policy
 log-probabilities. Serving records no log-probabilities, so the training
 component renders each rollout with the model's chat template and the actor
 computes them with the weights of the job's start. The ratio is exact for
-``max_staleness: 0``. Above 0 it measures the drift within the job, not the
+``max_artifact_lag: 0``. Above 0 it measures the drift within the job, not the
 gap to the weights that sampled the rollout. Give the component the serving
 engine's chat template arguments (`Chat template arguments
 <../../reference/configuration.rst#chat-template-arguments>`__).
@@ -88,9 +88,10 @@ Configuration
 
 SAO's pipeline has two stages: ``SAOSamples`` and ``SAOJobData``. The
 deployment's ``pipeline`` section configures them. ``SAOSamples`` trains each
-report by itself. Set the staleness limit in the record-to-sample stage, the
-job size in the sample-to-job stage, and the optimizer batch in the training
-config:
+report by itself. SAO updates asynchronously, so a rollout may train while the
+scenario serves a later artifact. Set that lag bound in the record-to-sample
+stage, the job size in the sample-to-job stage, and the optimizer batch in the
+training config:
 
 .. code:: yaml
 
@@ -99,7 +100,7 @@ config:
    pipeline:
      record2sample:
        config:
-         max_staleness: 18
+         max_artifact_lag: 18
      sample2job:
        config:
          job_samples: ${training.config.global_batch_size}
@@ -118,8 +119,8 @@ config:
    ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
        true trains every call of a report's trajectory, every reply; false trains only the reply of the trajectory's last call, with the earlier turns as context.
 
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+   ``pipeline.record2sample.config.max_artifact_lag`` : 0
+       the artifacts that the scenario may have served after the one that sampled a rollout, for the rollout to train; a non-negative int. 0 trains only rollouts of the served artifact. The samples service marks a rollout beyond the bound stale.
 
 A ``batch-size`` key in ``recipe.config`` or in
 ``pipeline.sample2job.config`` is an unknown key: the recipe or the scenario's

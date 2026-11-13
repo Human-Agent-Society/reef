@@ -285,7 +285,7 @@ def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_weight_byte_in_c
     live = LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component))
     # The inference service of this process is the reader of the weights; control's own steps are checked before
     # anything serves, with the services that load weights left out.
-    with split(tmp_path, TestPolicyRecipe(max_staleness=4), live, (component,)) as control:
+    with split(tmp_path, TestPolicyRecipe(max_artifact_lag=4), live, (component,)) as control:
         scenario = control.get_or_create_scenario("math")
         root = scenario.serving_artifact_id()
         control.accept_record(token_inference("i1", artifact_id=root))
@@ -330,7 +330,7 @@ def test_a_check_that_reads_the_weights_runs_where_they_are_and_brings_no_weight
     refused checkpoint fails its job, and a refused import raises the check's ``ValueError``, as before."""
     component = SentinelWeights(tmp_path / "training" / "checkpoints")
     live = LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component))
-    recipe = CheckedPolicyRecipe(max_staleness=4)
+    recipe = CheckedPolicyRecipe(max_artifact_lag=4)
     control_directory = tmp_path / "control"
     done: list[str] = []
 
@@ -473,7 +473,7 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
     evolving = training_live.harness_component
     assert evolving is not None
     weights = SentinelWeights(tmp_path / "training" / "checkpoints")
-    recipe = CompositeRecipe(components={"weights": TestPolicyRecipe(max_staleness=8), "harness": harness})
+    recipe = CompositeRecipe(components={"weights": TestPolicyRecipe(max_artifact_lag=8), "harness": harness})
     runtime = StubInferenceRuntime()
     # The stub answers each call from the artifact that the call names, so it serves an artifact beside the active.
     runtime.answers_each_artifact = True
@@ -505,10 +505,9 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
         def state() -> object:
             return control.build_training_status(), scenario_jobs(control.queue, "agent")
 
-        # One record trains both components, and the harness trains first: the weights job waits. Without the
-        # order, the test has a race. When the weights commit activates before the harness takes its sample, the
-        # sample is of weights that the scenario no longer serves (``max_staleness`` is 0), and the pipeline
-        # drops it, so the harness never trains.
+        # One record trains both components, and the harness trains first: the weights job waits, so that each
+        # operation below sees both components trained in one order. A harness trace never goes stale, so the
+        # other order would train the harness too.
         weights.may_train.clear()
         control.accept_record(token_inference("i1", scenario="agent", artifact_id=root["weights"]))
         control.accept_record(report("r1", "i1", scenario="agent"))
