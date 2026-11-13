@@ -49,10 +49,12 @@ A jobs-queue item:
 A checkpoint's ``path`` is a path of the training service, which only the component reads. Control reads no
 file of a checkpoint: the training worker stores the files of the checkpoint's ``artifact_path`` as content of the
 scenario's artifact store (``RepositoryBackend.store_content``) under ``checkpoint_content``, and control commits
-that content by name (``JobLoop.publish``). The committer discards the content of a checkpoint once its commit is
-recorded, and control's sweep discards the content of every checkpoint of an ended job before it deletes the
-job's item (``discard_ended_content``), so content that no commit names lives at most the work retention longer
-than its job.
+that content by name (``JobLoop.publish``). Before it stores a checkpoint, the worker writes the content's name
+into the item's ``metadata["stored_content"]``, so the item names all content of its job, also content that no
+progress entry names because the worker stopped or lost the job in between. The committer discards the content of
+a checkpoint once its commit is recorded, and control's sweep discards every named content of an ended job before
+it deletes the job's item (``discard_ended_content``), so content that no commit names lives at most the work
+retention longer than its job.
 
 Control reads no other file of the training service either. The files that record how a job ran
 (``TrainingComponent.job_records``) are stored content too, under ``job_records_content``, which the worker
@@ -119,6 +121,9 @@ ANSWER_READ_KEY = "answer_read"
 UNASKED_CHECK_SECONDS = 600.0
 #: The error of a check that control stopped asking for.
 UNASKED_CHECK_ERROR = "no trainer asked for this check any more"
+#: The key of a job item's ``metadata`` that holds the names of the content that the training worker stored, or
+#: was about to store, for the job's checkpoints: a list of strings.
+STORED_CONTENT_KEY = "stored_content"
 #: The key of a job item's ``metadata`` that holds the running job's progress, as its component reports it.
 PROGRESS_METADATA_KEY = "progress"
 #: The key of a job item's ``metadata`` that holds the experiment run that records the job.
@@ -338,7 +343,8 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
 
     - ``id``, ``state``, ``attempt_count`` and ``error``: the item's fields (``WorkItem``).
     - ``checkpoints``: the saved checkpoints that the job reported, in step order, each as ``checkpoint_json``
-      gives it, with its ``changed_parts``.
+      gives it, with its ``changed_parts``. A progress entry that another release of Reef wrote in another form
+      is left out: such a job reads as failed (``JobQueueComponent.status``).
     - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job finished, else None.
     - ``parameters``: the job's parameters, a JSON object: the recipe's parameters for the kind of the job's
       samples, with the request's parameters merged in. They hold the training ``method`` and the
@@ -365,7 +371,7 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
         "id": item.id,
         "state": item.state,
         "attempt_count": item.attempt_count,
-        "checkpoints": [dict(progress) for progress in item.progress],
+        "checkpoints": [checkpoint_json(checkpoint) for checkpoint in listed_checkpoints(item)],
         "result": None if item.result is None else dict(item.result),
         "error": item.error,
         "parameters": dict(json_object(payload.get("parameters"), "a job's parameters")),
@@ -382,6 +388,17 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
             else cast(JsonValue, ExperimentRun.from_dict(json_object(experiment, "a job's experiment")).to_dict())
         ),
     }
+
+
+def listed_checkpoints(item: WorkItem) -> list[SavedCheckpoint]:
+    """The checkpoints of the progress entries of ``item`` that have the current form."""
+    checkpoints = []
+    for entry in item.progress:
+        try:
+            checkpoints.append(checkpoint_from_json(entry))
+        except ValueError:
+            continue
+    return checkpoints
 
 
 def utc_time(seconds: float) -> str:
@@ -733,11 +750,12 @@ class TrainingJobWorker(QueueWorker):
         """Run the job of ``item`` on the component, and store and record its checkpoints, by step.
 
         The component gets the job with its own start (``resolved_job``). For each checkpoint that the item does
-        not hold yet, the worker first stores the files of its ``artifact_path`` in the artifact store of the
-        job's scenario, under ``checkpoint_content``, and then appends the progress entry, which names that
-        content and the parts that the checkpoint changed from the start
-        (``TrainingComponent.changed_parts``). A worker that stops between the two steps recorded nothing: the
-        worker that continues the job stores the same name again. The worker also copies the component's
+        not hold yet, the worker writes the name of its content (``checkpoint_content``) into the item's
+        metadata, then stores the files of its ``artifact_path`` under that name in the artifact store of the
+        job's scenario, and then appends the progress entry, which names that content and the parts that the
+        checkpoint changed from the start (``TrainingComponent.changed_parts``). A worker that stops after it
+        stored and before it recorded leaves no progress entry: the worker that continues the job stores the same
+        name again, and when nobody continues the job, the sweep finds the name in the metadata. The worker also copies the component's
         ``job_progress`` into the item's metadata when it changed, and it stores the job's record files
         (``job_records``) under ``job_records_content`` when the job ends. At each poll the worker
         reads the item: a job that control cancelled, or that another worker took, ends here, and the component
@@ -753,6 +771,7 @@ class TrainingJobWorker(QueueWorker):
         reported = {checkpoint_from_json(entry).step for entry in item.progress}
         progress_count = len(item.progress)
         written_progress: Mapping[str, Any] | None = None
+        stored_names = [str(name) for name in cast(list[JsonValue], item.metadata.get(STORED_CONTENT_KEY, []))]
         try:
             while True:
                 job_progress = self.component.job_progress(job.job_id)
@@ -774,6 +793,13 @@ class TrainingJobWorker(QueueWorker):
                             f"the {self.component.name} training component reported a checkpoint with no directory"
                         )
                     content = checkpoint_content(item.id, checkpoint.step)
+                    if content not in stored_names:
+                        stored_names.append(content)
+                        named = self.queue.write_metadata(
+                            JOBS_QUEUE, item.id, STORED_CONTENT_KEY, cast(JsonValue, list(stored_names))
+                        )
+                        if named is None:
+                            raise WorkLeaseLostError(f"job {item.id} left the queue")
                     self.backends(job.scenario).store_content(content, Path(checkpoint.artifact_path))
                     stored = replace(
                         checkpoint,
@@ -876,27 +902,38 @@ class TrainingCheckWorker(QueueWorker):
         return {"refusal": None}
 
 
-def discard_ended_content(queue: WorkQueue, backends: RepositoryBackendFactory, *, ended_before: float) -> int:
+def discard_ended_content(
+    queue: WorkQueue, backends: RepositoryBackendFactory, *, ended_before: float, give_up_before: float
+) -> tuple[str, ...]:
     """Discard the stored content of every checkpoint of the job items that ended before ``ended_before``
-    (seconds), and return the number of those items.
+    (seconds), and return the IDs of those items that must stay because their content could not be discarded.
 
-    These are the items that ``WorkQueue.delete_final`` deletes next, so the content of a checkpoint that no
-    commit took, of a cancelled job for example, goes with its item. Discarding content that a commit discarded
-    already changes nothing. An item whose progress does not parse, or whose content cannot be removed, is
-    logged and counted: its content stays.
+    These are the items that ``WorkQueue.delete_final`` deletes next. The names are those that the training worker
+    wrote into the item before it stored each checkpoint (``STORED_CONTENT_KEY``), so the content of a checkpoint
+    that no commit took, or that no progress entry names, goes with its item. Discarding content that a commit
+    discarded already changes nothing. A failure of one item, whatever it raises, is logged and leaves the other
+    items alone. Such an item stays for the next sweep, unless it ended before ``give_up_before``: then it goes,
+    and the log names the content that stays in the artifact store.
     """
-    ended = [
-        item
-        for item in queue.items(JOBS_QUEUE)
-        if item.final and item.ended_at is not None and item.ended_at < ended_before
-    ]
-    for item in ended:
+    kept: list[str] = []
+    for item in queue.items(JOBS_QUEUE):
+        if not item.final or item.ended_at is None or item.ended_at >= ended_before:
+            continue
+        names = item.metadata.get(STORED_CONTENT_KEY, [])
         try:
-            for entry in item.progress:
-                backends(item.scenario).discard_content(json_text(entry.get("content"), "a checkpoint's content"))
-        except (ArtifactError, ValueError):
-            logger.exception("could not discard the stored checkpoints of job %s", item.id)
-    return len(ended)
+            if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+                raise ValueError("a job's stored content is a list of names")
+            backend = backends(item.scenario)
+            for name in names:
+                backend.discard_content(cast(str, name))
+        except Exception:
+            # A sweep reads every scenario's backend, also a plugin's: one failure must not stop the others.
+            if item.ended_at < give_up_before:
+                logger.exception("gave up on the stored checkpoints %s of job %s; they stay stored", names, item.id)
+            else:
+                logger.exception("could not discard the stored checkpoints of job %s; the next sweep tries", item.id)
+                kept.append(item.id)
+    return tuple(kept)
 
 
 __all__ = [
@@ -907,6 +944,7 @@ __all__ = [
     "JOBS_QUEUE",
     "JOB_CANCELLED_ERROR",
     "PROGRESS_METADATA_KEY",
+    "STORED_CONTENT_KEY",
     "UNASKED_CHECK_ERROR",
     "UNASKED_CHECK_SECONDS",
     "JobExperimentRecorder",

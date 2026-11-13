@@ -13,13 +13,14 @@ from tests.support.job_data import job_data_ref
 from tests.support.training_deployment import LocalFacts
 from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import Artifact, ArtifactError, InMemoryRepositoryBackend
+from reef.artifact import Artifact, ArtifactError, InMemoryRepositoryBackend, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import InternalError
 from reef.core.job_data import JobData, TaskSample
 from reef.core.snapshot import RootSource, SnapshotRef
 from reef.core.training_request import TrainingRequest
 from reef.core.weight_layout import ArtifactFormat
+from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.observability.base import (
     ExperimentRun,
     ExperimentTracker,
@@ -29,7 +30,7 @@ from reef.observability.base import (
 from reef.storage.data import MemoryDataStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.tasks import LocalTaskFileStore
-from reef.storage.work_queue import NewWork
+from reef.storage.work_queue import NewWork, WorkLeaseLostError
 from reef.train.component import (
     JobCheckPendingError,
     JobStatus,
@@ -42,6 +43,7 @@ from reef.train.job_queue import (
     CHECKS_QUEUE,
     JOB_CANCELLED_ERROR,
     JOBS_QUEUE,
+    STORED_CONTENT_KEY,
     UNASKED_CHECK_ERROR,
     UNASKED_CHECK_SECONDS,
     JobExperimentRecorder,
@@ -521,12 +523,119 @@ def test_the_sweep_discards_the_stored_checkpoints_of_an_ended_job_that_no_commi
     ended_at = queue.read(JOBS_QUEUE, "j2").ended_at
     # A commit took and discarded one checkpoint. The trainer got a new start, so nobody commits the others.
     backend.discard_content("j1:1")
-    assert discard_ended_content(queue, worker.backends, ended_before=0.0) == 0
+    assert discard_ended_content(queue, worker.backends, ended_before=0.0, give_up_before=0.0) == ()
     assert backend.materialize_content("j1:2").is_dir()
-    assert discard_ended_content(queue, worker.backends, ended_before=ended_at + 1) == 2
+    assert discard_ended_content(queue, worker.backends, ended_before=ended_at + 1, give_up_before=0.0) == ()
     for name in ("j1:1", "j1:2", "j2:1", "j2:2"):
         with pytest.raises(ArtifactError):
             backend.materialize_content(name)
+
+
+class LosingQueue:
+    """The work queue of a worker that loses its job between the store of a checkpoint and its record."""
+
+    def __init__(self, queue) -> None:
+        self.queue = queue
+
+    def __getattr__(self, name: str):
+        return getattr(self.queue, name)
+
+    def append_progress(self, queue, item_id, worker_id, entry, *, number):
+        self.queue.cancel(queue, item_id, "cancelled")
+        raise WorkLeaseLostError(f"job {item_id} is no longer held by {worker_id}")
+
+
+@pytest.mark.unit
+def test_content_that_a_worker_stored_and_could_not_record_goes_with_the_jobs_item(tmp_path):
+    """The item names the content before the worker stores it, so the sweep finds content that no progress entry
+    names: of a job that was cancelled while the worker stored its checkpoint."""
+    queue = memory_coordination(lease_seconds=30).work_queue
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    worker = TrainingJobWorker(
+        StepComponent(tmp_path / "jobs"),
+        LosingQueue(queue),
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        backends,
+        worker_id="training-1",
+        poll_seconds=0.02,
+    )
+    assert worker.run_once()
+    item = queue.read(JOBS_QUEUE, "j1")
+    assert (item.state, item.progress, item.metadata[STORED_CONTENT_KEY]) == ("failed", (), ["j1:1"])
+    assert backends("s").materialize_content("j1:1").is_dir()
+    assert discard_ended_content(queue, backends, ended_before=item.ended_at + 1, give_up_before=0.0) == ()
+    with pytest.raises(ArtifactError):
+        backends("s").materialize_content("j1:1")
+    worker.stop()
+
+
+class FailingBackends(RepositoryBackendFactory):
+    """Opens the artifact stores of ``backends``, and raises for the scenario ``down``, as a plugin's backend can
+    raise any error."""
+
+    def __init__(self, backends: RepositoryBackendFactory) -> None:
+        self.backends = backends
+        self.down = True
+
+    def __call__(self, scenario: str):
+        if scenario == "down" and self.down:
+            raise ConnectionError("the artifact store did not answer")
+        return self.backends(scenario)
+
+
+@pytest.mark.unit
+def test_a_job_item_stays_until_its_content_is_discarded_and_does_not_stop_the_sweep_of_the_others(tmp_path):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    stores = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    backends = FailingBackends(stores)
+    files = tmp_path / "files"
+    files.mkdir()
+    for scenario, job_id in (("down", "a"), ("up", "b")):
+        stores(scenario).store_content(f"{job_id}:1", files)
+        queue.append(NewWork(JOBS_QUEUE, job_id, scenario, job_kind("steps"), job_payload(job(job_id))), now=0)
+        queue.write_metadata(JOBS_QUEUE, job_id, STORED_CONTENT_KEY, [f"{job_id}:1"])
+        queue.cancel(JOBS_QUEUE, job_id, "cancelled")
+    queue.append(NewWork(CHECKS_QUEUE, "other", "up", "training_check:steps", {"check": "archive"}), now=0)
+    queue.cancel(CHECKS_QUEUE, "other", "cancelled")
+    ended_at = queue.read(JOBS_QUEUE, "a").ended_at
+    sweeper = EndedWorkSweeper(queue, backends, retention_seconds=100.0)
+
+    def sweep(now: float) -> int:
+        kept = discard_ended_content(queue, backends, ended_before=now - 100, give_up_before=now - 200)
+        return queue.delete_final(finished_before=now - 100, keep={JOBS_QUEUE: kept})
+
+    # The store of one scenario is down: its item stays with the names, and every other ended item goes.
+    assert sweep(ended_at + 101) == 2
+    assert [item.id for item in queue.items(JOBS_QUEUE)] == ["a"] and not queue.items(CHECKS_QUEUE)
+    with pytest.raises(ArtifactError):
+        stores("up").materialize_content("b:1")
+    # The next sweep after the store is back discards the content and deletes the item.
+    backends.down = False
+    assert sweep(ended_at + 102) == 1 and not queue.items(JOBS_QUEUE)
+    with pytest.raises(ArtifactError):
+        stores("down").materialize_content("a:1")
+
+    # A store that never comes back: the item goes after one more retention time, so no item lives forever.
+    backends.down = True
+    queue.append(NewWork(JOBS_QUEUE, "c", "down", job_kind("steps"), job_payload(job("c"))), now=0)
+    queue.write_metadata(JOBS_QUEUE, "c", STORED_CONTENT_KEY, ["c:1"])
+    queue.cancel(JOBS_QUEUE, "c", "cancelled")
+    ended_at = queue.read(JOBS_QUEUE, "c").ended_at
+    assert sweep(ended_at + 101) == 0 and sweep(ended_at + 201) == 1
+    assert sweeper.sweep() == 0
+
+
+@pytest.mark.unit
+def test_the_job_listing_shows_only_checkpoints_of_the_current_form(tmp_path):
+    queue = memory_coordination(lease_seconds=30).work_queue
+    queue.append(NewWork(JOBS_QUEUE, "old", "s", job_kind("steps"), job_payload(job("old"))))
+    queue.take(JOBS_QUEUE, "training-0", [job_kind("steps")])
+    old = {"step": 1, "path": "/old/step-1", "artifact_path": "/old/step-1", "metrics": {}, "changed_parts": []}
+    queue.append_progress(JOBS_QUEUE, "old", "training-0", old, number=0)
+    current = checkpoint_json(SavedCheckpoint(2, "/old/step-2", None, content="old:2"))
+    queue.append_progress(JOBS_QUEUE, "old", "training-0", current, number=1)
+    assert job_json(queue.read(JOBS_QUEUE, "old"))["checkpoints"] == [current]
 
 
 @pytest.mark.unit

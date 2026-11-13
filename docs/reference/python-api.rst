@@ -1111,24 +1111,29 @@ A backend shares no snapshot between scenarios. It must:
   content, and control commits it by name without reading a file:
 
   - ``store_content(name, directory)`` stores the files of ``directory`` as
-    the content ``name``. Storing a name again replaces its files, so a
-    repeated call after a failure is safe.
-  - ``materialize_content(name)`` returns a local directory with those files.
-    Only an admission check that reads files calls it.
+    the content ``name``: exactly those files, whatever their names. Storing a
+    name again replaces its files in one step for a reader, so a repeated call
+    after a failure is safe.
+  - ``materialize_content(name)`` returns a local directory with exactly those
+    files, which stays readable when the name is stored again. An admission
+    check that reads files calls it, and the pages that show a job's records.
   - ``discard_content(name)`` removes the content. A name that the backend
     does not hold changes nothing, and every snapshot keeps its files.
-  - ``publish_stored(files, *, metadata, expected_parent, advance_head)``
+  - ``publish_parts(parts, *, metadata, expected_parent, advance_head)``
     stores a snapshot of files that the backend holds already, and moves the
-    head as ``publish`` does. ``files`` is one ``StoredFiles`` for a flat
-    snapshot, or a mapping from a component's directory to its
-    ``StoredFiles``. A ``StoredFiles`` names stored content, or an artifact ID
-    whose files an earlier snapshot holds. ``metadata`` is complete: it holds
-    the component manifest and the artifact IDs. Bind them with
-    ``bind_artifact_ids`` before a head moves. Raise ``ArtifactConflictError``
-    when the head is not ``expected_parent``, and ``ArtifactNotFoundError``
-    for content or an artifact that the backend does not hold. Make the
-    snapshot inside the storage, for example with a server-side copy, so that
-    the calling process downloads no file.
+    head as ``publish`` does. Callers use the inherited ``publish_stored``,
+    which checks first that the head is ``expected_parent``, also for
+    ``advance_head=False``; a backend that moves the head checks it again in
+    the same step as the move. ``parts`` maps the directory of each component
+    to its ``StoredFiles``, or the one key ``None`` for a flat snapshot. A
+    ``StoredFiles`` names stored content, or an artifact ID whose files an
+    earlier snapshot holds. Carry a component's files byte for byte.
+    ``metadata`` is complete: it holds the component manifest and the artifact
+    IDs. Bind them with ``bind_artifact_ids`` before a head moves. Raise
+    ``ArtifactNotFoundError`` for content or an artifact that the backend does
+    not hold. A failure can leave the snapshot stored with its IDs bound and
+    no head on it. Make the snapshot inside the storage, for example with a
+    server-side copy, so that the calling process downloads no file.
 
   A backend whose snapshots hold large files also overrides
   ``snapshot_metadata(ref)`` to read a snapshot's metadata without its files.

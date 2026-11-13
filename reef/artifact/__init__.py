@@ -49,7 +49,7 @@ They remain usable without a commit history.
 
 Every backend also holds stored content: named file trees that are no snapshot.
 The training service stores the files of a checkpoint with ``store_content``, and
-control commits them by name with ``publish_stored``, which makes the snapshot of
+control commits them by name with ``publish_stored`` (a backend implements ``publish_parts``), which makes the snapshot of
 files that the backend holds already (``StoredFiles``). The process that commits
 reads no file. ``discard_content`` removes content; a snapshot keeps its files.
 """

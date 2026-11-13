@@ -20,12 +20,7 @@ from reef.artifact.artifact import (
 )
 from reef.artifact.composite import link_or_copy
 from reef.artifact.files import directory_checksum
-from reef.artifact.repository import (
-    CachedRepositoryBackendFactory,
-    StagedSnapshotRepositoryBackend,
-    StoredFiles,
-    StoredTree,
-)
+from reef.artifact.repository import CachedRepositoryBackendFactory, StagedSnapshotRepositoryBackend, StoredFiles
 
 
 class _InMemoryStorage:
@@ -38,8 +33,9 @@ class _InMemoryStorage:
         self.metadata: dict[str, dict[str, object]] = {}
         #: The snapshot that each artifact ID is bound to.
         self.artifacts: dict[str, SnapshotRef] = {}
-        #: The directory of each stored content, by its name.
-        self.contents: dict[str, Path] = {}
+        #: The directories of each stored content, by its name: the last holds its files now, and those before
+        #: held the files that a later ``store_content`` replaced.
+        self.contents: dict[str, list[Path]] = {}
 
     def copy_artifact(self, source: Path, *, parent_revision: str | None) -> SnapshotRef:
         revision = uuid.uuid4().hex
@@ -165,46 +161,41 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
             shutil.rmtree(destination, ignore_errors=True)
             raise ArtifactPublicationError(f"failed to store content {name!r} from {directory}: {exc}") from exc
         with self._storage.lock:
-            replaced = self._storage.contents.get(name)
-            self._storage.contents[name] = destination
-        if replaced is not None:
-            shutil.rmtree(replaced, ignore_errors=True)
+            # A reader can hold the directory of the files before, so it stays until the content is discarded.
+            self._storage.contents.setdefault(name, []).append(destination)
 
     def materialize_content(self, name: str) -> Path:
         with self._storage.lock:
-            path = self._storage.contents.get(name)
-        if path is None:
+            stored = self._storage.contents.get(name)
+        if not stored:
             raise ArtifactNotFoundError(f"repository has no content {name!r}")
-        return path
+        return stored[-1]
 
     def discard_content(self, name: str) -> None:
         with self._storage.lock:
-            path = self._storage.contents.pop(name, None)
-        if path is not None:
+            stored = self._storage.contents.pop(name, [])
+        for path in stored:
             shutil.rmtree(path, ignore_errors=True)
 
-    def publish_stored(
+    def publish_parts(
         self,
-        files: StoredTree,
+        parts: Mapping[str | None, StoredFiles],
         *,
         metadata: Mapping[str, object],
         expected_parent: SnapshotRef,
-        advance_head: bool = True,
+        advance_head: bool,
     ) -> SnapshotRef:
         """Copy the named files into a new snapshot directory, by hard link where the filesystem allows."""
         with self._storage.lock:
             current = self.current()
             if current.revision != expected_parent.revision:
-                raise ArtifactConflictError(
-                    f"repository is at {current.revision}, not expected parent {expected_parent.revision}"
-                )
-            parts = {None: files} if isinstance(files, StoredFiles) else dict(files)
+                raise ArtifactConflictError(f"repository advanced from {expected_parent.revision}")
             sources: dict[str | None, Path] = {}
             for directory, part in parts.items():
                 if part.content is not None:
                     sources[directory] = self.materialize_content(part.content)
-                elif part.artifact_id is not None:
-                    local_path = self.resolve_artifact(part.artifact_id).local_path
+                else:
+                    local_path = self.resolve_artifact(str(part.artifact_id)).local_path
                     if local_path is None:
                         raise ArtifactPublicationError(f"artifact {part.artifact_id!r} has no stored files")
                     sources[directory] = local_path

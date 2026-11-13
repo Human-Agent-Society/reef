@@ -93,25 +93,28 @@ class RepositoryBackend(ArtifactRepository):
 
     Besides its snapshots, the repository holds stored content: named file trees with no parent, no metadata and
     no artifact ID, which no head moves to. The process that has a checkpoint's files stores them
-    (``store_content``), and another process commits them as a snapshot by name (``publish_stored``). Content
-    lives until ``discard_content``; a snapshot made of it keeps its files after that.
+    (``store_content``), and another process commits them as a snapshot by name (``publish_stored``, whose
+    storage part a backend implements as ``publish_parts``). Content lives until ``discard_content``; a snapshot
+    made of it keeps its files after that.
     """
 
     @abstractmethod
     def store_content(self, name: str, directory: Path) -> None:
         """Store the files of ``directory`` as the content ``name``, a non-empty string.
 
-        Afterwards the content ``name`` holds exactly those files, by relative path and bytes, also when ``name``
-        held other files before; so a repeated call after a failure is safe. A symlink is stored as the file that
-        it names. No snapshot, head or artifact ID changes. Raise ``ArtifactPublicationError`` when the files
-        cannot be stored.
+        Afterwards the content ``name`` holds exactly the files of ``directory``, by relative path and bytes,
+        whatever their names, also when ``name`` held other files before; so a repeated call after a failure is
+        safe. A symlink is stored as the file that it names. The change is atomic for a reader: a concurrent
+        ``publish_stored`` or ``materialize_content`` of ``name`` sees all the files of before or all the files of
+        after, and a directory that ``materialize_content`` returned keeps its files. No snapshot, head or
+        artifact ID changes. Raise ``ArtifactPublicationError`` when the files cannot be stored; the content
+        ``name`` is then as it was before.
         """
 
     @abstractmethod
     def materialize_content(self, name: str) -> Path:
-        """A local directory that holds the files of the content ``name``, beside files that the backend adds
-        (``REPOSITORY_FILES``). The caller does not change it. Raise ``ArtifactNotFoundError`` when the repository
-        holds no content ``name``."""
+        """A local directory that holds exactly the files of the content ``name``. The caller does not change
+        it. Raise ``ArtifactNotFoundError`` when the repository holds no content ``name``."""
 
     @abstractmethod
     def discard_content(self, name: str) -> None:
@@ -120,7 +123,6 @@ class RepositoryBackend(ArtifactRepository):
         Every snapshot keeps its files. Raise ``ArtifactPublicationError`` when the content cannot be removed.
         """
 
-    @abstractmethod
     def publish_stored(
         self,
         files: StoredTree,
@@ -134,15 +136,44 @@ class RepositoryBackend(ArtifactRepository):
         The new snapshot has the parent ``expected_parent`` and the metadata ``metadata``, which is complete: it
         holds the component manifest and the artifact IDs, as ``Artifact.storage_metadata`` gives them for
         ``publish``. For one ``StoredFiles``, the snapshot's files are those files, at its root. For a mapping,
-        the snapshot holds the files of each value in the directory that its key names; a value with no files
-        gives no file. The backend binds the artifact IDs of the metadata (``bind_artifact_ids``) and moves the
-        head as ``publish`` does for ``advance_head``. Every named content stays stored.
+        the snapshot holds the files of each value, byte for byte, in the directory that its key names; a value
+        with no files gives no file. The backend binds the artifact IDs of the metadata (``bind_artifact_ids``)
+        and moves the head as ``publish`` does for ``advance_head``. Every named content stays stored.
+
+        The head must be ``expected_parent``, also when ``advance_head`` is false: this method checks it first,
+        and a backend that moves the head checks it again in the same step as the move.
 
         Raise ``ArtifactConflictError`` when the head is not ``expected_parent`` or an artifact ID of the
         metadata names other content, ``ArtifactNotFoundError`` when the repository holds no such content or
-        binds no such artifact, and ``ArtifactPublicationError`` when the snapshot cannot be stored. Nothing
-        that a reader of the chain sees changes then.
+        binds no such artifact, and ``ArtifactPublicationError`` when the snapshot cannot be stored. The head
+        does not move then. A failure after the snapshot was stored can leave it stored with its artifact IDs
+        bound, and no head on it: a repeated call with the same artifact IDs and files is safe, and the committer
+        finds such a snapshot by its artifact ID.
         """
+        current = self.current()
+        if current.revision != expected_parent.revision:
+            raise ArtifactConflictError(
+                f"repository is at {current.revision}, not expected parent {expected_parent.revision}"
+            )
+        parts: dict[str | None, StoredFiles] = {}
+        if isinstance(files, StoredFiles):
+            parts[None] = files
+        else:
+            parts.update(files)
+        return self.publish_parts(parts, metadata=metadata, expected_parent=expected_parent, advance_head=advance_head)
+
+    @abstractmethod
+    def publish_parts(
+        self,
+        parts: Mapping[str | None, StoredFiles],
+        *,
+        metadata: Mapping[str, object],
+        expected_parent: SnapshotRef,
+        advance_head: bool,
+    ) -> SnapshotRef:
+        """The backend's part of ``publish_stored``, which has checked the head once: store the snapshot of
+        ``parts`` and move the head for ``advance_head``. ``parts`` has the one key None for a flat snapshot,
+        else the directory of each component."""
 
     def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
         """The metadata that the stored snapshot ``ref`` was published or registered with.
@@ -208,13 +239,17 @@ class RepositoryBackend(ArtifactRepository):
         bound, so a repeated call completes the rest.
         """
         for artifact_id in artifact_components(snapshot):
-            bound = self.bind_artifact_id(artifact_id, snapshot.ref)
-            if (
-                bound is not None
-                and bound != snapshot.ref
-                and self.artifact_content(bound, artifact_id) != self.artifact_content(snapshot.ref, artifact_id)
-            ):
-                raise ArtifactConflictError(f"artifact {artifact_id!r} already names different files or metadata")
+            self.require_same_content(artifact_id, self.bind_artifact_id(artifact_id, snapshot.ref), snapshot.ref)
+
+    def require_same_content(self, artifact_id: str, bound: SnapshotRef | None, ref: SnapshotRef) -> None:
+        """Raise ``ArtifactConflictError`` when ``bound``, the snapshot that ``artifact_id`` was bound to before
+        (``bind_artifact_id``), holds other files or metadata for the artifact than the snapshot ``ref``."""
+        if (
+            bound is not None
+            and bound != ref
+            and self.artifact_content(bound, artifact_id) != self.artifact_content(ref, artifact_id)
+        ):
+            raise ArtifactConflictError(f"artifact {artifact_id!r} already names different files or metadata")
 
     def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
         """Every file of the snapshot ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
@@ -656,9 +691,7 @@ class Repository(ArtifactRepository):
         """A local directory with the files that ``files`` names; it need not exist when they are no files."""
         if files.content is not None:
             return self.backend.materialize_content(files.content)
-        if files.artifact_id is None:
-            raise ArtifactPublicationError("stored files name content or an artifact")
-        path = self.backend.resolve_artifact(files.artifact_id).local_path
+        path = self.backend.resolve_artifact(str(files.artifact_id)).local_path
         if path is None:
             raise ArtifactPublicationError(f"artifact {files.artifact_id!r} has no local files")
         return path

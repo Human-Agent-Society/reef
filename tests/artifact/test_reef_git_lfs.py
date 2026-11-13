@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import shutil
+import stat
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 from reef.artifact import (
     Artifact,
     ArtifactConflictError,
+    ArtifactMaterializationError,
     ArtifactNotFoundError,
     ArtifactPublicationError,
     ArtifactSourceError,
@@ -959,3 +961,105 @@ def test_content_whose_upload_failed_is_not_stored_so_no_snapshot_names_its_miss
     served = control.materialize(published).local_path
     assert served is not None
     assert (served / "model.safetensors").read_bytes() == (export / "model.safetensors").read_bytes()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("kind", ["memory", "git"])
+def test_stored_content_and_a_carried_component_keep_every_file_also_one_named_as_the_backends_own(
+    kind: str, tmp_path: Path, fake_git_lfs: None
+) -> None:
+    """A checkpoint or a component can hold its own ``.gitattributes`` or ``reef-artifact.json``. Content holds
+    exactly the directory's files, and a snapshot carries a component byte for byte, so its artifact ID keeps
+    naming the same files and the next commit of the scenario binds it again."""
+    memory = InMemoryRepositoryBackend("agent", directory=tmp_path / "memory")
+
+    def backend(name: str) -> RepositoryBackend:
+        if kind == "memory":
+            return memory
+        return GitLFSRepositoryBackend(
+            "agent", tmp_path / "artifacts.git", work_dir=tmp_path / name / "work", cache_dir=tmp_path / name / "cache"
+        )
+
+    def every_file(directory: Path) -> dict[str, str]:
+        return {str(path.relative_to(directory)): path.read_text() for path in directory.rglob("*") if path.is_file()}
+
+    training, control, reader = backend("training"), backend("control"), backend("reader")
+    own = {
+        ".gitattributes": "*.md text\n",
+        "reef-artifact.json": "{}",
+        "AGENTS.md": "seed",
+        "sub/.gitattributes": "x\n",
+    }
+    manifest = {"weights": {"metadata": {}, "artifact_id": "w0"}, "harness": {"metadata": {}, "artifact_id": "h0"}}
+    root = control.register(
+        root_tree(
+            tmp_path / "root", {**{f"harness/{path}": text for path, text in own.items()}, "weights/w.txt": "0"}
+        ),
+        metadata={"components": manifest},
+    )
+    checkpoint = root_tree(tmp_path / "checkpoint", {**own, "AGENTS.md": "evolved"}).local_path
+    assert checkpoint is not None
+    training.store_content("job:1", checkpoint)
+    assert every_file(reader.materialize_content("job:1")) == {**own, "AGENTS.md": "evolved"}
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    training.store_content("job:2", empty)
+    assert every_file(reader.materialize_content("job:2")) == {}
+
+    # The weights change, and the harness h0 is carried with its own files of those names.
+    weights = {**manifest, "weights": {"metadata": {}, "artifact_id": "w1"}}
+    first = control.publish_stored(
+        {"weights": StoredFiles(content="job:2"), "harness": StoredFiles(artifact_id="h0")},
+        metadata={"components": weights},
+        expected_parent=root,
+    )
+    harness = {**weights, "harness": {"metadata": {}, "artifact_id": "h1"}}
+    second = control.publish_stored(
+        {"weights": StoredFiles(artifact_id="w1"), "harness": StoredFiles(content="job:1")},
+        metadata={"components": harness},
+        expected_parent=first,
+    )
+    for snapshot, text in ((first, "seed"), (second, "evolved")):
+        local = reader.materialize(snapshot).local_path
+        assert local is not None
+        assert every_file(local / "harness") == {**own, "AGENTS.md": text}
+        assert not (local / "weights").exists() or every_file(local / "weights") == {}
+
+
+@pytest.mark.integration
+def test_a_materialized_weight_file_cannot_be_written_into_the_repositorys_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A materialized LFS file of a local repository is a link to the repository's own object. It is read-only,
+    so a write through the cache is refused and every later reader gets the stored bytes. An object of another
+    size than its pointer names is not linked: ``git lfs pull`` checks it."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    remote = tmp_path / "artifacts.git"
+
+    def backend(name: str) -> GitLFSRepositoryBackend:
+        return GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / name / "work", cache_dir=tmp_path / name)
+
+    training, reader = backend("training"), backend("reader")
+    root = training.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "model.safetensors").write_bytes(b"GOOD" * 1000)
+    training.store_content("job:1", checkpoint)
+    published = training.publish_stored(
+        StoredFiles(content="job:1"), metadata={"artifact_id": "a1"}, expected_parent=root
+    )
+    served = reader.materialize(published).local_path
+    assert served is not None
+    stored = next(path for path in (remote / "lfs" / "objects").rglob("*") if path.is_file())
+    assert same_file(stored, served / "model.safetensors")
+    assert stat.S_IMODE(stored.stat().st_mode) == 0o444
+    with pytest.raises(PermissionError):
+        (served / "model.safetensors").open("r+b")
+    assert (backend("late").materialize(published).local_path / "model.safetensors").read_bytes() == b"GOOD" * 1000
+
+    # A damaged object is not linked, and the pull refuses it: no reader gets other bytes than the stored ones.
+    stored.chmod(0o644)
+    stored.write_bytes(b"short")
+    with pytest.raises(ArtifactMaterializationError):
+        backend("after-damage").materialize(published)

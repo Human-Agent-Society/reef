@@ -16,7 +16,7 @@ from reef.artifact import (
     SnapshotRef,
     StagedSnapshotRepositoryBackend,
 )
-from reef.artifact.repository import StoredTree
+from reef.artifact.repository import StoredFiles
 from reef.dispatcher import build_default_dispatcher
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -64,16 +64,16 @@ class BasicBackend(RepositoryBackend):
     def discard_content(self, name: str) -> None:
         self.delegate.discard_content(name)
 
-    def publish_stored(
+    def publish_parts(
         self,
-        files: StoredTree,
+        parts: Mapping[str | None, StoredFiles],
         *,
         metadata: Mapping[str, object],
         expected_parent: SnapshotRef,
-        advance_head: bool = True,
+        advance_head: bool,
     ) -> SnapshotRef:
-        return self.delegate.publish_stored(
-            files, metadata=metadata, expected_parent=expected_parent, advance_head=advance_head
+        return self.delegate.publish_parts(
+            parts, metadata=metadata, expected_parent=expected_parent, advance_head=advance_head
         )
 
 
