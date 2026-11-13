@@ -569,7 +569,9 @@ class Dispatcher(
                 self.unload_if_idle(name)
 
     def archive_scenario_state(self, scenario: str) -> list[str]:
-        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
+        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be
+        deleted twice, and ask each training service to do the same with what its component keeps for the scenario
+        (``JobQueueComponent.archive_scenario``): this process moves no directory of a training service."""
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
         configs = self.storage.read_settings(scenario).record2sample_config
@@ -584,6 +586,8 @@ class Dispatcher(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(directory), str(destination))
                 moved.append(str(destination))
+        for component in self.live.job_components():
+            component.archive_scenario(scenario)
         return moved
 
     def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:

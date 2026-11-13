@@ -614,6 +614,33 @@ class TrainingComponent(ABC):
     def cancel(self, job_id: str) -> None:
         """Stop the job, which then reports ``failed``; nothing for an unknown or ended job."""
 
+    def job_progress(self, job_id: str) -> Mapping[str, Any] | None:
+        """Where the running job ``job_id`` stands now: a JSON object whose keys the component defines, or None
+        for a job that does not run or a component that reports none, the default.
+
+        The training worker copies the value into the job's queue item whenever it changes, and control reads it
+        there (``JobQueueComponent.job_progress``). No other process reads a file of the component for it.
+        """
+        return None
+
+    def job_records(self, job_id: str) -> Path | None:
+        """A local directory of the files that record how the ended job ``job_id`` ran, or None for a job that
+        kept none, the default.
+
+        The training worker stores the directory in the artifact store of the job's scenario when the job ends
+        (``reef.train.job_queue.job_records_content``), where control reads it for its pages.
+        """
+        return None
+
+    def archive_scenario(self, scenario: str) -> None:
+        """Move aside what the component keeps for ``scenario`` alone, after the scenario was deleted, so that a
+        new scenario of that name starts with none of it. The default keeps nothing for one scenario.
+
+        Only the process that runs the component's jobs moves its directories: control asks through the
+        ``training_checks`` queue (``JobQueueComponent.archive_scenario``).
+        """
+        return
+
     def start_jobs(self) -> None:
         """Start running jobs in this process: take the component's job state and resume the jobs that have not ended.
 

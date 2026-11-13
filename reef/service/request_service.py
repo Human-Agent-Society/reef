@@ -24,7 +24,6 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
-from reef.recipe.deployment import harness_state_dir
 from reef.scenario.live_objects import harness_served_model
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import component_files
@@ -48,8 +47,9 @@ from reef.service.wire import (
     with_request_tags,
 )
 from reef.train.harness_backend.backend import JobProgress
-from reef.train.harness_backend.component import JOB_RECORDS_DIR, PROGRESS_FILE, read_job_progress
 from reef.train.harness_backend.records import read_job_records
+from reef.train.job_queue import job_records_content
+from reef.train.jobs import TRAINING_JOB_KEY, JobLoopState
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -383,15 +383,21 @@ class RequestService:
             )
         return files.descriptor
 
-    def harness_state_dir(self, scenario: Scenario) -> Path | None:
-        """The state directory of the harness a client pulls (``reef.recipe.deployment.harness_state_dir``), or None."""
-        component = scenario.components.files_component
-        return None if component is None else harness_state_dir(self._dispatcher.recipe, scenario.name, component)
-
     def step_progress(self, scenario: Scenario) -> JobProgress | None:
-        """The progress of the harness step that runs now, which the training component writes; None for none."""
-        root = self.harness_state_dir(scenario)
-        return None if root is None else read_job_progress(root / PROGRESS_FILE)
+        """The progress of the harness step that runs now, or None for none.
+
+        The training worker writes it into the item of the running job (``TrainingComponent.job_progress``), and
+        this reads it there: the first running job of the harness trainer that reports one.
+        """
+        trainer = self.files_trainer(scenario)
+        loop = trainer.job_loop
+        if loop is None:
+            return None
+        for job in JobLoopState.from_dict(trainer.state).jobs:
+            value = loop.component.job_progress(job.job_id)
+            if value is not None:
+                return JobProgress.from_json(value)
+        return None
 
     @staticmethod
     def files_trainer(scenario: Scenario) -> Trainer:
@@ -464,14 +470,17 @@ class RequestService:
         rows = list(reversed(scenario.harness_rows()))
         if not 0 <= step < len(rows):
             raise ArtifactNotFoundError(f"scenario {scenario.name!r} has no step {step}")
-        directory = (rows[step].get("metrics") or {}).get("step_record")
-        root = self.harness_state_dir(scenario)
-        if not directory or root is None:
+        metrics = rows[step].get("metrics") or {}
+        job = metrics.get(TRAINING_JOB_KEY)
+        if not metrics.get("step_record") or not isinstance(job, Mapping):
             return {"status": "not_recorded", "files": []}
-        if not isinstance(directory, str):
-            raise ValueError("invalid step record directory")
+        # The training service stored the job's record directory in the artifact store when the job ended.
         try:
-            return read_job_records(root / JOB_RECORDS_DIR, directory, relative)
+            directory = scenario.repository.backend.materialize_content(job_records_content(str(job["job_id"])))
+        except ArtifactNotFoundError:
+            return {"status": "missing", "files": []}
+        try:
+            return read_job_records(directory.parent, str(directory), relative)
         except FileNotFoundError as error:
             raise ArtifactNotFoundError("record file is not retained") from error
 

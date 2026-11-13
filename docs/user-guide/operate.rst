@@ -467,11 +467,15 @@ component:
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
 coding agent and the evaluation runs. Install the adapter's binary and the
-sandbox where the training service runs. The training service writes the step
-records and the running step's progress under ``evolution.state_dir``. Control
-reads them for the snapshot and request pages, so both must reach that
-directory, as they reach the artifact backend. Control builds no harness
-training component: it needs neither the adapter's binary nor the sandbox.
+sandbox where the training service runs. Only the training service reads and
+writes ``evolution.state_dir``. It copies the running step's progress into the
+step's job in the shared store, and it stores each ended step's record files in
+the artifact backend. Control reads both there for the snapshot and request
+pages. When you delete a scenario, control asks the training service to move
+the scenario's directory under ``evolution.state_dir`` to ``archived/``; the
+request waits while no training service runs. Control builds no harness
+training component: it needs neither the adapter's binary nor the sandbox, and
+it shares no directory with the training service.
 
 .. _Harness clients:
 

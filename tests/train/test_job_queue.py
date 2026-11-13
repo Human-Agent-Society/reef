@@ -55,6 +55,7 @@ from reef.train.job_queue import (
     job_json,
     job_kind,
     job_payload,
+    job_records_content,
     resolved_job,
     scenario_jobs,
 )
@@ -73,6 +74,9 @@ class StepComponent(LocalJobComponent):
         super().__init__(jobs_root)
         self.closed_count = 0
         self.checked: list[str] = []
+        #: What ``job_progress`` reports for each job.
+        self.progress: dict[str, Mapping[str, Any]] = {}
+        self.archived: list[str] = []
         self.start_jobs()
 
     @property
@@ -118,6 +122,16 @@ class StepComponent(LocalJobComponent):
             (path / "weights.txt").write_text(f"step {step}")
             self.save_checkpoint(directory, SavedCheckpoint(step, str(path), str(path), {"loss": 1.0 / step}))
         return {"steps": 2}
+
+    def job_progress(self, job_id: str) -> Mapping[str, Any] | None:
+        return self.progress.get(job_id)
+
+    def job_records(self, job_id: str) -> Path | None:
+        records = self.job_directory(job_id) / "step-1"
+        return records if records.is_dir() else None
+
+    def archive_scenario(self, scenario: str) -> None:
+        self.archived.append(scenario)
 
     def close_resources(self) -> None:
         self.closed_count += 1
@@ -453,6 +467,46 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
         backends("s").materialize_content("j1:1")
     stored = backends("s").materialize_content("j1:2")
     assert {path.name: path.read_text() for path in stored.iterdir()} == {"weights.txt": "step 2"}
+    worker.stop()
+
+
+@pytest.mark.unit
+def test_control_reads_a_jobs_progress_and_records_from_the_store_and_asks_for_an_archive(tmp_path):
+    """Control reads no directory of the training service: the worker copies the running job's progress into the
+    job's item and stores the ended job's record files, and the training service archives its own directories."""
+    queue = memory_coordination(lease_seconds=30).work_queue
+    component = StepComponent(tmp_path / "jobs")
+    component.progress["j1"] = {"phase": "proposing"}
+    data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    view = JobQueueComponent(StepFacts(), queue)
+    seen: list[Mapping[str, Any] | None] = []
+    status = component.status
+
+    def status_and_look(job_id: str) -> JobStatus:
+        # What control reads while the job runs, after the worker's first look at the job.
+        seen.append(view.job_progress(job_id))
+        return status(job_id)
+
+    component.status = status_and_look
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    worker = TrainingJobWorker(component, queue, data_store, backends, worker_id="training-1", poll_seconds=0.02)
+    assert view.job_progress("j1") is None
+    assert worker.run_once()
+    assert queue.read(JOBS_QUEUE, "j1").state == "finished"
+    assert {"phase": "proposing"} in seen
+    # The ended job reports no progress, and its record files are stored content.
+    assert view.job_progress("j1") is None
+    records = backends("s").materialize_content(job_records_content("j1"))
+    assert (records / "weights.txt").read_text() == "step 1"
+
+    # A deleted scenario: control only asks, however long the training service was away.
+    view.archive_scenario("s")
+    (asked,) = queue.items(CHECKS_QUEUE)
+    assert (asked.scenario, asked.payload) == ("s", {"check": "archive"}) and component.archived == []
+    checks = TrainingCheckWorker(component, queue, data_store, None, worker_id="checks-1")
+    assert checks.run_once()
+    assert component.archived == ["s"] and queue.read(CHECKS_QUEUE, asked.id).state == "finished"
     worker.stop()
 
 

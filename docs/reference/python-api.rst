@@ -430,10 +430,9 @@ deployment from its configuration alone:
      - the adapter that ``GET /reef/harness`` renders the harness artifacts
        for (``evolution.adapter`` of the harness recipe), or ``None``; the
        scenario list names it for every scenario
-   * - ``reef.recipe.deployment.harness_state_dir(recipe, scenario, component)``
-     - the directory of the component's harness evolution state, or ``None``
    * - ``reef.recipe.deployment.scenario_state_dirs(recipe, scenario)``
-     - the directories that a scenario delete archives
+     - the directories of the record-to-sample stages that a scenario delete
+       archives; a training service archives its own
    * - ``reef.scenario.factory.scenario_report_type(recipe)``
      - the report contract that ingress checks: the one that the recipes
        share, or a contract that a report meets when any recipe's parses it

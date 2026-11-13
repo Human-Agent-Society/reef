@@ -13,10 +13,12 @@ What only the component can answer, control asks through the ``training_checks``
 - ``kind`` is ``training_check:<component name>``;
 - ``payload`` is ``{"check": "job", "job_id", "job"}``, where ``job`` is a ``job_payload``, for
   ``TrainingComponent.check_job``; or ``{"check": "artifact", "names"}`` for
-  ``TrainingComponent.check_remote_artifact``;
+  ``TrainingComponent.check_remote_artifact``; or ``{"check": "archive"}`` for
+  ``TrainingComponent.archive_scenario`` of the item's scenario, which control adds when it deletes the scenario
+  and whose answer nobody reads;
 - ``result`` is ``{"refusal": <message>}`` when the component raised ``ValueError``, else ``{"refusal": null}``;
-- ``id`` is ``job:<job ID>`` for a job check, so control finds the check of a job in the queue, and
-  ``artifact:<random>`` for an artifact check;
+- ``id`` is ``job:<job ID>`` for a job check, so control finds the check of a job in the queue,
+  ``artifact:<random>`` for an artifact check, and ``archive:<scenario>:<random>`` for an archive;
 - ``metadata["asked_at"]`` is the time in seconds when control last asked for the answer, and
   ``metadata["answer_read"]`` is true once control read it.
 
@@ -38,6 +40,8 @@ A jobs-queue item:
 - each ``progress`` entry is one ``SavedCheckpoint``, in step order, with the name of its stored content and the
   parts that it changed (``TrainingComponent.changed_parts``);
 - ``result`` is ``{"state": "finished", "metrics": {...}}``;
+- ``metadata["progress"]`` is what the component reports about the running job
+  (``TrainingComponent.job_progress``), or None; the training worker writes it whenever it changes;
 - ``metadata["experiment"]``, when present, is the ``ExperimentRun`` that records the job, as ``to_dict`` gives
   it. Control writes it (``JobExperimentRecorder``) when its experiment tracker records a commit of the job, so the
   job listing of any service reads it from the item.
@@ -49,6 +53,11 @@ that content by name (``JobLoop.publish``). The committer discards the content o
 recorded, and control's sweep discards the content of every checkpoint of an ended job before it deletes the
 job's item (``discard_ended_content``), so content that no commit names lives at most the work retention longer
 than its job.
+
+Control reads no other file of the training service either. The files that record how a job ran
+(``TrainingComponent.job_records``) are stored content too, under ``job_records_content``, which the worker
+stores when the job ends and which stays for the pages of control. A scenario's own directories of a component
+are moved aside by the training service, when control asks (``archive``).
 
 The job's data is not in the item. Control writes it as a job data directory in the data store
 (``reef.storage.job_data``) before it adds the item, and the training worker opens the directory from the data
@@ -110,6 +119,8 @@ ANSWER_READ_KEY = "answer_read"
 UNASKED_CHECK_SECONDS = 600.0
 #: The error of a check that control stopped asking for.
 UNASKED_CHECK_ERROR = "no trainer asked for this check any more"
+#: The key of a job item's ``metadata`` that holds the running job's progress, as its component reports it.
+PROGRESS_METADATA_KEY = "progress"
 #: The key of a job item's ``metadata`` that holds the experiment run that records the job.
 EXPERIMENT_METADATA_KEY = "experiment"
 
@@ -214,6 +225,12 @@ def checkpoint_content(job_id: str, step: int) -> str:
     """The name of the stored content of the checkpoint that the job ``job_id`` saved at ``step``. It is the same
     for every attempt of the job, so a worker that stores the checkpoint again replaces the content."""
     return f"{job_id}:{step}"
+
+
+def job_records_content(job_id: str) -> str:
+    """The name of the stored content that holds the record files of the job ``job_id``
+    (``TrainingComponent.job_records``)."""
+    return f"{job_id}:records"
 
 
 def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:
@@ -491,6 +508,18 @@ class JobQueueComponent(TrainingComponent):
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         return checkpoint.changed_parts
 
+    def job_progress(self, job_id: str) -> Mapping[str, Any] | None:
+        """The progress that the training worker last wrote into the job's item, or None."""
+        item = self.queue.read(JOBS_QUEUE, job_id)
+        value = None if item is None else item.metadata.get(PROGRESS_METADATA_KEY)
+        return None if value is None else json_object(value, "a job's progress")
+
+    def archive_scenario(self, scenario: str) -> None:
+        """Ask the training service to move aside what its component keeps for the deleted ``scenario``. The
+        request waits in the queue while no training service runs, and nobody reads its answer."""
+        item_id = f"archive:{scenario}:{uuid.uuid4().hex}"
+        self.queue.append(NewWork(CHECKS_QUEUE, item_id, scenario, check_kind(self.name), {"check": "archive"}))
+
     def read_answer(self, item: WorkItem, subject: str) -> None:
         """Read the answer of the final check ``item`` about ``subject``: return when the component accepted, raise
         ``ValueError`` with its message when it refused, and ``RuntimeError`` when the check did not run."""
@@ -708,7 +737,9 @@ class TrainingJobWorker(QueueWorker):
         job's scenario, under ``checkpoint_content``, and then appends the progress entry, which names that
         content and the parts that the checkpoint changed from the start
         (``TrainingComponent.changed_parts``). A worker that stops between the two steps recorded nothing: the
-        worker that continues the job stores the same name again. At each poll the worker
+        worker that continues the job stores the same name again. The worker also copies the component's
+        ``job_progress`` into the item's metadata when it changed, and it stores the job's record files
+        (``job_records``) under ``job_records_content`` when the job ends. At each poll the worker
         reads the item: a job that control cancelled, or that another worker took, ends here, and the component
         cancels its local run. A worker that continues a job reports only the checkpoints
         whose step the item does not hold yet. When the worker stops, the job goes back to the queue, so another
@@ -721,9 +752,20 @@ class TrainingJobWorker(QueueWorker):
         self.component.submit(job)
         reported = {checkpoint_from_json(entry).step for entry in item.progress}
         progress_count = len(item.progress)
+        written_progress: Mapping[str, Any] | None = None
         try:
             while True:
+                job_progress = self.component.job_progress(job.job_id)
                 status = self.component.status(job.job_id)
+                if status.state != "running":
+                    job_progress = None
+                    records = self.component.job_records(job.job_id)
+                    if records is not None:
+                        self.backends(job.scenario).store_content(job_records_content(item.id), records)
+                if job_progress != written_progress:
+                    value = None if job_progress is None else cast(JsonValue, dict(job_progress))
+                    self.queue.write_metadata(JOBS_QUEUE, item.id, PROGRESS_METADATA_KEY, value)
+                    written_progress = job_progress
                 for checkpoint in status.checkpoints:
                     if checkpoint.step in reported:
                         continue
@@ -772,8 +814,9 @@ class TrainingCheckWorker(QueueWorker):
 
     ``run_item`` answers ``{"refusal": None}`` when the component accepted and ``{"refusal": message}`` when it
     raised ``ValueError(message)``: ``check_job`` of the job with its own start (``resolved_job``) for a ``job``
-    check, ``check_remote_artifact`` for an ``artifact`` check. A payload that is neither fails the item. So does
-    a check that control last asked for more than ``UNASKED_CHECK_SECONDS`` ago (``metadata["asked_at"]``, else the
+    check, ``check_remote_artifact`` for an ``artifact`` check. An ``archive`` runs ``archive_scenario`` of the
+    item's scenario and answers ``{"refusal": None}``, however old it is. Any other payload fails the item. So does
+    a job or artifact check that control last asked for more than ``UNASKED_CHECK_SECONDS`` ago (``metadata["asked_at"]``, else the
     item's ``created_at``), with ``UNASKED_CHECK_ERROR``: nobody waits for it, so it imports no start.
 
     Purpose: the training service starts one beside each ``TrainingJobWorker``. It has no job slot, so a check is
@@ -803,10 +846,14 @@ class TrainingCheckWorker(QueueWorker):
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         payload = item.payload
+        check = payload.get("check")
+        if check == "archive":
+            # Nobody waits for this answer, and the request stays valid however long the service was down.
+            self.component.archive_scenario(item.scenario)
+            return {"refusal": None}
         asked_at = item.metadata.get(ASKED_AT_KEY, item.created_at)
         if isinstance(asked_at, int | float) and time.time() - asked_at > UNASKED_CHECK_SECONDS:
             raise ItemFailedError(UNASKED_CHECK_ERROR)
-        check = payload.get("check")
         if check == "job":
             job = job_from_payload(
                 json_text(payload.get("job_id"), "a job check's job_id"),
@@ -825,7 +872,7 @@ class TrainingCheckWorker(QueueWorker):
             except ValueError as exc:
                 return {"refusal": str(exc)}
         else:
-            raise ItemFailedError(f"a training check is of a job or of an artifact, not {check!r}")
+            raise ItemFailedError(f"a training check is of a job, of an artifact or an archive, not {check!r}")
         return {"refusal": None}
 
 
@@ -859,6 +906,7 @@ __all__ = [
     "EXPERIMENT_METADATA_KEY",
     "JOBS_QUEUE",
     "JOB_CANCELLED_ERROR",
+    "PROGRESS_METADATA_KEY",
     "UNASKED_CHECK_ERROR",
     "UNASKED_CHECK_SECONDS",
     "JobExperimentRecorder",
@@ -875,6 +923,7 @@ __all__ = [
     "job_json",
     "job_kind",
     "job_payload",
+    "job_records_content",
     "request_summary",
     "resolved_job",
     "scenario_jobs",

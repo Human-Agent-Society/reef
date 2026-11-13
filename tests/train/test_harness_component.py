@@ -7,11 +7,13 @@ binary scores rules that hold the marker higher.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
-from tests.support.harness_jobs import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_backend, harness_recipe
+from tests.support.harness_jobs import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_recipe
 from tests.support.job_data import job_data_ref
 from tests.support.trajectories import recorded_trajectory
 
@@ -20,12 +22,7 @@ from reef.core.job_data import JobData
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.train.component import JobStatus, TrainingArtifactLayout, TrainingJob
 from reef.train.harness_backend.backend import JobProgress
-from reef.train.harness_backend.component import (
-    PROGRESS_FILE,
-    HarnessTrainingComponent,
-    ProgressFile,
-    read_job_progress,
-)
+from reef.train.harness_backend.component import HarnessTrainingComponent
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 
@@ -194,15 +191,32 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_the_progress_file_holds_the_running_steps_progress_until_it_ends(tmp_path: Path) -> None:
-    backend, _ = harness_backend(tmp_path, lambda workspace, services: None)
-    progress = JobProgress(request_id="ask-1", phase="proposing", started_at=1.0, job_record=str(tmp_path / "1"))
-    path = tmp_path / PROGRESS_FILE
-    with ProgressFile(backend, path, interval_seconds=0.01):
-        assert read_job_progress(path) is None
-        backend.progress = progress
-        deadline = time.monotonic() + 5
-        while read_job_progress(path) is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert read_job_progress(path) == progress
-    assert read_job_progress(path) is None
+def test_the_component_reports_the_running_jobs_progress_and_the_ended_jobs_records(tmp_path: Path) -> None:
+    """No other process reads the component's directories: the training worker copies ``job_progress`` into the
+    job's item and stores ``job_records`` in the artifact store."""
+    seen: list[Mapping[str, Any] | None] = []
+
+    def method(workspace, services):
+        seen.append(component.job_progress("one"))
+        return MARKER
+
+    component = component_of(tmp_path, method)
+    assert component.job_progress("one") is None and component.job_records("one") is None
+    component.start_jobs()
+    try:
+        component.submit(job(component, "one", start=seed_start(component, tmp_path)))
+        ended(component, "one")
+    finally:
+        component.close()
+    (progress,) = seen
+    assert progress is not None and JobProgress.from_json(progress).phase == "proposing"
+    assert component.job_progress("one") is None
+    records = component.job_records("one")
+    assert records is not None and records.is_dir()
+    assert records.parent.name == "steps"
+    # A deleted scenario's directory moves aside, so the records of a new scenario of the name start empty.
+    scenario_dir = records.parent.parent.parent
+    component.archive_scenario(scenario_dir.name)
+    assert not scenario_dir.exists() and component.job_records("one") is None
+    (archived,) = (scenario_dir.parent / "archived").iterdir()
+    assert archived.name.startswith(f"{scenario_dir.name}-")

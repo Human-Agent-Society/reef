@@ -37,35 +37,19 @@ def harness_adapter(recipe: Recipe) -> str | None:
     return None if harness is None else harness[1].evolution.adapter
 
 
-def harness_state_dir(recipe: Recipe, scenario: str, component: str) -> Path | None:
-    """The directory of ``component``'s harness evolution state in ``scenario``: its history, its step records and
-    the running step's progress (``EvolutionSettings.component_state_dir``).
-
-    ``None`` when the deployment evolves no harness in ``component``: a deployment with no harness recipe, or a
-    composite whose harness recipe has another component name. A harness recipe on its own answers for any
-    ``component``.
-    """
-    harness = harness_recipe(recipe)
-    if harness is None or harness[0] not in (None, component):
-        return None
-    return harness[1].evolution.component_state_dir(scenario, component)
-
-
 def scenario_state_dirs(recipe: Recipe, scenario: str) -> tuple[Path, ...]:
-    """The directories that belong to ``scenario`` alone, which the dispatcher archives when the scenario is
-    deleted: those of each recipe of the deployment, in the order of ``component_recipes``.
+    """The directories of the record-to-sample stages that belong to ``scenario`` alone, which the dispatcher
+    archives when the scenario is deleted: what the stage config of each recipe of the deployment names
+    (``PipelineSettings.scenario_state_dirs``), in the order of ``component_recipes``.
 
-    A harness recipe gives the scenario's directory of history and job records
-    (``EvolutionSettings.scenario_state_dir``). Any other recipe gives what its record-to-sample stage's config
-    names (``PipelineSettings.scenario_state_dirs``).
+    A harness recipe keeps the scenario's history and job records in a directory of the training service. That
+    service moves it aside itself (``TrainingComponent.archive_scenario``), so it is not listed here.
     """
     directories: list[Path] = []
     for _, child in component_recipes(recipe):
-        if isinstance(child, HarnessEvolutionRecipe):
-            directories.append(child.evolution.scenario_state_dir(scenario))
-        else:
+        if not isinstance(child, HarnessEvolutionRecipe):
             directories.extend(child.stages().scenario_state_dirs(scenario))
     return tuple(directories)
 
 
-__all__ = ["harness_adapter", "harness_recipe", "harness_state_dir", "scenario_state_dirs"]
+__all__ = ["harness_adapter", "harness_recipe", "scenario_state_dirs"]
