@@ -18,6 +18,11 @@ from types import ModuleType
 
 import pytest
 from reef_client import ReefClientError
+from tests.support import records
+from tests.support.conversations import conversation
+
+from reef.record2sample import ReportSamples
+from reef.train import PipelineContext
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TUTORIAL = REPO_ROOT / "tutorials" / "evolve-your-harness"
@@ -66,6 +71,9 @@ class StubReefClient:
     run has created its scenario, the status route answers HTTP 404, as the service does for a scenario with no
     startup request. Until a read has answered ``ready``, a model call is HTTP 503, as it is while the service
     starts the model. Status reads are in ``reads`` as ``("startup", state)``.
+
+    Each model call returns its own receipt, kept in ``receipts``. A report whose ID is stored with other content
+    is HTTP 409, as it is in the service.
     """
 
     def __init__(
@@ -81,6 +89,7 @@ class StubReefClient:
         self.created = False
         self.is_inference_ready = False
         self.head = head
+        self.receipts: list[str] = []
         self.reports: list[dict] = []
         self.references: list[list[str]] = []
         self.posts: list[tuple[str, str, dict]] = []
@@ -106,12 +115,20 @@ class StubReefClient:
         if not self.is_inference_ready:
             body = {"error": {"type": "inference_starting", "message": "The inference engine is starting."}}
             raise ReefClientError(503, json.dumps(body), "application/json")
-        return {"choices": [{"message": {"content": "9592"}}]}, "receipt-1"
+        self.receipts.append(f"receipt-{len(self.receipts) + 1}")
+        return {"choices": [{"message": {"content": "9592"}}]}, self.receipts[-1]
 
     def report(self, scenario: str, payload: dict, references: list[str], **kwargs: object) -> dict:
+        record_id = payload["agent_record_id"]
+        stored = {
+            report["agent_record_id"]: (report, graded)
+            for report, graded in zip(self.reports, self.references, strict=True)
+        }
+        if record_id in stored and stored[record_id] != (payload, references):
+            raise ReefClientError(409, f"record {record_id!r} is stored with other content", "text/plain")
         self.reports.append(payload)
         self.references.append(references)
-        return {"agent_record_id": payload["agent_record_id"], "scenario": scenario, "request_type": "report"}
+        return {"agent_record_id": record_id, "scenario": scenario, "request_type": "report"}
 
     def get(self, path: str, **kwargs: object) -> dict:
         self.requested.append(path)
@@ -203,9 +220,9 @@ def _record_waits(runner: ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[i
 def _stage_native(runner: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: StubReefClient) -> None:
     """The native form's surroundings: a pulled seed tree, and the serve process's turns stubbed out.
 
-    Each turn returns the receipts of its model calls, and the runner reports the score against them through
-    the client: the step rows the catalog answers with appear once the run has reported a turn, as they do in
-    the service.
+    Each turn returns the receipts of its two model calls, a tool call and then the answer, and the runner reports
+    the score through the client: the step rows the catalog answers with appear once the run has reported a turn,
+    as they do in the service.
     """
     tree = tmp_path / "tree"
     tree.mkdir()
@@ -216,7 +233,8 @@ def _stage_native(runner: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path:
     def turn(prompt, session=None):
         client.turns.append(prompt)
         number = len(client.turns)
-        return [], {"text": "9592", "session": "session-1", "turn": number, "exit": 0, "receipts": [f"r{number}"]}
+        receipts = [f"r{number}-tool", f"r{number}"]
+        return [], {"text": "9592", "session": "session-1", "turn": number, "exit": 0, "receipts": receipts}
 
     def mount_events(artifact_id):
         client.mounts.append(artifact_id)
@@ -261,6 +279,22 @@ def test_the_expected_step_count_is_the_reports_submitted_not_the_failures(
     assert len(client.reports) == 3
     assert waits == [3], f"every accepted report batches a step; the runner asked for {waits}, not 1"
     assert "3 report(s) batched (1 of them failing)" in printed
+
+
+def test_a_rerun_on_the_same_state_reports_under_new_record_ids(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``work/`` keeps the reports of a run, so a rerun must not reuse their IDs: the service answers that with 409."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 0.0, 1.0), NO_PUBLISH + NO_PUBLISH)
+
+    runner.main()
+    runner.main()
+
+    record_ids = [report["agent_record_id"] for report in client.reports]
+    assert len(set(record_ids)) == 6, f"each of the six reports needs its own record ID: {record_ids}"
+    assert client.references == [[receipt] for receipt in client.receipts], "each score goes against its own receipt"
 
 
 def test_completed_steps_that_publish_nothing_end_the_run_without_reading_the_head(
@@ -469,8 +503,31 @@ def test_the_native_run_waits_for_every_step_of_an_all_passing_run(
     runner.native_main()
 
     printed = capsys.readouterr().out
-    assert len(client.reports) == 3, "three turns, three scores reported against their receipts"
-    assert client.references == [["r1"], ["r2"], ["r3"]], "each score goes against the receipts its own turn returned"
+    assert len(client.reports) == 3, "three turns, three scores reported"
+    assert client.references == [["r1"], ["r2"], ["r3"]], "each score goes against the last receipt of its own turn"
     assert waits == [3], f"three accepted reports batch three steps; the native runner asked for {waits}"
     assert "nothing batched" not in printed and "no evolve step runs" not in printed
     assert "3 report(s) batched (0 of them failing)" in printed
+
+
+def test_reef_trains_each_native_report_of_a_turn_with_a_tool_call(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The two model calls of a turn are one trajectory. Reef ends a report that references both of them."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH)
+    _stage_native(runner, monkeypatch, tmp_path, client)
+    _record_waits(runner, monkeypatch)
+
+    runner.native_main()
+
+    stage = ReportSamples(PipelineContext(scenario="math"))
+    for number in (1, 2, 3):
+        # The answer call continues the tool call. A different filler keeps the turns in different trajectories.
+        stage.push(conversation(f"r{number}-tool", 1, filler=f" turn {number}"))
+        stage.push(conversation(f"r{number}", 2, filler=f" turn {number}"))
+    for payload, references in zip(client.reports, client.references, strict=True):
+        stage.push(records.report(payload["agent_record_id"], *references, score=payload["score"]))
+    trained = [set_id for unit in stage.take_ready_units() for set_id in unit.set_ids()]
+    assert trained == ["native-session-1-1", "native-session-1-2", "native-session-1-3"]

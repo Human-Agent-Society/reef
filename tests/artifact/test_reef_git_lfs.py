@@ -212,6 +212,26 @@ def test_configured_factory_registers_a_scenario_from_its_context(tmp_path: Path
 
 
 @pytest.mark.integration
+def test_configured_factory_reads_a_relative_repository_below_the_top_of_a_git_work_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_git_lfs: None
+) -> None:
+    # An example directory of a Reef checkout: Git reads a relative remote path from the top of the work tree.
+    example = tmp_path / "checkout" / "example"
+    example.mkdir(parents=True)
+    run_git("init", str(tmp_path / "checkout"))
+    monkeypatch.chdir(example)
+    context = RepositoryBackendContext(work_dir=Path("work/artifact-work"), cache_dir=Path("work/artifact-cache"))
+    config = {"repository": "work/artifacts.git"}
+    factory = GitLFSRepositoryBackendFactory.from_config(config, context=context)
+    factory("math").register(root_tree(tmp_path / "root", {"rules.md": "seed rules\n"}), metadata={})
+
+    restarted = GitLFSRepositoryBackendFactory.from_config(config, context=context)
+
+    assert restarted.list_registrations() == ("math",)
+    assert restarted.has_registration("math") and not restarted.has_registration("other")
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("repository", ["https://git.example/repository", "git@example:repository"])
 def test_configured_factory_keeps_a_remote_location(repository: str, tmp_path: Path, fake_git_lfs: None) -> None:
     context = RepositoryBackendContext(work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")

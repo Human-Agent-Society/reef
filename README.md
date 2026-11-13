@@ -122,10 +122,12 @@ Use the source checkout for development and for the training examples below.
 Reef supports two learning surfaces: model **weights** and agent **harnesses**.
 The deployment's recipe determines which surface its scenarios update.
 
-As a minimal example, start Reef as a pure inference server:
+As a minimal example, start Reef as a pure inference server. The base installation
+includes no inference engine: the environment must also have SGLang and GPU-enabled
+PyTorch (see [Configuration](https://reefinfra.ai/docs/reference/configuration/)).
 
 ```bash
-uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 ### Weight-training deployment
@@ -146,7 +148,7 @@ reef serve -c recipes/sao/examples/imo_answerbench/serve.yaml \
   --inference.model-path "$MODEL_PATH" \
   --reef.port "8900"
 
-curl -f http://127.0.0.1:8900/healthz          # ready to serve
+curl -f http://127.0.0.1:8900/healthz          # the service is up
 ```
 
 #### Send an inference request and report feedback
@@ -155,9 +157,16 @@ Send inference requests through Reef and report a score for each response. The
 SAO recipe uses each eligible scored rollout to run a training step.
 
 Reef's inference endpoint is OpenAI- and Anthropic-compatible: `/v1/chat/completions`,
-`/v1/responses` and `/v1/messages` take the provider's own request body. A request includes the
-`x-reef-scenario` header; a new name creates a scenario using the deployment's
-configured recipe. Requests do not select recipes.
+`/v1/responses` and `/v1/messages` take the provider's own request body. Each request names its
+scenario in the `x-reef-scenario` header. Requests do not select recipes.
+
+Create the scenario before you send the first inference request. `POST /reef/scenarios`
+creates it with the deployment's configured recipe. A repeated request returns the existing
+scenario. An inference request never creates a scenario: an unknown name gets HTTP 404.
+
+Scenario creation does not wait for the model's engine to start, and `/healthz` shows only
+that the service runs. Poll `GET /reef/scenarios/{scenario}/inference/status` until `state`
+is `ready`. If `state` is `failed`, `error` gives the cause.
 
 The response body uses the provider's OpenAI-compatible format. Reef adds the
 `x-reef-agent-record-id` response header. Its value is the **receipt** that a
@@ -167,13 +176,33 @@ example reports both a score and a short explanation.
 
 ```python
 import os
+import time
+
 import httpx
 
+scenario = "hello-reef"
 reef = httpx.Client(
     base_url="http://127.0.0.1:8900",
-    headers={"Authorization": f"Bearer {os.environ['REEF_TOKEN']}", "x-reef-scenario": "hello-reef"},
+    headers={"Authorization": f"Bearer {os.environ['REEF_TOKEN']}", "x-reef-scenario": scenario},
     timeout=300,
 )
+
+# Create the scenario; a repeated request returns the existing scenario
+reef.post("/reef/scenarios", json={"name": scenario}).raise_for_status()
+
+# Wait until inference is ready for the scenario
+deadline = time.monotonic() + 1800
+while True:
+    startup = reef.get(f"/reef/scenarios/{scenario}/inference/status")
+    startup.raise_for_status()
+    status = startup.json()
+    if status["state"] == "ready":
+        break
+    if status["state"] == "failed":
+        raise RuntimeError(f"Inference startup failed: {status['error']}")
+    if time.monotonic() > deadline:
+        raise TimeoutError(f"Inference is still {status['state']} after 30 minutes; read the Reef logs")
+    time.sleep(1)
 
 # Send a provider-compatible inference request
 response = reef.post(

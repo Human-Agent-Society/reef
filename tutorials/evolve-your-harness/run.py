@@ -23,7 +23,7 @@ that is already running:
              and follows the head
     turns  - ``python3 run.py native`` sends each task to the process as one
              turn, grades the reply, and reports the score against the
-             receipts the turn returned
+             last receipt the turn returned
     mount  - every reported score batches, so each report triggers one
              evolve step; a winning tree publishes and the process mounts it
              while it runs, which its log shows as ``harness/mount``
@@ -90,9 +90,10 @@ def main():
         )
         prefix = task.split(maxsplit=1)[0]  # keys evolution.py's ANSWERS table
         score = evolution.grade_text(task, body["choices"][0]["message"]["content"])
+        # The receipt in the ID keeps a rerun on the same work/ from reusing the ID of an earlier report.
         client.report(
             SCENARIO,
-            {"agent_record_id": f"harness-evolve-{index}", "score": score, "feedback": prefix},
+            {"agent_record_id": f"harness-evolve-{receipt}", "score": score, "feedback": prefix},
             references=[receipt],
         )
         # The recipe's default stages batch valid scored reports, passing ones included, and
@@ -236,11 +237,11 @@ def turn(prompt, session=None):
 
 
 def report(client, result, score, feedback):
-    """Post the score against the receipts of the model calls one turn made."""
+    """Post the score against the last model call of one turn; Reef adds the earlier calls of its trajectory."""
     client.report(
         SCENARIO,
         {"agent_record_id": f"native-{result['session']}-{result['turn']}", "score": score, "feedback": feedback},
-        references=result["receipts"],
+        references=result["receipts"][-1:],
     )
 
 
@@ -264,7 +265,7 @@ def native_main():
     seed = json.loads((TREE_DIR / SNAPSHOT_FILE).read_text())["artifact_id"]
 
     before = steps_before(client)
-    # turns + report: each task is one turn on the resident process; the score goes against the turn's receipts.
+    # turns + report: each task is one turn on the resident process; the score goes against the turn's last receipt.
     batched = 0
     failures = 0
     for index, task in enumerate(tasks, start=1):

@@ -85,9 +85,18 @@ Harness evolution
 
 **startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
 
-**No step publishes a change.** A step ran and its candidate was not selected. Read the step's ``candidate_rollouts`` in its snapshots row, and each rollout's record under the scenario's history (``<evolution.state_dir>/<scenario>/<component>/history/rollouts/``, where ``<component>`` is ``harness`` for ``HarnessEvolutionRecipe``; see `History <evolve-your-harness.rst#history>`__). Both sides scoring nothing means the rollouts could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or a rollout exceeded ``evolution.evaluation.task_timeout_s`` (600 seconds by default). Both sides scoring the same means the patch did not change the outcome; ``evolution.evaluation.policy: none`` publishes every valid candidate if that is what you want.
+**No step publishes a change.** A step ran and its candidate was not selected. Read the step's ``candidate_runs`` in its snapshots row. Then read each rollout's ``run.json`` under the scenario's history (``<evolution.state_dir>/<scenario>/<component>/history/runs/``, where ``<component>`` is ``harness`` for ``HarnessEvolutionRecipe``; see `History <evolve-your-harness.rst#history>`__). Its ``failure``, ``exit_code``, ``stdout`` and ``stderr`` show whether the agent ran. A score of zero does not show that: an agent that ran and gave a wrong answer also scores zero.
 
-**GET /reef/harness returns 404.** No request has named the scenario yet, the recipe's seed is empty and no step has published a tree, or the scenario's recipe serves no files; the answer's message says which. An inference call that names the scenario creates it, with the seed as its first snapshot, unless ``reef.allow_implicit_scenario_creation`` is false; then create it with ``POST /reef/scenarios``. The catalog at ``GET /reef/harness/artifacts`` lists what exists.
+When the agent did not run, look for one of these causes:
+
+- The adapter binary could not be launched. ``evolution.binary``, when set, must point at a real binary.
+- The endpoint rejected ``tool_choice: "auto"``. vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``.
+- The endpoint's context length is below the prompt plus the 32000-token reply budget that Reef sets for pi. vLLM answers HTTP 400. Do not set ``--max-model-len`` below that sum.
+- A rollout exceeded ``evolution.evaluation.task_timeout_s`` (600 seconds by default).
+
+When the agent ran and both sides have the same score, the patch did not change the outcome. ``evolution.evaluation.policy: none`` publishes every valid candidate if that is what you want.
+
+**GET /reef/harness returns 404.** The scenario does not exist, the recipe's seed is empty and no step has published a tree, or the scenario's recipe serves no files; the answer's message says which. An inference call never creates a scenario. Create it with ``POST /reef/scenarios``; its first snapshot holds the seed. A report, a record import or a harness install also creates it unless ``reef.allow_implicit_scenario_creation`` is false. The catalog at ``GET /reef/harness/artifacts`` lists what exists.
 
 **A client captures no receipts, so a report has nothing to send.** The installed ``reef-client`` is older than 0.2.0 and reads a header the service no longer sends. ``pip install -U "reef-client>=0.2.0"``.
 

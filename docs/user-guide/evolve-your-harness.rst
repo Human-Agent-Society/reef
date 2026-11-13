@@ -131,12 +131,20 @@ Online: learn from your sessions
    reef-client harness connect <scenario> --reef http://127.0.0.1:8901
    pi
 
-   # Score the session over its model calls: 0 fails, 1 succeeds.
-   CALLS=$(curl -s "http://127.0.0.1:8901/reef/scenarios/<scenario>/records?request_type=inference&limit=100" \
-     | jq -c '[.records[].agent_record_id]')
+   # Use a scenario with no other active client. Immediately after the session, find its newest inference record.
+   # Reef lists records oldest first, at most 100 for each request.
+   RECORDS="http://127.0.0.1:8901/reef/scenarios/<scenario>/records?request_type=inference&limit=100"
+   AFTER=0
+   while [ "$AFTER" != null ]; do
+     PAGE=$(curl -sf "$RECORDS&after_sequence=$AFTER") || break
+     AFTER=$(jq '.next_after_sequence' <<< "$PAGE")
+   done
+   LAST=$(jq -c '[.records[-1].agent_record_id]' <<< "$PAGE")
+
+   # Score the session on that call: 0 fails, 1 succeeds. Reef adds the earlier calls of the session.
    curl -s -X POST http://127.0.0.1:8901/reef/report \
      -H "x-reef-scenario: <scenario>" -H "Content-Type: application/json" \
-     -d "{\"references\": $CALLS, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
+     -d "{\"references\": $LAST, \"score\": 0, \"feedback\": \"it said the test passed without running it\"}"
 
    # The steps and their results; a row with "selected": true is a new snapshot.
    curl -s -H "x-reef-scenario: <scenario>" http://127.0.0.1:8901/reef/harness/artifacts
@@ -192,10 +200,10 @@ The example runs the online way without a person:
 
 ``configs/serve.yaml`` holds the endpoint, the model and the token. Three
 exact-answer tasks go through Reef, and each graded reply is one step. The
-run succeeds when a row of ``/reef/harness/artifacts`` shows ``selected:
-true``. When both sides score nothing, no run gave an answer: vLLM, for
-example, needs ``--enable-auto-tool-choice --tool-call-parser hermes``. See
-`Troubleshooting <troubleshooting.rst>`__.
+run waits for those steps to finish. A row of ``/reef/harness/artifacts``
+with ``selected: true`` means a new tree was published; an unchanged or tied
+candidate keeps the current tree. Inspect recorded failures when a run
+cannot complete. See `Troubleshooting <troubleshooting.rst>`__.
 
 The harness tree
 ----------------
