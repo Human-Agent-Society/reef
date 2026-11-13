@@ -265,10 +265,6 @@ class HarnessTrainingComponent(LocalJobComponent):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.facts.parameters_schema(kind)
 
-    @property
-    def default_start_inputs(self) -> Mapping[str, str]:
-        return self.facts.default_start_inputs
-
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Accept: an offline job runs the head tree on its train tasks."""
         return

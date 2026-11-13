@@ -205,13 +205,12 @@ because it needs the backend's service, its files or its framework:
 ``changed_parts`` and the jobs.
 
 The facts are the one place that states the default start. A
-``TrainingComponent`` has no ``default_start`` method, and Reef asks no
-component for a root. The component has two duties toward the start:
-
-- ``default_start_inputs`` returns the same inputs as the facts.
-- ``root_start(root)`` accepts a root that holds the files of
-  ``facts.default_start()`` and returns the start of a job at the base model.
-  The default ``root_start`` calls ``import_start`` on the root's files.
+``TrainingComponent`` has no ``default_start`` method and no
+``default_start_inputs`` property, and Reef asks no component for a root. The
+component has one duty toward the start: ``root_start(root)`` accepts a root
+that holds the files of ``facts.default_start()`` and returns the start of a
+job at the base model. The default ``root_start`` calls ``import_start`` on
+the root's files.
 
 The harness component has no factory; ``HarnessFacts.from_settings`` makes its
 facts from the ``HarnessSettings``.

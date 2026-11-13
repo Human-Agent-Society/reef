@@ -92,10 +92,6 @@ class StubTrainingComponent(TrainingComponent):
         return DefaultStart(inputs={"model": self.backend_name})
 
     @property
-    def default_start_inputs(self) -> Mapping[str, str]:
-        return self.stub_default_start().inputs
-
-    @property
     def base_start(self) -> str:
         return f"{self.backend_name}:base"
 
@@ -308,7 +304,7 @@ class StubFacts(TrainingBackendFacts):
 
     @property
     def default_start_inputs(self) -> Mapping[str, str]:
-        return self.component.default_start_inputs
+        return self.component.stub_default_start().inputs
 
     def default_start(self) -> DefaultStart:
         return self.component.stub_default_start()

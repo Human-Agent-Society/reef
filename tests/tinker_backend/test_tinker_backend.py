@@ -468,7 +468,9 @@ def test_a_root_of_an_older_reef_that_holds_the_untrained_adapter_starts_from_th
 ):
     old_root = empty_artifact(tmp_path)
     TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(old_root.local_path))
-    start = component.root_start(ScenarioRoot(old_root, RootSource("default", inputs=component.default_start_inputs)))
+    start = component.root_start(
+        ScenarioRoot(old_root, RootSource("default", inputs=component.facts.default_start_inputs))
+    )
     assert Path(start).parent == component.state_dir / "imported"
     assert train(component, batch(), objective.name, start=start).state == "finished"
     assert started_from(client) == [UNTRAINED.state_path]

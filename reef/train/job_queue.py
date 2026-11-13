@@ -396,8 +396,8 @@ class JobQueueComponent(TrainingComponent):
 
     Each member, with ``component`` the backend's component of the same settings:
 
-    - ``name``, ``artifact_format``, ``default_start_inputs``, ``shares_scenarios``, ``concurrent_jobs`` and
-      ``parameters_schema`` are the facts' members, which equal the component's.
+    - ``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs`` and ``parameters_schema`` are the
+      facts' members, which equal the component's.
     - ``root_start(root)`` raises as ``component.root_start(root)`` does (``facts.check_root_start``). Otherwise it
       returns the name of the root snapshot, ``SnapshotStart(revision, root.source).to_text()``.
       ``snapshot_start(artifact)`` raises as ``component.snapshot_start(artifact)`` does
@@ -441,10 +441,6 @@ class JobQueueComponent(TrainingComponent):
     @property
     def artifact_format(self) -> ArtifactFormat | None:
         return self.facts.artifact_format
-
-    @property
-    def default_start_inputs(self) -> Mapping[str, str]:
-        return self.facts.default_start_inputs
 
     @property
     def shares_scenarios(self) -> bool:

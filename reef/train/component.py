@@ -324,11 +324,11 @@ class TrainingBackendFacts(ABC):
 
     Relation to the component: let ``component`` be the backend's ``TrainingComponent`` of the same settings. Then
     ``name``, ``artifact_format``, ``shares_scenarios`` and ``concurrent_jobs`` equal the component's,
-    ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``default_start_inputs`` equals
-    ``component.default_start_inputs``, ``check_root_start(root)`` raises exactly when
-    ``component.root_start(root)`` raises, and ``check_import_start(artifact_dir)`` exactly when
+    ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``check_root_start(root)`` raises
+    exactly when ``component.root_start(root)`` raises, and ``check_import_start(artifact_dir)`` exactly when
     ``component.import_start(artifact_dir)`` raises, each with the same message. The component holds a value and
-    answers these members from it, so the two cannot differ. ``default_start().inputs`` equals
+    answers these members from it, so the two cannot differ. Only the facts state the default start: the
+    component has no ``default_start`` and no ``default_start_inputs``. ``default_start().inputs`` equals
     ``default_start_inputs``, and ``component.root_start`` accepts a root that holds ``default_start()``: the
     component starts training from the files that the facts write.
 
@@ -488,15 +488,6 @@ class TrainingComponent(ABC):
         ``None`` means the snapshots hold no weight files that an engine
         loads: only the backend's own serving runtime reads them (for
         example a Tinker manifest that Tinker's sampler serves).
-        """
-
-    @property
-    @abstractmethod
-    def default_start_inputs(self) -> Mapping[str, str]:
-        """The ``inputs`` of the backend's default start: the model and the settings that decide its content.
-
-        They equal ``TrainingBackendFacts.default_start_inputs`` of the same settings. The component writes no
-        default start: the backend's facts do (``TrainingBackendFacts.default_start``).
         """
 
     def root_start(self, root: ScenarioRoot) -> str:

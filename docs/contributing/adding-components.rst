@@ -187,9 +187,9 @@ Implementation
   weight file. A backend that trains a base model writes a base root
   (``base.json`` with ``BaseRoot(inputs).to_text()``) or a reference to the
   base model's commit (``hf-reference.json``). The component defines no
-  ``default_start``. It defines the ``default_start_inputs`` property, with
-  the facts' value, and its ``root_start`` (or the ``import_start`` behind it)
-  starts a job at the base model from a root that holds those files.
+  ``default_start`` and no ``default_start_inputs``. Its ``root_start`` (or the
+  ``import_start`` behind it) starts a job at the base model from a root that
+  holds those files.
   ``facts.check_root_start(root)`` refuses the same roots as
   ``component.root_start(root)``.
   Add a test that compares the facts with the component for two configs, and
