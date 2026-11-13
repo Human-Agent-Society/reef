@@ -1,6 +1,7 @@
 """Commit-history capability is checked before scenario registration or recovery."""
 
 from collections.abc import Mapping
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +16,7 @@ from reef.artifact import (
     SnapshotRef,
     StagedSnapshotRepositoryBackend,
 )
+from reef.artifact.repository import StoredFiles
 from reef.dispatcher import build_default_dispatcher
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -52,6 +54,30 @@ class BasicBackend(RepositoryBackend):
 
     def publish(self, artifact: Artifact, *, expected_parent: SnapshotRef, advance_head: bool = True) -> SnapshotRef:
         return self.delegate.publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
+
+    def store_content(self, name: str, directory: Path) -> None:
+        self.delegate.store_content(name, directory)
+
+    def materialize_content(self, name: str) -> Path:
+        return self.delegate.materialize_content(name)
+
+    def discard_content(self, name: str) -> None:
+        self.delegate.discard_content(name)
+
+    def discard_all_content(self) -> None:
+        self.delegate.discard_all_content()
+
+    def publish_parts(
+        self,
+        parts: Mapping[str | None, StoredFiles],
+        *,
+        metadata: Mapping[str, object],
+        expected_parent: SnapshotRef,
+        advance_head: bool,
+    ) -> SnapshotRef:
+        return self.delegate.publish_parts(
+            parts, metadata=metadata, expected_parent=expected_parent, advance_head=advance_head
+        )
 
 
 class IncompleteStagedBackend(BasicBackend, StagedSnapshotRepositoryBackend):

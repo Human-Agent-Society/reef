@@ -905,7 +905,6 @@ COMPOSITE_RECIPE_METHODS = frozenset({"__post_init__"})
 COMPOSITE_FAN_OUT_MEMBERS = frozenset(
     {
         "harness_adapter",
-        "harness_state_dir",
         "scenario_state_dirs",
         "for_record2sample_configs",
         "report_contract",

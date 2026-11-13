@@ -1064,7 +1064,7 @@ class SQLWorkQueue(WorkQueue):
             raise ReefError(f"work item {work.queue}/{work.id} was not added")
         return added
 
-    def delete_final(self, *, finished_before: float) -> int:
+    def delete_final(self, *, finished_before: float, keep: Mapping[str, Collection[str]] | None = None) -> int:
         newer = self.table.alias("newer_serving")
         latest_serving = and_(
             self.table.c.queue == SERVING_QUEUE,
@@ -1083,6 +1083,11 @@ class SQLWorkQueue(WorkQueue):
         statement = delete(self.table).where(
             self.table.c.state.in_(sorted(FINAL_STATES)), self.table.c.ended_at < finished_before, not_(latest_serving)
         )
+        for queue, item_ids in (keep or {}).items():
+            if item_ids:
+                statement = statement.where(
+                    not_(and_(self.table.c.queue == queue, self.table.c.item_id.in_(sorted(item_ids))))
+                )
         log = self.database.tables.work_log
         orphan_lines = delete(log).where(
             not_(

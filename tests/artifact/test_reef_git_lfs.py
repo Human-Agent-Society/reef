@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import shutil
+import stat
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -14,7 +15,9 @@ import pytest
 from reef.artifact import (
     Artifact,
     ArtifactConflictError,
+    ArtifactMaterializationError,
     ArtifactNotFoundError,
+    ArtifactPublicationError,
     ArtifactSourceError,
     DefaultStart,
     GitLFSRepositoryBackend,
@@ -22,6 +25,8 @@ from reef.artifact import (
     InMemoryRepositoryBackend,
     RepositoryBackend,
     RepositoryBackendContext,
+    SnapshotRef,
+    StoredFiles,
 )
 from reef.artifact.composite import link_or_copy
 from reef.artifact.git_client import GitClient
@@ -735,6 +740,18 @@ def test_the_hub_layout_keeps_snapshots_on_tags_and_moving_refs_on_branches(
     assert backend.resolve_snapshot(pending.revision) == pending
     assert factory.has_registration("math") and factory.list_registrations() == ("math",)
 
+    # Stored content is replaced and deleted, so its ref is a branch; a snapshot of it is a tag as any other.
+    backend.store_content("job:1", candidate)
+    (content_ref,) = set(run_git("--git-dir", str(remote), "show-ref").split()[1::2]) - refs.keys()
+    assert content_ref.startswith(f"refs/heads/reef/contents/{encoded}/")
+    by_name = backend.publish_stored(
+        StoredFiles(content="job:1"), metadata={"artifact_id": "a1"}, expected_parent=published
+    )
+    assert by_name.parent_revision == published.revision and backend.current() == by_name
+    backend.discard_content("job:1")
+    assert content_ref not in run_git("--git-dir", str(remote), "show-ref")
+    assert factory.list_registrations() == ("math",)
+
     # A repository keeps one layout: the other is refused instead of hiding the snapshots.
     with pytest.raises(ArtifactSourceError, match="keeps its refs under refs/heads/reef/ and refs/tags/reef/"):
         GitLFSRepositoryBackend("math", remote, work_dir=tmp_path / "reef-work", cache_dir=tmp_path / "reef-cache")
@@ -783,3 +800,286 @@ def test_configured_factory_reads_the_ref_layout_and_the_token(
     assert factory._git_config == token_config(config["repository"], "hf_secret_token")
     with pytest.raises(PluginConfigError, match="refs must be one of"):
         GitLFSRepositoryBackendFactory.from_config({"repository": "a", "refs": "custom"}, context=context)
+
+
+def files_of(directory: Path) -> dict[str, str]:
+    """The text files under ``directory`` by relative path, without the files that a backend adds to a snapshot."""
+    return {
+        str(path.relative_to(directory)): path.read_text()
+        for path in directory.rglob("*")
+        if path.is_file() and path.name not in (".gitattributes", "reef-artifact.json")
+    }
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("kind", ["memory", "git"])
+def test_a_backend_publishes_a_snapshot_of_stored_content_and_bound_artifacts_by_name(
+    kind: str, tmp_path: Path, fake_git_lfs: None
+) -> None:
+    def backend(name: str) -> RepositoryBackend:
+        if kind == "memory":
+            return memory
+        return GitLFSRepositoryBackend(
+            "agent", tmp_path / "artifacts.git", work_dir=tmp_path / name / "work", cache_dir=tmp_path / name / "cache"
+        )
+
+    memory = InMemoryRepositoryBackend("agent", directory=tmp_path / "memory")
+    # One process stores, another publishes by name, and a third reads.
+    training, control, reader = backend("training"), backend("control"), backend("reader")
+    manifest = {
+        "weights": {"metadata": {"rank": 8}, "artifact_id": "w0"},
+        "harness": {"metadata": {}, "artifact_id": "h0"},
+    }
+    # The root keeps no file of the weights component.
+    root = control.register(
+        root_tree(tmp_path / "root", {"harness/AGENTS.md": "seed"}), metadata={"components": manifest}
+    )
+
+    checkpoint = root_tree(tmp_path / "one", {"AGENTS.md": "first", "docs/notes.md": "n"}).local_path
+    assert checkpoint is not None
+    training.store_content("job:0", checkpoint)
+    # Storing a name again replaces its files; a symlink is stored as the file that it names.
+    (checkpoint / "docs" / "notes.md").unlink()
+    (checkpoint / "AGENTS.md").write_text("evolved")
+    (tmp_path / "linked.md").write_text("linked")
+    (checkpoint / "link.md").symlink_to(tmp_path / "linked.md")
+    training.store_content("job:0", checkpoint)
+    shutil.rmtree(checkpoint)
+    evolved = {"AGENTS.md": "evolved", "link.md": "linked"}
+    assert files_of(reader.materialize_content("job:0")) == evolved
+
+    # A snapshot of several components: stored content for one, and the bound artifact of the other.
+    files = {"weights": StoredFiles(artifact_id="w0"), "harness": StoredFiles(content="job:0")}
+    metadata = {"components": {**manifest, "harness": {"metadata": {"step": 1}, "artifact_id": "h1"}}}
+    with pytest.raises(ArtifactConflictError):
+        control.publish_stored(files, metadata=metadata, expected_parent=SnapshotRef("other", None))
+    pending = control.publish_stored(files, metadata=metadata, expected_parent=root, advance_head=False)
+    assert pending.parent_revision == root.revision and control.current() == root
+    assert control.snapshot_metadata(pending)["components"] == metadata["components"]
+    assert reader.artifact_snapshot("h1") == pending
+    assert files_of(reader.materialize(pending).local_path) == {
+        f"harness/{path}": text for path, text in evolved.items()
+    }
+    control.commit_snapshot(pending, expected_parent=root)
+    assert reader.current() == pending
+
+    # A flat snapshot of stored content, and of an artifact that a snapshot of several components binds.
+    flat = control.publish_stored(
+        StoredFiles(content="job:0"), metadata={"artifact_id": "flat-1"}, expected_parent=pending
+    )
+    assert control.current() == flat and files_of(reader.materialize(flat).local_path) == evolved
+    # An artifact ID never names other files or metadata.
+    with pytest.raises(ArtifactConflictError):
+        control.publish_stored(StoredFiles(artifact_id="h1"), metadata={"artifact_id": "h1"}, expected_parent=flat)
+    again = control.publish_stored(
+        StoredFiles(artifact_id="h1"), metadata={"artifact_id": "flat-2"}, expected_parent=flat
+    )
+    assert files_of(reader.materialize(again).local_path) == evolved
+
+    # Discarded content is gone, a second discard changes nothing, and every snapshot keeps its files.
+    control.discard_content("job:0")
+    training.discard_content("job:0")
+    for missing in (StoredFiles(content="job:0"), StoredFiles(artifact_id="unknown")):
+        with pytest.raises(ArtifactNotFoundError):
+            control.publish_stored(missing, metadata={"artifact_id": "x"}, expected_parent=again)
+    with pytest.raises(ArtifactNotFoundError):
+        reader.materialize_content("job:0")
+    assert control.current() == again
+    assert files_of(backend("late").materialize(flat).local_path) == evolved
+
+
+@pytest.mark.unit
+def test_stored_files_name_content_or_an_artifact() -> None:
+    assert StoredFiles(content="job:0") != StoredFiles(artifact_id="job:0")
+    for values in ({}, {"content": ""}, {"content": "a", "artifact_id": "b"}, {"artifact_id": 3}):
+        with pytest.raises(ValueError, match="exactly one of content and artifact_id"):
+            StoredFiles(**values)
+    with pytest.raises(ValueError, match="no local_path"):
+        Artifact(SnapshotRef("local:x", None), None, local_path=Path("."), content="job:0")
+    stored = Artifact.stored("job:0")
+    assert (stored.content, stored.local_path) == ("job:0", None)
+    assert stored.artifact_id != Artifact.stored("job:0").artifact_id
+
+
+def copies_of(root: Path, byte_count: int) -> int:
+    """How many files of ``byte_count`` bytes under ``root`` hold their own bytes: hard links count once."""
+    return len(
+        {path.stat().st_ino for path in root.rglob("*") if path.is_file() and path.stat().st_size == byte_count}
+    )
+
+
+@pytest.mark.integration
+def test_a_checkpoint_on_one_host_is_stored_and_served_with_one_copy_of_its_weights(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With a local repository, the trainer's export is copied once, into the LFS storage. The repository and the
+    materialized snapshot of every service on the host link that one object."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    byte_count = 4 * 1024 * 1024
+    weights = os.urandom(byte_count)
+
+    def backend(name: str) -> GitLFSRepositoryBackend:
+        return GitLFSRepositoryBackend(
+            "agent", tmp_path / "artifacts.git", work_dir=tmp_path / name / "work", cache_dir=tmp_path / name / "cache"
+        )
+
+    training, control, inference = backend("training"), backend("control"), backend("inference")
+    root = control.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / "model.safetensors").write_bytes(weights)
+    training.store_content("job:1", export)
+    assert copies_of(tmp_path, byte_count) == 2
+    published = control.publish_stored(
+        StoredFiles(content="job:1"), metadata={"artifact_id": "a1"}, expected_parent=root
+    )
+    control.discard_content("job:1")
+    # Two services read the snapshot: each cache entry is a link to the stored object, not a copy.
+    for reader in (inference, training):
+        served = reader.materialize(published).local_path
+        assert served is not None and (served / "model.safetensors").read_bytes() == weights
+    assert copies_of(tmp_path, byte_count) == 2
+    stored = next((tmp_path / "artifacts.git" / "lfs" / "objects").rglob("*/*/*"))
+    assert same_file(stored, served / "model.safetensors")
+    # The control process still holds none of the bytes.
+    assert copies_of(tmp_path / "control", byte_count) == 0
+
+
+@pytest.mark.integration
+def test_content_whose_upload_failed_is_not_stored_so_no_snapshot_names_its_missing_objects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``publish_stored`` pushes without the LFS upload, so the objects must be on the remote already. The push of
+    ``store_content`` uploads them before it moves the content's ref: when the upload fails, the ref does not exist,
+    and a snapshot of that content cannot be published."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    remote = tmp_path / "artifacts.git"
+    training = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "t-work", cache_dir=tmp_path / "t-cache")
+    control = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "c-work", cache_dir=tmp_path / "c-cache")
+    root = control.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
+    export = tmp_path / "export"
+    export.mkdir()
+    (export / "model.safetensors").write_bytes(os.urandom(4096))
+    # The remote cannot take an LFS object.
+    shutil.rmtree(remote / "lfs", ignore_errors=True)
+    (remote / "lfs").write_text("not a directory")
+    with pytest.raises(ArtifactPublicationError):
+        training.store_content("job:1", export)
+    assert "contents" not in run_git("--git-dir", str(remote), "show-ref")
+    with pytest.raises(ArtifactNotFoundError, match="no content 'job:1'"):
+        control.publish_stored(StoredFiles(content="job:1"), metadata={"artifact_id": "a1"}, expected_parent=root)
+    assert control.current() == root
+
+    # Once the upload works, the same call stores the content, and the snapshot's object is on the remote.
+    (remote / "lfs").unlink()
+    training.store_content("job:1", export)
+    published = control.publish_stored(
+        StoredFiles(content="job:1"), metadata={"artifact_id": "a1"}, expected_parent=root
+    )
+    served = control.materialize(published).local_path
+    assert served is not None
+    assert (served / "model.safetensors").read_bytes() == (export / "model.safetensors").read_bytes()
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("kind", ["memory", "git"])
+def test_stored_content_and_a_carried_component_keep_every_file_also_one_named_as_the_backends_own(
+    kind: str, tmp_path: Path, fake_git_lfs: None
+) -> None:
+    """A checkpoint or a component can hold its own ``.gitattributes`` or ``reef-artifact.json``. Content holds
+    exactly the directory's files, and a snapshot carries a component byte for byte, so its artifact ID keeps
+    naming the same files and the next commit of the scenario binds it again."""
+    memory = InMemoryRepositoryBackend("agent", directory=tmp_path / "memory")
+
+    def backend(name: str) -> RepositoryBackend:
+        if kind == "memory":
+            return memory
+        return GitLFSRepositoryBackend(
+            "agent", tmp_path / "artifacts.git", work_dir=tmp_path / name / "work", cache_dir=tmp_path / name / "cache"
+        )
+
+    def every_file(directory: Path) -> dict[str, str]:
+        return {str(path.relative_to(directory)): path.read_text() for path in directory.rglob("*") if path.is_file()}
+
+    training, control, reader = backend("training"), backend("control"), backend("reader")
+    own = {
+        ".gitattributes": "*.md text\n",
+        "reef-artifact.json": "{}",
+        "AGENTS.md": "seed",
+        "sub/.gitattributes": "x\n",
+    }
+    manifest = {"weights": {"metadata": {}, "artifact_id": "w0"}, "harness": {"metadata": {}, "artifact_id": "h0"}}
+    root = control.register(
+        root_tree(
+            tmp_path / "root", {**{f"harness/{path}": text for path, text in own.items()}, "weights/w.txt": "0"}
+        ),
+        metadata={"components": manifest},
+    )
+    checkpoint = root_tree(tmp_path / "checkpoint", {**own, "AGENTS.md": "evolved"}).local_path
+    assert checkpoint is not None
+    training.store_content("job:1", checkpoint)
+    assert every_file(reader.materialize_content("job:1")) == {**own, "AGENTS.md": "evolved"}
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    training.store_content("job:2", empty)
+    assert every_file(reader.materialize_content("job:2")) == {}
+
+    # The weights change, and the harness h0 is carried with its own files of those names.
+    weights = {**manifest, "weights": {"metadata": {}, "artifact_id": "w1"}}
+    first = control.publish_stored(
+        {"weights": StoredFiles(content="job:2"), "harness": StoredFiles(artifact_id="h0")},
+        metadata={"components": weights},
+        expected_parent=root,
+    )
+    harness = {**weights, "harness": {"metadata": {}, "artifact_id": "h1"}}
+    second = control.publish_stored(
+        {"weights": StoredFiles(artifact_id="w1"), "harness": StoredFiles(content="job:1")},
+        metadata={"components": harness},
+        expected_parent=first,
+    )
+    for snapshot, text in ((first, "seed"), (second, "evolved")):
+        local = reader.materialize(snapshot).local_path
+        assert local is not None
+        assert every_file(local / "harness") == {**own, "AGENTS.md": text}
+        assert not (local / "weights").exists() or every_file(local / "weights") == {}
+
+
+@pytest.mark.integration
+def test_a_materialized_weight_file_cannot_be_written_into_the_repositorys_object(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A materialized LFS file of a local repository is a link to the repository's own object. It is read-only,
+    so a write through the cache is refused and every later reader gets the stored bytes. An object of another
+    size than its pointer names is not linked: ``git lfs pull`` checks it."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    remote = tmp_path / "artifacts.git"
+
+    def backend(name: str) -> GitLFSRepositoryBackend:
+        return GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / name / "work", cache_dir=tmp_path / name)
+
+    training, reader = backend("training"), backend("reader")
+    root = training.register(root_tree(tmp_path / "root", {"config.json": "{}"}), metadata={})
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "model.safetensors").write_bytes(b"GOOD" * 1000)
+    training.store_content("job:1", checkpoint)
+    published = training.publish_stored(
+        StoredFiles(content="job:1"), metadata={"artifact_id": "a1"}, expected_parent=root
+    )
+    served = reader.materialize(published).local_path
+    assert served is not None
+    stored = next(path for path in (remote / "lfs" / "objects").rglob("*") if path.is_file())
+    assert same_file(stored, served / "model.safetensors")
+    assert stat.S_IMODE(stored.stat().st_mode) == 0o444
+    with pytest.raises(PermissionError):
+        (served / "model.safetensors").open("r+b")
+    assert (backend("late").materialize(published).local_path / "model.safetensors").read_bytes() == b"GOOD" * 1000
+
+    # A damaged object is not linked, and the pull refuses it: no reader gets other bytes than the stored ones.
+    stored.chmod(0o644)
+    stored.write_bytes(b"short")
+    with pytest.raises(ArtifactMaterializationError):
+        backend("after-damage").materialize(published)

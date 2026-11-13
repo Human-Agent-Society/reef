@@ -144,11 +144,11 @@ def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
             while view.status("one").state != "finished":
                 assert asyncio.get_running_loop().time() < deadline, "the training service did not finish its job"
                 await asyncio.sleep(0.01)
-            assert len(view.status("one").checkpoints) == 1
+            # The service stored the checkpoint's files in the artifact store, and names that content.
+            (checkpoint,) = view.status("one").checkpoints
+            assert (checkpoint.content, checkpoint.artifact_path) == ("one:0", None)
             assert coordination.control_lease.current() is None
             assert not Path(config.task_file_dir).exists()
-            assert not (tmp_path / "work").exists()
-            assert not (tmp_path / "cache").exists()
         assert component.closed
 
     try:

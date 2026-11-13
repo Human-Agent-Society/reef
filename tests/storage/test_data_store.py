@@ -1162,13 +1162,20 @@ def test_a_task_has_one_use_for_its_own_mark_and_one_for_each_held_benchmark_of_
     assert store.item_splits("acme", "coding", ["add"]) == {"add": frozenset({"train", "eval"})}
     assert [item.item_id for item in store.query("acme", scenario="coding")] == ["add"]
 
-    # A hold that changes its split begins its uses again, after the others.
+    # A scenario can hold one benchmark in both splits: the holds are apart, and each gives its own use.
     last = store.last_use_sequence("acme", "coding")
     assert store.hold("acme", "coding", "benchmark", "easy", "eval").split == "eval"
     assert uses_of(store, "coding", after=last) == [("add", "eval", "easy")]
+    assert [(hold.name, hold.split) for hold in store.holds("acme", "coding")] == [
+        ("easy", "eval"),
+        ("easy", "train"),
+        ("math", "train"),
+    ]
 
-    assert store.release("acme", "coding", "benchmark", "math")
-    assert not store.release("acme", "coding", "benchmark", "math")
+    assert store.release("acme", "coding", "benchmark", "math", "train")
+    assert not store.release("acme", "coding", "benchmark", "math", "train")
+    assert not store.release("acme", "coding", "benchmark", "math", "eval")
+    assert store.release("acme", "coding", "benchmark", "easy", "train")
     assert uses_of(store, "coding") == [("add", "eval", None), ("add", "eval", "easy")]
     # The end of a scenario ends its holds, so a new scenario of that name uses nothing.
     assert store.delete_scenario("acme", "coding") == 1
@@ -1239,7 +1246,7 @@ def test_a_scenario_that_holds_a_trajectory_set_uses_its_trajectories(store, tmp
         ("benchmark", 1),
         ("trajectory_set", 2),
     ]
-    assert store.release("acme", "coding", "trajectory_set", "day-1")
+    assert store.release("acme", "coding", "trajectory_set", "day-1", "train")
     assert uses_of(store, "coding", kind="trajectory") == [] and uses_of(store, "coding") == [("add", "eval", "day-1")]
 
 

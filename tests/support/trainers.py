@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from tests.support.stored_checkpoints import store_checkpoints
+
 from reef.recipe import Recipe
 from reef.scenario.factory import read_trainer_spec
 from reef.scenario.live_objects import LiveObjects
@@ -30,9 +32,13 @@ def recipe_trainer(
     root: ScenarioRoot | None = None,
 ) -> Trainer:
     """The trainer that the scenario factory builds for ``recipe``, which is not a composite, on the objects of
-    ``live``."""
+    ``live``. Its job component runs the jobs on the trainer's own thread, so it stores its own checkpoints
+    (``store_checkpoints``)."""
+    spec = read_trainer_spec(recipe, live)
+    if spec.job_component is not None:
+        store_checkpoints(spec.job_component, scenario, root)
     return build_trainer(
-        read_trainer_spec(recipe, live),
+        spec,
         scenario,
         records,
         algorithm_state=algorithm_state,

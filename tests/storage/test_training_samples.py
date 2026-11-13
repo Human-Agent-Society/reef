@@ -332,7 +332,7 @@ def test_a_task_that_the_scenario_uses_through_benchmarks_is_listed_for_each_use
     assert len(samples.task_paths(["task-a"])) == 1
 
     for benchmark in ("suite", "more"):
-        assert scenario.data.release("acme", "math", "benchmark", benchmark)
+        assert scenario.data.release("acme", "math", "benchmark", benchmark, "train")
     assert [stored.split for stored in samples.read(["task-a"])] == ["eval"]
     scenario.data.update("acme", ["task-a"], {"scenarios": {"math": None}})
     assert samples.read(["task-a"]) == () and samples.task_paths(["task-a"]) == ()

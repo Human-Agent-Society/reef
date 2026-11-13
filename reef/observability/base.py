@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from reef.artifact.artifact import Artifact
 from reef.core.artifact_selection import ArtifactSelection
 
 
@@ -41,6 +42,10 @@ class TrainingExperimentEvent:
 
     ``produced_artifacts`` is an ``ArtifactSelection``. Only the changed
     component advances; a step without an artifact keeps its previous start.
+    ``checkpoint`` is the snapshot that the commit published, bound to the scenario's repository and not made
+    local, or None for a commit that published none. A tracker that uploads a checkpoint's files makes it local
+    (``Artifact.materialize``), which reads them from the artifact store, and takes the directory of
+    ``context.component``.
     Commit observers make these events; trackers record their IDs and metrics.
     """
 
@@ -49,11 +54,13 @@ class TrainingExperimentEvent:
     metrics: Mapping[str, Any]
     outcome: str
     training_job_id: str | None = None
-    checkpoint_path: str | None = None
+    checkpoint: Artifact | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.produced_artifacts, ArtifactSelection):
             raise TypeError("produced_artifacts must be an ArtifactSelection")
+        if self.checkpoint is not None and not isinstance(self.checkpoint, Artifact):
+            raise TypeError("checkpoint must be an Artifact or None")
 
 
 @dataclass(frozen=True, slots=True)

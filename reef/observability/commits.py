@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Lock, Thread
 
+from reef.artifact.artifact import Artifact, ArtifactRepository
 from reef.core.artifact_selection import ArtifactSelection
 from reef.observability.base import (
     ExperimentTracker,
@@ -34,8 +35,12 @@ ExperimentEvent = TrainingExperimentEvent | TrainFromExperimentEvent
 
 @dataclass(frozen=True)
 class PreparedExperiment:
+    """What the committer knows before a training commit: its ``context``, and the scenario's ``repository``
+    when the commit publishes an artifact, else None. The observer makes it in ``prepare`` and reads it when the
+    commit lands."""
+
     context: TrainingExperimentContext
-    checkpoint_path: str | None
+    repository: ArtifactRepository | None
 
 
 class ExperimentReportQueue:
@@ -159,10 +164,11 @@ class CommitExperimentObserver(RecordObserver):
         self,
         context: TrainingExperimentContext,
         *,
-        checkpoint_path: str | None,
+        repository: ArtifactRepository | None,
     ) -> Mapping[str, object]:
-        """Keep the checkpoint's local path until the commit lands; tracking failures leave metrics alone."""
-        self.prepared = PreparedExperiment(context, checkpoint_path)
+        """Keep the context, and the repository of a commit that publishes an artifact, until the commit lands;
+        tracking failures leave metrics alone."""
+        self.prepared = PreparedExperiment(context, repository)
         try:
             return dict(self.tracker.correlation_metrics(context))
         except Exception:
@@ -224,6 +230,10 @@ class CommitExperimentObserver(RecordObserver):
                 metrics=metrics,
                 outcome="rejected" if metrics.get("selected") is False else "committed",
                 training_job_id=commit.training_job_id,
-                checkpoint_path=None if prepared is None else prepared.checkpoint_path,
+                checkpoint=(
+                    None
+                    if prepared is None or prepared.repository is None or not commit.checkpoint
+                    else Artifact(commit.snapshot, prepared.repository)
+                ),
             )
         )

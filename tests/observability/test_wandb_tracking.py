@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import dataclasses
 import time
+from pathlib import Path
 
 import pytest
 
+from reef.artifact.artifact import Artifact
+from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.artifact_selection import ArtifactSelection
 from reef.observability.base import (
     ExperimentRun,
@@ -44,7 +47,18 @@ class _StubRun:
         self.finished = True
 
 
+class _StubArtifact:
+    def __init__(self, *, name: str, type: str) -> None:
+        self.name = name
+        self.files: dict[str, str] = {}
+
+    def add_dir(self, directory: str) -> None:
+        self.files = {path.name: path.read_text() for path in Path(directory).iterdir()}
+
+
 class _StubClient:
+    Artifact = _StubArtifact
+
     def __init__(self, *, fail_init: bool = False, fail_log: bool = False) -> None:
         self.fail_init = fail_init
         self.fail_log = fail_log
@@ -98,7 +112,6 @@ def _event(
         metrics={"train/loss": 0.25, "reward": 0.8, "selection": {"score": 1.0, "label": "ok"}},
         outcome="committed",
         training_job_id="job-7",
-        checkpoint_path="/checkpoints/hf/7",
     )
 
 
@@ -124,6 +137,28 @@ def _tracker(client: _StubClient, **overrides) -> WandbExperimentTracker:
         },
         client=client,
     )
+
+
+@pytest.mark.unit
+def test_upload_checkpoints_reads_the_committed_snapshot_from_the_artifact_store(tmp_path: Path) -> None:
+    """The process that commits holds no checkpoint file, so the tracker uploads the files of the committed
+    snapshot, which it reads from the artifact store; without ``upload_checkpoints`` it reads none."""
+    backend = InMemoryRepositoryBackend("math", directory=tmp_path / "store")
+    files = tmp_path / "checkpoint"
+    files.mkdir()
+    (files / "weights.txt").write_text("w1")
+    committed = backend.register(Artifact.local(files), metadata={})
+    event = dataclasses.replace(_event(), checkpoint=Artifact(committed, backend))
+
+    quiet = _StubClient()
+    _tracker(quiet).record(event)
+    assert quiet.runs[0].artifacts == []
+
+    client = _StubClient()
+    _tracker(client, upload_checkpoints=True).record(event)
+    (uploaded,) = client.runs[0].artifacts
+    assert uploaded.name.startswith("reef-checkpoint-")
+    assert uploaded.files == {"weights.txt": "w1"}
 
 
 @pytest.mark.unit
@@ -173,7 +208,7 @@ def test_generic_wandb_provider_records_committed_backend_event() -> None:
     assert logged["reef/produced_artifact_ids"] == {"weights": "artifact:8"}
     assert not {"reef/source_runtime_load_id", "reef/produced_runtime_load_id"} & logged.keys()
     assert logged["reef/training_job_id"] == "job-7"
-    assert logged["reef/checkpoint_path"] == "/checkpoints/hf/7"
+    assert "reef/checkpoint_path" not in logged
     assert client.runs[0].artifacts == []
 
     tracker.close()

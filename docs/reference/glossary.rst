@@ -272,7 +272,7 @@ A ``TrainingComponent`` runs bounded training jobs with its framework's own
 training loop, for example Slime or Tinker. Reef submits a job, reads its
 status, and can cancel it; the component saves checkpoints. A
 ``SavedCheckpoint`` names the directory a later job starts from and the
-directory Reef publishes as a snapshot.
+directory whose files the training service stores in the artifact backend, where Reef commits them as a snapshot.
 
 Training job
 ------------

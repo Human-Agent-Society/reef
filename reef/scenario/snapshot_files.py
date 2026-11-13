@@ -47,7 +47,7 @@ class ScenarioArtifactFiles(CommittedArtifacts):
         refs = [self.repository.start_artifact, self.repository.require_current_artifact()]
         refs.extend(record.snapshot for record in self.store.history())
         for ref in dict.fromkeys(refs):
-            artifact = self.repository.resolve(ref)
+            artifact = self.repository.snapshot(ref)
             selected = self.components.component_artifact(artifact, component)
             if selected.artifact_id == artifact_id:
                 return ArtifactTextFiles(artifact_id, dict(TextFileTree().read_files(selected) or {}))
@@ -57,7 +57,7 @@ class ScenarioArtifactFiles(CommittedArtifacts):
 
     def files(self, ref: SnapshotRef, component: str) -> ArtifactTextFiles:
         """Return the selected component's ID and text files from a stored snapshot."""
-        artifact = self.repository.resolve(ref)
+        artifact = self.repository.snapshot(ref)
         selected = self.components.component_artifact(artifact, component)
         return ArtifactTextFiles(selected.artifact_id, dict(TextFileTree().read_files(selected) or {}))
 

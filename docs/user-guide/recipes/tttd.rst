@@ -454,8 +454,8 @@ project and an optional entity:
 
 Export ``WANDB_API_KEY`` or log in through the cluster's credential store. Do
 not put the key in YAML, tags, run names, or Slime flags. Reef assigns one W&B
-run identity to a scenario and resumes it after a service restart. Checkpoint
-paths are logged as metadata when ``upload_checkpoints`` is false. `Experiment
+run identity to a scenario and resumes it after a service restart. A run names
+its checkpoints by their artifact IDs when ``upload_checkpoints`` is false. `Experiment
 tracking <../../reference/configuration.rst#experiment-tracking>`__ describes grouping,
 run segments, offline mode, and metric names.
 

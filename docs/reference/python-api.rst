@@ -430,10 +430,9 @@ deployment from its configuration alone:
      - the adapter that ``GET /reef/harness`` renders the harness artifacts
        for (``evolution.adapter`` of the harness recipe), or ``None``; the
        scenario list names it for every scenario
-   * - ``reef.recipe.deployment.harness_state_dir(recipe, scenario, component)``
-     - the directory of the component's harness evolution state, or ``None``
    * - ``reef.recipe.deployment.scenario_state_dirs(recipe, scenario)``
-     - the directories that a scenario delete archives
+     - the directories of the record-to-sample stages that a scenario delete
+       archives; a training service archives its own
    * - ``reef.scenario.factory.scenario_report_type(recipe)``
      - the report contract that ingress checks: the one that the recipes
        share, or a contract that a report meets when any recipe's parses it
@@ -1106,6 +1105,45 @@ A backend shares no snapshot between scenarios. It must:
   stored snapshot, or raise ``ArtifactNotFoundError``. Its ``revision`` and
   ``parent_revision`` are backend locators, separate from component IDs.
 - Keep each component entry's ``artifact_id`` in the manifests it stores.
+- Implement the five operations on stored content. Stored content is a named
+  file tree of one scenario with no parent, no metadata and no artifact ID,
+  and no head moves to it. The training service stores each checkpoint as
+  content, and control commits it by name without reading a file:
+
+  - ``store_content(name, directory)`` stores the files of ``directory`` as
+    the content ``name``: exactly those files, whatever their names. Storing a
+    name again replaces its files in one step for a reader, so a repeated call
+    after a failure is safe.
+  - ``materialize_content(name)`` returns a local directory with exactly those
+    files, which stays readable when the name is stored again. An admission
+    check that reads files calls it, and the pages that show a job's records.
+  - ``discard_content(name)`` removes the content. A name that the backend
+    does not hold changes nothing, and every snapshot keeps its files.
+  - ``discard_all_content()`` removes every content of the scenario. Reef
+    calls it when the scenario is deleted, so no content outlives its
+    scenario.
+  - ``publish_parts(parts, *, metadata, expected_parent, advance_head)``
+    stores a snapshot of files that the backend holds already, and moves the
+    head as ``publish`` does. Callers use the inherited ``publish_stored``,
+    which checks first that the head is ``expected_parent``, also for
+    ``advance_head=False``; a backend that moves the head checks it again in
+    the same step as the move. ``parts`` maps the directory of each component
+    to its ``StoredFiles``, or the one key ``None`` for a flat snapshot. A
+    ``StoredFiles`` names stored content, or an artifact ID whose files an
+    earlier snapshot holds. Carry a component's files byte for byte.
+    ``metadata`` is complete: it holds the component manifest and the artifact
+    IDs. Bind them with ``bind_artifact_ids`` before a head moves. Raise
+    ``ArtifactNotFoundError`` for content or an artifact that the backend does
+    not hold. A failure can leave the snapshot stored with its IDs bound and
+    no head on it. Make the snapshot inside the storage, for example with a
+    server-side copy, so that the calling process downloads no file.
+
+  A backend whose snapshots hold large files also overrides
+  ``snapshot_metadata(ref)`` to read a snapshot's metadata without its files,
+  and ``materialize_component(ref, name)`` to make one component of a snapshot
+  local without the files of the others. Control reads a harness tree through
+  the second, so that it fetches no weights. Both defaults materialize the
+  whole snapshot.
 
 The optional capabilities are separate base classes. Inherit only the ones
 that the backend supports:
@@ -2585,7 +2623,11 @@ base root whose ``inputs`` equal ``default_start_inputs``, and raise
 
 A ``SavedCheckpoint`` has a ``step`` within its job, a ``path`` that a later
 job starts from, a ``artifact_path`` that Reef publishes and serving loads, and
-the backend's ``metrics``. A finished job without checkpoints trained nothing,
+the backend's ``metrics``. Both paths are local directories of the process that
+runs the component. The training worker stores the files of ``artifact_path``
+in the artifact backend (``RepositoryBackend.store_content``) and writes the
+checkpoint into the jobs queue with the name of that ``content`` in place of
+``artifact_path``. A finished job without checkpoints trained nothing,
 for example because its objective skipped the job's data.
 
 ``reef.train.local_jobs.LocalJobComponent`` is the base of the built-in
@@ -2605,8 +2647,10 @@ commits:
    trainer commits the submission, which consumes the records of the job's
    data.
 2. While the job runs, the trainer commits each new saved checkpoint: its
-   ``artifact_path`` becomes a new artifact, with the checkpoint's training
-   metrics. The scenario's activation rule decides whether it serves.
+   stored ``content`` becomes a new artifact, with the checkpoint's training
+   metrics. The backend makes the snapshot of the stored files
+   (``RepositoryBackend.publish_stored``), so control reads none of them. The
+   scenario's activation rule decides whether it serves.
 3. When the job ends, the trainer commits its outcome.
 
 Weight training and harness evolution share the loop: every job carries the

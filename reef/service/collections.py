@@ -122,8 +122,8 @@ def hold_set(
     scenario, kind, name, split, item_count, synced}``.
 
     The body of a benchmark is ``{"split"}``. The body of a trajectory set is ``{}``: a trajectory always trains.
-    The scenario uses each item of the set from then on, also an item that joins it later. No item changes. A hold
-    that exists gets the split. Raise ``ValueError`` as ``checked_hold`` does.
+    The scenario uses each item of the set from then on, also an item that joins it later. No item changes. A
+    scenario can hold one benchmark in both splits, by two calls. Raise ``ValueError`` as ``checked_hold`` does.
     """
     if kind == "trajectory_set":
         if body:
@@ -137,17 +137,28 @@ def hold_set(
     return {"owner": owner, **hold.to_json(), "synced": sync_touched(data, owner, [scenario])}
 
 
-def release_set(data: DataAccess, owner: str, scenario: str, kind: str, name: str) -> dict[str, Any]:
-    """End the hold of the set ``name`` of ``kind`` by ``scenario`` of ``owner``, then sync the scenario; return
-    ``{owner, scenario, kind, name, released, synced}``. ``released`` is False when the scenario did not hold the
-    set."""
-    released = data.require_store().release(owner, scenario, kind, name)
+def release_set(
+    data: DataAccess, owner: str, scenario: str, kind: str, name: str, split: str | None
+) -> dict[str, Any]:
+    """End the hold of the set ``name`` of ``kind`` in ``split`` by ``scenario`` of ``owner``, then sync the
+    scenario; return ``{owner, scenario, kind, name, split, released, synced}``. ``released`` is False when the
+    scenario did not hold the set in that split.
+
+    ``split`` is ``train`` or ``eval`` for a benchmark. For a trajectory set it is None or ``train``. Raise
+    ``ValueError`` for another value.
+    """
+    if kind == "trajectory_set" and split is None:
+        split = "train"
+    if split not in SPLIT_NAMES:
+        raise ValueError(f"split is one of {', '.join(SPLIT_NAMES)}")
+    released = data.require_store().release(owner, scenario, kind, name, split)
     synced = sync_touched(data, owner, [scenario]) if released else True
     return {
         "owner": owner,
         "scenario": scenario,
         "kind": kind,
         "name": name,
+        "split": split,
         "released": released,
         "synced": synced,
     }

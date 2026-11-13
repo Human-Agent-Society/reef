@@ -67,6 +67,7 @@ from reef.train.job_queue import (
     TrainingJobWorker,
     cancel_request_jobs,
     cancel_scenario_job,
+    cancel_scenario_jobs,
     scenario_jobs,
 )
 from reef.train.manager import (
@@ -265,6 +266,8 @@ class Dispatcher(
             # Control's tracker also writes each training job's run into the job's item, for the job listing.
             tracker = JobExperimentRecorder(tracker, self.queue)
         self.experiment_tracker = tracker
+        #: Opens the artifact store of a scenario.
+        self.backend_factory = backend_factory
         self.registry = ScenarioRegistry(
             recipe,
             backend_factory,
@@ -309,7 +312,9 @@ class Dispatcher(
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
-            self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
+            self.workers.add(
+                EndedWorkSweeper(coordination.work_queue, backend_factory, retention_seconds=work_retention_seconds)
+            )
             if training_manager is not None:
                 self.workers.add(TrainingManagerWorker(training_manager, self))
             if data_store is not None:
@@ -411,17 +416,26 @@ class Dispatcher(
         - Its ``served_models`` rows go, so the inference service answers it 404.
         - The workers drop the scenario, and a training job it runs is cancelled.
         - The loaded instance closes.
+        - The stored content of the scenario leaves the artifact store: the record files of its jobs, and any
+          checkpoint that no commit took (``RepositoryBackend.discard_all_content``).
         - The storage archives the records, the commits and the settings.
         - The recipe's own directories move to an ``archived`` sibling.
         - The repository registration is archived, so the name is free again.
 
         Artifacts that other scenarios share stay.
+
+        What can refuse runs first: an unknown scenario, and a repository backend that cannot archive a
+        registration (``NotImplementedError``), change nothing. The steps then run in the order above. A delete
+        that fails at the discard of the content, because the artifact store did not answer, leaves the scenario
+        with its storage and its registration: it loads again on its next use, with no running job and without
+        the content that was discarded, and the same call again finishes the delete.
         """
         if "/" in scenario or scenario in ("", ".", ".."):
             raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         with self.record_retention_lock, self.registry.lock_for(scenario):
             if not self.registry.has(scenario):
                 raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
+            self.registry.require_archivable()
             # The inference service stops answering the scenario first, so no record reaches the archived store.
             if self.publisher is not None:
                 self.publisher.withdraw(scenario)
@@ -433,7 +447,13 @@ class Dispatcher(
                     # Nothing would read the job's checkpoints once its scenario is gone.
                     component_trainer.trainer.cancel_job()
                 dropped.close()
+            # A trainer adds a job to the queue before the commit that records it. Such a job is in no trainer's
+            # state, so the queue is asked: no job of the scenario runs on and stores files after the delete.
+            cancel_scenario_jobs(self.queue, scenario)
             self.local_workers.close_replaced_instances(scenario)
+            # The discard can fail when the artifact store does not answer. It runs before the scenario's storage
+            # and registration are archived, so the scenario is whole and a repeated delete finishes.
+            self.backend_factory(scenario).discard_all_content()
             archived = [*self.archive_scenario_state(scenario), *self.registry.archive_registration(scenario)]
         self.registry.forget_lock(scenario)
         return {"scenario": scenario, "archived": archived}
@@ -567,7 +587,9 @@ class Dispatcher(
                 self.unload_if_idle(name)
 
     def archive_scenario_state(self, scenario: str) -> list[str]:
-        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
+        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be
+        deleted twice, and ask each training service to do the same with what its component keeps for the scenario
+        (``JobQueueComponent.archive_scenario``): this process moves no directory of a training service."""
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
         configs = self.storage.read_settings(scenario).record2sample_config
@@ -582,6 +604,8 @@ class Dispatcher(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(directory), str(destination))
                 moved.append(str(destination))
+        for component in self.live.job_components():
+            component.archive_scenario(scenario)
         return moved
 
     def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
@@ -1189,8 +1213,9 @@ class Dispatcher(
             runtime = current.runtime
             if runtime is None:
                 raise ReefError(f"scenario {scenario!r} has no runtime")
-            _, snapshot = current.resolve_artifact(artifact_id, component)
-            return runtime, snapshot.materialize()
+            # The candidate's own component is made local; the snapshot's other components stay in the store.
+            selected, snapshot = current.resolve_artifact(artifact_id, component)
+            return runtime, current.components.component_artifact(snapshot, selected.component).materialize()
 
     def candidate_task(self, scenario: str, task_name: str) -> Path:
         """The directory of the Harbor task ``task_name`` of ``scenario`` here (``CandidateArtifacts``)."""

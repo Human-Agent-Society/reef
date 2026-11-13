@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import shutil
 import tempfile
 import uuid
@@ -19,16 +20,21 @@ from reef.artifact.artifact import (
     LOCAL_SNAPSHOT_PREFIX,
     Artifact,
     ArtifactConflictError,
+    ArtifactError,
     ArtifactNotFoundError,
     ArtifactPublicationError,
     ArtifactRepository,
     SnapshotRef,
     artifact_components,
+    content_metadata,
 )
 from reef.artifact.composite import compose_snapshot
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents
 from reef.core.plugins import Plugin
 from reef.core.snapshot import SELECTION_VIEW_PREFIX
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,8 +67,136 @@ class FileDownload:
             raise ValueError("a file download's expires_at is a positive int of Unix seconds")
 
 
+@dataclass(frozen=True)
+class StoredFiles:
+    """The files of one artifact, named where a repository backend holds them already.
+
+    Values: exactly one of ``content`` and ``artifact_id`` is a non-empty string, and the other is None.
+    ``content`` names stored content of the repository (``RepositoryBackend.store_content``). ``artifact_id`` names
+    an artifact that a stored snapshot of the repository binds: the files are that snapshot's files of the
+    artifact, without the files that the backend adds to a snapshot.
+
+    Purpose: the committer makes them for the snapshot of a training commit, and
+    ``RepositoryBackend.publish_stored`` reads them, so that the process that commits a snapshot need not hold
+    its files.
+    """
+
+    content: str | None = None
+    artifact_id: str | None = None
+
+    def __post_init__(self) -> None:
+        named = [value for value in (self.content, self.artifact_id) if value is not None]
+        if len(named) != 1 or not isinstance(named[0], str) or not named[0]:
+            raise ValueError("stored files name exactly one of content and artifact_id, a non-empty string")
+
+
+#: The files of a snapshot to publish: of a flat snapshot, or of each component of a snapshot of several.
+StoredTree = StoredFiles | Mapping[str, StoredFiles]
+
+
 class RepositoryBackend(ArtifactRepository):
-    """Durable storage bound to one scenario repository."""
+    """Durable storage bound to one scenario repository.
+
+    Besides its snapshots, the repository holds stored content: named file trees with no parent, no metadata and
+    no artifact ID, which no head moves to. The process that has a checkpoint's files stores them
+    (``store_content``), and another process commits them as a snapshot by name (``publish_stored``, whose
+    storage part a backend implements as ``publish_parts``). Content lives until ``discard_content``, and at most
+    until the scenario is deleted (``discard_all_content``); a snapshot made of it keeps its files after that.
+    """
+
+    @abstractmethod
+    def store_content(self, name: str, directory: Path) -> None:
+        """Store the files of ``directory`` as the content ``name``, a non-empty string.
+
+        Afterwards the content ``name`` holds exactly the files of ``directory``, by relative path and bytes,
+        whatever their names, also when ``name`` held other files before; so a repeated call after a failure is
+        safe. A symlink is stored as the file that it names. The change is atomic for a reader: a concurrent
+        ``publish_stored`` or ``materialize_content`` of ``name`` sees all the files of before or all the files of
+        after, and a directory that ``materialize_content`` returned keeps its files. No snapshot, head or
+        artifact ID changes. Raise ``ArtifactPublicationError`` when the files cannot be stored; the content
+        ``name`` is then as it was before.
+        """
+
+    @abstractmethod
+    def materialize_content(self, name: str) -> Path:
+        """A local directory that holds exactly the files of the content ``name``. The caller does not change
+        it. Raise ``ArtifactNotFoundError`` when the repository holds no content ``name``."""
+
+    @abstractmethod
+    def discard_content(self, name: str) -> None:
+        """Remove the content ``name``; a name that the repository does not hold changes nothing.
+
+        Every snapshot keeps its files. Raise ``ArtifactPublicationError`` when the content cannot be removed.
+        """
+
+    @abstractmethod
+    def discard_all_content(self) -> None:
+        """Remove every content of this scenario's repository, whatever its name. Every snapshot keeps its files.
+
+        Reef calls it when the scenario is deleted: content lives no longer than its scenario. Raise
+        ``ArtifactPublicationError`` when the content cannot be removed.
+        """
+
+    def publish_stored(
+        self,
+        files: StoredTree,
+        *,
+        metadata: Mapping[str, object],
+        expected_parent: SnapshotRef,
+        advance_head: bool = True,
+    ) -> SnapshotRef:
+        """Store a snapshot of files that the repository holds already, and return it; the caller reads no file.
+
+        The new snapshot has the parent ``expected_parent`` and the metadata ``metadata``, which is complete: it
+        holds the component manifest and the artifact IDs, as ``Artifact.storage_metadata`` gives them for
+        ``publish``. For one ``StoredFiles``, the snapshot's files are those files, at its root. For a mapping,
+        the snapshot holds the files of each value, byte for byte, in the directory that its key names; a value
+        with no files gives no file. The backend binds the artifact IDs of the metadata (``bind_artifact_ids``)
+        and moves the head as ``publish`` does for ``advance_head``. Every named content stays stored.
+
+        The head must be ``expected_parent``, also when ``advance_head`` is false: this method checks it first,
+        and a backend that moves the head checks it again in the same step as the move.
+
+        Raise ``ArtifactConflictError`` when the head is not ``expected_parent`` or an artifact ID of the
+        metadata names other content, ``ArtifactNotFoundError`` when the repository holds no such content or
+        binds no such artifact, and ``ArtifactPublicationError`` when the snapshot cannot be stored. The head
+        does not move then. A failure after the snapshot was stored can leave it stored with its artifact IDs
+        bound, and no head on it: a repeated call with the same artifact IDs and files is safe, and the committer
+        finds such a snapshot by its artifact ID.
+        """
+        current = self.current()
+        if current.revision != expected_parent.revision:
+            raise ArtifactConflictError(
+                f"repository is at {current.revision}, not expected parent {expected_parent.revision}"
+            )
+        parts: dict[str | None, StoredFiles] = {}
+        if isinstance(files, StoredFiles):
+            parts[None] = files
+        else:
+            parts.update(files)
+        return self.publish_parts(parts, metadata=metadata, expected_parent=expected_parent, advance_head=advance_head)
+
+    @abstractmethod
+    def publish_parts(
+        self,
+        parts: Mapping[str | None, StoredFiles],
+        *,
+        metadata: Mapping[str, object],
+        expected_parent: SnapshotRef,
+        advance_head: bool,
+    ) -> SnapshotRef:
+        """The backend's part of ``publish_stored``, which has checked the head once: store the snapshot of
+        ``parts`` and move the head for ``advance_head``. ``parts`` has the one key None for a flat snapshot,
+        else the directory of each component."""
+
+    def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
+        """The metadata that the stored snapshot ``ref`` was published or registered with.
+
+        The result is the snapshot's storage metadata (``Artifact.storage_metadata``). This default materializes
+        the snapshot. A backend whose snapshots hold large files reads the metadata without them. Raise
+        ``ArtifactError`` for a snapshot that the repository does not hold.
+        """
+        return self.materialize(ref).storage_metadata
 
     @abstractmethod
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
@@ -85,16 +219,23 @@ class RepositoryBackend(ArtifactRepository):
         return snapshots
 
     def resolve_artifact(self, artifact_id: str) -> Artifact:
-        """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path.
+        """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path,
+        and without the files of the other components of that snapshot where the backend can
+        (``materialize_component``).
 
         Raise ``ArtifactNotFoundError`` when this repository has no binding for the ID.
         """
-        snapshot = self.materialize(self.artifact_snapshot(artifact_id))
+        ref = self.artifact_snapshot(artifact_id)
+        snapshot = Artifact(ref, None, metadata=self.snapshot_metadata(ref))
         components = artifact_components(snapshot)
         if artifact_id not in components:
             raise ArtifactPublicationError(f"artifact binding does not contain {artifact_id!r}")
         component = components[artifact_id]
-        return snapshot if component is None else snapshot.component(component)
+        manifest = snapshot.components
+        if component is None or manifest is None or manifest.single:
+            return self.materialize(ref)
+        # Only the files of this artifact are made local, not the other components of its snapshot.
+        return self.materialize_component(ref, component)
 
     @abstractmethod
     def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
@@ -119,13 +260,17 @@ class RepositoryBackend(ArtifactRepository):
         bound, so a repeated call completes the rest.
         """
         for artifact_id in artifact_components(snapshot):
-            bound = self.bind_artifact_id(artifact_id, snapshot.ref)
-            if (
-                bound is not None
-                and bound != snapshot.ref
-                and self.artifact_content(bound, artifact_id) != self.artifact_content(snapshot.ref, artifact_id)
-            ):
-                raise ArtifactConflictError(f"artifact {artifact_id!r} already names different files or metadata")
+            self.require_same_content(artifact_id, self.bind_artifact_id(artifact_id, snapshot.ref), snapshot.ref)
+
+    def require_same_content(self, artifact_id: str, bound: SnapshotRef | None, ref: SnapshotRef) -> None:
+        """Raise ``ArtifactConflictError`` when ``bound``, the snapshot that ``artifact_id`` was bound to before
+        (``bind_artifact_id``), holds other files or metadata for the artifact than the snapshot ``ref``."""
+        if (
+            bound is not None
+            and bound != ref
+            and self.artifact_content(bound, artifact_id) != self.artifact_content(ref, artifact_id)
+        ):
+            raise ArtifactConflictError(f"artifact {artifact_id!r} already names different files or metadata")
 
     def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
         """Every file of the snapshot ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
@@ -364,6 +509,12 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
     def _list_persisted_registrations(self) -> tuple[str, ...]:
         return ()
 
+    @property
+    def archives_registrations(self) -> bool:
+        """Whether ``archive_registration`` can move a scenario's registration aside here. The default is true. A
+        caller asks before it starts to delete a scenario, so that the delete refuses before it changes anything."""
+        return True
+
     def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
         """Move the durable registration aside; nothing to do for a backend that registers in memory only."""
         return ()
@@ -403,6 +554,13 @@ class Repository(ArtifactRepository):
         # single "latest local" slot would make an older snapshot dangle as
         # soon as the next snapshot is staged.
         self._local_artifacts: dict[str, Artifact] = {}
+        #: The files of each staged snapshot that the backend holds already, by the staged revision. Such a
+        #: snapshot is in ``_local_artifacts`` with no local path, and it is made local only when a reader asks.
+        self.stored_trees: dict[str, StoredTree] = {}
+        #: The local copy of each staged snapshot of ``stored_trees`` that a reader asked for.
+        self.materialized_stored: dict[str, Artifact] = {}
+        #: The stored content that exists for one staged snapshot of ``stored_trees`` alone, by its revision.
+        self.owned_content: dict[str, str] = {}
         self.selections: dict[str, ArtifactSelection] = {}
         self.selection_lock = Lock()
         self._process_id = uuid.uuid4().hex
@@ -510,10 +668,10 @@ class Repository(ArtifactRepository):
     def materialize(self, ref: SnapshotRef) -> Artifact:
         local = self._local_artifacts.get(ref.revision)
         if local is not None and local.ref == ref:
-            return local
+            return local if ref.revision not in self.stored_trees else self.materialize_stored(local)
         selection = self.selections.get(ref.revision)
         if selection is not None:
-            materialized = self.select(selection)
+            materialized = self.materialize_selection(selection)
             if materialized.ref == ref:
                 return materialized
             return Artifact(ref, self, local_path=materialized.local_path, metadata=materialized.storage_metadata)
@@ -523,24 +681,136 @@ class Repository(ArtifactRepository):
         """Resolve an artifact reference to an Artifact materialized at a local path."""
         return self.materialize(ref)
 
+    def materialize_stored(self, staged: Artifact) -> Artifact:
+        """The staged snapshot ``staged`` of ``stored_trees`` with its files in a local directory.
+
+        The files of stored content come from ``RepositoryBackend.materialize_content``, and the files of a bound
+        artifact from ``resolve_artifact``. A snapshot of several components is composed once under ``local_root``
+        and kept until ``discard``.
+        """
+        revision = staged.ref.revision
+        tree = self.stored_trees[revision]
+        if isinstance(tree, StoredFiles):
+            return Artifact(staged.ref, self, local_path=self.stored_files(tree), metadata=staged.storage_metadata)
+        with self.selection_lock:
+            composed = self.materialized_stored.get(revision)
+            if composed is None:
+                manifest = staged.components
+                if manifest is None:
+                    raise ArtifactPublicationError("a staged snapshot of several components carries their manifest")
+                destination = self.local_root / self._process_id / uuid.uuid4().hex
+                compose_snapshot(
+                    {
+                        name: Artifact(
+                            staged.ref,
+                            None,
+                            local_path=self.stored_files(files),
+                            metadata=manifest.entries[name].metadata,
+                            artifact_id=manifest.entries[name].artifact_id,
+                        )
+                        for name, files in tree.items()
+                    },
+                    directory=destination,
+                )
+                composed = Artifact(staged.ref, self, local_path=destination, metadata=staged.storage_metadata)
+                self.materialized_stored[revision] = composed
+            return composed
+
+    def stored_files(self, files: StoredFiles) -> Path:
+        """A local directory with the files that ``files`` names; it need not exist when they are no files."""
+        if files.content is not None:
+            return self.backend.materialize_content(files.content)
+        path = self.backend.resolve_artifact(str(files.artifact_id)).local_path
+        if path is None:
+            raise ArtifactPublicationError(f"artifact {files.artifact_id!r} has no local files")
+        return path
+
+    def materialize_component(self, ref: SnapshotRef, name: str) -> Artifact:
+        """The component ``name`` of the snapshot ``ref``, local. A snapshot of this host is local as a whole;
+        of a stored snapshot, the backend makes only the component local where it can."""
+        if ref.revision in self._local_artifacts:
+            return self.materialize(ref).component(name)
+        selection = self.selections.get(ref.revision)
+        if selection is None:
+            return self.backend.materialize_component(ref, name)
+        if name not in selection.components:
+            raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {name!r}")
+        # A view of a selection that is not composed here: only the artifact of this component is made local.
+        return self.backend.resolve_artifact(selection.components[name])
+
+    def snapshot(self, ref: SnapshotRef) -> Artifact:
+        """The snapshot ``ref`` with its metadata and without its files: ``materialize`` or ``component`` of the
+        result makes local what a reader asks for."""
+        if ref.revision in self.selections:
+            return self.select(self.selections[ref.revision])
+        return Artifact(ref, self, metadata=self.snapshot_metadata(ref))
+
+    def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
+        """The metadata of the snapshot ``ref``, read without its files: of a snapshot staged on this host, or
+        the backend's ``snapshot_metadata`` of a stored one."""
+        local = self._local_artifacts.get(ref.revision)
+        if local is not None and local.ref == ref:
+            return local.storage_metadata
+        return self.backend.snapshot_metadata(ref)
+
     def selection(self, ref: SnapshotRef, names: tuple[str, ...]) -> ArtifactSelection:
         """The artifact ID of each of ``names`` in the snapshot ``ref``.
 
-        A selection view answers from the selection it was composed from, without materializing; a stored
-        snapshot is materialized and answers from its components.
+        A selection view answers from the selection it was composed from. Any other snapshot answers from its
+        metadata (``snapshot_metadata``), and no file is read: a snapshot of one component gives its artifact for
+        every name. Raise ``ArtifactNotFoundError`` for a name that a snapshot of several components does not
+        bind.
         """
         selected = self.selections.get(ref.revision)
         if selected is not None:
             return selected
-        artifact = self.resolve(ref)
-        return ArtifactSelection({name: artifact.component(name).artifact_id for name in names})
+        snapshot = Artifact(ref, None, metadata=self.snapshot_metadata(ref))
+        manifest = snapshot.components
+        if manifest is None or manifest.single:
+            return ArtifactSelection(dict.fromkeys(names, snapshot.artifact_id))
+        missing = [name for name in names if name not in manifest.entries]
+        if missing:
+            raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {missing[0]!r}")
+        return ArtifactSelection({name: manifest.artifact_id(name, ref.revision) for name in names})
 
     def select(self, selection: ArtifactSelection) -> Artifact:
-        """Materialize existing component artifacts as a local view without publishing or moving any storage head.
+        """The view of existing component artifacts that ``selection`` names, with its manifest and no file.
 
-        The deterministic private cache key lets an operation record name the view during recovery. Its complete
-        selection must be persisted with that record; the cache key alone cannot recover its files.
+        Selecting is a metadata operation: nothing is published, no storage head moves, and no file is fetched.
+        A reader of the view makes local what it reads: ``Artifact.component`` one component
+        (``materialize_component``), and ``materialize`` the whole view. A selection of one artifact is the stored
+        snapshot of that artifact. The deterministic private cache key lets an operation record name the view
+        during recovery. Its complete selection must be persisted with that record; the cache key alone cannot
+        recover its files.
         """
+        if len(selection.components) == 1:
+            artifact_id = next(iter(selection.components.values()))
+            stored = self.backend.artifact_snapshot(artifact_id)
+            snapshot = Artifact(stored, self, metadata=self.backend.snapshot_metadata(stored))
+            manifest = snapshot.components
+            if manifest is None or manifest.single:
+                return snapshot
+            return self.backend.resolve_artifact(artifact_id).with_repository(self)
+        with self.selection_lock:
+            cache_key = f"{SELECTION_VIEW_PREFIX}{selection_digest(selection)}"
+            cached = self._local_artifacts.get(cache_key)
+            if cached is not None:
+                return cached
+            manifest = SnapshotComponents(
+                {name: self.stored_entry(artifact_id) for name, artifact_id in selection.components.items()}
+            )
+            self.selections[cache_key] = selection
+            return Artifact(SnapshotRef(cache_key, None), self, metadata={COMPONENTS_METADATA_KEY: manifest.to_dict()})
+
+    def stored_entry(self, artifact_id: str) -> ComponentEntry:
+        """The manifest entry of the stored artifact ``artifact_id``: its ID and its own metadata, read from the
+        metadata of the snapshot that binds it."""
+        stored = self.backend.artifact_snapshot(artifact_id)
+        snapshot = Artifact(stored, None, metadata=self.backend.snapshot_metadata(stored))
+        return ComponentEntry(artifact_id, content_metadata(snapshot, artifact_components(snapshot)[artifact_id]))
+
+    def materialize_selection(self, selection: ArtifactSelection) -> Artifact:
+        """The view of ``selection`` with the files of every component in one local directory, composed once."""
         if len(selection.components) == 1:
             artifact_id = next(iter(selection.components.values()))
             return self.backend.resolve_artifact(artifact_id).with_repository(self)
@@ -584,6 +854,16 @@ class Repository(ArtifactRepository):
         *,
         parent: SnapshotRef,
     ) -> Artifact:
+        """Stage ``artifact`` as the flat snapshot of commit ``commit_number`` with the parent ``parent``.
+
+        An artifact with a local path is copied under ``local_root``. An artifact of stored content
+        (``Artifact.content``) is staged by name: nothing is copied, and ``publish`` has the backend make the
+        snapshot of that content.
+        """
+        if artifact.content is not None:
+            return self.stage_stored(
+                commit_number, StoredFiles(content=artifact.content), artifact.storage_metadata, parent=parent
+            )
         if artifact.local_path is None:
             raise ArtifactPublicationError("staged artifact requires local_path")
         destination = self.local_root / self._process_id / uuid.uuid4().hex
@@ -594,17 +874,35 @@ class Repository(ArtifactRepository):
             raise ArtifactPublicationError(f"failed to stage artifact from {artifact.local_path}: {exc}") from exc
         return self.register_staged(commit_number, artifact, destination, parent=parent)
 
-    def stage_composed(
+    def stage_stored(
         self,
         commit_number: int,
-        components: Mapping[str, Artifact],
+        files: StoredTree,
+        metadata: Mapping[str, object],
         *,
         parent: SnapshotRef,
+        owned_content: str | None = None,
     ) -> Artifact:
-        """Compose several components straight into a staged local snapshot; one copy, not two."""
-        destination = self.local_root / self._process_id / uuid.uuid4().hex
-        composed = compose_snapshot(components, directory=destination)
-        return self.register_staged(commit_number, composed, destination, parent=parent)
+        """Stage the snapshot of commit ``commit_number`` whose files the backend holds already (``files``), with
+        the storage metadata ``metadata`` and the parent ``parent``.
+
+        The result has no local path. ``materialize`` makes it local for a reader that asks, ``publish`` stores it
+        with ``RepositoryBackend.publish_stored``, and ``discard`` forgets it. ``owned_content`` names stored
+        content that exists for this snapshot alone: ``discard`` removes it, also after the publication.
+        """
+        staged = Artifact(
+            SnapshotRef(
+                revision=f"{LOCAL_SNAPSHOT_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{commit_number}",
+                parent_revision=parent.revision,
+            ),
+            self,
+            metadata=metadata,
+        )
+        self.stored_trees[staged.ref.revision] = files
+        self._local_artifacts[staged.ref.revision] = staged
+        if owned_content is not None:
+            self.owned_content[staged.ref.revision] = owned_content
+        return staged
 
     def register_staged(
         self, commit_number: int, source: Artifact, destination: Path, *, parent: SnapshotRef
@@ -639,20 +937,29 @@ class Repository(ArtifactRepository):
         artifact (``current``). ``advance_heads=False`` mints a snapshot beside
         the chain that no head moves to.
         """
-        ref = self._backend.publish(
-            (
-                artifact.with_repository(self)
-                if metadata is None
-                else Artifact(
-                    artifact.ref,
-                    self,
-                    local_path=artifact.local_path,
-                    metadata={**artifact.storage_metadata, **dict(metadata)},
-                )
-            ),
-            expected_parent=expected_parent,
-            advance_head=advance_heads,
-        )
+        stored = self.stored_trees.get(artifact.ref.revision)
+        if stored is None:
+            ref = self._backend.publish(
+                (
+                    artifact.with_repository(self)
+                    if metadata is None
+                    else Artifact(
+                        artifact.ref,
+                        self,
+                        local_path=artifact.local_path,
+                        metadata={**artifact.storage_metadata, **dict(metadata)},
+                    )
+                ),
+                expected_parent=expected_parent,
+                advance_head=advance_heads,
+            )
+        else:
+            ref = self._backend.publish_stored(
+                stored,
+                metadata={**artifact.storage_metadata, **dict(metadata or {})},
+                expected_parent=expected_parent,
+                advance_head=advance_heads,
+            )
         if advance_heads:
             with self._head_lock:
                 if activate:
@@ -662,9 +969,31 @@ class Repository(ArtifactRepository):
         return ref
 
     def discard(self, artifact: Artifact) -> None:
+        """Forget the staged snapshot or the view of a selection ``artifact``, and remove its local files.
+
+        A view of a selection is named by its revision, whatever object holds it: the view that ``select``
+        returned has no file, and a reader that made it local registered another object for the same view.
+        """
+        if artifact.ref.selection_view:
+            composed = self._local_artifacts.pop(artifact.ref.revision, None)
+            self.selections.pop(artifact.ref.revision, None)
+            if composed is not None:
+                composed.discard()
+            return
         if self._local_artifacts.get(artifact.ref.revision) is artifact:
             self._local_artifacts.pop(artifact.ref.revision, None)
             self.selections.pop(artifact.ref.revision, None)
+            self.stored_trees.pop(artifact.ref.revision, None)
+            composed = self.materialized_stored.pop(artifact.ref.revision, None)
+            if composed is not None:
+                composed.discard()
+            owned = self.owned_content.pop(artifact.ref.revision, None)
+            if owned is not None:
+                # The snapshot keeps the files. A failure leaves content that no job item names.
+                try:
+                    self.backend.discard_content(owned)
+                except ArtifactError:
+                    logger.warning("could not discard the stored content %s", owned)
         path = artifact.local_path
         artifact.discard()
         if path is not None:

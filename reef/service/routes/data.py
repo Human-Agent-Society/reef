@@ -254,7 +254,8 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         if request.method == "PUT":
             body = await read_object(request)
             return web.json_response(await asyncio.to_thread(hold_set, data, *names, body))
-        return web.json_response(await asyncio.to_thread(release_set, data, *names))
+        split = request.query.get("split")
+        return web.json_response(await asyncio.to_thread(release_set, data, *names, split))
 
     base = "/reef/namespaces/{owner}/data"
     transfers = "{transfer:" + "|".join(TRANSFER_KINDS) + "}"

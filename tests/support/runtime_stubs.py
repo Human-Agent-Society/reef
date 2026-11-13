@@ -265,7 +265,8 @@ class StubInferenceRuntime(InferenceRuntime):
         return self.served_model_name(scenario) or None
 
     def serve(self, artifact: Artifact) -> str:
-        path = artifact.local_path
+        # A runtime makes local the artifact that it loads, as the engines of ``reef.inference.serving`` do.
+        path = artifact.materialize().local_path if artifact.repository is not None else artifact.local_path
         marker = None if path is None else Path(path) / VERSION_FILE
         version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.revision
         self.served = version
