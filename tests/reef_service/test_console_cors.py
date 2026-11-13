@@ -26,7 +26,9 @@ def make_client(origins=(ORIGIN,)):
         return web.json_response({"scenario": request.headers.get("x-reef-scenario")})
 
     async def stream(request):
-        response = web.StreamResponse(headers={"content-type": "text/event-stream", "x-reef-artifact-id": "release-1"})
+        response = web.StreamResponse(
+            headers={"content-type": "text/event-stream", "x-reef-artifact-id": "artifact-1"}
+        )
         await response.prepare(request)
         await response.write(b"data: hello\n\n")
         await response.write_eof()

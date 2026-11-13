@@ -26,6 +26,7 @@ from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
 
 from recipes.sao import SAOJobData, SAOSamples
+from recipes.sao.processor import SAOSettings
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents
@@ -37,7 +38,6 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
-from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
@@ -53,7 +53,7 @@ from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.trainer import PendingTrainingResult
-from reef.train.trainer_builder import SpecTrainerBuilder, TrainerSpec
+from reef.train.trainer_builder import TrainerSpec, build_trainers
 from reef.train.types import JobData, PreparedCommit, TrainingCommit
 
 NUM_GPUS = 0
@@ -62,7 +62,7 @@ NUM_GPUS = 0
 def sao_pipeline(context: PipelineContext, *, accept_multi_turn: bool = False) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2sample=SAOSamples(context, SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
+        record2sample=SAOSamples(context, SAOSettings(accept_multi_turn_policy_samples=accept_multi_turn)),
         sample2job=SAOJobData(context, None, None),
     )
 
@@ -81,13 +81,12 @@ def preparing_trainer(records: ItemRecordStore, **options) -> Trainer:
 @pytest.mark.unit
 def test_one_trainer_spec_is_bound_to_the_only_component_and_refused_for_several() -> None:
     spec = TrainerSpec(name="recipe", stages=PipelineSettings.from_setting(None, spec=PipelineSpec(), environ={}))
-    builder = SpecTrainerBuilder()
 
     def components(*names: str) -> ScenarioComponents:
         return ScenarioComponents({name: ComponentSpec() for name in names})
 
     def build(served: ScenarioComponents) -> tuple[ComponentTrainer, ...]:
-        return builder.build_trainers(spec, "math", memory_records("math"), components=served, algorithm_states={})
+        return build_trainers(spec, "math", memory_records("math"), components=served, algorithm_states={})
 
     for served, bound in ((components(), "records"), (components("weights"), "weights")):
         (component_trainer,) = build(served)
@@ -113,7 +112,7 @@ def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> N
         commit=CommitRecord(
             scenario="math",
             commit_number=step,
-            snapshot=SnapshotRef(f"release:{step}", "base"),
+            snapshot=SnapshotRef(f"snapshot:{step}", "base"),
             checkpoint=True,
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,
@@ -279,7 +278,7 @@ def test_cookbook_processors_wait_for_references_before_rejecting_a_report_of_se
         context = PipelineContext("math")
         processor = TrainingPipeline(
             context,
-            record2sample=SAOSamples(context, SampleAssemblySettings()),
+            record2sample=SAOSamples(context, SAOSettings()),
             sample2job=SAOJobData(context, None, None),
         )
     processor.push(served_call("i1", 1))

@@ -30,6 +30,13 @@ class RefusingHandler(InferenceHandler):
 
 
 class Runtime(InferenceRuntime):
+    """A runtime without engines that answers through ``RefusingHandler``.
+
+    Values: ``any_artifact`` is ``serves_any_artifact``. With it, ``artifact_model`` names the base model at the
+    artifact's revision; without it, the base refusal applies. ``activate_checkpoint`` loads nothing and returns
+    "load-0". Purpose: the tests build an ``ArtifactEndpoint`` on it.
+    """
+
     def __init__(self, *, any_artifact: bool) -> None:
         super().__init__(base_url="http://runtime.invalid")
         self.any_artifact = any_artifact
@@ -44,10 +51,16 @@ class Runtime(InferenceRuntime):
         return self.any_artifact
 
     def artifact_model(self, artifact):
+        if not self.any_artifact:
+            return super().artifact_model(artifact)
         return PolicyModel("base", artifact.ref.revision)
 
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """No route: these tests give each artifact endpoint its route themselves."""
+        return None
 
 
 def call(url: str, path: str, body: object) -> tuple[int, dict]:
@@ -91,24 +104,24 @@ class StartedElsewhereRuntime(Runtime):
 
 @pytest.mark.unit
 def test_a_call_reaches_an_engine_that_another_process_started_with_the_engines_values() -> None:
-    release = Artifact(
+    artifact = Artifact(
         SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"
     )
     runtime = StartedElsewhereRuntime()
     served = ServedArtifact("artifact:r7", "https://engine.invalid", "engine-model")
-    with ArtifactEndpoint(runtime, release, served) as endpoint:
+    with ArtifactEndpoint(runtime, artifact, served) as endpoint:
         chat = {"model": "from-the-agent", "messages": [{"role": "user", "content": "ok"}]}
         assert call(endpoint.url, "/v1/chat/completions", chat) == (200, {"artifact_id": "artifact:r7"})
     assert runtime.engine.bodies == [{**chat, "model": "engine-model", "temperature": 0.2}]
 
 
 @pytest.mark.unit
-def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_to_a_status() -> None:
-    release = Artifact(
+def test_the_endpoint_answers_every_call_from_its_artifact_and_maps_each_failure_to_a_status() -> None:
+    artifact = Artifact(
         SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"
     )
     runtime = Runtime(any_artifact=True)
-    with ArtifactEndpoint(runtime, release) as endpoint:
+    with ArtifactEndpoint(runtime, artifact) as endpoint:
         chat = {"messages": [{"role": "user", "content": "ok"}]}
         assert call(endpoint.url, "/v1/chat/completions", chat) == (
             200,
@@ -123,8 +136,8 @@ def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_
         runtime.close_admission()
         assert call(endpoint.url, "/v1/chat/completions", chat)[0] == 503
     elsewhere = ServedArtifact("artifact:r7", "http://elsewhere.invalid", "m")
-    with ArtifactEndpoint(Runtime(any_artifact=True), release, elsewhere) as endpoint:
+    with ArtifactEndpoint(Runtime(any_artifact=True), artifact, elsewhere) as endpoint:
         status, body = call(endpoint.url, "/v1/chat/completions", {"messages": [{"content": "ok"}]})
         assert status == 502 and "no handler" in body["error"]["message"]
     with pytest.raises(ValueError, match="serves only its current artifact"):
-        ArtifactEndpoint(Runtime(any_artifact=False), release)
+        ArtifactEndpoint(Runtime(any_artifact=False), artifact)

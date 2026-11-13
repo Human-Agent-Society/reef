@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -41,12 +40,11 @@ from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorker
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.recipe.deployment import scenario_state_dirs
 from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
-from reef.scenario.factory import ItemStart, with_record2sample_configs
-from reef.scenario.live_objects import LiveObjects, check_recipe_objects, close_runtimes, scenario_components
+from reef.scenario.factory import ItemStart
+from reef.scenario.live_objects import LiveObjects, RecipeChecks, check_recipe_objects, close_runtimes
 from reef.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
@@ -67,6 +65,7 @@ from reef.train.job_queue import (
     TrainingJobWorker,
     cancel_request_jobs,
     cancel_scenario_job,
+    cancel_scenario_jobs,
     scenario_jobs,
 )
 from reef.train.manager import (
@@ -80,7 +79,6 @@ from reef.train.manager import (
     TrainFrom,
     TrainingManager,
 )
-from reef.train.trainer_builder import TrainerBuilder
 from reef.train.training_requests import RequestCancel, TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
@@ -143,7 +141,6 @@ class Dispatcher(
         work_retention_seconds: float = 7 * 24 * 3600.0,
         training_max_jobs: int = 1,
         training_manager: TrainingManager | None = None,
-        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         """``live``: the runtime, the job components, the data store and the served endpoint that this process
         built for ``recipe`` (``LiveObjects``); None is a process with none of them, which fits a recipe that only
@@ -196,9 +193,6 @@ class Dispatcher(
         (``ItemRecordStore``). Control runs the ``data_sync`` items that the data service adds after its writes
         (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
         which owns the task file store that the data store shares.
-
-        ``trainer_builder``: builds the trainers of each scenario. None builds each trainer from the
-        recipe's spec (``SpecTrainerBuilder``).
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
@@ -232,6 +226,7 @@ class Dispatcher(
                         self.queue,
                         self.job_directory_store,
                         backend_factory,
+                        checks=RecipeChecks(recipe),
                         worker_id=instance_id(f"training-{component.name}"),
                         local_artifact_dir=local_artifact_dir,
                         slots=training_max_jobs,
@@ -270,6 +265,8 @@ class Dispatcher(
             # Control's tracker also writes each training job's run into the job's item, for the job listing.
             tracker = JobExperimentRecorder(tracker, self.queue)
         self.experiment_tracker = tracker
+        #: Opens the artifact store of a scenario.
+        self.backend_factory = backend_factory
         self.registry = ScenarioRegistry(
             recipe,
             backend_factory,
@@ -282,7 +279,6 @@ class Dispatcher(
             lifecycle=self,
             served_models=coordination.served_models,
             training_requests=TrainingRequestQueue(self.queue),
-            trainer_builder=trainer_builder,
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
@@ -315,7 +311,9 @@ class Dispatcher(
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
-            self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
+            self.workers.add(
+                EndedWorkSweeper(coordination.work_queue, backend_factory, retention_seconds=work_retention_seconds)
+            )
             if training_manager is not None:
                 self.workers.add(TrainingManagerWorker(training_manager, self))
             if data_store is not None:
@@ -417,17 +415,27 @@ class Dispatcher(
         - Its ``served_models`` rows go, so the inference service answers it 404.
         - The workers drop the scenario, and a training job it runs is cancelled.
         - The loaded instance closes.
+        - The stored content of the scenario leaves the artifact store: the record files of its jobs, and any
+          checkpoint that no commit took (``RepositoryBackend.discard_all_content``).
         - The storage archives the records, the commits and the settings.
         - The recipe's own directories move to an ``archived`` sibling.
-        - The repository registration is archived, so the name is free again.
+        - The repository registration is archived. The archive also records that the scenario ID is never used
+          again (``CachedRepositoryBackendFactory.has_archived_registration``).
 
         Artifacts that other scenarios share stay.
+
+        What can refuse runs first: an unknown scenario, and a repository backend that cannot archive a
+        registration (``NotImplementedError``), change nothing. The steps then run in the order above. A delete
+        that fails at the discard of the content, because the artifact store did not answer, leaves the scenario
+        with its storage and its registration: it loads again on its next use, with no running job and without
+        the content that was discarded, and the same call again finishes the delete.
         """
         if "/" in scenario or scenario in ("", ".", ".."):
             raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         with self.record_retention_lock, self.registry.lock_for(scenario):
             if not self.registry.has(scenario):
                 raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
+            self.registry.require_archivable()
             # The inference service stops answering the scenario first, so no record reaches the archived store.
             if self.publisher is not None:
                 self.publisher.withdraw(scenario)
@@ -439,7 +447,16 @@ class Dispatcher(
                     # Nothing would read the job's checkpoints once its scenario is gone.
                     component_trainer.trainer.cancel_job()
                 dropped.close()
+            # A trainer adds a job to the queue before the commit that records it. Such a job is in no trainer's
+            # state, so the queue is asked: no job of the scenario runs on and stores files after the delete. A job
+            # that a cycle adds after this look, and that the cycle cannot cancel because its process stopped, is
+            # cancelled by the training worker, which finds the registration archived below
+            # (``TrainingJobWorker.refuses_deleted_scenario``).
+            cancel_scenario_jobs(self.queue, scenario)
             self.local_workers.close_replaced_instances(scenario)
+            # The discard can fail when the artifact store does not answer. It runs before the scenario's storage
+            # and registration are archived, so the scenario is whole and a repeated delete finishes.
+            self.backend_factory(scenario).discard_all_content()
             archived = [*self.archive_scenario_state(scenario), *self.registry.archive_registration(scenario)]
         self.registry.forget_lock(scenario)
         return {"scenario": scenario, "archived": archived}
@@ -573,21 +590,13 @@ class Dispatcher(
                 self.unload_if_idle(name)
 
     def archive_scenario_state(self, scenario: str) -> list[str]:
-        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
-        configs = self.storage.read_settings(scenario).record2sample_config
-        recipe = with_record2sample_configs(
-            self.recipe, scenario_components(self.recipe, self.live, scenario), configs
-        )
-        directories = scenario_state_dirs(recipe, scenario)
+        """Move the scenario's storage under an ``archived`` sibling (``ScenarioRegistry.archive_store``), and ask
+        each training service to do the same with what its component keeps for the scenario
+        (``JobQueueComponent.archive_scenario``). This process moves no directory of another service, and no
+        record-to-sample stage keeps a directory of its own."""
         moved = list(self.registry.archive_store(scenario))
-        for directory in directories:
-            if directory.exists():
-                destination = directory.parent / "archived" / f"{directory.name}-{stamp}"
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(directory), str(destination))
-                moved.append(str(destination))
+        for component in self.live.job_components():
+            component.archive_scenario(scenario)
         return moved
 
     def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
@@ -687,9 +696,11 @@ class Dispatcher(
         scenario has one component.
 
         Raise ``ScenarioNotFoundError`` for an unknown scenario, the errors of ``Scenario.resolve_artifact`` for an
-        artifact that is not one of the component, ``ReefError`` when the runtime serves one artifact and
-        ``served`` names more, and ``ValueError`` when this service does not run control or when an empty
-        ``served`` comes with a ``component``.
+        artifact that is not one of the component, and ``ValueError`` when this service does not run control or when
+        an empty ``served`` comes with a ``component``. Raise ``ReefError`` when ``served`` names more artifacts than
+        the runtime keeps loaded at once (``require_served_capacity``); that check precedes every change, so the
+        scenario then serves what it served, or still serves nothing, with the same commit history, routes and
+        traffic split.
         """
         if self.publisher is None:
             raise ValueError("this service does not run control, so it cannot change what a scenario serves")
@@ -711,6 +722,7 @@ class Dispatcher(
             name = current.artifact_snapshot(active_id, component)[0]
             for artifact_id in served:
                 current.artifact_snapshot(artifact_id, name)
+            self.require_served_capacity(current, name, sorted(served))
             beside = {artifact_id for artifact_id, entry in current.served_beside().items() if entry.component == name}
             others = set(served) - {active_id}
             # The artifact that is active now keeps its route while the new one starts.
@@ -725,6 +737,35 @@ class Dispatcher(
             self.publisher.write_traffic_weights(scenario, split)
             self.scenario_committed(current)
             return {"served": self.served_mapping(current)[name]}
+
+    def require_served_capacity(self, current: Scenario, component: str, artifact_ids: Sequence[str]) -> None:
+        """Raise ``ReefError`` when the runtime of ``current`` cannot keep ``artifact_ids`` loaded at once.
+
+        ``artifact_ids`` are all the artifacts of ``component`` that the scenario shall serve, in sorted order: one
+        or more. They are more than the runtime keeps loaded when ``component`` is the one that the runtime loads
+        (``ScenarioComponents.loaded_component``) and their count exceeds
+        ``InferenceRuntime.served_artifact_capacity``. An artifact of any other component loads nothing: the active
+        weights answer for it. The same holds for every artifact of a scenario without a runtime or without a loaded
+        component.
+
+        The count is that of the mapping alone. An artifact that the mapping stops takes no part in it, though it
+        can hold its engine for a while after the change; the runtime refuses a load that finds no free engine.
+        """
+        runtime = current.runtime
+        if runtime is None or component != current.components.loaded_component:
+            return
+        capacity = runtime.served_artifact_capacity
+        if capacity is None or len(artifact_ids) <= capacity:
+            return
+        limit = (
+            "answers only from the snapshot it has loaded"
+            if capacity == 1
+            else f"keeps at most {capacity} artifacts of component {component!r} loaded at once"
+        )
+        raise ReefError(
+            f"scenario {current.name!r}'s runtime {limit}, so it cannot serve the {len(artifact_ids)} artifacts "
+            f"that the mapping names: {', '.join(artifact_ids)}"
+        )
 
     def served_mapping(self, current: Scenario) -> dict[str, dict[str, int]]:
         """What ``current`` serves, by component: each served artifact of the component with its traffic weight.
@@ -1163,8 +1204,9 @@ class Dispatcher(
             runtime = current.runtime
             if runtime is None:
                 raise ReefError(f"scenario {scenario!r} has no runtime")
-            _, snapshot = current.resolve_artifact(artifact_id, component)
-            return runtime, snapshot.materialize()
+            # The candidate's own component is made local; the snapshot's other components stay in the store.
+            selected, snapshot = current.resolve_artifact(artifact_id, component)
+            return runtime, current.components.component_artifact(snapshot, selected.component).materialize()
 
     def candidate_task(self, scenario: str, task_name: str) -> Path:
         """The directory of the Harbor task ``task_name`` of ``scenario`` here (``CandidateArtifacts``)."""

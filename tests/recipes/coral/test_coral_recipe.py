@@ -77,7 +77,6 @@ def test_group_size_in_the_recipe_config_is_refused(key):
     [
         ({"record2sample": {"config": {"group_size": 1}}}, "at least two"),
         ({"sample2job": {"config": {"group_size": 2}}}, "CoralJobData: unknown config fields: group_size"),
-        ({"record2sample": {"config": {"max_staleness": -1}}}, "max_staleness must be a non-negative int"),
     ],
 )
 def test_bad_stage_config_is_refused_when_the_pipeline_builds(pipeline, message):

@@ -103,8 +103,9 @@ class TrainingJob:
     (the non-empty start: one that the component made, such as ``SavedCheckpoint.path``, or in a job that control
     queued the name of a snapshot, ``SnapshotStart.to_text``, which the training service replaces by the component's
     start of that snapshot before the component reads the job),
-    ``data`` (the job data directory that the job trains, ``reef.storage.job_data``; the component reads it
-    with ``job.read_data()`` and cuts it into optimizer batches by its own batch size),
+    ``data`` (the reference to the job data directory that the job trains, ``reef.storage.job_data``; a component
+    that trains on Reef's host reads it with ``job.read_data()`` and cuts it into optimizer batches by its own batch
+    size, and a component that runs the job elsewhere gives that place ``data_uri``),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
     trainer submits the job. The jobs of one scenario can run at the same time when the component has
     ``concurrent_jobs``; each starts from its own ``start``.
@@ -151,11 +152,12 @@ class TrainingJob:
 
     @property
     def data_dir(self) -> Path:
-        """The local job data directory: read it with ``read_data``."""
+        """The local job data directory: read it with ``read_data``. The first read copies it from a remote store."""
         return self.data.path
 
     def read_data(self) -> JobData:
-        """The job's data, without a request: its samples in job order, each task with its local directory."""
+        """The job's data, without a request: its samples in job order, each task with its local directory. The
+        read copies the directory and the tasks' directories from a remote store when the host does not hold them."""
         return self.data.read()
 
     @property
@@ -198,30 +200,40 @@ class SavedCheckpoint:
 
     ``step`` is a non-negative int, counted within the job. ``path`` is a
     non-empty directory path as the component wrote it, which a later job
-    can start from. ``artifact_path`` is the non-empty directory that Reef
-    publishes as a snapshot when it serves the checkpoint: the weights that
-    serving loads, without the training state that only the component reads
-    (for example ``path`` itself, or its Hugging Face export).
-    ``metrics`` is the backend's telemetry for the training that led to this
+    can start from. ``metrics`` is the backend's telemetry for the training that led to this
     checkpoint, a mapping that encodes as JSON, which Reef records without
-    reading. ``changed_parts`` is a frozenset of non-empty strings: empty in the value that a component makes, and
-    ``TrainingComponent.changed_parts`` of the checkpoint in the value that the training service writes into the
-    jobs queue. A component makes the value; ``JobLoop`` reads it.
+    reading.
+
+    Exactly one of ``artifact_path`` and ``content`` is a non-empty string, and the other is None:
+
+    - In the value that a component makes, ``artifact_path`` is the local directory that Reef publishes as a
+      snapshot: the weights that serving loads, without the training state that only the component reads (for
+      example ``path`` itself, or its Hugging Face export). The component does not change the directory after it
+      reports the checkpoint. ``changed_parts`` is empty.
+    - In the value that the training service writes into the jobs queue, ``content`` is the name under which
+      the training service stored the files of that directory in the artifact store of the job's scenario
+      (``RepositoryBackend.store_content``), and ``changed_parts`` is ``TrainingComponent.changed_parts`` of the
+      checkpoint, a frozenset of non-empty strings.
+
+    A component makes the first value; ``TrainingJobWorker`` makes the second of it, and ``JobLoop`` reads the
+    second: control commits the checkpoint by ``content`` and reads no path of the training service.
     """
 
     step: int
     path: str
-    artifact_path: str
+    artifact_path: str | None
     metrics: Mapping[str, Any] = field(default_factory=dict)
     changed_parts: frozenset[str] = frozenset()
+    content: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 0:
             raise ValueError("SavedCheckpoint.step must be a non-negative int")
         if not isinstance(self.path, str) or not self.path:
             raise ValueError("SavedCheckpoint.path must be a non-empty string")
-        if not isinstance(self.artifact_path, str) or not self.artifact_path:
-            raise ValueError("SavedCheckpoint.artifact_path must be a non-empty string")
+        named = [value for value in (self.artifact_path, self.content) if value is not None]
+        if len(named) != 1 or not isinstance(named[0], str) or not named[0]:
+            raise ValueError("SavedCheckpoint names exactly one of artifact_path and content, a non-empty string")
         if not isinstance(self.metrics, Mapping):
             raise TypeError("SavedCheckpoint.metrics must be a mapping")
         if not isinstance(self.changed_parts, frozenset) or not all(
@@ -274,8 +286,13 @@ class JobStatus:
 class ScenarioRoot:
     """A scenario's root snapshot, as one trainer's component sees it, and where the root came from.
 
-    Values: ``artifact`` is the trainer's component of the scenario's root snapshot (the snapshot itself when the
-    snapshot is flat), which ``materialize`` makes local. ``source`` is the root's ``RootSource``.
+    Values: ``artifact`` is the scenario's root snapshot, local or not. ``source`` is the root's ``RootSource``.
+    ``component`` is the trainer's component of the snapshot, or None when the trainer reads the whole snapshot (a
+    flat one). ``files`` is None, or the paths, relative to that component, of the only files that a reader of the
+    root reads (``TrainingBackendFacts.start_files``).
+
+    ``local_directory()`` is the directory of the component, made local (``Artifact.component_files``): with every
+    file when ``files`` is None, else with at least each file of ``files`` that it has.
 
     Purpose: ``ScenarioFactory`` makes it when it builds a scenario's trainers, and ``Trainer.build`` gives it to
     ``TrainingComponent.root_start`` for the first job of a trainer that has no committed state.
@@ -283,15 +300,23 @@ class ScenarioRoot:
 
     artifact: Artifact
     source: RootSource
+    component: str | None = None
+    files: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.artifact, Artifact) or not isinstance(self.source, RootSource):
             raise TypeError("a scenario root is an Artifact and a RootSource")
+        if self.component is not None and (not isinstance(self.component, str) or not self.component):
+            raise ValueError("a scenario root's component is a non-empty name or None")
+        if self.files is not None and (
+            not isinstance(self.files, tuple) or not all(isinstance(path, str) and path for path in self.files)
+        ):
+            raise ValueError("a scenario root's files are a tuple of relative paths or None")
 
     def local_directory(self) -> Path:
-        """The directory of the root's files, made local (``Artifact.materialize``); ``ValueError`` when the
-        artifact has no local files."""
-        local_path = self.artifact.materialize().local_path
+        """The directory of the root's component, made local as the class says; ``ValueError`` when the artifact
+        has no local files."""
+        local_path = self.artifact.component_files(self.component, self.files).local_path
         if local_path is None:
             raise ValueError(f"the root snapshot {self.artifact.ref.revision} has no local files to train from")
         return local_path
@@ -310,7 +335,7 @@ def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
                 name.removeprefix(prefix): value for name, value in source.inputs.items() if name.startswith(prefix)
             },
         )
-    return ScenarioRoot(root.artifact.component(component), source)
+    return ScenarioRoot(root.artifact, source, component, root.files)
 
 
 class TrainingBackendFacts(ABC):
@@ -322,16 +347,17 @@ class TrainingBackendFacts(ABC):
 
     Relation to the component: let ``component`` be the backend's ``TrainingComponent`` of the same settings. Then
     ``name``, ``artifact_format``, ``shares_scenarios`` and ``concurrent_jobs`` equal the component's,
-    ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``default_start_inputs`` equals
-    ``component.default_start_inputs``, ``check_root_start(root)`` raises exactly when
-    ``component.root_start(root)`` raises, and ``check_import_start(artifact_dir)`` exactly when
+    ``parameters_schema(kind)`` equals ``component.parameters_schema(kind)``, ``check_root_start(root)`` raises
+    exactly when ``component.root_start(root)`` raises, and ``check_import_start(artifact_dir)`` exactly when
     ``component.import_start(artifact_dir)`` raises, each with the same message. The component holds a value and
-    answers these members from it, so the two cannot differ. ``default_start().inputs`` equals
+    answers these members from it, so the two cannot differ. Only the facts state the default start: the
+    component has no ``default_start`` and no ``default_start_inputs``. ``default_start().inputs`` equals
     ``default_start_inputs``, and ``component.root_start`` accepts a root that holds ``default_start()``: the
     component starts training from the files that the facts write.
 
     A member reads at most the settings, the files that a caller hands it (``check_root_start`` reads the root
-    snapshot's files), and local paths that the settings name. No member writes a file, calls the backend's service
+    snapshot's files), and local paths that the settings name. ``check_root_start`` and ``check_import_start``
+    read no file of a start but those that ``start_files`` names, so control fetches only those. No member writes a file, calls the backend's service
     or needs a running component. What needs one stays on ``TrainingComponent`` and runs in the training service:
     the start of a job (``root_start``, ``import_start``), ``check_remote_artifact``, ``check_task_jobs``,
     ``check_job``, ``changed_parts`` and the jobs themselves.
@@ -386,6 +412,18 @@ class TrainingBackendFacts(ABC):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         """The JSON Schema of the complete parameters of a job of ``kind`` samples, or None when the backend
         declares none (``TrainingComponent.parameters_schema``)."""
+
+    @property
+    @abstractmethod
+    def start_files(self) -> tuple[str, ...] | None:
+        """The paths, relative to the trainer's component of a snapshot, of the only files that
+        ``check_root_start`` and ``check_import_start`` read; None when they read the whole component.
+
+        Control makes local only these files of a start before it calls the two checks
+        (``ScenarioRoot.files``, ``reef.train.job_queue.JobQueueComponent``), so a check of weights fetches no
+        weight file. A named file that the component does not have is missing from the directory, as it would be
+        from a whole copy. An empty tuple means that the checks read no file.
+        """
 
     @abstractmethod
     def check_root_start(self, root: ScenarioRoot) -> None:
@@ -488,15 +526,6 @@ class TrainingComponent(ABC):
         example a Tinker manifest that Tinker's sampler serves).
         """
 
-    @property
-    @abstractmethod
-    def default_start_inputs(self) -> Mapping[str, str]:
-        """The ``inputs`` of the backend's default start: the model and the settings that decide its content.
-
-        They equal ``TrainingBackendFacts.default_start_inputs`` of the same settings. The component writes no
-        default start: the backend's facts do (``TrainingBackendFacts.default_start``).
-        """
-
     def root_start(self, root: ScenarioRoot) -> str:
         """The start of the first job of a trainer whose scenario has the root snapshot ``root``.
 
@@ -508,9 +537,16 @@ class TrainingComponent(ABC):
         """
         return self.import_start(root.local_directory())
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        """The paths, relative to the trainer's component of a snapshot, of the only files that ``root_start`` and
+        ``snapshot_start`` read, or None for the whole component, the default. A caller makes local at least these
+        files (``Artifact.component_files``)."""
+        return None
+
     def snapshot_start(self, artifact: Artifact) -> str:
         """The start of a job that trains from ``artifact``, the trainer's component of a published snapshot,
-        materialized. The default is ``import_start`` of its directory. Raise ``ValueError`` when the component
+        materialized: with every file, or with at least those of ``start_files``. The default is ``import_start`` of its directory. Raise ``ValueError`` when the component
         cannot start from it, or when the artifact has no local files."""
         if artifact.local_path is None:
             raise ValueError(f"artifact {artifact.ref.revision!r} has no local files to train from")
@@ -583,11 +619,11 @@ class TrainingComponent(ABC):
 
     @abstractmethod
     def import_start(self, artifact_dir: Path) -> str:
-        """Take the published snapshot in ``release`` as the start of later jobs; return that start.
+        """Take the published snapshot in ``artifact_dir`` as the start of later jobs; return that start.
 
         Reef calls this when a trainer starts training from an artifact
         (``train-from``). The component copies what it trains
-        from into its own durable directory, since ``release`` can be
+        from into its own durable directory, since ``artifact_dir`` can be
         discarded later. Raise ``ValueError``, and change nothing, when the
         component cannot start from these weights.
         """
@@ -610,6 +646,33 @@ class TrainingComponent(ABC):
     @abstractmethod
     def cancel(self, job_id: str) -> None:
         """Stop the job, which then reports ``failed``; nothing for an unknown or ended job."""
+
+    def job_progress(self, job_id: str) -> Mapping[str, JsonValue] | None:
+        """Where the running job ``job_id`` stands now: a JSON object whose keys the component defines, or None
+        for a job that does not run or a component that reports none, the default.
+
+        The training worker copies the value into the job's queue item whenever it changes, and control reads it
+        there (``JobQueueComponent.job_progress``). No other process reads a file of the component for it.
+        """
+        return None
+
+    def job_records(self, job_id: str) -> Path | None:
+        """A local directory of the files that record how the ended job ``job_id`` ran, or None for a job that
+        kept none, the default.
+
+        The training worker stores the directory in the artifact store of the job's scenario when the job ends
+        (``reef.train.job_queue.job_records_content``), where control reads it for its pages.
+        """
+        return None
+
+    def archive_scenario(self, scenario: str) -> None:
+        """Move aside what the component keeps for ``scenario`` alone, after the scenario was deleted, so that a
+        new scenario of that name starts with none of it. The default keeps nothing for one scenario.
+
+        Only the process that runs the component's jobs moves its directories: control asks through the
+        ``training_checks`` queue (``JobQueueComponent.archive_scenario``).
+        """
+        return
 
     def start_jobs(self) -> None:
         """Start running jobs in this process: take the component's job state and resume the jobs that have not ended.

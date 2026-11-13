@@ -294,6 +294,7 @@ def test_remote_engines_keep_the_section_and_start_no_local_component(tmp_path):
         "inference_token_env": "GPU_HOST_TOKEN",
         "startup_timeout_s": 3600.0,
         "model_path": "Qwen/Qwen3-8B",
+        "slot_urls": [],
     }
     assert serving_config(config)["remote"] == config["reef"]["inference_remote"]
 
@@ -331,7 +332,7 @@ def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(
         component.close()
 
 
-def test_a_restart_serves_a_saved_release_and_trains_from_it(tmp_path, monkeypatch, objective, downloads):
+def test_a_restart_serves_a_saved_snapshot_and_trains_from_it(tmp_path, monkeypatch, objective, downloads):
     config, _ = resolve_deployment_config(local_engine_config(tmp_path), None, tmp_path / "serve.yaml")
     component, inference, _ = build(config, monkeypatch, Engines())
     math, _ = train(component, inference, objective, "math", 0)

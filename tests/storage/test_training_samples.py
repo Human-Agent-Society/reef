@@ -15,9 +15,9 @@ from reef.artifact import SnapshotRef
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.tasks import write_harbor_task
 from reef.storage.commits import CommitRecord
-from reef.storage.data import DataStore, MemoryDataStore, NewItem
+from reef.storage.data import TASK_PATH_READERS, DataStore, MemoryDataStore, NewItem
 from reef.storage.postgres import PostgresScenarioStorage
-from reef.storage.samples import TASK_PATH_READERS, SampleStore, consumed_sample_id, stage_item_id
+from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -165,7 +165,7 @@ def training_commit(step: int, *consumed: str, component: str | None = None) -> 
     return CommitRecord(
         scenario="math",
         commit_number=step,
-        snapshot=SnapshotRef(f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"snapshot:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         high_water_sequence=step,
@@ -314,3 +314,25 @@ def test_a_restart_counts_the_trained_samples_from_the_commits(open_durable_stor
             expected_commit_number=2, commit=training_commit(3, consumed_sample_id("upload"), component="b")
         )
         assert state.train_counts(["upload"]) == {"upload": {"a": 2, "b": 1}}
+
+
+def test_a_task_that_the_scenario_uses_through_benchmarks_is_listed_for_each_use_and_read_once(scenario):
+    samples = scenario.samples
+    scenario.task("task-a", "eval")
+    scenario.data.update("acme", ["task-a"], {"benchmarks": ["suite", "more"]})
+    scenario.data.hold("acme", "math", "benchmark", "suite", "train")
+    scenario.data.hold("acme", "math", "benchmark", "more", "train")
+    uses = [("task-a", "eval", None), ("task-a", "train", "suite"), ("task-a", "train", "more")]
+    assert [(stored.sample_id, stored.split, stored.held_set) for stored in samples.page(kind="task")] == uses
+    assert [(task.sample_id, task.split, task.held_set) for task in samples.listed_imported_tasks()] == uses
+    assert [task.held_set for task in samples.imported_tasks(split="eval")] == [None]
+    # A reader of the ID gets the item once: it trains when one of its uses trains.
+    (read,) = samples.read(["task-a", "task-a"])
+    assert (read.sample_id, read.split, read.held_set) == ("task-a", "train", None)
+    assert len(samples.task_paths(["task-a"])) == 1
+
+    for benchmark in ("suite", "more"):
+        assert scenario.data.release("acme", "math", "benchmark", benchmark, "train")
+    assert [stored.split for stored in samples.read(["task-a"])] == ["eval"]
+    scenario.data.update("acme", ["task-a"], {"scenarios": {"math": None}})
+    assert samples.read(["task-a"]) == () and samples.task_paths(["task-a"]) == ()

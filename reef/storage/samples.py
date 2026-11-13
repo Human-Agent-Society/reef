@@ -25,16 +25,27 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, MemoryDataStore, NewItem, StoredItem
+from reef.storage.data import (
+    MAX_QUERY_LIMIT,
+    TASK_PATH_READERS,
+    DataStore,
+    ItemConflictError,
+    ItemUse,
+    MemoryDataStore,
+    NewItem,
+    StoredItem,
+)
 from reef.storage.tasks import LocalTaskFileStore, SplitName, TaskFileStore
 
 #: Marks the ID of a consumed sample in a commit, so that it cannot be a record ID.
 CONSUMED_SAMPLE_PREFIX = "sample:"
 #: The prefix of a record ID in a ``TrainingState`` that a stage ended and no commit named when it was stored.
 ENDED_RECORD_PREFIX = "ended:"
-#: The task directories that ``SampleStore.task_paths`` reads from the task file store at the same time. A remote
-#: store downloads each directory, and one download at a time takes minutes for some thousand tasks.
-TASK_PATH_READERS = 8
+#: The prefix of the ``TrainingState`` key under which the samples service stores the served states that it judged
+#: a trainer's samples against (``TrainerSamples.write_judged``).
+JUDGED_KEY_PREFIX = "judged:"
+#: The metadata key with which the samples service marks a sample that a stage made as stale.
+STALE_KEY = "stale"
 
 SampleKind = Literal["trajectory", "task"]
 SAMPLE_KINDS: tuple[SampleKind, ...] = ("trajectory", "task")
@@ -57,12 +68,17 @@ class StoredSample:
 
     Values: ``sequence`` is the positive sequence of the scenario's use of the item (``DataStore.scenario_items``),
     or the item's sequence when ``SampleStore.read`` read it. ``sample_id`` is the item's ID. ``split`` is the
-    item's split for the scenario: ``train``, or ``eval`` for an imported task that an evaluation runs. ``sample`` is
+    split of that use: ``train``, or ``eval`` for an imported task that an evaluation runs. ``held_set`` is the
+    name of the held set that gives the use (RFC #1420), a benchmark for a task or a trajectory set for a
+    trajectory, or None for the use of the item's own mark. A scenario can use one item more than once, so two
+    values of one page can have one ``sample_id``. A value that ``SampleStore.read`` read stands for the item, not
+    for one use: its ``split`` is ``train`` when a use of the item trains, and its ``held_set`` is None. ``sample`` is
     the ``TrajectorySample`` or ``TaskSample`` of the item. ``train_counts`` maps each trainer (its component, or
     ``""`` for the only trainer of a scenario) to the positive number of its committed jobs that listed
     ``consumed_sample_id(sample_id)``. ``component`` is the trainer whose stage made the item, or None for an upload
     or an imported task. ``group`` is None or the name that the samples of one stage unit share, so that they train
-    together.
+    together. ``stale`` is True when ``component`` is not None and the samples service marked the item stale
+    (``TrainerSamples.mark_stale``); else False.
 
     Purpose: ``SampleStore`` makes it. A trainer's pipeline reads it, and the listings and evaluations too.
     """
@@ -74,6 +90,8 @@ class StoredSample:
     train_counts: Mapping[str, int] = field(default_factory=dict)
     component: str | None = None
     group: str | None = None
+    held_set: str | None = None
+    stale: bool = False
 
     @property
     def kind(self) -> SampleKind:
@@ -88,8 +106,8 @@ class StoredSample:
 class ListedSample:
     """What a listing shows of one sample: the values of ``StoredSample`` without its content.
 
-    Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component`` and ``group`` are those of
-    ``StoredSample``. ``kind`` is the kind of its item, and ``digest`` is the digest of its item: of a task, the
+    Values: ``sequence``, ``sample_id``, ``split``, ``train_counts``, ``component``, ``group``, ``held_set`` and ``stale``
+    are those of ``StoredSample``. ``kind`` is the kind of its item, and ``digest`` is the digest of its item: of a task, the
     digest of its files.
 
     Purpose: ``SampleStore.listing`` and ``SampleStore.listed_imported_tasks`` make it, and the listing routes read
@@ -104,13 +122,17 @@ class ListedSample:
     train_counts: Mapping[str, int]
     component: str | None
     group: str | None
+    held_set: str | None = None
+    stale: bool = False
 
 
 class TrainingState(ABC):
     """The training state of one scenario: what its trainers trained and consumed.
 
     Values: the train count of each sample ID and trainer, a positive int, and the IDs of the records that each
-    trainer's stages consumed. The train count of a sample and a trainer is the number of that trainer's commits that
+    trainer's stages consumed. Under the key ``judged:<trainer>`` (``JUDGED_KEY_PREFIX``) in place of a trainer, the
+    consumed IDs are ``<commit number> <rule>``: the served histories at which the samples service judged that
+    trainer's samples, and the staleness rule of each judgment. The train count of a sample and a trainer is the number of that trainer's commits that
     list the sample (``consumed_sample_id``), so only a commit changes it. A train count stays when its item leaves
     the scenario, so an item that comes back keeps it.
 
@@ -155,7 +177,7 @@ class SampleStore:
     ``state`` its training state.
 
     Purpose: ``ScenarioStorage.sample_store`` makes it for an open scenario. The listings and evaluations read it,
-    and the scenario factory's trainer builder gives each trainer its ``TrainerSamples`` (``for_trainer``).
+    and ``reef.train.trainer_builder.build_trainers`` gives each trainer its ``TrainerSamples`` (``for_trainer``).
     """
 
     data: DataStore
@@ -188,7 +210,7 @@ class SampleStore:
             )
             if found:
                 return found
-            after_sequence = uses[-1][0]
+            after_sequence = uses[-1].sequence
         return ()
 
     def listing(
@@ -200,20 +222,23 @@ class SampleStore:
         uses = self.data.scenario_items(
             self.owner, self.scenario, kinds=kinds, after=after_sequence, limit=limit, content=False
         )
-        counts = self.state.train_counts([item.item_id for _, item in uses])
-        return tuple(self.listed_sample(sequence, item, counts.get(item.item_id, {})) for sequence, item in uses)
+        counts = self.state.train_counts([use.item.item_id for use in uses])
+        return tuple(self.listed_sample(use, counts.get(use.item.item_id, {})) for use in uses)
 
-    def listed_sample(self, sequence: int, item: StoredItem, train_counts: Mapping[str, int]) -> ListedSample:
+    def listed_sample(self, use: ItemUse, train_counts: Mapping[str, int]) -> ListedSample:
+        item = use.item
         own = self.own_origin(item)
         return ListedSample(
-            sequence,
+            use.sequence,
             item.item_id,
             cast(SampleKind, item.kind),
             item.digest,
-            cast(SplitName, item.scenarios[self.scenario]),
+            cast(SplitName, use.split),
             train_counts,
             None if own is None else own["component"],
             None if own is None else item.metadata.get("group"),
+            use.held_set,
+            own is not None and item.metadata.get(STALE_KEY) is True,
         )
 
     def own_origin(self, item: StoredItem) -> Mapping[str, Any] | None:
@@ -222,23 +247,18 @@ class SampleStore:
         return origin if isinstance(origin, Mapping) and origin.get("scenario") == self.scenario else None
 
     def read(self, sample_ids: Sequence[str]) -> tuple[StoredSample, ...]:
-        """The samples of ``sample_ids`` that the scenario uses, in the order of their items. The store reads them
+        """The samples of ``sample_ids`` that the scenario uses, one for each item, in the order of their items. The
+        split of a sample is ``train`` when a use of its item trains, else ``eval``. The store reads them
         ``MAX_QUERY_LIMIT`` at a time: a request can name tens of thousands of samples, and one read for each would
         hold the trainer's lock for minutes."""
-        items = sorted(
-            (
-                item
-                for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT)
-                for item in self.data.read_many(self.owner, batch)
-                if self.scenario in item.scenarios
-            ),
-            key=lambda item: item.sequence,
-        )
-        return tuple(
-            stored
-            for batch in batched(items, MAX_QUERY_LIMIT)
-            for stored in self.stored([(item.sequence, item) for item in batch])
-        )
+        uses: list[ItemUse] = []
+        for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT):
+            splits = self.data.item_splits(self.owner, self.scenario, batch)
+            for item in self.data.read_many(self.owner, list(splits)):
+                split = "train" if "train" in splits[item.item_id] else "eval"
+                uses.append(ItemUse(item.sequence, item, split))
+        uses.sort(key=lambda use: use.sequence)
+        return tuple(stored for batch in batched(uses, MAX_QUERY_LIMIT) for stored in self.stored(batch))
 
     def task_paths(self, sample_ids: Sequence[str]) -> tuple[Path, ...]:
         """The task directories of the tasks of ``sample_ids`` that the scenario uses, in the order of their items.
@@ -251,24 +271,26 @@ class SampleStore:
             (
                 item
                 for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT)
-                for item in self.data.read_many(self.owner, batch)
-                if self.scenario in item.scenarios and item.kind == "task"
+                for item in self.data.read_many(
+                    self.owner, list(self.data.item_splits(self.owner, self.scenario, batch)), content=False
+                )
+                if item.kind == "task"
             ),
             key=lambda item: item.sequence,
         )
         with ThreadPoolExecutor(max_workers=TASK_PATH_READERS) as readers:
             return tuple(readers.map(self.data.task_path, items))
 
-    def stored(self, uses: Sequence[tuple[int, StoredItem]]) -> tuple[StoredSample, ...]:
+    def stored(self, uses: Sequence[ItemUse]) -> tuple[StoredSample, ...]:
         """The samples of the uses ``uses`` that are trajectories or tasks, with their train counts."""
-        samples = [(sequence, item) for sequence, item in uses if item.kind in SAMPLE_KINDS]
-        counts = self.state.train_counts([item.item_id for _, item in samples])
-        return tuple(self.stored_sample(sequence, item, counts.get(item.item_id, {})) for sequence, item in samples)
+        samples = [use for use in uses if use.item.kind in SAMPLE_KINDS]
+        counts = self.state.train_counts([use.item.item_id for use in samples])
+        return tuple(self.stored_sample(use, counts.get(use.item.item_id, {})) for use in samples)
 
-    def stored_sample(self, sequence: int, item: StoredItem, train_counts: Mapping[str, int]) -> StoredSample:
-        """The sample of ``item``. An item that a stage of this scenario made trains for that stage's trainer, with
-        its group, its sample's group and records, and, for a task, its sample's metadata."""
-        split = cast(SplitName, item.scenarios[self.scenario])
+    def stored_sample(self, use: ItemUse, train_counts: Mapping[str, int]) -> StoredSample:
+        """The sample of the use ``use``. An item that a stage of this scenario made trains for that stage's trainer,
+        with its group, its sample's group and records, and, for a task, its sample's metadata."""
+        item, split = use.item, cast(SplitName, use.split)
         own = self.own_origin(item)
         records = () if own is None else tuple(own["records"])
         sample: TrajectorySample | TaskSample
@@ -289,7 +311,10 @@ class SampleStore:
             )
         component = None if own is None else own["component"]
         group = None if own is None else item.metadata.get("group")
-        return StoredSample(sequence, item.item_id, split, sample, train_counts, component, group)
+        stale = own is not None and item.metadata.get(STALE_KEY) is True
+        return StoredSample(
+            use.sequence, item.item_id, split, sample, train_counts, component, group, use.held_set, stale
+        )
 
     def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         """Every task that the scenario uses and that no stage of it made, in use order; only ``split``'s if given."""
@@ -354,11 +379,12 @@ class TrainerSamples:
         samples: Sequence[tuple[str, Sample]],
         *,
         lineage: Mapping[str, str] | None = None,
+        stale: bool = False,
     ) -> int:
         """Save the samples that the stages of ``trainer`` made from ``record_ids`` as items that the scenario uses,
         then mark the records consumed; return the number of new items. ``lineage`` adds top-level metadata that
         names the sample processing tasks of the samples (``TrainingPipeline.lineage``), so a query by group finds
-        them.
+        them. With ``stale``, the samples are stored with the stale mark (``mark_stale``).
 
         The sample named ``name`` is the item ``stage_item_id(scenario, name)``. An item that exists stays as it is,
         so a stage that makes a sample again, after a restart, changes nothing. ``record_ids`` is empty for samples
@@ -379,6 +405,7 @@ class TrainerSamples:
                 "scenarios": {store.scenario: "train"},
                 "origin": origin,
                 **({"group": group} if group is not None else {}),
+                **({STALE_KEY: True} if stale else {}),
                 **(lineage or {}),
             }
             try:
@@ -416,6 +443,31 @@ class TrainerSamples:
             self.trainer, [f"{ENDED_RECORD_PREFIX}{record_id}" for record_id in sorted(record_ids)]
         )
 
+    def mark_stale(self, sample_ids: Sequence[str]) -> None:
+        """Mark ``sample_ids``, samples that the stages of ``trainer`` made, stale: the item's metadata ``stale`` is
+        true. No automatic job takes such a sample; a training request can still name it. The mark stays, so a
+        restart reads the same decision."""
+        for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT):
+            self.store.data.update(self.store.owner, list(batch), {STALE_KEY: True})
+
+    def judged_commit(self, rule: str) -> int:
+        """The newest ``ServedArtifacts.commit_number`` at which the samples service judged the samples of
+        ``trainer`` under the staleness rule ``rule``, or -1 before the first such judgment. The training state keeps
+        rows only, ``<commit number> <rule>``: one for each judgment, and the largest commit number of ``rule``
+        counts, so a row written twice or out of order changes nothing."""
+        judged = self.store.state.consumed_record_ids(f"{JUDGED_KEY_PREFIX}{self.trainer}")
+        return max(
+            (int(row.split(" ", 1)[0]) for row in judged if row.split(" ", 1)[1:] == [rule]),
+            default=-1,
+        )
+
+    def write_judged(self, commit_number: int, rule: str) -> None:
+        """Store that the samples service judged the samples of ``trainer`` at the served history of
+        ``commit_number`` under the staleness rule ``rule``, a string without spaces."""
+        if " " in rule:
+            raise ValueError("a staleness rule has no spaces")
+        self.store.state.consume_records(f"{JUDGED_KEY_PREFIX}{self.trainer}", [f"{commit_number} {rule}"])
+
     def ended_record_ids(self) -> frozenset[str]:
         """The records that the stages of ``trainer`` ended (``end_records``), whether a commit names them or not."""
         return frozenset(
@@ -427,7 +479,9 @@ class TrainerSamples:
 
 __all__ = [
     "CONSUMED_SAMPLE_PREFIX",
+    "JUDGED_KEY_PREFIX",
     "SAMPLE_KINDS",
+    "STALE_KEY",
     "ListedSample",
     "MemoryTrainingState",
     "SampleKind",

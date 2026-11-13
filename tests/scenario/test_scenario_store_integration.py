@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import pytest
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core.errors import ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.pipeline_context import PipelineContext
 from reef.recipe.base import Recipe
+from reef.record2sample import NoSamples
 from reef.scenario.live_objects import LiveObjects
 from reef.storage.commits import CommitRecord
 from reef.storage.data import DataStore
@@ -24,8 +28,8 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore, TaskStorage
+from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
-from reef.train.trainer_builder import TrainerBuilder
 from reef.train.types import TrainingCommit
 
 
@@ -124,22 +128,21 @@ class OpaqueStorage(ScenarioStorage):
         self._inner.close()
 
 
-class FailingTrainers(TrainerBuilder):
-    def build_trainers(
-        self,
-        specs,
-        scenario,
-        records,
-        *,
-        components,
-        algorithm_states,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
-    ):
+class FailingSamples(NoSamples):
+    """A record-to-sample stage that fails when a scenario builds it."""
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
         raise RuntimeError("injected trainers failure")
+
+
+@dataclass(frozen=True)
+class FailingStageRecipe(Recipe):
+    """A recipe whose trainer cannot be built: its record-to-sample stage is ``FailingSamples``."""
+
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(record2sample=FailingSamples)
 
 
 class IncompleteRecords(RecordStore):
@@ -255,11 +258,8 @@ def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(
         assert factory.events.index(("close", "math")) < factory.events.index(("archive", "math"))
         assert dispatcher.prune_record_archives(retention) == 1
         code.records.append(trace("survivor", "code"))
-        replacement = dispatcher.get_or_create_scenario("math")
-        assert replacement is not None
-        assert replacement is not math
-        assert replacement.records.count("math") == 0
-        assert replacement.store.history() == ()
+        with pytest.raises(ScenarioDeletedError):
+            dispatcher.get_or_create_scenario("math")
         assert dispatcher.read_record("code", "survivor") is not None
     finally:
         dispatcher.close()
@@ -271,11 +271,10 @@ def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(
 def test_failed_construction_closes_injected_store(tmp_path: Path, failure_point: str) -> None:
     factory = OpaqueStorage(tmp_path / "private-store", fail_recovery=failure_point == "recovery")
     dispatcher = Dispatcher(
-        Recipe(),
+        FailingStageRecipe() if failure_point == "trainers" else Recipe(),
         backend_factory(tmp_path),
         scenario_storage=factory,
         coordination=memory_coordination(),
-        trainer_builder=FailingTrainers() if failure_point == "trainers" else None,
     )
     try:
         with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):

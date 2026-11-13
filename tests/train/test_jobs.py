@@ -55,16 +55,12 @@ class FakeComponent(TrainingComponent):
     def concurrent_jobs(self) -> bool:
         return self.runs_concurrent_jobs
 
-    @property
-    def default_start_inputs(self) -> dict[str, str]:
-        return {}
-
     def root_start(self, root: ScenarioRoot) -> str:
         return "fake:base"
 
-    def import_start(self, release: Path) -> str:
-        self.imported.append(release)
-        return f"fake:{release.name}"
+    def import_start(self, artifact_dir: Path) -> str:
+        self.imported.append(artifact_dir)
+        return f"fake:{artifact_dir.name}"
 
     def submit(self, job: TrainingJob) -> None:
         self.jobs.append(job)
@@ -219,7 +215,7 @@ def test_a_checkpoint_moves_the_training_start_only_for_the_job_that_continues_i
     loop = loop_with(component)
     named, continuing = RunningJob("named", "fake:a1", train_from="a1"), RunningJob("continuing", "fake:base")
     state = JobLoopState("fake:base", (named, continuing))
-    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"))
+    saved = SavedCheckpoint(1, str(tmp_path / "1"), None, content="named:1")
 
     published = loop.publish(state, named, saved).result
     # The commit names the start of the job, so its artifact does not become the training start.
@@ -242,7 +238,7 @@ def test_poll_reports_the_first_job_with_news_and_an_end_removes_only_that_job(c
     for job in jobs:
         component.statuses[job.job_id] = JobStatus(job.job_id, "running")
     assert loop.poll(state) is None
-    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"))
+    saved = SavedCheckpoint(1, str(tmp_path / "1"), None, content="job-3:1")
     component.statuses["job-2"] = JobStatus("job-2", "finished")
     component.statuses["job-3"] = JobStatus("job-3", "running", (saved,))
     ended = loop.poll(state).result
@@ -271,11 +267,13 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
     state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
     job_id = state.jobs[0].job_id
     assert loop.poll(state) is None
-    first = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"), {"loss": 0.5})
+    first = SavedCheckpoint(1, str(tmp_path / "1"), None, {"loss": 0.5}, content="stored:1")
     component.statuses[job_id] = JobStatus(job_id, "running", (first,))
     publication = loop.poll(state)
     published = publication.result
-    assert published.artifact is not None and published.artifact.local_path == tmp_path / "1-release"
+    # The commit names the stored content: control holds no file of the checkpoint.
+    assert published.artifact is not None
+    assert (published.artifact.content, published.artifact.local_path) == ("stored:1", None)
     # The commit carries the training metrics and the checkpoint's place in its job, and no selection.
     assert published.metrics == {
         "loss": 0.5,
@@ -352,7 +350,7 @@ def test_a_state_from_before_concurrent_jobs_reads_as_one_job_that_continues_the
 def test_a_checkpoint_publication_refuses_a_training_metric_that_it_would_overwrite(component, tmp_path):
     loop = loop_with(component)
     state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
-    reserved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1"), {"training_job": 1})
+    reserved = SavedCheckpoint(1, str(tmp_path / "1"), None, {"training_job": 1}, content="stored:1")
     with pytest.raises(ValueError, match="training metrics name 'training_job'"):
         loop.publish(state, state.jobs[0], reserved)
 
@@ -394,8 +392,8 @@ def job_trainer(state: JobLoopState, component: TrainingComponent) -> Trainer:
 def test_start_from_an_imported_artifact_cancels_the_continuing_job_and_keeps_a_job_with_its_own_start(component):
     named = RunningJob("job-2", "fake:a1", train_from="a1")
     trainer = job_trainer(JobLoopState("/start", (RunningJob("job-1", "/start"), named), 1, FINISHED), component)
-    trainer.start_from(trainer.import_start(Artifact.local(Path("/releases/old"))))
-    assert component.imported == [Path("/releases/old")]
+    trainer.start_from(trainer.import_start(Artifact.local(Path("/snapshots/old"))))
+    assert component.imported == [Path("/snapshots/old")]
     assert component.cancelled == ["job-1"]
     # The job with its own start runs on, and the jobs that ended stay counted.
     assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old", (named,), 1, FINISHED)
@@ -407,18 +405,18 @@ def test_an_import_is_refused_without_a_change_when_the_trainer_cannot_start(com
     running = JobLoopState("/start", (RunningJob("job-1", "/start"),))
     trainer = job_trainer(running, component)
 
-    def refuse(release):
+    def refuse(artifact_dir):
         raise ValueError("these weights cannot train")
 
     monkeypatch.setattr(component, "import_start", refuse)
     with pytest.raises(TrainingStartRefusedError, match="these weights cannot train"):
-        trainer.start_from(trainer.import_start(Artifact.local(Path("/releases/old"))))
+        trainer.start_from(trainer.import_start(Artifact.local(Path("/snapshots/old"))))
     assert component.cancelled == []
     assert JobLoopState.from_dict(trainer.state) == running
     # A trainer that trains nothing has no start to set.
     observer = Trainer.build("math", memory_records("math"), pipeline_factory=threshold_pipeline)
     with pytest.raises(TrainingStartRefusedError, match="trains nothing"):
-        observer.import_start(Artifact.local(Path("/releases/old")))
+        observer.import_start(Artifact.local(Path("/snapshots/old")))
 
 
 @pytest.mark.unit
@@ -436,7 +434,7 @@ def test_start_from_is_refused_while_a_commit_is_pending(component):
 
 @pytest.mark.unit
 def test_a_poll_result_is_dropped_when_a_new_start_was_set_while_the_poll_ran(tmp_path):
-    saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
+    saved = SavedCheckpoint(0, str(tmp_path / "0"), None, content="stored:0")
 
     class StartDuringStatus(FakeComponent):
         trainer: Trainer
@@ -461,7 +459,7 @@ def test_a_restarted_trainer_polls_its_running_job_before_it_reserves_a_batch(co
     assert trainer.job_running
     assert trainer.advance_job() is None
     assert trainer.pending_job_data is None and component.jobs == []
-    saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
+    saved = SavedCheckpoint(0, str(tmp_path / "0"), None, content="stored:0")
     component.statuses["job-1"] = JobStatus("job-1", "running", (saved,))
     published = trainer.advance_job()
     assert published is not None and published.metrics["training_job"]["event"] == "checkpoint"
@@ -516,7 +514,7 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     submitted = trainer.advance_job()
     trainer.settle_commit(trainer.prepare_commit(submitted))
     [job] = component.jobs
-    saved = SavedCheckpoint(0, str(tmp_path / "0"), str(tmp_path / "0"))
+    saved = SavedCheckpoint(0, str(tmp_path / "0"), None, content="stored:0")
     component.statuses[job.job_id] = JobStatus(job.job_id, "running", (saved,))
     published = trainer.advance_job()
     trainer.settle_commit(trainer.prepare_commit(published))
@@ -587,7 +585,8 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
         pipeline_factory=lambda context: TrainingPipeline(
             context, sample2job=TrajectoryAndTaskJobData(context, None, 1)
         ),
-        job_loop=loop_with(component),
+        # The job's tasks are in the task file store of the samples' data store, so the job loop reads them there.
+        job_loop=JobLoop(component, scenario="math", data_store=samples.data),
         training_mode="manual",
         samples=samples.for_trainer(""),
         # The recipe gives trajectory jobs SFT; task jobs take their parameters from their training request.
@@ -611,3 +610,35 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
         "TrajectorySample",
         "TaskSample",
     ]
+
+
+def test_a_task_in_a_train_benchmark_and_an_eval_benchmark_trains_once(component, tmp_path):
+    session, samples = open_sample_store(tmp_path / "records", "math")
+    task = write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path)
+    data, owner = samples.data, samples.owner
+    data.create(owner, [NewItem("task-a", task, {"kind": "task", "benchmarks": ["suite", "more", "held"]})])
+    # The scenario uses the task three times: twice to train, and then once to evaluate.
+    for benchmark, split in (("suite", "train"), ("more", "train"), ("held", "eval")):
+        data.hold(owner, "math", "benchmark", benchmark, split)
+    trainer = Trainer.build(
+        "math",
+        session.records,
+        pipeline_factory=lambda context: TrainingPipeline(
+            context, sample2job=TrajectoryAndTaskJobData(context, None, 1)
+        ),
+        job_loop=JobLoop(component, scenario="math", data_store=data),
+        samples=samples.for_trainer(""),
+        job_parameters={"task": {"objective": "provided:Objective"}},
+        root=STUB_ROOT,
+    )
+    trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
+    (job,) = component.jobs
+    # The later eval use does not take the task from the trainer, and the job holds the task once.
+    assert [sample.metadata["task"]["name"] for sample in job.read_data().samples] == ["task-a"]
+    component.statuses[job.job_id] = JobStatus(job.job_id, "finished")
+    trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
+    # A new train use of the trained task starts no second job.
+    data.update(owner, ["task-a"], {"benchmarks": ["suite", "more", "held", "again"]})
+    data.hold(owner, "math", "benchmark", "again", "train")
+    trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
+    assert len(component.jobs) == 1

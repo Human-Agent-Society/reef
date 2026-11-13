@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.storage.durable_files import read_json, write_json
-from reef.storage.job_data import JobDataRef
+from reef.storage.job_data import JobDataRef, LocalJobData
 from reef.train.component import JobStatus, SavedCheckpoint, TrainingComponent, TrainingJob
 
 logger = logging.getLogger(__name__)
@@ -39,7 +39,7 @@ def submitted_job(job_id: str, backend: str, submitted: Mapping[str, Any]) -> Tr
         job_id,
         backend,
         submitted["start"],
-        JobDataRef.from_dict(data, Path(data["path"]), tuple(Path(path) for path in data["task_paths"])),
+        JobDataRef.from_dict(data, LocalJobData(Path(data["path"]), tuple(Path(path) for path in data["task_paths"]))),
         submitted["parameters"],
         scenario=submitted["scenario"],
         request_id=submitted.get("request_id"),
@@ -169,6 +169,7 @@ class LocalJobComponent(TrainingComponent):
                 {
                     "scenario": job.scenario,
                     "start": job.start,
+                    # The job's process has no data store, so the file names the local copies.
                     "data": {
                         **job.data.to_dict(),
                         "path": str(job.data_dir),

@@ -272,7 +272,7 @@ A ``TrainingComponent`` runs bounded training jobs with its framework's own
 training loop, for example Slime or Tinker. Reef submits a job, reads its
 status, and can cancel it; the component saves checkpoints. A
 ``SavedCheckpoint`` names the directory a later job starts from and the
-directory Reef publishes as a snapshot.
+directory whose files the training service stores in the artifact backend, where Reef commits them as a snapshot.
 
 Training job
 ------------
@@ -334,11 +334,11 @@ artifact that answered by ``artifact_id``.
 Staleness
 ---------
 
-The number of artifacts that a scenario served after the artifact that
-produced a sample, bounded by the record-to-sample stage's ``max_staleness``
-(``pipeline.record2sample.config.max_staleness``). Zero trains a sample only
-while the artifact that produced it serves. The record-to-sample stage checks
-it before job data forms.
+Whether a stored sample may still train, given the artifacts that the
+scenario served after the artifact that produced it. The record-to-sample
+stage gives the rule, and the samples service marks a stale sample in the
+store. An on-policy stage trains a sample only while the artifact that
+produced it serves.
 
 Reported and computed feedback
 ------------------------------

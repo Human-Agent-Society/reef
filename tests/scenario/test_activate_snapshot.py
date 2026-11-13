@@ -19,7 +19,7 @@ def checkpoint(tmp_path: Path) -> Artifact:
     return Artifact.local(root)
 
 
-def test_a_release_loads_for_its_scenario_only_on_a_runtime_of_per_scenario_adapters(tmp_path: Path) -> None:
+def test_a_snapshot_loads_for_its_scenario_only_on_a_runtime_of_per_scenario_adapters(tmp_path: Path) -> None:
     saved = checkpoint(tmp_path)
     adapters, shared = StubInferenceRuntime(per_scenario_adapters=True), StubInferenceRuntime()
     activate_snapshot(WEIGHTS, saved, adapters, "math")

@@ -66,11 +66,13 @@ class BlockingLostAckBackend(InMemoryRepositoryBackend):
     release = Event()
     failed = False
 
-    def publish(self, artifact, *, expected_parent, advance_head=True):
+    def publish_stored(self, files, *, metadata, expected_parent, advance_head=True):
         type(self).started.set()
         if not type(self).release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release blocked publication")
-        ref = super().publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
+        ref = super().publish_stored(
+            files, metadata=metadata, expected_parent=expected_parent, advance_head=advance_head
+        )
         if not type(self).failed:
             type(self).failed = True
             raise ArtifactPublicationError("lost publication acknowledgement")
@@ -139,11 +141,11 @@ def start_dispatcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     opened = []
 
-    def start(backend_type=None, *, experiment_tracker=None, max_staleness=0, **component_options):
+    def start(backend_type=None, *, experiment_tracker=None, max_artifact_lag=0, **component_options):
         component = DurableComponent(tmp_path / "checkpoints", **component_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(directory=tmp_path / "repository")
         dispatcher = Dispatcher(
-            TestPolicyRecipe(max_staleness=max_staleness),
+            TestPolicyRecipe(max_artifact_lag=max_artifact_lag),
             factory,
             live=live_objects(component, component.inference),
             local_artifact_dir=tmp_path / "staged",
@@ -329,7 +331,7 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
 
 
 @pytest.mark.unit
-def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None:
+def test_two_jobs_form_one_deterministic_snapshot_chain(start_dispatcher) -> None:
     component, dispatcher = start_dispatcher()
     _submit_pair(dispatcher)
     _wait_for_jobs(dispatcher, 1)
@@ -443,7 +445,7 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
     # The root snapshot answers the second pair while the first job trains, so that pair trains one artifact behind.
-    _, dispatcher = start_dispatcher(experiment_tracker=tracker, max_staleness=1)
+    _, dispatcher = start_dispatcher(experiment_tracker=tracker, max_artifact_lag=1)
     # The trainer's cycle executes while it submits the first job: hold the submission.
     started, release = _hold_job_submission(monkeypatch)
     _submit_pair(dispatcher)
@@ -452,10 +454,10 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     samples_release = Event()
     produce_samples = Trainer.produce_samples
 
-    def held_samples(self: Trainer, progress=None) -> bool:
+    def held_samples(self: Trainer, selection=None, served=None) -> bool:
         if not samples_release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release the held samples service")
-        return produce_samples(self, progress)
+        return produce_samples(self, selection, served)
 
     monkeypatch.setattr(Trainer, "produce_samples", held_samples)
     _submit_pair(dispatcher, "2")

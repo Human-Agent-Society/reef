@@ -79,8 +79,8 @@ class _ReefClient:
         self.inferences: list[dict] = []
         self.reports: list[dict] = []
 
-    def inference_with_record(self, scenario, path, payload, *, recipe=None, release_id=None):
-        assert (scenario, path, recipe, release_id) == (
+    def inference_with_record(self, scenario, path, payload, *, recipe=None, artifact_version=None):
+        assert (scenario, path, recipe, artifact_version) == (
             "guidance-smoke",
             "/v1/chat/completions",
             None,
@@ -92,8 +92,8 @@ class _ReefClient:
         content = "malformed guidance" if index == 0 else f"<guidance>improve strategy {index}</guidance>"
         return {"choices": [{"message": {"content": content}}]}, f"receipt-{index}"
 
-    def report(self, scenario, payload, *, recipe=None, release_id=None):
-        assert (scenario, recipe, release_id) == ("guidance-smoke", None, None)
+    def report(self, scenario, payload, *, recipe=None, artifact_version=None):
+        assert (scenario, recipe, artifact_version) == ("guidance-smoke", None, None)
         with self._lock:
             self.reports.append(payload)
         return {}

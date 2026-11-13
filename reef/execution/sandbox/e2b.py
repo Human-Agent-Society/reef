@@ -7,6 +7,14 @@ The template is the harness's pinned binary on Node 22; one Reef builds on
 first use (about a minute) when the alias does not exist yet. E2B grants a
 sandbox at most an hour when it is created, so a session that runs longer
 asks for the hour again before it ends (:class:`SandboxKeeper`).
+
+``KillOnTimeoutE2BEnvironment`` reuses Harbor's E2B environment for task trials. It requests deletion at timeout,
+so AgentENV deletes an abandoned sandbox instead of pausing it. The shared ``environment_config`` selects this
+class for Reef's Harbor rollouts and generator checks through ``import_path``. A standalone Harbor trial that
+selects only ``e2b`` uses Harbor's own class.
+
+This module can load without the optional E2B SDK. Opening a sandbox requires the SDK; the Harbor subclass also
+requires Harbor 0.25, installed through ``reef-infra[e2b]``.
 """
 
 from __future__ import annotations
@@ -17,7 +25,11 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, override
+
+from harbor.environments.e2b import E2BEnvironment
+from harbor.models.task.config import NetworkMode
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from reef.execution.sandbox.process import (
     ProcessOutcome,
@@ -315,4 +327,42 @@ class E2BSession(RemoteSession):
                 logger.warning("could not copy %s back from the failed E2B process", root.name)
 
 
-__all__ = ["E2BExecutor", "E2BSession", "SandboxKeeper", "ensure_template", "template_alias"]
+class KillOnTimeoutE2BEnvironment(E2BEnvironment):
+    """Harbor's ``E2BEnvironment`` whose sandbox is created with ``lifecycle={"on_timeout": "kill"}``.
+
+    Values: those of ``E2BEnvironment``. Harbor makes one from a trial's environment config, so the template, the
+    sandbox's lifetime (``sandbox_timeout_secs``), its metadata, its startup environment and its network options are
+    the parent's, and ``type()`` is ``e2b``.
+    Purpose: Harbor's ``EnvironmentFactory`` makes one for an ``e2b`` trial whose environment config names this class
+    as its ``import_path``. ``start`` creates the sandbox with ``_create_sandbox``, and ``stop`` deletes it, as before.
+    """
+
+    # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The body is
+    # Harbor's create call with one more argument, and the decorator is Harbor's retry policy, because Harbor's
+    # decorator wraps its own method and not this one. When Harbor adds an argument to the call, add it here too: the
+    # parity test in tests/sandbox/test_task_environment.py compares the two calls.
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
+    @override
+    async def _create_sandbox(self) -> None:
+        # Keep this optional SDK import inside sandbox creation.
+        from e2b import AsyncSandbox
+
+        self._sandbox = await AsyncSandbox.create(
+            template=self._template_name,
+            metadata={"environment_name": self.environment_name, "session_id": self.session_id},
+            envs=self._startup_env(),
+            timeout=self._sandbox_timeout,
+            allow_internet_access=self.network_policy.network_mode != NetworkMode.NO_NETWORK,
+            network=self._sandbox_create_network_options(),
+            lifecycle={"on_timeout": "kill"},
+        )
+
+
+__all__ = [
+    "E2BExecutor",
+    "E2BSession",
+    "KillOnTimeoutE2BEnvironment",
+    "SandboxKeeper",
+    "ensure_template",
+    "template_alias",
+]

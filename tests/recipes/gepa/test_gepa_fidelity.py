@@ -164,8 +164,8 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
         binary=str(binary),
     )
     recipe, live = rebuilt_recipe(recipe, live, models={"reflection": Reflector("http://model.test", "reflection")})
-    releases = TreeArtifacts(recipe.seed)
-    backend = build_harness_backend(recipe, live, "fidelity", releases)
+    artifacts = TreeArtifacts(recipe.seed)
+    backend = build_harness_backend(recipe, live, "fidelity", artifacts)
     policy = ComparePolicy(backend, statistic="mean")
 
     def committed_archive(state: dict[str, Any], text: str) -> Archive:
@@ -178,7 +178,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
     plans: dict[int, dict[str, Any]] = {}
     try:
         for step in range(1, iterations + 1):
-            text = releases.head(COMPONENT).files["rules.md"]
+            text = artifacts.head(COMPONENT).files["rules.md"]
             plan = committed_archive(state, text).plan(len(TRAIN), len(VAL), 3)
             plans[plan["iteration"]] = plan
             samples = tuple(
@@ -197,11 +197,11 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
             result = backend_step(backend, JobData(f"fidelity:{step}", samples), state, policy)
             if result.artifact is not None:
                 # What the committer does with a selected candidate: it becomes the head snapshot.
-                releases.publish(f"r{step}", HarnessTree.read(result.artifact.local_path))
+                artifacts.publish(f"r{step}", HarnessTree.read(result.artifact.local_path))
                 backend.discard_kept_tree()
             state = dict(result.state)
         # The last step's validation folds in as the next step would fold it.
-        return committed_archive(state, releases.head(COMPONENT).files["rules.md"]), plans
+        return committed_archive(state, artifacts.head(COMPONENT).files["rules.md"]), plans
     finally:
         backend.close()
 

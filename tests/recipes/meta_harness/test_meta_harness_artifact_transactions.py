@@ -200,7 +200,7 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
         dispatcher.close()
 
 
-def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(publication_case, monkeypatch):
+def test_lost_journal_ack_retries_the_committed_snapshot_without_evaluating_again(publication_case, monkeypatch):
     recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,

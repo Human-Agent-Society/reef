@@ -108,7 +108,7 @@ class CoralGrouping(ReportGrouping):
 
 @dataclass(frozen=True)
 class CoralSettings(SampleAssemblySettings):
-    """The config of ``CoralSamples``: the size of a sibling group, the sample assembly, and the staleness limit.
+    """The config of ``CoralSamples``: the size of a sibling group and the sample assembly.
 
     Values: ``group_size`` is an int of at least two; the other keys are as in ``SampleAssemblySettings``, with
     multi-turn samples on by default. The constructor refuses other values.
@@ -141,9 +141,7 @@ class CoralSamples(ReportSamples):
     """
 
     def __init__(self, context: PipelineContext, settings: CoralSettings) -> None:
-        super().__init__(
-            context, CoralGrouping(settings.group_size), exclusive_sources=True, max_staleness=settings.max_staleness
-        )
+        super().__init__(context, CoralGrouping(settings.group_size), exclusive_sources=True)
         self.assembly = SampleAssembly(settings)
 
     @classmethod

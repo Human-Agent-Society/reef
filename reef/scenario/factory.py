@@ -24,6 +24,7 @@ from reef.artifact.artifact import (
 from reef.artifact.components import ScenarioComponents
 from reef.artifact.composite import compose_snapshot
 from reef.artifact.repository import (
+    CachedRepositoryBackendFactory,
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
@@ -34,7 +35,7 @@ from reef.artifact.repository import (
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, ScenarioDeletedError
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, shared_report_type
 from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
@@ -64,7 +65,7 @@ from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
 from reef.train.component import ScenarioRoot
 from reef.train.trainer import ComponentTrainer
-from reef.train.trainer_builder import ComponentTrainerSpecs, SpecTrainerBuilder, TrainerBuilder, TrainerSpec
+from reef.train.trainer_builder import ComponentTrainerSpecs, TrainerSpec, build_trainers
 from reef.train.training_requests import TrainingRequestQueue
 
 
@@ -99,7 +100,8 @@ class RepositoryCommitSnapshots(CommitSnapshots):
         if len(artifact_ids) == 1:
             return next(iter(artifact_ids.values()))
         if self.start_ids is None:
-            self.start_ids = frozenset(artifact_components(self.backend.materialize(self.start)))
+            start = Artifact(self.start, None, metadata=self.backend.snapshot_metadata(self.start))
+            self.start_ids = frozenset(artifact_components(start))
         made = [id_ for id_ in artifact_ids.values() if id_ not in seen and id_ not in self.start_ids]
         if not made:
             raise CommitHistoryError(f"commit {record.commit_number} made an artifact, but names no new artifact ID")
@@ -305,7 +307,7 @@ def with_record2sample_configs(
 ) -> Recipe:
     """``recipe`` with a scenario's own record-to-sample keys ``configs``, by component name
     (``ScenarioSettings.record2sample_config``), over the record-to-sample config of each component's recipe
-    (``Recipe.with_record2sample_config``). The trainer builder builds the scenario's trainers from the result.
+    (``Recipe.with_record2sample_config``). ``build_trainers`` builds the scenario's trainers from the result.
 
     ``components`` is what the scenario serves. Empty ``configs`` return ``recipe``. A composite gives each child
     the keys under the child's component name. Any other recipe takes the keys of the one component that its
@@ -368,12 +370,9 @@ class ScenarioFactory:
         experiment_reports: ExperimentReportQueue | None = None,
         served_models: ServedModels | None = None,
         training_requests: TrainingRequestQueue | None = None,
-        trainer_builder: TrainerBuilder | None = None,
     ) -> None:
         self._recipe = recipe
         self.live = LiveObjects() if live is None else live
-        #: Builds each scenario's trainers from the recipe's specs; None is ``SpecTrainerBuilder``.
-        self.trainer_builder = SpecTrainerBuilder() if trainer_builder is None else trainer_builder
         #: The training requests of every scenario; None builds scenarios that take no request.
         self._training_requests = training_requests
         self.served_models = served_models
@@ -395,7 +394,9 @@ class ScenarioFactory:
         """Recover the scenario ``scenario``, or create it when the backend has no registration of it.
 
         A new scenario gets its own root snapshot (``register``): the artifact item ``start``, or the recipe's
-        default start when ``start`` is ``None``. An existing scenario ignores ``start``.
+        default start when ``start`` is ``None``. An existing scenario ignores ``start``. A scenario ID whose
+        scenario was deleted is never registered again: ``ScenarioDeletedError``
+        (``CachedRepositoryBackendFactory.has_archived_registration``).
         """
         backend = self._backend_factory(scenario)
         if self._storage.durable and not isinstance(backend, StagedSnapshotRepositoryBackend):
@@ -406,6 +407,12 @@ class ScenarioFactory:
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
         components = scenario_components(self._recipe, self.live, scenario)
         if registration is None:
+            if isinstance(self._backend_factory, CachedRepositoryBackendFactory) and (
+                self._backend_factory.has_archived_registration(scenario)
+            ):
+                raise ScenarioDeletedError(
+                    f"scenario {scenario!r} was deleted, and its ID is not used again; create a scenario with a new ID"
+                )
             self.register(scenario, backend, components, start)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from
             # the durable registration instead of assuming this creation attempt won.
@@ -466,12 +473,10 @@ class ScenarioFactory:
             directory.mkdir()
             stored = layout.stored(start.files, directory, artifact_id=start.item.artifact_id)
             source = RootSource("item", item=start.item.item_id, uri=start.uri, version=start.files.version)
-            # The admission checks of an import: the snapshot's own with one component, else the component's here and
-            # the snapshot's on the composed root.
+            # The admission checks of an import, on the files that this process copied.
+            components.validate(directory, component)
             if components.single:
-                components.validate(stored)
                 return stored, source
-            components.components[component].validator.validate(stored)
             item = (component, stored)
             default = default_start(self._recipe, self.live)
         tree = work / "default"
@@ -492,9 +497,7 @@ class ScenarioFactory:
         if item is None:
             return compose_snapshot(artifacts, directory=work / "root"), source
         artifacts[item[0]] = item[1]
-        root = compose_snapshot(artifacts, directory=work / "root")
-        components.validator.validate(root)
-        return root, source
+        return compose_snapshot(artifacts, directory=work / "root"), source
 
     def _recover(
         self,
@@ -608,7 +611,7 @@ class ScenarioFactory:
             record2sample_config = self._storage.read_settings(name).record2sample_config
             recipe = with_record2sample_configs(self._recipe, components, record2sample_config)
             try:
-                trainers = self.trainer_builder.build_trainers(
+                trainers = build_trainers(
                     read_trainer_specs(recipe, self.live),
                     name,
                     store.records,
@@ -622,7 +625,7 @@ class ScenarioFactory:
                         name=name, store=store, repository=repository, components=components
                     ),
                     samples=self._storage.sample_store(name, store),
-                    root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
+                    root=ScenarioRoot(repository.snapshot(start_artifact), root_source),
                 )
             except PluginConfigError as exc:
                 raise RecipeConfigError(str(exc)) from exc

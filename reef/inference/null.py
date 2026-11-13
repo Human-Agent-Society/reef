@@ -15,6 +15,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailableError
+from reef.core.served_models import ServedArtifact
 from reef.inference.interfaces import InferenceAdmissionHandle, InferenceArtifact, InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory
 
@@ -64,6 +65,10 @@ class NullInferenceRuntime(InferenceRuntime):
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.artifact_id
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """No route for any artifact: this runtime serves no requests."""
+        return None
 
 
 class NullRuntimeFactory(RuntimeFactory):

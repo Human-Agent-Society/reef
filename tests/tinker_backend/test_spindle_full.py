@@ -197,15 +197,15 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
 
     status = train(component)
     assert client.starts == [FreshStart(MODEL)]
-    release = Path(status.checkpoints[0].artifact_path)
-    saved = TinkerCheckpoint.read(release)
+    artifact_dir = Path(status.checkpoints[0].artifact_path)
+    saved = TinkerCheckpoint.read(artifact_dir)
     assert saved.lora_rank is None and saved.service == SPINDLE
     # The snapshot refers to the checkpoint's weights, which the exporter put in the snapshot repo.
     assert exporter.exported == [(saved.state_path, HuggingFaceRevision(MODEL, COMMIT))]
-    assert read_reference(release) == HuggingFaceRevision(RELEASES, f"{1:040x}")
+    assert read_reference(artifact_dir) == HuggingFaceRevision(RELEASES, f"{1:040x}")
 
     # A job from a saved snapshot restores its checkpoint, whatever its reference names.
-    train(component, start=str(release))
+    train(component, start=str(artifact_dir))
     assert client.starts[-1] == saved
 
 
@@ -250,7 +250,7 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
         TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(copy))
     # The base of this component is its reference to the base revision, so it takes no base root.
     (tmp_path / "base-root").mkdir()
-    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.default_start_inputs).to_text())
+    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.facts.default_start_inputs).to_text())
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
         TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "base-root"))
 
@@ -279,7 +279,7 @@ def test_the_component_trains_the_repo_of_its_base_on_a_spindle_deployment(tmp_p
 
 
 @pytest.mark.unit
-def test_spindles_sampler_serves_the_base_as_the_base_model_and_a_release_by_its_sampler(client, tmp_path):
+def test_spindles_sampler_serves_the_base_as_the_base_model_and_a_snapshot_by_its_sampler(client, tmp_path):
     runtime = TinkerInferenceRuntime(client, base_model=MODEL, service=SPINDLE, weight_kind="model")
     lora_runtime = TinkerInferenceRuntime(client, base_model=MODEL, service=SPINDLE)
     try:

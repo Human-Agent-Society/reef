@@ -38,7 +38,7 @@ If you use a token, export it in both terminals and add
 
 ## 2. Create a scenario
 
-Open another terminal. Create a scenario to keep this harness's releases and
+Open another terminal. Create a scenario to keep this harness's snapshots and
 requests together, then read its first snapshot:
 
 ```bash
@@ -55,7 +55,7 @@ Note its `artifact_id`.
 
 ## 3. Ask for a change
 
-Send the request, with the release id from the previous step:
+Send the request, with the artifact ID from the previous step:
 
 ```bash
 curl -fsS -H 'x-reef-scenario: reefine-example' -H 'Content-Type: application/json' \

@@ -18,8 +18,9 @@ from reef.artifact.artifact import (
     artifact_components,
     content_metadata,
 )
+from reef.artifact.composite import link_or_copy
 from reef.artifact.files import directory_checksum
-from reef.artifact.repository import CachedRepositoryBackendFactory, StagedSnapshotRepositoryBackend
+from reef.artifact.repository import CachedRepositoryBackendFactory, StagedSnapshotRepositoryBackend, StoredFiles
 
 
 class _InMemoryStorage:
@@ -32,6 +33,9 @@ class _InMemoryStorage:
         self.metadata: dict[str, dict[str, object]] = {}
         #: The snapshot that each artifact ID is bound to.
         self.artifacts: dict[str, SnapshotRef] = {}
+        #: The directories of each stored content, by its name: the last holds its files now, and those before
+        #: held the files that a later ``store_content`` replaced.
+        self.contents: dict[str, list[Path]] = {}
 
     def copy_artifact(self, source: Path, *, parent_revision: str | None) -> SnapshotRef:
         revision = uuid.uuid4().hex
@@ -147,6 +151,91 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
                 self._metadata = artifact.storage_metadata
             return ref
 
+    def store_content(self, name: str, directory: Path) -> None:
+        if not isinstance(name, str) or not name:
+            raise ValueError("a content's name is a non-empty string")
+        destination = self._storage.root / f"content-{uuid.uuid4().hex}"
+        try:
+            shutil.copytree(directory, destination)
+        except OSError as exc:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise ArtifactPublicationError(f"failed to store content {name!r} from {directory}: {exc}") from exc
+        with self._storage.lock:
+            # A reader can hold the directory of the files before, so it stays until the content is discarded.
+            self._storage.contents.setdefault(name, []).append(destination)
+
+    def materialize_content(self, name: str) -> Path:
+        with self._storage.lock:
+            stored = self._storage.contents.get(name)
+        if not stored:
+            raise ArtifactNotFoundError(f"repository has no content {name!r}")
+        return stored[-1]
+
+    def discard_content(self, name: str) -> None:
+        with self._storage.lock:
+            stored = self._storage.contents.pop(name, [])
+        for path in stored:
+            shutil.rmtree(path, ignore_errors=True)
+
+    def discard_all_content(self) -> None:
+        with self._storage.lock:
+            stored = [path for paths in self._storage.contents.values() for path in paths]
+            self._storage.contents.clear()
+        for path in stored:
+            shutil.rmtree(path, ignore_errors=True)
+
+    def publish_parts(
+        self,
+        parts: Mapping[str | None, StoredFiles],
+        *,
+        metadata: Mapping[str, object],
+        expected_parent: SnapshotRef,
+        advance_head: bool,
+    ) -> SnapshotRef:
+        """Copy the named files into a new snapshot directory, by hard link where the filesystem allows."""
+        with self._storage.lock:
+            current = self.current()
+            if current.revision != expected_parent.revision:
+                raise ArtifactConflictError(f"repository advanced from {expected_parent.revision}")
+            sources: dict[str | None, Path] = {}
+            for directory, part in parts.items():
+                if part.content is not None:
+                    sources[directory] = self.materialize_content(part.content)
+                else:
+                    local_path = self.resolve_artifact(str(part.artifact_id)).local_path
+                    if local_path is None:
+                        raise ArtifactPublicationError(f"artifact {part.artifact_id!r} has no stored files")
+                    sources[directory] = local_path
+            revision = uuid.uuid4().hex
+            destination = self._storage.root / revision
+            try:
+                for directory, source in sources.items():
+                    target = destination if directory is None else destination / directory
+                    if source.is_dir():
+                        shutil.copytree(source, target, copy_function=link_or_copy)
+                    else:
+                        target.mkdir(parents=True)
+                destination.mkdir(exist_ok=True)
+            except OSError as exc:
+                shutil.rmtree(destination, ignore_errors=True)
+                raise ArtifactPublicationError(f"failed to store a snapshot of stored files: {exc}") from exc
+            ref = SnapshotRef(revision=revision, parent_revision=current.revision)
+            self._storage.refs[revision] = ref
+            self._storage.paths[revision] = destination
+            self._storage.metadata[revision] = dict(metadata)
+            self.bind_artifact_ids(self.materialize(ref))
+            if advance_head:
+                self._current = ref
+                self._metadata = dict(metadata)
+            return ref
+
+    def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
+        with self._storage.lock:
+            metadata = self._storage.metadata.get(ref.revision)
+        if metadata is None:
+            raise ArtifactMaterializationError(f"snapshot does not exist: {ref.revision}")
+        return dict(metadata)
+
     def commit_snapshot(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         with self._storage.lock:
             current = self.current()
@@ -165,6 +254,15 @@ class _InMemoryRepositoryBackendFactory(CachedRepositoryBackendFactory):
         super().__init__()
         self._backend_type = backend_type
         self._directory = None if directory is None else Path(directory)
+        #: The scenarios whose registration this factory archived. The store lives in this process only.
+        self.archived: set[str] = set()
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
         return self._backend_type(scenario, directory=self._directory)
+
+    def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
+        self.archived.add(scenario)
+        return ()
+
+    def has_archived_registration(self, scenario: str) -> bool:
+        return scenario in self.archived

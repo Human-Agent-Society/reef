@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterable, Iterator
+from argparse import Namespace
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 
 import torch
@@ -208,31 +209,58 @@ class _MegatronNameResolver:
         return megatron_name
 
 
-def rekey_backup_to_vp_stages(args, model, backup_weights):
-    """Re-key Slime's actor backup to the ``vp_stages.{vp}.{name}`` convention.
+def rekey_backup_to_vp_stages(
+    args: Namespace, model: Sequence[torch.nn.Module], backup_weights: Mapping[str, torch.Tensor]
+) -> dict[str, torch.Tensor]:
+    """Re-key Slime's actor backup from global names to Bridge's ``vp_stages.{stage}.{local_name}`` names.
 
-    Slime f655e13d (#2251) made the actor backup use global parameter names
-    unconditionally (``convert_to_global_name=True``); before that, bridge
-    mode snapshotted local names under a ``vp_stages.`` prefix, which is the
-    convention Bridge conversion tasks — and the lookups below — still use.
+    Slime names each backup tensor by its place in the whole model: its
+    ``named_params_and_buffers(args, model)`` adds each chunk's layer and expert
+    offsets. Bridge conversion tasks name a weight by its place in its model
+    chunk. Both enumerations walk the same tensors in the same order: for each
+    chunk, every ``named_parameters()`` entry, then only the ``named_buffers()``
+    entries whose name contains ``expert_bias``. So the n-th local name and the
+    n-th global name belong to one tensor; each pair is checked to hold the same
+    tensor object before it is used.
 
-    Both naming modes enumerate ``model`` and ``named_parameters()`` in the
-    same order, so zipping them yields the exact global-name -> local-name
-    correspondence without guessing at layer-offset or expert-offset math.
-    Weights whose global name is missing from the backup are skipped rather
-    than fabricated; the lookup that needs them will say which one, loudly.
+    Returns a new dict. For each pair whose global name, without ``module.``
+    prefixes, is in ``backup_weights``, the local name maps to that backup
+    tensor, not to the live model tensor. A weight whose global name is missing
+    from the backup is skipped; the lookup that needs it reports it. Entries of
+    ``backup_weights`` already named ``vp_stages.`` are added last and win.
+    ``backup_weights`` is not changed.
+
+    Raises:
+        RuntimeError: The two enumerations differ in length, or a pair holds two
+            different tensors.
     """
     from slime.backends.megatron_utils.misc_utils import strip_param_name_prefix
     from slime.backends.megatron_utils.update_weight.common import named_params_and_buffers
 
-    local_names = (name for name, _ in named_params_and_buffers(args, model, convert_to_global_name=False))
-    global_names = (
-        strip_param_name_prefix(name) for name, _ in named_params_and_buffers(args, model, convert_to_global_name=True)
-    )
-    rekeyed = {}
-    for local_name, global_name in zip(local_names, global_names, strict=True):
-        if global_name in backup_weights:
-            rekeyed[local_name] = backup_weights[global_name]
+    local_weights: list[tuple[str, torch.Tensor]] = []
+    for vp_stage, model_chunk in enumerate(model):
+        chunk_weights: list[tuple[str, torch.Tensor]] = list(model_chunk.named_parameters())
+        chunk_weights += [(name, buffer) for name, buffer in model_chunk.named_buffers() if "expert_bias" in name]
+        local_weights += [
+            (f"vp_stages.{vp_stage}.{strip_param_name_prefix(name)}", tensor) for name, tensor in chunk_weights
+        ]
+    global_weights = list(named_params_and_buffers(args, model))
+    if len(local_weights) != len(global_weights):
+        raise RuntimeError(
+            f"the model chunks hold {len(local_weights)} parameters and expert_bias buffers, "
+            f"but Slime's global enumeration names {len(global_weights)} weights"
+        )
+    rekeyed: dict[str, torch.Tensor] = {}
+    for (local_name, local_tensor), (global_name, global_tensor) in zip(local_weights, global_weights, strict=True):
+        # Object identity, not tensor equality: no tensor data is read.
+        if local_tensor is not global_tensor:
+            raise RuntimeError(
+                f"local weight {local_name!r} and Slime's global weight {global_name!r} are different tensors; "
+                "the two enumerations no longer walk the model in the same order"
+            )
+        backup_name = strip_param_name_prefix(global_name)
+        if backup_name in backup_weights:
+            rekeyed[local_name] = backup_weights[backup_name]
     # Anything already in vp_stages form (an older slime, or a test fixture)
     # wins over the translation, and non-parameter entries pass through.
     rekeyed.update({key: value for key, value in backup_weights.items() if key.startswith("vp_stages.")})

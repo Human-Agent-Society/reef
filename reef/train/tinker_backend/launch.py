@@ -157,7 +157,7 @@ class SpindleFullDeployment(InProcessTrainingDeployment):
         return super().prepare(config, settings)
 
     def trainer_serving_config(self, settings: Mapping[str, Any]) -> dict[str, Any]:
-        """Spindle's sampler, which serves each full-parameter release with the training settings' key."""
+        """Spindle's sampler, which serves each full-parameter snapshot with the training settings' key."""
         spindle = spindle_full_settings(settings["training_backend_options"])
         return {
             "type": "tinker",

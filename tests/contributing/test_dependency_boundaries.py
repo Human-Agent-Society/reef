@@ -109,7 +109,7 @@ def test_harbor_task_values_and_validation_do_not_depend_on_harness() -> None:
         assert _imports_of(imported, "reef.harness") == [], module_name
 
 
-def test_release_id_chain_does_not_depend_on_scenario_or_trainer() -> None:
+def test_snapshot_chain_does_not_depend_on_scenario_or_trainer() -> None:
     module = importlib.import_module("reef.artifact.snapshot_chain")
     tree = ast.parse(inspect.getsource(module))
 
@@ -358,6 +358,29 @@ def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
         "import sys; sys.modules['ray'] = None; sys.modules['torch'] = None; "
         "from reef.train.harness_backend.backend import HarnessBackend; "
         "assert HarnessBackend"
+    )
+
+
+def test_executor_config_and_the_e2b_module_do_not_require_the_e2b_package() -> None:
+    # The executor config imports reef.execution.sandbox.e2b for every deployment, and that module defines a
+    # subclass of Harbor's E2B environment. A base installation has no e2b package. The modules still import, a
+    # local executor is built and the E2B settings are read; only the E2B startup check names the missing extra.
+    _assert_isolated_import(
+        "import sys\n"
+        "sys.modules['e2b'] = None\n"
+        "from reef.execution.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor\n"
+        "from reef.execution.sandbox.e2b import E2BExecutor, KillOnTimeoutE2BEnvironment\n"
+        "from reef.execution.sandbox.process import LocalExecutor, SandboxUnavailableError\n"
+        "assert REMOTE_EXECUTORS['e2b'] is E2BExecutor and KillOnTimeoutE2BEnvironment.type() == 'e2b'\n"
+        "assert isinstance(build_executor({'executor': 'local'}), LocalExecutor)\n"
+        "executor = remote_executor('e2b', {'e2b_template': 'custom'}, {'E2B_API_KEY': 'key'})\n"
+        "assert isinstance(executor, E2BExecutor) and executor.template == 'custom'\n"
+        "try:\n"
+        "    executor.preflight()\n"
+        "except SandboxUnavailableError as error:\n"
+        "    assert 'reef-infra[e2b]' in str(error), error\n"
+        "else:\n"
+        "    raise AssertionError('the E2B startup check passed without the e2b package')\n"
     )
 
 
@@ -882,7 +905,6 @@ COMPOSITE_RECIPE_METHODS = frozenset({"__post_init__"})
 COMPOSITE_FAN_OUT_MEMBERS = frozenset(
     {
         "harness_adapter",
-        "harness_state_dir",
         "scenario_state_dirs",
         "for_record2sample_configs",
         "report_contract",

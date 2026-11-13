@@ -271,11 +271,11 @@ def test_teacher_weights_move_toward_the_actor_in_float32() -> None:
 # --- the vocab shards -----------------------------------------------------------
 
 
-def _sharded_worker(rank: int, world: int, port: int, divergence: str, seed: int) -> None:
+def _sharded_worker(rank: int, world: int, rendezvous_file: str, divergence: str, seed: int) -> None:
     """One tensor-parallel rank: its vocab shard's divergences and gradients must match the dense computation."""
     import torch.distributed as dist
 
-    dist.init_process_group("gloo", init_method=f"tcp://127.0.0.1:{port}", rank=rank, world_size=world)
+    dist.init_process_group("gloo", init_method=f"file://{rendezvous_file}", rank=rank, world_size=world)
     try:
         group = dist.group.WORLD
         vocab = 24
@@ -309,19 +309,17 @@ def _sharded_worker(rank: int, world: int, port: int, divergence: str, seed: int
 
 @pytest.mark.unit
 @pytest.mark.parametrize("divergence", _DIVERGENCES)
-def test_sharded_divergences_match_the_dense_computation_across_vocab_shards(divergence: str) -> None:
+def test_sharded_divergences_match_the_dense_computation_across_vocab_shards(divergence: str, tmp_path) -> None:
     # Every rank sees one vocab shard and the all-reduced totals, the way
     # tensor-parallel Megatron hands the loss its logits; the gradient on a
     # shard must be the dense gradient's slice, coupling through the global
     # log-sum-exp included.
-    import socket
-
     import torch.multiprocessing as multiprocessing
 
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    multiprocessing.spawn(_sharded_worker, args=(4, port, divergence, 3), nprocs=4, join=True)
+    # The ranks meet through a file of this test alone. A TCP rendezvous needs a port chosen before rank 0 binds
+    # it, and another test process can take that port in between.
+    rendezvous_file = str(tmp_path / "ranks")
+    multiprocessing.spawn(_sharded_worker, args=(4, rendezvous_file, divergence, 3), nprocs=4, join=True)
 
 
 # --- the teacher's weights -----------------------------------------------------------

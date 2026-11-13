@@ -5,7 +5,7 @@ Local inference needs no YAML file:
 
 .. code:: bash
 
-   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+   reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 
 This starts SGLang on an automatically selected loopback port, waits for its
 health endpoint, then starts Reef on ``127.0.0.1:8900``. Use
@@ -577,7 +577,7 @@ weights, or a PEFT adapter with its rank and target modules.
        adapters the engines keep resident when the snapshots are PEFT adapters. Each scenario keeps its served adapter resident, so set at least the number of training scenarios; one more lets a scenario's new adapter load beside its served one
 
    ``inference.prefix-sharing`` : false
-       share prefix-cache entries between requests. Each snapshot load then retracts the requests in flight, which prefill again on the new weights. SGLang keeps the cache only where that is safe
+       ``true``: requests on the same weights share the engines' prefix cache. The engines finish their requests and clear the cache before each change of weights
 
 The engine settings are ``inference.backend``, ``inference.num-gpus``,
 ``inference.tensor-parallel-size``, ``inference.options``,
@@ -591,18 +591,46 @@ names how to fetch their weights (``TrainingDeployment.engine_weights``);
 Tinker's does. Otherwise the HTTP service refuses that pairing when it
 starts.
 
+With ``inference.serving: engines``, the inference component keeps each
+production request on the weights that the request selected (`Request
+pinning <../developer-guide/executors.rst#request-pinning>`__). No setting
+turns this off. It needs ``inference.backend: sglang`` (the default) or
+``vllm`` with the engine's own request handler, so Reef refuses another
+backend or ``inference.handler-factory`` here. Another engine needs its own
+serving runtime (``inference.serving: module:Factory``). With ``trainer``,
+Tinker's sampler serves each snapshot as an immutable revision, so it needs
+no pinning.
+
+With ``inference.prefix-sharing: true``, the engines clear their prefix
+cache before each change of weights or adapters, after the admitted
+requests finish. The clear covers the engine's own cache, which includes
+SGLang's host-memory tier (``enable_hierarchical_cache``). Engines that do
+not confirm the clear stay unavailable until the control plane replaces
+them. For adapter artifacts, SGLang keeps the cache only when it keys the
+entries by adapter; otherwise the engines run without a prefix cache.
+
+The clear does not cover KV that an engine keeps outside itself. Engine
+serving therefore refuses these ``inference.options``, with or without
+prefix sharing: SGLang's ``hicache_storage_backend`` and
+``enable_lmcache``, and vLLM's ``kv_transfer_config``,
+``kv_offloading_size`` and ``kv_offloading_backend``. Reef checks these
+option names only. Do not give the engines another KV store through a
+plugin or an environment variable.
+
 The control plane checks the inference component every 30 seconds. When the
 component has restarted, or an engine has failed, the control plane pauses
-generation, starts the lost engines again, loads each scenario's served
-artifact into them, and resumes.
+generation, replaces the component's engine stack, loads each scenario's
+served artifact again, and resumes.
 
 Engine-serving inference uses the same ``inference`` fields as standalone
-serving. ``inference.num-gpus`` is the total inference GPU budget;
+serving. ``inference.num-gpus`` is the total inference GPU budget; with
+``inference.remote.slot-urls``, it is the budget of each component.
 ``inference.tensor-parallel-size`` is the GPU count per engine (default 1).
-The total defaults to the per-engine count and must be a positive multiple of
-it. For example, 4 GPUs with tensor parallel size 2 creates two engines.
-Standalone serving currently supports one engine, so its total must equal its
-tensor parallel size. An external provider does not accept local GPU requests.
+The budget defaults to the per-engine count and must be a positive multiple
+of it. For example, 4 GPUs with tensor parallel size 2 creates two engines on
+one component. Standalone serving currently supports one engine on each
+component, so its budget must equal its tensor parallel size. An external
+provider does not accept local GPU requests.
 
 .. code:: yaml
 
@@ -690,7 +718,8 @@ handled by the inference component (see `Engine supervision
 ``inference.backend: vllm`` selects the vLLM engine integration. The
 inference component launches one vLLM server per engine on its GPUs with
 ``VLLM_SERVER_DEV_MODE=1`` and ``--logprobs-mode processed_logprobs``. It loads each published snapshot
-through vLLM's control routes: ``/pause?mode=keep`` (a retracting pause adds
+through vLLM's control routes: ``/pause?mode=keep`` (with
+``inference.prefix-sharing: true``, also
 ``/reset_prefix_cache?reset_running_requests=true``),
 ``/update_weight_version``, ``/collective_rpc reload_weights`` and the
 ``/v1/load_lora_adapter`` routes. Engines are single-node; more than one
@@ -708,7 +737,9 @@ Engine options use vLLM's engine-argument names. Reef sets ``model``,
 ``enable_sleep_mode``. It defaults
 ``generation_config`` to ``vllm``, so the model's own generation defaults
 cannot add truncation or a temperature the trainer never sees. It enables
-prefix caching only under a retracting pause.
+prefix caching only with ``inference.prefix-sharing: true``. Engine serving
+refuses a configured ``kv_transfer_config`` and vLLM's KV offloading options
+(see ``inference.prefix-sharing`` above).
 
 vLLM engines serve full-weight artifacts only. The HTTP service refuses
 adapter artifacts, such as Slime's with ``training.options.megatron-lora-rank``
@@ -728,9 +759,10 @@ The HTTP service uploads each published snapshot to the component as files:
   beside the base model. Only ``inference.backend: sglang`` serves LoRA
   adapters.
 
-The HTTP service reads each snapshot from the checkpoint directory. With
-multi-node training, put the checkpoint directory on storage that the HTTP
-service's host can read.
+The training service stores each checkpoint in the artifact backend from the
+checkpoint directory, and every other service reads it from the artifact
+backend. With multi-node training, put the checkpoint directory on storage that
+the training service's host can read.
 
 Reef starts only its own inference, training and HTTP services.
 PRM and user-simulation services are independently deployed by OpenClawRL;
@@ -806,7 +838,7 @@ For managed SGLang, use:
 
 .. code:: bash
 
-   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
+   reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
      --inference.options.mem-fraction-static 0.8 \
      --inference.options.trust-remote-code true
 
@@ -1813,6 +1845,9 @@ the component:
    ``inference.remote.url``
        the component's HTTP(S) base URL, without credentials, query or fragment
 
+   ``inference.remote.slot-urls`` : []
+       base URLs of further components, in the form of ``url`` and all different; for full-weight artifacts only
+
    ``inference.remote.control-token-env`` : REEF_REMOTE_CONTROL_TOKEN
        variable with the component's control token; the process that starts the engines reads it
 
@@ -1824,6 +1859,37 @@ the component:
 
    ``inference.remote.model-path`` : ``inference.model-path`` as written
        the model that the component loads: a Hugging Face repository ID or a path on the component's host; this host may replace ``inference.model-path`` with a local snapshot
+
+One component serves one full-weight checkpoint. To let a scenario serve
+several checkpoints at the same time, name one more component for each
+further checkpoint:
+
+.. code:: yaml
+
+   inference:
+     remote:
+       url: https://gpu-a.example.com
+       slot-urls:
+         - https://gpu-b.example.com
+
+The one training scenario then serves as many checkpoints together as there
+are components. A further component does not add a training scenario. These
+rules apply:
+
+- Start each further component in the same way as the first one, with the
+  same ``--engine`` and the same two tokens. Reef starts the same model and
+  engine options on each one, and ``inference.num-gpus`` counts the GPUs of
+  one component.
+- Give each component GPUs that no other component uses: its own host or
+  visible GPUs, or one Ray cluster that all of them join
+  (``--ray-address``). Different URLs alone do not separate the GPUs.
+- Use ``slot-urls`` with full-weight artifacts only. Reef refuses it for
+  adapter artifacts and for a trainer's rollout engines.
+
+`Set what a scenario serves
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__ describes how a
+scenario uses the components, and how to replace a checkpoint when every
+component holds one.
 
 The ``training`` section
 ------------------------
@@ -1968,27 +2034,13 @@ A scenario can replace keys of ``pipeline.record2sample.config`` for itself
 with its ``record2sample_config`` setting (`Record-to-sample config
 <http-api.rst#record-to-sample-config>`__).
 
-Every built-in record-to-sample stage that holds units reads
-``max_staleness``, Reef's staleness filter. Reef drops held training data
-whose producing artifact is more than this many served artifacts behind the
-artifact that the scenario serves. The limit is a record-to-sample setting,
-not a recipe setting: ``recipe.config.max_staleness`` is an error.
-
-.. container:: config
-
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       the artifacts that training data may lag behind the served artifact and still train, a non-negative int; 0 trains only data of the served artifact
-
-.. code:: yaml
-
-   pipeline:
-     record2sample:
-       config:
-         max_staleness: 2
-
-``NoSamples`` and ``SFTSamples`` refuse the key: the first holds no unit, and
-the second never drops an SFT target as stale. A training
-framework's own off-policy limit goes in that backend's
+Each record-to-sample stage decides which of its samples are stale, and the
+samples service applies that rule; no setting chooses it. Most built-in stages
+are on-policy: only data of the artifact that the scenario serves trains. An
+SFT stage and the harness trace stages never drop a sample. SAO accepts a
+bounded lag, its own ``max_artifact_lag`` (`SAO <../user-guide/recipes/sao.rst>`__).
+A ``pipeline.record2sample.config.max_staleness`` key is refused at startup:
+remove it. A training framework's own off-policy limit goes in that backend's
 ``training.options``. No built-in backend has one now. See `Staleness
 <../developer-guide/processors.rst#staleness>`__.
 
@@ -2178,7 +2230,7 @@ samples train.
        the Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must fit the training component's text chat: system, user and assistant text messages, no tools.
 
    ``rollout.environment`` : docker
-       the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``. On ``modal``, a task with ``environment/docker-compose.yaml`` and no GPU runs on Modal's VM runtime, so that its Compose networks work. A Modal sandbox of a task with an agent time limit lives for the task's build, agent, and verifier time limits plus one hour, at most one day. The sandbox of a task with no agent time limit lives for two hours
+       the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``. On ``modal``, a task with ``environment/docker-compose.yaml`` and no GPU runs on Modal's VM runtime, so that its Compose networks work. The paragraphs after this list describe the cloud sandbox of an ``e2b`` or ``modal`` rollout
 
    ``rollout.agent_host`` : none
        the host at which an agent inside the sandbox reaches the component's host; none for an agent on this host
@@ -2191,6 +2243,34 @@ samples train.
 
    ``rollout.scaffold_tolerance`` : 8
        tokens at the end of a prompt that the next prompt's history may drop, such as the empty think block of a thinking template with thinking off; the sample keeps them, and the response after them trains
+
+Set ``rollout.environment`` to ``e2b`` for an E2B-compatible service such as
+AgentENV, or ``modal`` for Modal. For a self-hosted E2B service, set
+``E2B_API_URL``, ``E2B_SANDBOX_URL`` and ``E2B_API_KEY`` in the process that
+runs the rollouts. The first two select the service's API and sandbox
+endpoints. Slime does not forward these endpoint variables from its driver
+to Ray workers; configure them in the workers' environment too.
+
+Harbor deletes the sandbox when the rollout ends. If the rollout process is
+killed before cleanup, the sandbox's lifetime limits how long it can remain.
+The lifetime is the sum of the task's build, agent and verifier time limits,
+plus one hour. A nonzero ``override_timeout_sec`` in ``rollout.agent`` replaces
+the task's agent time limit in that sum, and an ``override_setup_timeout_sec``
+adds to it. The lifetime is at most one day, so a rollout that needs more time
+loses its sandbox after one day.
+
+When neither the task nor a nonzero ``override_timeout_sec`` gives the agent a
+time limit, this sum does not apply. A Modal sandbox then lives for two hours.
+An E2B sandbox keeps Harbor's default lifetime of one day.
+
+Reef asks the service to delete an E2B sandbox at the end of its lifetime.
+Without this request, a self-hosted service can pause the sandbox and keep it.
+
+These lifetime rules also apply to evaluation and generator rollouts, each
+with its own agent config. The ``generator`` section describes checks.
+Standalone ``harbor run -e e2b`` commands and the Meta-Harness Terminal-Bench
+``terminus`` adapter use Harbor's default timeout behavior. That adapter is
+separate from the ``terminus-2`` agent used by Reef rollouts.
 
 The job's metrics report each task's rewards of the rollouts that ran
 (``rollout_rewards``), the samples that train (``rollout_samples``), and the
@@ -2398,18 +2478,28 @@ generated-task stages to consume. The generator writes and checks Harbor tasks f
 and runs the plays of a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its
 host needs the ``harbor`` command line and the Harbor environment that
-``generator.environment`` selects; the Reef service itself needs neither. The
-default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
+``generator.environment`` selects; the Reef service itself needs neither.
+
+The default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
 in an E2B cloud sandbox, so a host without Docker, such as a cluster node with
 only Apptainer, uses it. It needs ``E2B_API_KEY`` exported where ``reef serve``
 starts and ``reef-infra[e2b]`` in the generator's interpreter; the readiness
 check looks there, so ``generator.harbor`` must come from the same Python
-environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
+environment. ``modal`` runs each task in a Modal sandbox. It needs
+``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve``
+starts, and ``reef-infra[modal]`` in the generator's interpreter.
+
+With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
 compose services), an agent inside the sandbox cannot reach a
 ``generator.agent-host`` on a private host, and E2B builds a template for each
-new task image. ``modal`` runs each task in a Modal sandbox. It needs
-``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve``
-starts, and ``reef-infra[modal]`` in the generator's interpreter. ``execution.generator`` selects the generator's executor, so a
+new task image. The E2B rules of ``rollout.environment`` apply to the checks
+and to the rollouts: the value for a self-hosted service, the sandbox
+lifetime, and the request to delete the sandbox at its end. A rollout takes
+the agent's time limits from ``generator.agent``. A check runs Harbor's oracle
+or nop agent, which sets no time limit, so only the task's time limits count
+for a check.
+
+``execution.generator`` selects the generator's executor, so a
 deployment can place it on another host. The generator runs its proposals,
 checks and rollouts at the same time.
 ``generator.concurrency`` limits only the rollouts in flight, so a proposal or a check never waits behind rollouts.
@@ -2668,7 +2758,9 @@ it. Its ``url`` is the URL that the open W&B run gives. An offline run gives
 none: the URL is then ``https://wandb.ai/<entity>/<project>/runs/<run_id>``,
 where the run is once it is synced, with the configured ``entity``. Without a
 configured ``entity``, the URL of an offline run is ``null``.
-Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
+With ``upload_checkpoints: true``, Reef reads the files of each committed
+checkpoint from the artifact backend and uploads them as a W&B artifact.
+Otherwise a run names its checkpoints by their artifact IDs only.
 
 Import, initialization, logging, summary, and upload failures are reported in
 the service log and never fail a training step or its commit.

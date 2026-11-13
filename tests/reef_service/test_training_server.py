@@ -251,16 +251,13 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
     # example-owned stacks (the openclawrl config lives with its example, like recipes/tttd/examples/tttd/serve.yaml)
     (example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),),
 )
-def test_training_configs_leave_max_staleness_unset_and_make_checkpoint_budget_mandatory(
-    relative_path, monkeypatch
-) -> None:
+def test_training_configs_make_checkpoint_budget_mandatory(relative_path, monkeypatch) -> None:
     monkeypatch.setenv("REEF_TOKEN", "test-token")
     from tests.support.config_helpers import load_deployment
 
     from reef.execution.executor.arguments import native_arguments
 
     config = load_deployment(deploy.PROJECT_ROOT / relative_path)
-    assert "max_staleness" not in config["reef"]
     retention = config["training"]["checkpoint_retention"]
     command = " ".join(native_arguments(config["reef"]["training_backend_options"]))
 
@@ -469,13 +466,14 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
 
 
 @pytest.mark.unit
-def test_build_dispatcher_gives_max_staleness_to_the_record_to_sample_stage_only(stub_repository, tmp_path) -> None:
-    pipeline = {"record2sample": {"config": {"max_staleness": 2}}}
+def test_build_dispatcher_gives_a_stage_key_to_the_record_to_sample_stage_only(stub_repository, tmp_path) -> None:
+    pipeline = {"record2sample": {"config": {"prm_m": 2}}}
     dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
 
-    # The window belongs to the record-to-sample stage; the training component never receives it.
-    assert "max_staleness" not in dispatcher.job_components[0].config
-    assert dispatcher.recipe.stages().build(PipelineContext("s")).record2sample.max_staleness == 2
+    # The key belongs to the record-to-sample stage; the training component never receives it.
+    assert "prm_m" not in dispatcher.job_components[0].config
+    assert dispatcher.recipe.stages().record2sample.config == {"prm_m": 2}
+    dispatcher.recipe.stages().build(PipelineContext("s")).close()
 
 
 @pytest.mark.unit

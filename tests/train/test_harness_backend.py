@@ -54,12 +54,12 @@ def data(step: int, *samples, request: TrainingRequest | None = None) -> JobData
     return JobData(f"demo:{step}", tuple(samples), request=request)
 
 
-def published(artifacts: TreeArtifacts, release_id: str, result: TrainingCommit) -> HarnessTree:
-    """Record ``result``'s tree as release ``release_id``, as the committer's publish does."""
+def published(artifacts: TreeArtifacts, artifact_id: str, result: TrainingCommit) -> HarnessTree:
+    """Record ``result``'s tree as artifact ``artifact_id``, as the committer's publish does."""
     if result.artifact is None or result.artifact.local_path is None:
         raise AssertionError(f"the step published nothing: {result.metrics.get('selection')}")
     tree = HarnessTree.read(result.artifact.local_path)
-    artifacts.publish(release_id, tree)
+    artifacts.publish(artifact_id, tree)
     return tree
 
 

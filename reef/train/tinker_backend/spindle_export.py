@@ -50,7 +50,7 @@ def checkpoint_directory(state_path: str) -> str:
 class CheckpointExporter(ABC):
     """Puts the Hugging Face weights of a full-parameter checkpoint into a repo on the Hub.
 
-    Values: ``export(state_path, base)`` returns a commit of the exporter's release repo whose files are exactly the
+    Values: ``export(state_path, base)`` returns a commit of the exporter's repo whose files are exactly the
     weights of the checkpoint at ``state_path`` (its safetensors, ``config.json`` and ``generation_config.json``) and
     the tokenizer, chat template, processor and generation config files of ``base``; a checkpoint's file replaces the
     base's file of the same name. It raises ``ValueError`` for a path that names no

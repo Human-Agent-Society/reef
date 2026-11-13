@@ -29,6 +29,11 @@ class ScenarioNotFoundError(ReefError):
     """The scenario does not exist and the caller may not create it implicitly."""
 
 
+class ScenarioDeletedError(ReefError):
+    """The scenario ID belonged to a scenario that was deleted. A scenario ID is never used again after its delete,
+    so a new scenario needs a new ID."""
+
+
 class ScenarioLimitReachedError(ReefError):
     """The service holds its maximum number of registered scenarios. It refuses a new scenario."""
 
@@ -117,4 +122,18 @@ def inference_aborted(response: Mapping[str, object]) -> bool:
             or (isinstance(choice.get("meta_info"), Mapping) and aborted(choice["meta_info"].get("finish_reason")))
         )
         for choice in choices
+    )
+
+
+def inference_incomplete(response: Mapping[str, object]) -> bool:
+    """Whether a response explicitly reports an abort or incomplete stream delivery.
+
+    Diagnostic records remain readable but cannot become training samples. Older buffered records without
+    delivery metadata retain their existing eligibility; a provider's own ``complete`` field is not a receipt.
+    """
+    delivery = response.get("stream_delivery")
+    return (
+        inference_aborted(response)
+        or (isinstance(delivery, Mapping) and delivery.get("complete") is False)
+        or (response.get("stream") is True and response.get("complete") is False)
     )

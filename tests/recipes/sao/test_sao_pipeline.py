@@ -27,10 +27,11 @@ from tests.support.runtime_stubs import (
 from tests.support.samples import data_storage, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.stored_checkpoints import store_checkpoints
 from tests.support.trajectories import policy_trajectory
 
 from recipes.sao import SAORecipe
-from recipes.sao.processor import SAOJobData, SAOSamples
+from recipes.sao.processor import SAOJobData, SAOSamples, SAOSettings
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
@@ -42,7 +43,6 @@ from reef.dispatcher import Dispatcher
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
-from reef.record2sample.assembly import SampleAssemblySettings
 from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
@@ -63,7 +63,7 @@ EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 def sao_processor(context: PipelineContext, job_samples: int | None = None) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2sample=SAOSamples(context, SampleAssemblySettings()),
+        record2sample=SAOSamples(context, SAOSettings()),
         sample2job=SAOJobData(context, None, job_samples),
     )
 
@@ -183,7 +183,7 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
         ({"sample2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
         ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         ({"record2sample": {"config": {"batch_size": 2}}}, "SAOSamples: unknown config fields: batch_size"),
-        ({"record2sample": {"config": {"max_staleness": -1}}}, "max_staleness must be a non-negative int"),
+        ({"record2sample": {"config": {"max_artifact_lag": -1}}}, "max_artifact_lag must be a non-negative int"),
     ],
 )
 def test_sao_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(
@@ -226,7 +226,7 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
 
 
 @pytest.mark.unit
-def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_without_a_release() -> None:
+def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_without_an_artifact_id() -> None:
     # The producing artifact lives in payload["artifact_id"], set by the
     # inference service. The sample must still record it, or the staleness
     # check finds the sample stale and no SAO step ever runs.
@@ -481,7 +481,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
 
         _wait_for_finished_jobs(dispatcher, 1)
 
-        # The checkpoint is published as the chain tip, but never serves: only the root release was activated.
+        # The checkpoint is published as the chain tip, but never serves: only the root snapshot was activated.
         assert inference.activated == base
         [job] = component.submitted
         [record] = _checkpoint_commits(dispatcher)
@@ -521,7 +521,7 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
         _wait_for_finished_jobs(dispatcher, 1)
         head = scenario.repository.require_current_artifact()
         wait_for_serving(dispatcher)
-        # The new head is the saved release of the trained checkpoint, and it
+        # The new head is the saved snapshot of the trained checkpoint, and it
         # actually moved off the pre-train head (guards against a constant stub).
         assert head.revision != pre_head.revision
         # The runtime loaded the checkpoint once, and the scenario serves its artifact.
@@ -596,7 +596,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             "math",
             session.records,
             pipeline_factory=lambda context: sao_processor(context, job_samples=1),
-            job_loop=JobLoop(component, scenario="math"),
+            job_loop=JobLoop(store_checkpoints(component, "math", None), scenario="math"),
             job_parameters=SAORecipe().parameters_by_kind(),
             root=STUB_ROOT,
             algorithm_state=algorithm_state,
@@ -625,7 +625,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             commit=CommitRecord(
                 scenario="math",
                 commit_number=step,
-                snapshot=SnapshotRef("release:base", "base"),
+                snapshot=SnapshotRef("snapshot:base", "base"),
                 checkpoint=False,
                 algorithm_state=prepared.algorithm_state,
                 high_water_sequence=prepared.high_water_sequence,

@@ -8,14 +8,17 @@ from tests.support.component_trainers import _records
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.samples_service import make_samples
+from tests.support.stored_checkpoints import store_checkpoints
 
-from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core.served_models import ScenarioModel, ServedArtifact
+from reef.core.snapshot import RootSource
 from reef.core.training_request import normalize_training_request_payload
 from reef.observability import NullExperimentTracker
 from reef.scenario.factory import ScenarioFactory
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import ScenarioRoot
 from reef.train.training_requests import TrainingRequestQueue
 
 
@@ -29,7 +32,7 @@ def deferred_factory(tmp_path: Path):
     ):
         factory = ScenarioFactory(
             TestPolicyRecipe(),
-            InMemoryRepositoryBackend.factory(directory=tmp_path / "releases"),
+            InMemoryRepositoryBackend.factory(directory=tmp_path / "snapshots"),
             live=live_objects(training, runtime),
             scenario_storage=storage,
             experiment_tracker=NullExperimentTracker(),
@@ -43,6 +46,14 @@ def test_load_training_activation_and_recovery_do_not_load_an_engine(deferred_fa
     factory, runtime, coordination = deferred_factory
     lease = coordination.control_lease.acquire("test-control")
     with closing(factory.load_or_create("math")) as scenario:
+        # The factory's trainer calls the component itself, with no jobs queue, so the component stores its
+        # checkpoints as the training worker does.
+        component = scenario.trainer.job_loop_required().component
+        store_checkpoints(
+            component,
+            "math",
+            ScenarioRoot(Artifact(scenario.current_snapshot(), scenario.repository), RootSource("default")),
+        )
         root = scenario.current_snapshot()
         assert runtime.activated == []
         for record in _records(1, scenario.serving_artifact_id(), "math"):
@@ -117,7 +128,7 @@ def test_a_request_trains_while_the_selected_artifact_does_not_serve(deferred_fa
         assert scenario.served_artifact_id() is None
         assert scenario.training_requests is not None
         samples = [stored.sample_id for stored in scenario.trainer.pipeline.store.page()]
-        payload = {"text": "train", "session": "session-1", "artifact_id": "release-1", "samples": samples}
+        payload = {"text": "train", "session": "session-1", "artifact_id": "artifact-1", "samples": samples}
         scenario.training_requests.file("t1", normalize_training_request_payload(payload))
 
         result = scenario.next_commit()

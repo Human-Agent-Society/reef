@@ -25,8 +25,9 @@ from reef.cli import main
 from reef.core.errors import RuntimeConfigError, UpstreamStatusError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
+from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
-from reef.inference.tinker import TinkerInferenceRuntime
+from reef.inference.tinker import TINKER_URL, TinkerInferenceRuntime
 from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -275,12 +276,12 @@ def test_a_job_saves_one_checkpoint_and_the_next_job_continues_from_it(component
     assert TinkerCheckpoint.read(Path(second.checkpoints[0].path)).algorithm_state == {"steps": 2}
 
 
-def test_a_release_holds_its_manifest_alone(component, objective):
+def test_an_artifact_holds_its_manifest_alone(component, objective):
     # The weights stay on the service: engines that serve a snapshot download its adapter (TinkerSamplerWeights).
     assert component.artifact_format is None
     status = train(component, batch(), objective.name)
-    release = Path(status.checkpoints[0].artifact_path)
-    assert [path.name for path in release.iterdir()] == [MANIFEST]
+    artifact_dir = Path(status.checkpoints[0].artifact_path)
+    assert [path.name for path in artifact_dir.iterdir()] == [MANIFEST]
 
 
 def test_a_failed_job_reports_its_error_and_saves_no_checkpoint(component, client, objective):
@@ -450,14 +451,14 @@ def test_the_default_start_is_a_base_root_that_the_facts_write_without_the_servi
         assert status.state == "finished" and started_from(client) == [FRESH]
         # Neither the root, nor the check of the job, nor the job itself saved an untrained adapter.
         assert client.initializations == 0
-        # A trained release still imports by its manifest.
-        release = tmp_path / "release"
-        release.mkdir()
-        (release / MANIFEST).write_text((Path(status.checkpoints[0].artifact_path) / MANIFEST).read_text())
-        imported = component.import_start(release)
+        # A trained artifact still imports by its manifest.
+        artifact_dir = tmp_path / "artifact"
+        artifact_dir.mkdir()
+        (artifact_dir / MANIFEST).write_text((Path(status.checkpoints[0].artifact_path) / MANIFEST).read_text())
+        imported = component.import_start(artifact_dir)
         assert Path(imported).parent == component.state_dir / "imported"
-        assert TinkerCheckpoint.read(Path(imported)) == TinkerCheckpoint.read(release)
-        assert component.import_start(release) == imported
+        assert TinkerCheckpoint.read(Path(imported)) == TinkerCheckpoint.read(artifact_dir)
+        assert component.import_start(artifact_dir) == imported
     finally:
         component.close()
 
@@ -467,7 +468,9 @@ def test_a_root_of_an_older_reef_that_holds_the_untrained_adapter_starts_from_th
 ):
     old_root = empty_artifact(tmp_path)
     TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(old_root.local_path))
-    start = component.root_start(ScenarioRoot(old_root, RootSource("default", inputs=component.default_start_inputs)))
+    start = component.root_start(
+        ScenarioRoot(old_root, RootSource("default", inputs=component.facts.default_start_inputs))
+    )
     assert Path(start).parent == component.state_dir / "imported"
     assert train(component, batch(), objective.name, start=start).state == "finished"
     assert started_from(client) == [UNTRAINED.state_path]
@@ -514,21 +517,21 @@ def test_a_component_without_a_seed_pins_one_untrained_adapter_for_its_jobs_from
         other.close()
 
 
-def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(component, client, tmp_path):
-    release = tmp_path / "release"
+def test_an_imported_artifact_is_a_manifest_whose_paths_resolve_on_the_service(component, client, tmp_path):
+    artifact_dir = tmp_path / "artifact"
     with pytest.raises(ValueError, match=r"holds tinker-checkpoint\.json"):
-        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
-    UNTRAINED.write(release)
-    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(artifact_dir))
+    UNTRAINED.write(artifact_dir)
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(artifact_dir))
     client.missing = {UNTRAINED.state_path}
     with pytest.raises(ValueError, match=f"{UNTRAINED.state_path} does not resolve"):
-        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
-    TinkerCheckpoint(MODEL, 8, "tinker://r8/state", "tinker://r8/sampler").write(release)
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(artifact_dir))
+    TinkerCheckpoint(MODEL, 8, "tinker://r8/state", "tinker://r8/sampler").write(artifact_dir)
     with pytest.raises(ValueError, match=r"no rank 32 LoRA of .*: its rank is 8"):
-        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
-    (release / MANIFEST).write_text(json.dumps({**UNTRAINED.to_dict(), "unknown": 1}))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(artifact_dir))
+    (artifact_dir / MANIFEST).write_text(json.dumps({**UNTRAINED.to_dict(), "unknown": 1}))
     with pytest.raises(ValueError, match="is no Tinker checkpoint manifest"):
-        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
+        TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(artifact_dir))
 
 
 def base_root(directory: Path, inputs: dict[str, str]) -> Artifact:
@@ -557,7 +560,7 @@ def test_a_base_root_of_the_model_rank_and_service_is_admitted_and_samples_the_b
         TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(base.local_path))
     (base.local_path / MANIFEST).unlink()
 
-    # The runtime samples the base model for it, before and after a trained release.
+    # The runtime samples the base model for it, before and after a trained snapshot.
     first = inference.activate_checkpoint(base)
     assert inference.served_model_name("s") == MODEL
     assert inference.artifact_model(base) == PolicyModel(MODEL, None)
@@ -835,18 +838,26 @@ def test_unsupported_chat_options_fail_explicitly(inference, client, tmp_path, e
     assert not client.sampled
 
 
-def test_activation_serves_the_new_sampler_and_freezes_older_releases(component, inference, objective, tmp_path):
+def test_activation_serves_the_new_sampler_and_freezes_older_snapshots(component, inference, objective, tmp_path):
     base = empty_artifact(tmp_path)
     first = inference.activate_checkpoint(base)
+    assert inference.served_artifact(base.artifact_id, "s") == ServedArtifact(
+        base.artifact_id, TINKER_URL, "tinker://base/sampler"
+    )
+    assert inference.served_artifact("unbound-artifact", "s") is None
     (checkpoint,) = train(component, batch(), objective.name).checkpoints
     published = Artifact.local(Path(checkpoint.artifact_path))
     selected = inference.activate_checkpoint(published)
     assert selected != first
+    assert inference.served_artifact(base.artifact_id, "s") is None
+    assert inference.served_artifact(published.artifact_id, "s") == ServedArtifact(
+        published.artifact_id, TINKER_URL, "tinker://update-1/sampler"
+    )
     # The served row names the active sampler; a request under an older sampler's name keeps that sampler's load.
     assert inference.served_model_name("s") == "tinker://update-1/sampler"
     assert inference.sampler_load("tinker://base/sampler") == ("tinker://base/sampler", first)
     assert inference.sampler_load("tinker://update-1/sampler") == ("tinker://update-1/sampler", selected)
-    # Each snapshot's model is the base with that snapshot's sampler, whichever release is served.
+    # Each snapshot's model is the base with that snapshot's sampler, whichever snapshot is served.
     assert inference.artifact_model(published) == PolicyModel(MODEL, "tinker://update-1/sampler")
     assert inference.artifact_model(base) == PolicyModel(MODEL, "tinker://base/sampler")
     rollback = Artifact.local(base.local_path)
@@ -931,7 +942,6 @@ def test_serve_skips_the_model_download_for_a_hosted_backend(tmp_path, monkeypat
 @pytest.mark.parametrize(
     "options",
     [
-        {"max_staleness": 1},
         {"lora_rank": 0},
         {"learning_rate": 0},
         {"kl_coef": -1},
@@ -947,7 +957,7 @@ def test_bad_runtime_configuration_fails_without_api_key(tmp_path, options):
 # -- Through the dispatcher and the HTTP service
 
 
-def test_tinker_serves_its_releases_with_the_training_options_as_cli_text_gives_them():
+def test_tinker_serves_its_snapshots_with_the_training_options_as_cli_text_gives_them():
     options = {
         "state-dir": "state",
         "batch-size": "4",
@@ -1065,7 +1075,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         scenario = second.get_or_create_scenario("math")
         assert scenario.commit_number == step
         assert loop_state(scenario) == state
-        # The creation is the scenario's root snapshot: its artifact_id is the root's release ID.
+        # The creation is the scenario's root snapshot: its artifact_id is the root's revision.
         base_artifact = scenario.snapshot_queries.artifact_for_version(base).artifact_id
         assert base_artifact == scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
         assert scenario.repository.start_artifact.revision == base

@@ -162,7 +162,7 @@ Each ID is any row of the artifact list. Leave out ``component`` when the scenar
 
 An empty mapping, ``{"served": {}}`` without ``component``, makes the whole scenario serve nothing. Reef then starts no engine for it, and training still runs. ``POST /reef/scenarios`` with ``"serves": false`` creates a scenario in this state. The scenario serves again when ``served`` names an artifact (`Serve nothing <../reference/http-api.rst#serve-nothing>`__).
 
-The response accepts the mapping. Inference then loads the artifacts in the background. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using a new active artifact. Repeating the request retries a failed startup at once.
+The response accepts the mapping. Inference then loads the artifacts in the background. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using a new active artifact. For an artifact that serves beside the active one, add ``?model=<artifact-id>``. Repeating the request retries a failed startup at once.
 
 Reef appends an ``activate``, ``serve`` or ``stop_serving`` operation for each artifact that changes. It creates no artifact or repository revision. For example, changing the active ``harness`` from artifact B to C changes ``{weights: A, harness: B}`` to ``{weights: A, harness: C}``. The weights keep artifact A and its identity. Each operation stores the complete selection, so recovery restores the same combination. History is not rewritten, and the step counter keeps increasing. The request never changes a trainer's training start.
 
@@ -179,7 +179,28 @@ Reef appends an ``activate``, ``serve`` or ``stop_serving`` operation for each a
 
 A call to the artifact's URL is recorded with the ``artifact_id`` that answered. Choose which clients call each URL, for example with a gateway. The served artifacts survive a restart.
 
-**Runtime limits.** To serve several artifacts, the runtime must answer each call from the artifact that the call names. A Tinker scenario can serve any of its artifacts together. A runtime that loads weights into engines serves one artifact, so Reef refuses a mapping of several artifacts there. A full-weight serving runtime that makes its starting artifact active after a checkpoint loads the starting artifact's files from the artifact repository. `Set what a scenario serves <../reference/http-api.rst#set-what-a-scenario-serves>`__ in the HTTP API lists the answers and status codes.
+**Runtime limits.** To serve several artifacts, the runtime must answer each call from the artifact that the call names. The runtime sets how many weight artifacts a scenario serves together:
+
+- A Tinker scenario can serve any of its artifacts together.
+- Reef's adapter serving keeps one weight artifact of a scenario loaded.
+- Reef's full-weight serving keeps one checkpoint of a scenario loaded on each inference component. A deployment has one component by default, and ``inference.remote.slot-urls`` names further components (`The inference section <../reference/configuration.rst#the-inference-section>`__).
+
+Reef refuses a mapping that names more weight artifacts than that number with HTTP 400, and changes nothing.
+
+**Several checkpoints on several components.** Each checkpoint of the mapping has its own component:
+
+- **A change of traffic weights alone loads nothing.** A split, a promotion and a rollback keep each checkpoint that the scenario serves already on its component.
+- **A stopped checkpoint keeps its component for a while.** It takes no new requests, and the admitted requests can finish. Reef schedules its retirement ``inference.timeout-s`` plus 5 seconds after it publishes the new routes, which is 305 seconds by default. A busy serving worker or a failed release makes the retirement later. No API reports its end. The component then keeps its engines and their GPU memory for the next checkpoint.
+
+**Replace a checkpoint when every component holds one.** A new checkpoint needs a free component. In this example, ``a``, ``b`` and ``c`` stand for artifact IDs. Two components serve ``a`` and ``b``, and ``c`` must replace ``a``:
+
+#. Send a mapping that names neither ``a`` nor ``c``: ``{"b": 100}``.
+#. Wait about ``inference.timeout-s`` plus 5 seconds. This is an estimate: the time starts when Reef publishes the new routes, not at the HTTP 200, and a ``ready`` status of ``b`` shows neither that publication nor a free component.
+#. Try to add ``c`` with a mapping such as ``{"b": 100, "c": 0}``, and poll the status of ``c`` itself: ``GET /reef/scenarios/{scenario}/inference/status?model=<id-of-c>``. Without ``model``, the status describes the active ``b``, which stays ``ready`` when ``c`` fails. If ``c`` fails because no component is free yet, wait and send the mapping again.
+
+One mapping that removes ``a`` and adds ``c``, such as ``{"b": 50, "c": 50}``, works only when another component is free. Otherwise Reef accepts it, but its startup fails before Reef publishes new routes. ``a`` then keeps its route and its component, so each retry of that mapping fails in the same way. Use the three steps to recover.
+
+A full-weight serving runtime that makes its starting artifact active after a checkpoint loads the starting artifact's files from the artifact repository. `Set what a scenario serves <../reference/http-api.rst#set-what-a-scenario-serves>`__ in the HTTP API lists the answers and status codes.
 
 Activation rule
 ---------------
@@ -324,7 +345,7 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its history and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its history and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, which also records that the scenario ID is never used again. Deleting a weight-training scenario cancels its running training job.
 
 Run the services in separate processes
 --------------------------------------
@@ -430,22 +451,35 @@ component:
   backend when it takes the job. Give the training service the same
   ``storage.artifact-backend`` access as control, and its own
   ``storage.artifact-cache-dir``.
+* The training service stores the files of each saved checkpoint in the
+  artifact backend, and control commits them by name. Control reads no
+  directory of the training service and holds none of a checkpoint's bytes, so
+  the two share no volume for checkpoints. The training service therefore
+  needs write access to the artifact backend. An artifact import and a
+  harness sync are composed in the artifact backend too, and control reads
+  one component of a snapshot at a time, so the weights of a scenario with
+  several components do not pass through control. A checkpoint that no commit
+  took, such as one of a cancelled job, leaves the artifact backend when
+  control deletes the job's ended item
+  (``storage.work-retention-s``, 7 days by default).
 * An artifact import for ``tinker`` or ``spindle_full`` looks the checkpoint up
   on the backend's service. The training service does that, so such an import
   needs a running training service. It answers ``503`` when the training
   service gives no answer within 60 seconds.
 
-Control still publishes each checkpoint from the path that the training service
-reports, so both must reach the checkpoint directories.
-
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
 coding agent and the evaluation runs. Install the adapter's binary and the
-sandbox where the training service runs. The training service writes the step
-records and the running step's progress under ``evolution.state_dir``. Control
-reads them for the snapshot and request pages, so both must reach that
-directory, as they reach the artifact backend. Control builds no harness
-training component: it needs neither the adapter's binary nor the sandbox.
+sandbox where the training service runs. Only the training service reads and
+writes ``evolution.state_dir``. It copies the running step's progress into the
+step's job in the shared store, and it stores each ended step's record files in
+the artifact backend. Control reads both there for the snapshot and request
+pages. The record files stay as long as the scenario: Reef removes them from
+the artifact backend when you delete the scenario. When you delete a scenario, control asks the training service to move
+the scenario's directory under ``evolution.state_dir`` to ``archived/``; the
+request waits while no training service runs. Control builds no harness
+training component: it needs neither the adapter's binary nor the sandbox, and
+it shares no directory with the training service.
 
 .. _Harness clients:
 
@@ -527,13 +561,18 @@ inference service never creates a scenario: create it first with
   compact its run.
 * ``502`` when the engine fails otherwise or cannot be reached, and ``504`` when
   it does not answer within ``inference.timeout-s``.
-* ``409`` when the engine answers with another model name or aborts the
-  request twice. The service reads the row again and retries once, for
-  example during a change of the served model.
+* ``409`` when the engine aborts the request twice. The service reads the row
+  again and retries once, for example during a change of the served model.
+* ``503`` with ``Retry-After`` when the engine does not serve the selected
+  weights on either attempt, for example during a weight change, or when the
+  retry finds no row for the request's artifact.
 * ``503`` when it cannot read ``served_models`` and has no earlier read from
   the last 300 seconds, or when the record store does not take the record. The
   service never returns a buffered answer without its record. A stream goes
   out as the engine sends it, and its record is appended when it ends.
+* A stream that fails after its headers gets no receipt. `Request
+  <../reference/http-api.rst#request>`__ gives the stream cases and the
+  retry rules.
 
 **Control restarts.** While control is down, the inference service continues to
 answer from ``served_models`` and to record. Training jobs, sample requests and
@@ -561,7 +600,9 @@ still serves it, as a remote endpoint can; requests to it go on without a gap.
 The other routes go, and their scenarios' requests get ``inference_starting``.
 Then completed selections return to starting, and the new owner activates them
 again. An activation replaces a scenario's route when it serves from another
-engine. This status is not a continuous engine health check. Runtime backends still control cancellation of engine calls
+engine. Reef's own engines keep no route: the new owner starts a new engine
+stack, which ends the requests in flight, and loads each selection again.
+This status is not a continuous engine health check. Runtime backends still control cancellation of engine calls
 that were already in progress when a worker lost its lease.
 
 Control runs as one active instance and any number of standby instances on the
@@ -582,11 +623,29 @@ active artifact of each scenario and the artifacts served beside it. A
 candidate under evaluation is not one of them: the evaluation service loads the
 candidate from the artifact repository and answers its rollouts with the
 scenario's runtime, so it needs no other service. Inference records name the
-answering artifact with ``artifact_id``, including the starting artifact. A runtime
-that loads full weights in place serves the next artifact under the same model
-name after an activation, so a request in flight at that moment can be answered
-by the next artifact while its record names the old one. Adapter runtimes serve
-each artifact under its own name and do not have this limit.
+answering artifact with ``artifact_id``, including the starting artifact.
+
+**Request pinning.** Reef's engines keep each request on the weights that it
+selected, and no setting turns this protection off. A change of weights
+waits for the requests in flight, for at most ``inference.timeout-s``, and
+then interrupts them: none continues on the next weights. `Request pinning
+<../developer-guide/executors.rst#request-pinning>`__ lists the guarantees
+and their limits. Operate the inference component as follows:
+
+* Run control, the inference replicas and the component on the same Reef
+  version. The component must confirm the protection at each engine start
+  and at each health check, and the engine startup fails without it.
+* Keep the native engine addresses private. Clients use Reef's public
+  inference API.
+* Restart the component after a reset of the coordination store, because
+  owner sequences can otherwise move backwards.
+* An adapter that never loads keeps its engine stack unavailable, and the
+  stack retries at each health check. Correct the artifact, or restart the
+  serving worker, before you select a replacement.
+* A control call waits at most 30 seconds for an earlier one, and then gets
+  a retryable HTTP 503. A native call that never returns needs operator
+  recovery of the component; Reef never runs a second weight change beside
+  it.
 
 Choose the storage backend
 --------------------------
@@ -684,7 +743,7 @@ name and a ``config`` mapping, as for a storage plugin:
      artifact-backend:
        module: my_package.artifacts:ObjectStoreArtifactBackend
        config:
-         bucket: reef-releases
+         bucket: reef-snapshots
 
 Reef calls ``from_config(config, context=...)`` to make the backend. The
 `Python artifact backend contract <../reference/python-api.rst#artifact-backends>`__
@@ -723,6 +782,41 @@ each snapshot to the Hub as it publishes it:
   appears in no URL, file or log. Keep the repository private unless you mean
   to publish what Reef trains.
 - Archiving a deleted scenario's ref works with a local repository only.
+
+The training service stores each checkpoint in the repository before a
+commit takes it. Reef discards a checkpoint after its commit, when the sweep
+deletes its ended job, and when its scenario is deleted. What happens to its
+Git LFS objects depends on where the repository is:
+
+- A local repository, named by a path or a ``file://`` URL: the discard
+  deletes the ref only. Control's sweep of ended work, once an hour, removes
+  each LFS object that no ref references any more. The delete of a scenario
+  does the same at once. Snapshots, pending snapshots and archived scenarios
+  keep their objects. A materialized file is a link to its object. So the
+  sweep removes a cache entry of discarded content one sweep later, because
+  another service that shares the cache directory can still read it. The
+  training service's clone drops its links when the store's push ends.
+  The removal scans the refs without the lock, so stores and publishes do not
+  wait for the scan. When a store or publish starts during the scan, the sweep
+  removes nothing, and the next sweep removes what it left. The processes
+  coordinate with ``flock`` on the file ``reef-objects.lock`` in the
+  repository, and count their writes in ``reef-objects.writes``, which grows
+  by one byte for each write. This is safe when every process that writes the
+  repository runs on one host, on any local filesystem. It is also safe across
+  hosts on a Linux NFS mount, such as Amazon EFS, because Linux emulates
+  ``flock`` there with NFS byte-range locks. On other shared filesystems, such
+  as SMB or a FUSE mount of object storage, the lock does not reach other
+  hosts: do not share a local repository between hosts there. Reef does not
+  detect the filesystem.
+- A remote Git server or the Hugging Face Hub: the objects stay on the remote
+  after Reef deletes the ref. Reef's clone in the work directory also keeps a
+  copy of each object that it uploaded. To free the remote's space, stop every
+  Reef service that writes the repository, and then remove the objects that no
+  ref references with the server's own tools. On the Hub,
+  ``HfApi.list_lfs_files`` and ``HfApi.permanently_delete_lfs_files`` of
+  ``huggingface_hub`` do this. Reef does not remove them itself, because a store
+  on another host can upload an object before it pushes the ref that
+  references it.
 
 Choose the task file store
 --------------------------
@@ -968,18 +1062,27 @@ refuses that configuration.
 Upgrade from a Reef that wrote older formats
 --------------------------------------------
 
-This Reef reads only the formats that it writes: ``reef-commit/9`` commit
-records, ``reef-scenario/8`` scenario metadata, and the current tables of the
-record database, the data store and the coordination store. It does not
-upgrade a store that an older Reef wrote.
+The data store upgrades its own tables. It records their version in the
+table ``data_schema_version``. When a service opens a database of an earlier
+version, it brings the tables to the current version in one transaction,
+before it reads an item. Stop every process of the deployment before you
+start the new Reef: a process of the earlier Reef fails on the upgraded
+tables. A database of a later version stops the start with ``a later Reef
+wrote them``; Reef changes nothing then.
+
+For its other stores, this Reef reads only the formats that it writes:
+``reef-commit/9`` commit records, ``reef-scenario/8`` scenario metadata, and
+the current tables of the record database and the coordination store. It does
+not upgrade one of these that an older Reef wrote.
 
 A scenario with an older commit record or older scenario metadata does not
 load, and its error names the format. A PostgreSQL record schema of another
 version stops the start with ``unsupported PostgreSQL record schema version``.
 Reef does not change or delete older data.
 
-To move to this Reef from one that wrote older formats, use a new deployment
-directory and, for PostgreSQL, a new schema. Then create the scenarios again.
+To move to this Reef from one that wrote older formats of these stores, use a
+new deployment directory and, for PostgreSQL, a new schema. Then create the
+scenarios again.
 
 Back up a deployment
 --------------------

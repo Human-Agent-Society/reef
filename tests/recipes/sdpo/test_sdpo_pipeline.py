@@ -73,7 +73,7 @@ def push(
     step: int = 0,
     score: float = 0.0,
     feedback: str = "",
-    release: str | None = "slime-v3",
+    artifact_id: str | None = "slime-v3",
     question: list[dict[str, Any]] | None = None,
     suffix: str = "",
 ) -> None:
@@ -83,7 +83,7 @@ def push(
             scenario="science",
             request_type=RequestType.INFERENCE,
             agent_record_id=name,
-            artifact_id=release,
+            artifact_id=artifact_id,
             payload={
                 "messages": question or QUESTION,
                 "tools": TOOLS,
@@ -180,11 +180,11 @@ def test_first_report_wins_a_retry_slot() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("release", [None, "slime-v4"])
-def test_rejects_steps_without_one_known_policy_release(release: str | None) -> None:
+@pytest.mark.parametrize("artifact_id", [None, "slime-v4"])
+def test_rejects_steps_without_one_known_policy_artifact(artifact_id: str | None) -> None:
     target = processor()
     push(target, 0)
-    push(target, 1, release=release)
+    push(target, 1, artifact_id=artifact_id)
     with pytest.raises(RuntimeError, match="no job data ready"):
         target.build_job_data(2)
     assert target.status()["failed_steps"] == [{"step": 0, "reason": "missing_or_mixed_artifact_ids"}]

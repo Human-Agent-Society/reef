@@ -88,9 +88,10 @@ class TraceJobData(DistillJobData):
         if self.evaluation_split:
             samples = self.context.samples
             stored = () if samples is None else samples.imported_tasks(split="eval")
-            parameters["evaluation_tasks"] = [
-                str(item.sample.task_path) for item in stored if isinstance(item.sample, TaskSample)
-            ]
+            # A scenario can use a task more than once (RFC #1420): an evaluation runs it once.
+            parameters["evaluation_tasks"] = list(
+                dict.fromkeys(str(item.sample.task_path) for item in stored if isinstance(item.sample, TaskSample))
+            )
         return parameters
 
 

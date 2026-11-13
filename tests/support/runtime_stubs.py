@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact import Artifact, DefaultStart
+from reef.core.errors import ReefError
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import Sample
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ArtifactFormat
-from reef.inference.http import InferenceProxyRuntime
-from reef.inference.interfaces import InferenceBackend
+from reef.inference.http import HttpInferenceHandler
+from reef.inference.interfaces import InferenceBackend, InferenceHandler, InferenceRuntime
 from reef.inference.serving import OpenedEngines, ServingEngines
 from reef.scenario.live_objects import LiveObjects
 from reef.storage.data import DataStore
@@ -91,16 +92,17 @@ class StubTrainingComponent(TrainingComponent):
         return DefaultStart(inputs={"model": self.backend_name})
 
     @property
-    def default_start_inputs(self) -> Mapping[str, str]:
-        return self.stub_default_start().inputs
-
-    @property
     def base_start(self) -> str:
         return f"{self.backend_name}:base"
 
     def root_start(self, root: ScenarioRoot) -> str:
         """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
         return self.base_start
+
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        """The stub's checks read no file of a start; a subclass whose checks read some names them."""
+        return ()
 
     def check_import_start(self, artifact_dir: Path) -> None:
         """Raise ``ValueError`` for a snapshot that the stub cannot start from; the stub's facts ask it too. A stub
@@ -169,38 +171,56 @@ class RecordingComponent(StubTrainingComponent):
         return ()
 
 
-class StubInferenceRuntime(InferenceProxyRuntime):
-    """An inference proxy that records the snapshots it serves.
+class StubInferenceRuntime(InferenceRuntime):
+    """A runtime that serves weight snapshots without engines: it records each snapshot that a test activates.
 
-    A snapshot serves under the version its ``model.txt`` names, or under its
-    artifact ID when it holds no such file. ``activated`` lists the versions
-    of the snapshots it served, at commits, activations and starts, in order;
-    ``served`` is the last one, ``None`` before the first one. For each
-    activation, ``activated_ids`` holds the artifact ID and
-    ``activated_scenarios`` the scenario that the activation named, or None.
+    Values: ``configured_model_path`` is the model name of the engine at ``base_url``; a test answers that engine
+    or leaves it unreachable. A snapshot's version is the text of its ``model.txt``, or its revision without that
+    file. ``activated`` lists the versions of the activated snapshots, in order. For each activation,
+    ``activated_ids`` holds the artifact ID and ``activated_scenarios`` the scenario that the activation named, or
+    None. ``served`` is the last version and ``active_artifact_id`` is the ID of that snapshot's artifact; both are
+    None before the first activation. ``answers_each_artifact`` is False at first. A test sets it, and the runtime
+    then answers each call from the artifact that the call names, as Tinker does (``serves_any_artifact``).
+    ``per_scenario_adapters`` and ``shared_by_training_scenarios`` are what the runtime reports for the properties
+    of the same names.
 
-    With ``answers_each_artifact``, the runtime answers each call from the artifact it names, as Tinker does: each
-    artifact has its own model name, ``sampler:<artifact_id>``. ``per_scenario_adapters`` and
-    ``shared_by_training_scenarios`` are what the runtime reports for the properties of the same names.
+    Purpose: scenario, dispatcher and service tests bind it to a recipe in place of a runtime with engines.
+
+    The runtime keeps one binding: ``served_artifact`` gives a route only for ``active_artifact_id``. Its capacity
+    is the base default. So it deploys an artifact beside the active one (``serve_artifact``) only with
+    ``answers_each_artifact``, or in a subclass whose ``served_artifact_capacity`` is above 1. A snapshot without
+    weights routes to the configured model, as on an inference proxy (``endpoint_model_name``).
     """
 
     def __init__(
         self,
         base_url: str = "http://inference-runtime",
         *,
+        model_path: str = "stub-model",
+        inference_timeout_s: float = 300.0,
         per_scenario_adapters: bool = False,
         shared_by_training_scenarios: bool = False,
-        **kwargs,
     ) -> None:
-        kwargs.setdefault("model_path", "stub-model")
-        super().__init__(base_url=base_url, **kwargs)
+        super().__init__(base_url=base_url, inference_timeout_s=inference_timeout_s)
+        self.configured_model_path = model_path
+        self.handler = HttpInferenceHandler(self.base_url, timeout_s=self.inference_timeout_s)
         self.activated: list[str] = []
         self.activated_ids: list[str] = []
         self.activated_scenarios: list[str | None] = []
         self.served: str | None = None
+        self.active_artifact_id: str | None = None
         self.answers_each_artifact = False
         self.adapters_per_scenario = per_scenario_adapters
         self.training_scenarios_share = shared_by_training_scenarios
+
+    @property
+    def model_path(self) -> str:
+        return self.configured_model_path
+
+    @property
+    def inference_handler(self) -> InferenceHandler:
+        """A plain HTTP handler for ``base_url``, as an inference proxy has."""
+        return self.handler
 
     @property
     def serves_any_artifact(self) -> bool:
@@ -215,9 +235,16 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         return self.training_scenarios_share
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        if not self.answers_each_artifact:
+            raise ReefError("the stub runtime answers only from the snapshot that it activated")
         return PolicyModel("base", artifact.ref.revision)
 
     def serve_artifact(self, artifact: Artifact, *, scenario: str) -> ServedArtifact:
+        """Deploy ``artifact`` under its own model name, ``sampler:<artifact_id>``.
+
+        Raise ``ReefError`` at a capacity of 1."""
+        if self.served_artifact_capacity == 1:
+            raise ReefError("the stub runtime keeps one snapshot, so it deploys no artifact beside the active one")
         return ServedArtifact(artifact.artifact_id, self.base_url, f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
@@ -225,10 +252,26 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         self.activated_scenarios.append(scenario)
         version = self.serve(artifact)
         self.activated.append(version)
+        self.active_artifact_id = artifact.artifact_id
         return version
 
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """The route of the last activated artifact, at ``base_url`` under ``served_model_name``. None for any other
+        artifact, and when the stub has no model name or no HTTP(S) ``base_url``."""
+        if artifact_id != self.active_artifact_id:
+            return None
+        try:
+            return ServedArtifact(artifact_id, self.base_url, self.served_model_name(scenario))
+        except ValueError:
+            return None
+
+    def endpoint_model_name(self, scenario: str) -> str | None:
+        """The configured model for a snapshot without weights; None when the stub names no model."""
+        return self.served_model_name(scenario) or None
+
     def serve(self, artifact: Artifact) -> str:
-        path = artifact.local_path
+        # A runtime makes local the artifact that it loads, as the engines of ``reef.inference.serving`` do.
+        path = artifact.materialize().local_path if artifact.repository is not None else artifact.local_path
         marker = None if path is None else Path(path) / VERSION_FILE
         version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.revision
         self.served = version
@@ -267,13 +310,17 @@ class StubFacts(TrainingBackendFacts):
 
     @property
     def default_start_inputs(self) -> Mapping[str, str]:
-        return self.component.default_start_inputs
+        return self.component.stub_default_start().inputs
 
     def default_start(self) -> DefaultStart:
         return self.component.stub_default_start()
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.component.parameters_schema(kind)
+
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        return self.component.start_files
 
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.component.root_start(root)
@@ -302,6 +349,12 @@ def live_objects(
     )
 
 
+def harness_live_objects(component: StubTrainingComponent, *, data_store: DataStore | None = None) -> LiveObjects:
+    """The live objects of a test deployment that evolves a harness: ``component`` as the harness training
+    component, and its facts (``StubFacts``). The deployment has no runtime."""
+    return LiveObjects(harness_component=component, harness_facts=StubFacts(component), data_store=data_store)
+
+
 def job_sized_stages(
     spec: PipelineSpec, section: Mapping[str, Any] | None = None, *, job_samples: int = 1
 ) -> PipelineSettings:
@@ -317,7 +370,8 @@ def job_sized_stages(
 
 class RunningEngines(ServingEngines):
     """Engines that a test started behind ``backend`` and stops: opening returns them as new engines, and closing
-    stops nothing.
+    stops nothing. They declare ``request_pinning``, as a receiver that keeps each request on its weights does;
+    the fake backend admits no request, so the tests cover the runtime's own calls only.
 
     Purpose: the serving runtime tests run ``AdapterServingRuntime`` and ``FullWeightServingRuntime`` on fake engines.
     """
@@ -328,6 +382,10 @@ class RunningEngines(ServingEngines):
     @property
     def base_url(self) -> str:
         return self.backend.inference_url()
+
+    @property
+    def request_pinning(self) -> bool:
+        return True
 
     def open(self) -> OpenedEngines:
         return OpenedEngines(self.backend, attached=False)

@@ -21,13 +21,21 @@ class MemoryArtifactBackend(CachedRepositoryBackendFactory, ConfigurableReposito
         super().__init__()
         self.context = context
         self.label = label
+        self.archived: set[str] = set()
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: RepositoryBackendContext) -> Self:
         return cls(context, label=str(config["label"]))
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
-        return InMemoryRepositoryBackend(scenario, directory=self.context.cache_dir / "releases")
+        return InMemoryRepositoryBackend(scenario, directory=self.context.cache_dir / "snapshots")
+
+    def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
+        self.archived.add(scenario)
+        return ()
+
+    def has_archived_registration(self, scenario: str) -> bool:
+        return scenario in self.archived
 
 
 class UnreachableArtifactBackend(CachedRepositoryBackendFactory, ConfigurableRepositoryBackendFactory):
@@ -38,4 +46,7 @@ class UnreachableArtifactBackend(CachedRepositoryBackendFactory, ConfigurableRep
         raise ConnectionError(f"artifact store {Path(context.work_dir).name} is unreachable")
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
+        raise NotImplementedError
+
+    def has_archived_registration(self, scenario: str) -> bool:
         raise NotImplementedError

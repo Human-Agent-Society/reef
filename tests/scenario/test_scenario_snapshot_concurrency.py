@@ -1,48 +1,49 @@
-"""Release readers stay live during evolution without observing partial publication."""
+"""Snapshot readers stay live during evolution without observing partial publication."""
 
 from __future__ import annotations
 
+import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from threading import Event
+from typing import Any
 
 import pytest
-from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.polling import wait_until
+from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 from tests.support.samples_service import make_samples
-from tests.support.threshold_processor import threshold_pipeline
-from tests.support.trainers import OneTrainerBuilder
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
 
 from reef.artifact import Artifact, ArtifactPublicationError, DefaultStart, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPendingError
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import SERVICE_COMPONENTS
-from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import Trainer, TrainingCommit
+from reef.train import TrainingCommit
 from reef.train.component import SavedCheckpoint, TrainingJob
-from reef.train.jobs import JobLoop
+from reef.train.job_queue import CHECKS_QUEUE, JobQueueComponent
+from reef.train.pipeline import PipelineSpec
+from reef.train.types import JobData
 
 
 class _LocalJobs(StubTrainingComponent):
     """A training component whose ``n``-th job saves one checkpoint holding ``model.txt`` = ``step <n>``, with the
-    metric ``score`` = ``n``. With ``block``, a job waits in ``submit``, so the trainer's preparation waits with it."""
+    metric ``score`` = ``n``. Its scenarios start from ``model.txt`` = ``initial``."""
 
     def __init__(self, artifact_dir: Path) -> None:
         super().__init__(artifact_dir, name="local", shares_scenarios=True)
-        self.block = False
-        self.started = Event()
-        self.resume = Event()
+
+    def stub_default_start(self) -> DefaultStart:
+        return DefaultStart(files={"model.txt": "initial"})
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
-        if self.block:
-            self.started.set()
-            assert self.resume.wait(10), "test did not release the job"
         step = len(self.submitted)
         path = self.checkpoint_root / str(step)
         path.mkdir(parents=True)
@@ -50,52 +51,42 @@ class _LocalJobs(StubTrainingComponent):
         return (SavedCheckpoint(0, str(path), str(path), {"score": float(step)}),)
 
 
+class _BlockingJobData(ThresholdJobData):
+    """Batches like ``ThresholdJobData``. While ``block`` is true, ``job_parameters`` sets ``started`` and waits for
+    ``resume``, so the trainer's cycle that submits the job waits with it. The ``local_scenario`` fixture resets the
+    three class attributes."""
+
+    block = False
+    started = Event()
+    resume = Event()
+
+    def job_parameters(self, data: JobData) -> Mapping[str, Any]:
+        if type(self).block:
+            type(self).started.set()
+            assert type(self).resume.wait(10), "test did not release the cycle"
+        return super().job_parameters(data)
+
+
 @dataclass(frozen=True)
-class _LocalRecipe(Recipe):
-    def default_start(self) -> DefaultStart:
-        return DefaultStart(files={"model.txt": "initial"})
-
-
-class _LocalTrainers(OneTrainerBuilder):
-    """Builds a trainer whose jobs run on ``backend``, on the trainer's own thread."""
-
-    def __init__(self, backend: _LocalJobs) -> None:
-        self.backend = backend
-
-    def build_trainer(
-        self,
-        spec,
-        scenario,
-        records,
-        *,
-        algorithm_state,
-        experiment_logger,
-        task_storage,
-        artifacts,
-        samples,
-        root,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=partial(threshold_pipeline, job_samples=1),
-            job_loop=JobLoop(self.backend, scenario=scenario),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            root=root,
-        )
+class _LocalRecipe(TestPolicyRecipe):
+    @classmethod
+    def pipeline_spec(cls) -> PipelineSpec:
+        return PipelineSpec(ThresholdSamples, _BlockingJobData)
 
 
 @pytest.fixture
 def local_scenario(tmp_path):
     backend = _LocalJobs(tmp_path / "candidates")
+    _BlockingJobData.block = False
+    _BlockingJobData.started = Event()
+    _BlockingJobData.resume = Event()
     dispatcher = Dispatcher(
         _LocalRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(backend),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
-        trainer_builder=_LocalTrainers(backend),
         # The test makes the samples and commits each step itself. No samples worker makes them, and control's local
         # training workers run no cycle: a woken worker would prepare and commit the same result as the test.
         components=frozenset(SERVICE_COMPONENTS) - {"samples"},
@@ -106,7 +97,7 @@ def local_scenario(tmp_path):
     try:
         yield scenario, backend
     finally:
-        backend.resume.set()
+        _BlockingJobData.resume.set()
         dispatcher.close()
 
 
@@ -117,7 +108,13 @@ def _queue_batch(scenario: Scenario, step: int) -> None:
         AgentRecord.create(
             scenario="math",
             request_type=RequestType.INFERENCE,
-            payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+            # The artifact that serves the scenario answered the call, so the sample is not stale.
+            payload={
+                "tokens": [1, 2],
+                "loss_mask": [0, 1],
+                "rollout_log_probs": [-0.2],
+                "artifact_id": scenario.serving_artifact_id(),
+            },
             agent_record_id=f"i{step}",
         )
     )
@@ -133,12 +130,20 @@ def _queue_batch(scenario: Scenario, step: int) -> None:
     make_samples(scenario)
 
 
+def _next_commit(scenario: Scenario) -> TrainingCommit:
+    """The trainer's next commit, once it has one: a job's submission after the training service checked the job,
+    or the news of the running job after the training worker reported it."""
+    deadline = time.monotonic() + 10
+    while (result := scenario.next_commit()) is None:
+        assert time.monotonic() < deadline, "the trainer had no commit"
+        time.sleep(0.01)
+    return result
+
+
 def _finish(scenario: Scenario) -> None:
-    """Commit the end of the running job, when one runs: the job ended in ``submit``."""
+    """Commit what is left of the running job, when one runs, up to its end."""
     while scenario.trainer.job_running:
-        result = scenario.next_commit()
-        assert result is not None
-        scenario.commit(result)
+        scenario.commit(_next_commit(scenario))
 
 
 def _prepare(scenario: Scenario) -> TrainingCommit:
@@ -146,12 +151,27 @@ def _prepare(scenario: Scenario) -> TrainingCommit:
     its artifact, not committed yet."""
     _finish(scenario)
     _queue_batch(scenario, scenario.commit_number + 1)
-    submitted = scenario.next_commit()
-    assert submitted is not None
-    scenario.commit(submitted)
-    result = scenario.next_commit()
-    assert result is not None and result.artifact is not None
+    scenario.commit(_next_commit(scenario))
+    result = _next_commit(scenario)
+    assert result.artifact is not None
     return result
+
+
+def _wait_for_job_check(scenario: Scenario) -> None:
+    """Ask the training service to check the trainer's next job, and wait for its answer: the trainer's next cycle
+    then submits the job."""
+    job_loop = scenario.trainer.job_loop_required()
+    component = job_loop.component
+    assert isinstance(component, JobQueueComponent)
+    wait_until(lambda: scenario.next_commit() is None and job_loop.waiting_job is not None)
+    job = job_loop.waiting_job
+    assert job is not None
+
+    def answered() -> bool:
+        item = component.queue.read(CHECKS_QUEUE, f"job:{job.job_id}")
+        return item is not None and item.final
+
+    wait_until(answered, message="the training service did not check the job")
 
 
 def _model_text(artifact: Artifact) -> str:
@@ -161,16 +181,18 @@ def _model_text(artifact: Artifact) -> str:
 
 
 @pytest.mark.unit
-def test_release_reads_remain_live_during_local_training(local_scenario) -> None:
-    scenario, backend = local_scenario
+def test_snapshot_reads_remain_live_during_local_training(local_scenario) -> None:
+    scenario, _ = local_scenario
     initial_ref = scenario.current_snapshot()
     scenario.commit(_prepare(scenario))
     _finish(scenario)
     current_ref = scenario.current_snapshot()
     expected_rows = scenario.artifact_rows()
     expected_selection = scenario.artifact_selection()
-    backend.block = True
     _queue_batch(scenario, 2)
+    # The cycle that waits is the one that submits the job, so the job's check has its answer first.
+    _wait_for_job_check(scenario)
+    _BlockingJobData.block = True
     writer_started = Event()
 
     def write():
@@ -180,7 +202,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
     with ThreadPoolExecutor(max_workers=7) as executor:
         training = executor.submit(scenario.next_commit)
         try:
-            assert backend.started.wait(2), "the job did not start"
+            assert _BlockingJobData.started.wait(2), "the cycle did not start"
             writer = executor.submit(write)
             assert writer_started.wait(2), "writer did not start"
             # A queued writer must wait on the operation lock without first
@@ -201,7 +223,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
                 writer.result(timeout=0.1)
             assert not training.done()
         finally:
-            backend.resume.set()
+            _BlockingJobData.resume.set()
 
         result = training.result(timeout=2)
         assert result.metrics["training_job"]["event"] == "submitted"
@@ -214,7 +236,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
 
 @pytest.mark.unit
 @pytest.mark.parametrize("operation", ["commit", "activate"])
-def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch, operation) -> None:
+def test_snapshot_reads_wait_for_complete_publication(local_scenario, monkeypatch, operation) -> None:
     scenario, _ = local_scenario
     initial_ref = scenario.current_snapshot()
     scenario.commit(_prepare(scenario))
@@ -307,8 +329,8 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
             "error": "storage unavailable",
         }
         # The job's end is the next commit: it repairs the committed parent first, which fails.
-        ended = scenario.next_commit()
-        assert ended is not None and ended.artifact is None
+        ended = _next_commit(scenario)
+        assert ended.artifact is None
 
         def unexpected_publish(*args, **kwargs):
             pytest.fail("a commit must not publish while its committed parent is unsynchronized")

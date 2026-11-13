@@ -47,10 +47,9 @@ recipe:
   implementation: recipes.sdft.recipe:SDFTRecipe
 # The sdft recipe's stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
-  # The staleness limit, and the teacher's window.
+  # The teacher's window. The stage is on-policy: a sample of an artifact that no longer serves does not train.
   record2sample:
     config:
-      max_staleness: 0                 # on-policy: the stage waits for each step's snapshot before sampling again
       max_teacher_tokens: 8192         # the trainer's seq-length; a longer teacher sequence does not train
   sample2job:
     config:

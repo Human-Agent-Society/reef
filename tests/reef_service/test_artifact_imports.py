@@ -39,7 +39,7 @@ from reef.train.trainer import Trainer
 
 
 def weights(directory: Path, content: bytes = b"w9") -> Path:
-    """A full-weight artifact: the layout of ``StubTrainingComponent``'s releases."""
+    """A full-weight artifact: the layout of ``StubTrainingComponent``'s artifacts."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -103,7 +103,7 @@ def test_a_base_root_is_imported_only_into_the_deployment_whose_default_start_it
     row = value.list_artifacts("math")[0]
     assert (row["operation"], row["artifact_id"]) == ("import", imported.artifact_id)
     _, stored_artifact = scenario.resolve_artifact(imported.artifact_id)
-    assert read_base_root(stored_artifact.local_path) == BaseRoot({"model": "stub"})
+    assert read_base_root(stored_artifact.materialize().local_path) == BaseRoot({"model": "stub"})
     with pytest.raises(ValueError, match="model: 'qwen', not 'stub'"):
         value.import_artifact(
             "math", opened(tmp_path / "other"), None, source=source(tmp_path / "other"), directory=store(tmp_path)
@@ -148,7 +148,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     assert "release_id" not in row and "content_id" not in row
     assert imported.artifact_id != record.snapshot.revision
     _, stored_artifact = scenario.resolve_artifact(imported.artifact_id)
-    assert directory_checksum(stored_artifact.local_path) == directory_checksum(tmp_path / "w9")
+    assert directory_checksum(stored_artifact.materialize().local_path) == directory_checksum(tmp_path / "w9")
     assert (row["source"], row["active"], row["activated"]) == (source(tmp_path / "w9"), False, False)
 
     # Importing the same bytes again creates another artifact identity.
@@ -157,7 +157,9 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     )
     assert again.artifact_id != imported.artifact_id
     _, another_artifact = scenario.resolve_artifact(again.artifact_id)
-    assert directory_checksum(another_artifact.local_path) == directory_checksum(stored_artifact.local_path)
+    assert directory_checksum(another_artifact.materialize().local_path) == directory_checksum(
+        stored_artifact.materialize().local_path
+    )
 
     # The artifact is then an ordinary row: it serves and trains as any other.
     activated = value.activate("math", imported.artifact_id)
