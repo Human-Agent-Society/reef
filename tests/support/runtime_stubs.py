@@ -99,6 +99,11 @@ class StubTrainingComponent(TrainingComponent):
         """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
         return self.base_start
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        """The stub's checks read no file of a start; a subclass whose checks read some names them."""
+        return ()
+
     def check_import_start(self, artifact_dir: Path) -> None:
         """Raise ``ValueError`` for a snapshot that the stub cannot start from; the stub's facts ask it too. A stub
         starts from every snapshot."""
@@ -312,6 +317,10 @@ class StubFacts(TrainingBackendFacts):
 
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.component.parameters_schema(kind)
+
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        return self.component.start_files
 
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.component.root_start(root)

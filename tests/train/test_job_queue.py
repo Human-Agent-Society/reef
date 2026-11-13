@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +16,7 @@ from tests.support.training_deployment import LocalFacts
 from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import Artifact, ArtifactError, InMemoryRepositoryBackend, RepositoryBackendFactory
+from reef.artifact.components import ComponentChecks
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import InternalError
 from reef.core.job_data import JobData, TaskSample
@@ -27,6 +30,8 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
+from reef.recipe import Recipe
+from reef.scenario.live_objects import RecipeChecks
 from reef.storage.data import MemoryDataStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.tasks import LocalTaskFileStore
@@ -66,6 +71,8 @@ from reef.train.local_jobs import LocalJobComponent
 from reef.train.training_requests import REQUEST_CANCELLED_ERROR, ScenarioTrainingRequests
 
 WAIT_SECONDS = 10.0
+#: The checks of a recipe that declares no component: they admit every checkpoint.
+ACCEPT_ALL = RecipeChecks(Recipe())
 
 
 class StepComponent(LocalJobComponent):
@@ -184,7 +191,9 @@ def worked(tmp_path):
     component = StepComponent(tmp_path / "jobs")
     data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
-    worker = TrainingJobWorker(component, queue, data_store, backends, worker_id="training-1", poll_seconds=0.02)
+    worker = TrainingJobWorker(
+        component, queue, data_store, backends, checks=ACCEPT_ALL, worker_id="training-1", poll_seconds=0.02
+    )
     checks = TrainingCheckWorker(component, queue, data_store, None, worker_id="checks-1", poll_seconds=0.02)
     worker.start()
     checks.start()
@@ -426,6 +435,7 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
         queue,
         MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts"),
+        checks=ACCEPT_ALL,
         worker_id="training-1",
         poll_seconds=0.02,
     )
@@ -457,6 +467,7 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
         queue,
         MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
         backends,
+        checks=ACCEPT_ALL,
         worker_id="training-1",
         poll_seconds=0.02,
     )
@@ -469,6 +480,67 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
         backends("s").materialize_content("j1:1")
     stored = backends("s").materialize_content("j1:2")
     assert {path.name: path.read_text() for path in stored.iterdir()} == {"weights.txt": "step 2"}
+    worker.stop()
+
+
+class RefuseSecondStep(ComponentChecks):
+    """Refuse a checkpoint whose weights say ``step 2``; it reads the checkpoint's files. ``seen`` lists the
+    scenario and component of each check."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, str | None]] = []
+
+    def validate(self, scenario: str, component: str | None, directory: Path) -> None:
+        self.seen.append((scenario, component))
+        if (directory / "weights.txt").read_text() == "step 2":
+            raise ValueError("the weights of step 2 are refused")
+
+
+class HeldSteps(StepComponent):
+    """Saves the two checkpoints of ``StepComponent`` and keeps the job running until ``release`` is set."""
+
+    def __init__(self, jobs_root: Path) -> None:
+        super().__init__(jobs_root)
+        self.release = threading.Event()
+
+    def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
+        result = super().run(job, directory)
+        self.release.wait(WAIT_SECONDS)
+        return result
+
+
+@pytest.mark.unit
+def test_the_worker_checks_each_checkpoint_before_it_stores_it_and_a_refusal_fails_the_job(tmp_path):
+    """The training service runs the scenario's check on the checkpoint's own directory, so no other process
+    fetches a checkpoint to check it. A refused checkpoint is not stored, and its job fails for good with the
+    check's message; the job's earlier checkpoint stays recorded, and so do the job's record files."""
+    queue = memory_coordination(lease_seconds=30).work_queue
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(replace(job("j1"), component="w"))))
+    checks = RefuseSecondStep()
+    # The job still runs when its second checkpoint is refused, so it has not stored its records yet.
+    component = HeldSteps(tmp_path / "jobs")
+    worker = TrainingJobWorker(
+        component,
+        queue,
+        MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
+        backends,
+        checks=checks,
+        worker_id="training-1",
+        poll_seconds=0.02,
+    )
+    assert worker.run_once()
+    item = queue.read(JOBS_QUEUE, "j1")
+    assert item.state == "failed"
+    assert item.error == "the scenario's check refused checkpoint 2 of job j1: the weights of step 2 are refused"
+    assert [entry["content"] for entry in item.progress] == ["j1:1"]
+    assert item.metadata[STORED_CONTENT_KEY] == ["j1:1"]
+    assert checks.seen == [("s", "w"), ("s", "w")]
+    with pytest.raises(ArtifactError):
+        backends("s").materialize_content("j1:2")
+    records = backends("s").materialize_content(job_records_content("j1"))
+    assert (records / "weights.txt").read_text() == "step 1"
+    component.release.set()
     worker.stop()
 
 
@@ -492,7 +564,9 @@ def test_control_reads_a_jobs_progress_and_records_from_the_store_and_asks_for_a
 
     component.status = status_and_look
     queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
-    worker = TrainingJobWorker(component, queue, data_store, backends, worker_id="training-1", poll_seconds=0.02)
+    worker = TrainingJobWorker(
+        component, queue, data_store, backends, checks=ACCEPT_ALL, worker_id="training-1", poll_seconds=0.02
+    )
     assert view.job_progress("j1") is None
     assert worker.run_once()
     assert queue.read(JOBS_QUEUE, "j1").state == "finished"
@@ -557,6 +631,7 @@ def test_content_that_a_worker_stored_and_could_not_record_goes_with_the_jobs_it
         LosingQueue(queue),
         MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
         backends,
+        checks=ACCEPT_ALL,
         worker_id="training-1",
         poll_seconds=0.02,
     )

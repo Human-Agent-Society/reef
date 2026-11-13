@@ -286,8 +286,13 @@ class JobStatus:
 class ScenarioRoot:
     """A scenario's root snapshot, as one trainer's component sees it, and where the root came from.
 
-    Values: ``artifact`` is the trainer's component of the scenario's root snapshot (the snapshot itself when the
-    snapshot is flat), which ``materialize`` makes local. ``source`` is the root's ``RootSource``.
+    Values: ``artifact`` is the scenario's root snapshot, local or not. ``source`` is the root's ``RootSource``.
+    ``component`` is the trainer's component of the snapshot, or None when the trainer reads the whole snapshot (a
+    flat one). ``files`` is None, or the paths, relative to that component, of the only files that a reader of the
+    root reads (``TrainingBackendFacts.start_files``).
+
+    ``local_directory()`` is the directory of the component, made local (``Artifact.component_files``): with every
+    file when ``files`` is None, else with at least each file of ``files`` that it has.
 
     Purpose: ``ScenarioFactory`` makes it when it builds a scenario's trainers, and ``Trainer.build`` gives it to
     ``TrainingComponent.root_start`` for the first job of a trainer that has no committed state.
@@ -295,15 +300,23 @@ class ScenarioRoot:
 
     artifact: Artifact
     source: RootSource
+    component: str | None = None
+    files: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.artifact, Artifact) or not isinstance(self.source, RootSource):
             raise TypeError("a scenario root is an Artifact and a RootSource")
+        if self.component is not None and (not isinstance(self.component, str) or not self.component):
+            raise ValueError("a scenario root's component is a non-empty name or None")
+        if self.files is not None and (
+            not isinstance(self.files, tuple) or not all(isinstance(path, str) and path for path in self.files)
+        ):
+            raise ValueError("a scenario root's files are a tuple of relative paths or None")
 
     def local_directory(self) -> Path:
-        """The directory of the root's files, made local (``Artifact.materialize``); ``ValueError`` when the
-        artifact has no local files."""
-        local_path = self.artifact.materialize().local_path
+        """The directory of the root's component, made local as the class says; ``ValueError`` when the artifact
+        has no local files."""
+        local_path = self.artifact.component_files(self.component, self.files).local_path
         if local_path is None:
             raise ValueError(f"the root snapshot {self.artifact.ref.revision} has no local files to train from")
         return local_path
@@ -322,7 +335,7 @@ def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
                 name.removeprefix(prefix): value for name, value in source.inputs.items() if name.startswith(prefix)
             },
         )
-    return ScenarioRoot(root.artifact.component(component), source)
+    return ScenarioRoot(root.artifact, source, component, root.files)
 
 
 class TrainingBackendFacts(ABC):
@@ -343,7 +356,8 @@ class TrainingBackendFacts(ABC):
     component starts training from the files that the facts write.
 
     A member reads at most the settings, the files that a caller hands it (``check_root_start`` reads the root
-    snapshot's files), and local paths that the settings name. No member writes a file, calls the backend's service
+    snapshot's files), and local paths that the settings name. ``check_root_start`` and ``check_import_start``
+    read no file of a start but those that ``start_files`` names, so control fetches only those. No member writes a file, calls the backend's service
     or needs a running component. What needs one stays on ``TrainingComponent`` and runs in the training service:
     the start of a job (``root_start``, ``import_start``), ``check_remote_artifact``, ``check_task_jobs``,
     ``check_job``, ``changed_parts`` and the jobs themselves.
@@ -398,6 +412,18 @@ class TrainingBackendFacts(ABC):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         """The JSON Schema of the complete parameters of a job of ``kind`` samples, or None when the backend
         declares none (``TrainingComponent.parameters_schema``)."""
+
+    @property
+    @abstractmethod
+    def start_files(self) -> tuple[str, ...] | None:
+        """The paths, relative to the trainer's component of a snapshot, of the only files that
+        ``check_root_start`` and ``check_import_start`` read; None when they read the whole component.
+
+        Control makes local only these files of a start before it calls the two checks
+        (``ScenarioRoot.files``, ``reef.train.job_queue.JobQueueComponent``), so a check of weights fetches no
+        weight file. A named file that the component does not have is missing from the directory, as it would be
+        from a whole copy. An empty tuple means that the checks read no file.
+        """
 
     @abstractmethod
     def check_root_start(self, root: ScenarioRoot) -> None:
@@ -511,9 +537,16 @@ class TrainingComponent(ABC):
         """
         return self.import_start(root.local_directory())
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        """The paths, relative to the trainer's component of a snapshot, of the only files that ``root_start`` and
+        ``snapshot_start`` read, or None for the whole component, the default. A caller makes local at least these
+        files (``Artifact.component_files``)."""
+        return None
+
     def snapshot_start(self, artifact: Artifact) -> str:
         """The start of a job that trains from ``artifact``, the trainer's component of a published snapshot,
-        materialized. The default is ``import_start`` of its directory. Raise ``ValueError`` when the component
+        materialized: with every file, or with at least those of ``start_files``. The default is ``import_start`` of its directory. Raise ``ValueError`` when the component
         cannot start from it, or when the artifact has no local files."""
         if artifact.local_path is None:
             raise ValueError(f"artifact {artifact.ref.revision!r} has no local files to train from")

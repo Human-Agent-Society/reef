@@ -174,7 +174,9 @@ Implementation
   - ``parameters_schema(kind)``: the JSON Schema of a job's parameters.
   - ``check_root_start(root)`` and ``check_import_start(artifact_dir)``: raise
     ``ValueError`` exactly when the component's ``root_start`` and
-    ``import_start`` raise, with the same message. They write nothing.
+    ``import_start`` raise, with the same message. They write nothing, and
+    they read only the files that ``start_files`` names (``None``: the whole
+    component). Control makes only those files local.
   - ``check_artifact(files)``: check an import's files. The default checks
     ``artifact_format`` and returns ``None``. Override it when the snapshots
     have another layout. Return a JSON object when something must also

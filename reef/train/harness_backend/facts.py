@@ -104,6 +104,11 @@ class HarnessFacts(TrainingBackendFacts):
         self.check_tree(tree)
         return tree
 
+    @property
+    def start_files(self) -> None:
+        """None: the checks read the whole harness tree, which is text."""
+        return None
+
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.tree_in(root.local_directory())
 

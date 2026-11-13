@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from reef.artifact import Artifact
@@ -35,7 +37,7 @@ def test_default_component_validator_accepts_anything() -> None:
     assert isinstance(validator, AcceptAnyArtifact)
     validator.validate(object())  # type: ignore[arg-type]
     # A record-only scenario has no components, so nothing to admit.
-    Recipe().build_components("s").validate(object())  # type: ignore[arg-type]
+    Recipe().build_components("s").validate(Path("unread"))
 
 
 def test_text_file_tree_ignores_repository_bookkeeping(tmp_path) -> None:
