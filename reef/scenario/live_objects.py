@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 
-from reef.artifact.artifact import Artifact
 from reef.artifact.components import ComponentChecks, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError
@@ -226,7 +226,7 @@ class RecipeChecks(ComponentChecks):
     """The admission checks that ``recipe`` declares for each scenario (``declared_components``).
 
     Values: ``recipe`` is the deployment's recipe. ``validate(scenario, component, artifact)`` runs
-    ``declared_components(recipe, scenario).validate(artifact, component)``.
+    ``declared_components(recipe, scenario).validate(directory, component)``.
 
     Purpose: the training service gives it to each job worker, which checks every checkpoint with it before it
     stores the checkpoint (``reef.train.job_queue.TrainingJobWorker``).
@@ -238,8 +238,8 @@ class RecipeChecks(ComponentChecks):
         if not isinstance(self.recipe, Recipe):
             raise TypeError(f"recipe must be a Recipe, got {type(self.recipe).__name__}")
 
-    def validate(self, scenario: str, component: str | None, artifact: Artifact) -> None:
-        declared_components(self.recipe, scenario).validate(artifact, component)
+    def validate(self, scenario: str, component: str | None, directory: Path) -> None:
+        declared_components(self.recipe, scenario).validate(directory, component)
 
 
 def scenario_components(recipe: Recipe, live: LiveObjects, scenario: str) -> ScenarioComponents:

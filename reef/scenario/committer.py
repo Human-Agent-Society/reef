@@ -645,7 +645,7 @@ class ScenarioCommitter:
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_commit_number = self._commit_number + 1
-            components.validate(imported, component)
+            components.validate(directory, component)
             if components.single:
                 staged = self._artifacts.stage(next_commit_number, imported, parent=self._artifacts.checkpoint)
                 metadata = dict(staged.metadata)
@@ -1078,7 +1078,10 @@ class ScenarioCommitter:
             raise ReefError(f"scenario {self.name!r} serves no component {component!r}")
         if publication.artifact.content is not None:
             return self.stage_stored_publication(next_commit_number, publication.artifact, component, checkpoint)
-        components.validate(publication.artifact, component)
+        local_path = publication.artifact.local_path
+        if local_path is None:
+            raise ReefError(f"scenario {self.name!r}: a published component has stored content or local files")
+        components.validate(local_path, component)
         if components.single:
             return self._artifacts.stage(next_commit_number, publication.artifact, parent=checkpoint)
         return self.stage_combination(next_commit_number, component, publication.artifact)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -489,23 +490,38 @@ class RefuseSecondStep(ComponentChecks):
     def __init__(self) -> None:
         self.seen: list[tuple[str, str | None]] = []
 
-    def validate(self, scenario: str, component: str | None, artifact: Artifact) -> None:
+    def validate(self, scenario: str, component: str | None, directory: Path) -> None:
         self.seen.append((scenario, component))
-        if (artifact.local_path / "weights.txt").read_text() == "step 2":
+        if (directory / "weights.txt").read_text() == "step 2":
             raise ValueError("the weights of step 2 are refused")
+
+
+class HeldSteps(StepComponent):
+    """Saves the two checkpoints of ``StepComponent`` and keeps the job running until ``release`` is set."""
+
+    def __init__(self, jobs_root: Path) -> None:
+        super().__init__(jobs_root)
+        self.release = threading.Event()
+
+    def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
+        result = super().run(job, directory)
+        self.release.wait(WAIT_SECONDS)
+        return result
 
 
 @pytest.mark.unit
 def test_the_worker_checks_each_checkpoint_before_it_stores_it_and_a_refusal_fails_the_job(tmp_path):
     """The training service runs the scenario's check on the checkpoint's own directory, so no other process
     fetches a checkpoint to check it. A refused checkpoint is not stored, and its job fails for good with the
-    check's message; the job's earlier checkpoint stays recorded."""
+    check's message; the job's earlier checkpoint stays recorded, and so do the job's record files."""
     queue = memory_coordination(lease_seconds=30).work_queue
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
     queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(replace(job("j1"), component="w"))))
     checks = RefuseSecondStep()
+    # The job still runs when its second checkpoint is refused, so it has not stored its records yet.
+    component = HeldSteps(tmp_path / "jobs")
     worker = TrainingJobWorker(
-        StepComponent(tmp_path / "jobs"),
+        component,
         queue,
         MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
         backends,
@@ -522,6 +538,9 @@ def test_the_worker_checks_each_checkpoint_before_it_stores_it_and_a_refusal_fai
     assert checks.seen == [("s", "w"), ("s", "w")]
     with pytest.raises(ArtifactError):
         backends("s").materialize_content("j1:2")
+    records = backends("s").materialize_content(job_records_content("j1"))
+    assert (records / "weights.txt").read_text() == "step 1"
+    component.release.set()
     worker.stop()
 
 

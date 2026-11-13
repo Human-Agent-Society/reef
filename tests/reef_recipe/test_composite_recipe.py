@@ -951,7 +951,7 @@ def test_a_recipe_serving_no_component_admits_the_whole_snapshot_through_its_val
         evolved.mkdir()
         (evolved / "notes.txt").write_text("unvetted")
         with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.components.validate(Artifact.local(evolved))
+            scenario.components.validate(evolved)
         with pytest.raises(ValueError, match="validator refused the artifact"):
             scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(evolved)))
         assert scenario.current_snapshot() == head

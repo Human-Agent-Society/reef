@@ -104,8 +104,9 @@ class ArtifactValidator(ABC):
     """An admission check of the artifacts of one component of a scenario.
 
     ``validate(artifact)`` returns when the check admits ``artifact``, and raises ``ValueError`` or a ``ReefError``
-    that names what does not hold. ``artifact`` holds the files of one component alone, in a local directory
-    (``Artifact.local_path``); the check reads only those files and the artifact's metadata.
+    that names what does not hold. ``artifact`` is ``Artifact.local(directory)`` of the directory that holds the
+    files of one component alone: it has no metadata and an artifact ID of its own, so the check reads the files
+    only. Every caller gives it so (``ScenarioComponents.validate``), whichever operation stores the artifact.
 
     Purpose: a recipe binds it on ``ComponentSpec.validator`` or ``ScenarioComponents.validator``. The process that
     holds an artifact's files for its own work runs the check once, before the artifact is stored: the training

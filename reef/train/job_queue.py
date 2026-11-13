@@ -815,8 +815,8 @@ class TrainingJobWorker(QueueWorker):
         The component gets the job with its own start (``resolved_job``). For each checkpoint that the item does
         not hold yet, the worker first runs the admission check of the job's component on the checkpoint's
         ``artifact_path`` (``ComponentChecks.validate``). A refusal (``ValueError`` or ``ReefError``) cancels the
-        component's run, and the job fails for good with the refusal's message; the job's earlier checkpoints stay
-        recorded. Then the worker writes the name of its content (``checkpoint_content``) into the item's
+        component's run, the worker stores the job's record files, and the job fails for good with the refusal's
+        message; the job's earlier checkpoints stay recorded. Then the worker writes the name of its content (``checkpoint_content``) into the item's
         metadata, then stores the files of its ``artifact_path`` under that name in the artifact store of the
         job's scenario, and then appends the progress entry, which names that content and the parts that the
         checkpoint changed from the start (``TrainingComponent.changed_parts``). A worker that stops after it
@@ -845,16 +845,7 @@ class TrainingJobWorker(QueueWorker):
                 status = self.component.status(job.job_id)
                 if status.state != "running":
                     job_progress = None
-                    records = self.component.job_records(job.job_id)
-                    if records is not None:
-                        backend = self.backends(job.scenario)
-                        backend.store_content(job_records_content(item.id), records)
-                        held = self.queue.read(JOBS_QUEUE, item.id)
-                        if held is None or held.worker_id != self.worker_id or held.final:
-                            # The job was cancelled meanwhile, as the delete of its scenario does: no page reads
-                            # these records, and the delete discarded the scenario's content before this store.
-                            backend.discard_content(job_records_content(item.id))
-                            raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
+                    self.store_records(item, job)
                 if job_progress != written_progress:
                     value = None if job_progress is None else cast(JsonValue, dict(job_progress))
                     self.queue.write_metadata(JOBS_QUEUE, item.id, PROGRESS_METADATA_KEY, value)
@@ -867,11 +858,11 @@ class TrainingJobWorker(QueueWorker):
                             f"the {self.component.name} training component reported a checkpoint with no directory"
                         )
                     try:
-                        self.checks.validate(
-                            job.scenario, job.component, Artifact.local(Path(checkpoint.artifact_path))
-                        )
+                        self.checks.validate(job.scenario, job.component, Path(checkpoint.artifact_path))
                     except (ValueError, ReefError) as exc:
                         self.component.cancel(job.job_id)
+                        # A person reads the records of a refused job first.
+                        self.store_records(item, job)
                         raise ItemFailedError(
                             f"the scenario's check refused checkpoint {checkpoint.step} of job {job.job_id}: {exc}"
                         ) from exc
@@ -918,6 +909,22 @@ class TrainingJobWorker(QueueWorker):
             logger.warning("training worker %s lost job %s; cancelling its local run", self.worker_id, item.id)
             self.component.cancel(item.id)
             raise
+
+    def store_records(self, item: WorkItem, job: TrainingJob) -> None:
+        """Store the record files of the ended ``job`` of ``item`` (``TrainingComponent.job_records``) as the content
+        ``job_records_content(item.id)``; nothing when the component kept none. Raise ``WorkLeaseLostError``, and
+        discard what it stored, when the job was cancelled or taken meanwhile."""
+        records = self.component.job_records(job.job_id)
+        if records is None:
+            return
+        backend = self.backends(job.scenario)
+        backend.store_content(job_records_content(item.id), records)
+        held = self.queue.read(JOBS_QUEUE, item.id)
+        if held is None or held.worker_id != self.worker_id or held.final:
+            # The job was cancelled meanwhile, as the delete of its scenario does: no page reads these records, and
+            # the delete discarded the scenario's content before this store.
+            backend.discard_content(job_records_content(item.id))
+            raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
 
 
 class TrainingCheckWorker(QueueWorker):

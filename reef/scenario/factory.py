@@ -465,7 +465,7 @@ class ScenarioFactory:
             stored = layout.stored(start.files, directory, artifact_id=start.item.artifact_id)
             source = RootSource("item", item=start.item.item_id, uri=start.uri, version=start.files.version)
             # The admission checks of an import, on the files that this process copied.
-            components.validate(stored, component)
+            components.validate(directory, component)
             if components.single:
                 return stored, source
             item = (component, stored)

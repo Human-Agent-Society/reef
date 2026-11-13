@@ -28,7 +28,7 @@ from reef.artifact import (
     SnapshotRef,
     StoredFiles,
 )
-from reef.artifact.composite import link_or_copy
+from reef.artifact.composite import compose_snapshot, link_or_copy
 from reef.artifact.git_client import GitClient
 from reef.artifact.git_lfs import HUB_REFS, same_file, token_config
 from reef.core.plugins import PluginConfigError
@@ -1063,3 +1063,56 @@ def test_a_materialized_weight_file_cannot_be_written_into_the_repositorys_objec
     stored.write_bytes(b"short")
     with pytest.raises(ArtifactMaterializationError):
         backend("after-damage").materialize(published)
+
+
+def lfs_files(directory: Path) -> list[str]:
+    """The files under ``directory``, as paths under it, without Git's own."""
+    return sorted(
+        str(path.relative_to(directory))
+        for path in directory.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("composite", [False, True])
+def test_a_reader_of_named_files_fetches_those_files_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, composite: bool
+) -> None:
+    """``materialize_component_files`` of a few named files (Tinker's ``start_files``) checks out only those
+    paths of the component: a named file that the component lacks is missing, a file of the same name in a
+    subdirectory is not read, and no weight object reaches the reader's directories."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    weights = b"weight-bytes-that-the-reader-must-not-fetch:" + bytes(range(256)) * 32
+    files = {"base.json": b'{"inputs": {}}', "model.safetensors": weights, "sub/tinker-checkpoint.json": b"nested"}
+    component = tmp_path / "weights"
+    for relative, data in files.items():
+        (component / relative).parent.mkdir(parents=True, exist_ok=True)
+        (component / relative).write_bytes(data)
+    writer = GitLFSRepositoryBackend(
+        "s", tmp_path / "artifacts.git", work_dir=tmp_path / "writer" / "work", cache_dir=tmp_path / "writer" / "cache"
+    )
+    if composite:
+        harness = root_tree(tmp_path / "harness", {"base.json": "harness file"})
+        snapshot = compose_snapshot(
+            {"weights": Artifact.local(component), "harness": harness}, directory=tmp_path / "composed"
+        )
+        root = writer.register(snapshot, metadata=dict(snapshot.storage_metadata))
+        name: str | None = "weights"
+    else:
+        root = writer.register(Artifact.local(component), metadata={})
+        name = None
+    reader_dir = tmp_path / "reader"
+    reader = GitLFSRepositoryBackend(
+        "s", tmp_path / "artifacts.git", work_dir=reader_dir / "work", cache_dir=reader_dir / "cache"
+    )
+
+    read = reader.materialize_component_files(root, name, ("base.json", "tinker-checkpoint.json"))
+
+    assert read.local_path is not None
+    assert lfs_files(read.local_path) == ["base.json"]
+    assert (read.local_path / "base.json").read_bytes() == files["base.json"]
+    assert reader.materialize_component_files(root, name, ()).local_path is not None
+    for path in reader_dir.rglob("*"):
+        assert not path.is_file() or weights[:64] not in path.read_bytes(), path

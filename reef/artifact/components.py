@@ -229,9 +229,9 @@ class ScenarioComponents:
             return None
         return tree.read_files(self.component_artifact(artifact, name))
 
-    def validate(self, artifact: Artifact, component: str | None = None) -> None:
-        """Admit ``artifact`` as the files of ``component`` alone: run the snapshot's own check, then the check of
-        ``component``.
+    def validate(self, directory: Path, component: str | None = None) -> None:
+        """Admit the files in ``directory`` as an artifact of ``component``: run the snapshot's own check, then the
+        check of ``component``, each on ``Artifact.local(directory)`` (``ArtifactValidator``).
 
         ``component`` None names the one component of a flat snapshot, or none when the scenario serves none; a
         scenario that serves no component runs only its own check, whatever ``component`` names. Raise
@@ -242,6 +242,7 @@ class ScenarioComponents:
             raise ValueError(f"the scenario serves components {list(self.names)}: name the component")
         if component is not None and self.names and component not in self.components:
             raise ValueError(f"the scenario has no component {component!r}")
+        artifact = Artifact.local(Path(directory))
         self.validator.validate(artifact)
         if self.names:
             self.components[self.names[0] if component is None else component].validator.validate(artifact)
@@ -250,8 +251,9 @@ class ScenarioComponents:
 class ComponentChecks(ABC):
     """The admission checks of the components of every scenario of one deployment.
 
-    ``validate(scenario, component, artifact)`` returns when the checks of ``scenario`` admit ``artifact`` as the
-    files of ``component`` (``ScenarioComponents.validate``), and raises what they raise otherwise.
+    ``validate(scenario, component, directory)`` returns when the checks of ``scenario`` admit the files in
+    ``directory`` as an artifact of ``component`` (``ScenarioComponents.validate``), and raises what they raise
+    otherwise.
 
     Purpose: the job worker of the training service (``reef.train.job_queue.TrainingJobWorker``) checks each
     checkpoint with it before it stores the checkpoint. ``reef.scenario.live_objects.RecipeChecks`` gives the checks
@@ -259,7 +261,7 @@ class ComponentChecks(ABC):
     """
 
     @abstractmethod
-    def validate(self, scenario: str, component: str | None, artifact: Artifact) -> None: ...
+    def validate(self, scenario: str, component: str | None, directory: Path) -> None: ...
 
 
 __all__ = [

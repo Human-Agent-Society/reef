@@ -35,6 +35,8 @@ from reef.evaluation.activation import activation_reference
 from reef.observability import NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.recipe.composite import CompositeRecipe
+from reef.recipe.errors import RecipeConfigError
+from reef.recipe.loading import load_recipe
 from reef.scenario.binding import activate_snapshot
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.live_objects import LiveObjects
@@ -58,10 +60,10 @@ def tree(root: Path, files: Mapping[str, str]) -> Path:
 
 class _RecordingValidator(ArtifactValidator):
     def __init__(self) -> None:
-        self.seen: list[str] = []
+        self.seen: list[Path | None] = []
 
     def validate(self, artifact: Artifact) -> None:
-        self.seen.append(artifact.artifact_id)
+        self.seen.append(artifact.local_path)
 
 
 @pytest.mark.unit
@@ -218,11 +220,11 @@ def test_components_route_each_capability_to_its_component(tmp_path: Path) -> No
     assert components.read_files(first) == {"AGENTS.md": "rules"}
 
     # Each component is checked alone, on its own files.
-    components.validate(weights, WEIGHTS)
-    components.validate(harness, HARNESS)
-    assert validator.seen == [weights.artifact_id]
+    components.validate(weights.local_path, WEIGHTS)
+    components.validate(harness.local_path, HARNESS)
+    assert validator.seen == [weights.local_path]
     with pytest.raises(ValueError, match="name the component"):
-        components.validate(first)
+        components.validate(first.local_path)
     activate_snapshot(components, first, runtime, "agent")
     assert runtime.activated_ids == [weights.artifact_id]
 
@@ -240,6 +242,20 @@ def test_components_reject_ambiguous_component_sets() -> None:
     # No process holds the files of a combination, so a snapshot of several components has no check of its own.
     with pytest.raises(ValueError, match="no check of its own"):
         ScenarioComponents(components={"a": ComponentSpec(), "b": ComponentSpec()}, validator=_RecordingValidator())
+
+
+@dataclass(frozen=True)
+class _CheckedPairRecipe(Recipe):
+    """A record-only recipe that declares two components and a check of the whole snapshot, which Reef refuses."""
+
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents({WEIGHTS: ComponentSpec(), HARNESS: ComponentSpec()}, _RecordingValidator())
+
+
+@pytest.mark.unit
+def test_a_whole_snapshot_check_of_several_components_fails_the_recipe_load() -> None:
+    with pytest.raises(RecipeConfigError, match="no check of its own: give each component its validator"):
+        load_recipe(_CheckedPairRecipe, {}, {})
 
 
 @dataclass(frozen=True, kw_only=True)
