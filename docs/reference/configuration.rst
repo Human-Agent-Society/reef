@@ -2171,7 +2171,7 @@ samples train.
        the Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must fit the training component's text chat: system, user and assistant text messages, no tools.
 
    ``rollout.environment`` : docker
-       the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``. On ``modal``, a task with ``environment/docker-compose.yaml`` and no GPU runs on Modal's VM runtime, so that its Compose networks work. An E2B or Modal sandbox of a rollout whose agent has a time limit lives for the task's build, agent, and verifier time limits plus one hour. An ``override_timeout_sec`` in ``rollout.agent`` replaces the task's agent time limit in that sum, and an ``override_setup_timeout_sec`` adds to it. The lifetime is at most one day, which is Harbor's default: a longer rollout loses its sandbox then. An E2B sandbox is deleted at the end of its lifetime, also on a self-hosted service that would pause it
+       the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``. On ``modal``, a task with ``environment/docker-compose.yaml`` and no GPU runs on Modal's VM runtime, so that its Compose networks work. The paragraphs after this list describe the cloud sandbox of an ``e2b`` or ``modal`` rollout
 
    ``rollout.agent_host`` : none
        the host at which an agent inside the sandbox reaches the component's host; none for an agent on this host
@@ -2184,6 +2184,32 @@ samples train.
 
    ``rollout.scaffold_tolerance`` : 8
        tokens at the end of a prompt that the next prompt's history may drop, such as the empty think block of a thinking template with thinking off; the sample keeps them, and the response after them trains
+
+Set ``rollout.environment`` to ``e2b`` for an E2B-compatible service such as
+AgentENV, or ``modal`` for Modal. For a self-hosted E2B service, set
+``E2B_API_URL``, ``E2B_SANDBOX_URL`` and ``E2B_API_KEY`` in the process that
+runs the rollouts. The first two select the service's API and sandbox
+endpoints. Slime does not forward these endpoint variables from its driver
+to Ray workers; configure them in the workers' environment too.
+
+Harbor deletes the sandbox when the rollout ends. If the rollout process is
+killed before cleanup, the sandbox's lifetime limits how long it can remain.
+The lifetime is the sum of the task's build, agent and verifier time limits,
+plus one hour. A nonzero ``override_timeout_sec`` in ``rollout.agent`` replaces
+the task's agent time limit in that sum, and an ``override_setup_timeout_sec``
+adds to it. The lifetime is at most one day, so a rollout that needs more time
+loses its sandbox after one day. When neither the task nor ``rollout.agent``
+gives the agent a time limit, the sandbox keeps Harbor's default lifetime of
+one day.
+
+Reef asks the service to delete an E2B sandbox at the end of its lifetime.
+Without this request, a self-hosted service can pause the sandbox and keep it.
+
+These lifetime rules also apply to evaluation and generator rollouts, each
+with its own agent config. The ``generator`` section describes checks.
+Standalone ``harbor run -e e2b`` commands and the Meta-Harness Terminal-Bench
+``terminus`` adapter use Harbor's default timeout behavior. That adapter is
+separate from the ``terminus-2`` agent used by Reef rollouts.
 
 The job's metrics report each task's rewards of the rollouts that ran
 (``rollout_rewards``), the samples that train (``rollout_samples``), and the
@@ -2391,23 +2417,28 @@ generated-task stages to consume. The generator writes and checks Harbor tasks f
 and runs the plays of a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its
 host needs the ``harbor`` command line and the Harbor environment that
-``generator.environment`` selects; the Reef service itself needs neither. The
-default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
+``generator.environment`` selects; the Reef service itself needs neither.
+
+The default, ``docker``, needs a Docker daemon on the host. ``e2b`` runs each task
 in an E2B cloud sandbox, so a host without Docker, such as a cluster node with
 only Apptainer, uses it. It needs ``E2B_API_KEY`` exported where ``reef serve``
 starts and ``reef-infra[e2b]`` in the generator's interpreter; the readiness
 check looks there, so ``generator.harbor`` must come from the same Python
-environment. With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
+environment. ``modal`` runs each task in a Modal sandbox. It needs
+``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve``
+starts, and ``reef-infra[modal]`` in the generator's interpreter.
+
+With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
 compose services), an agent inside the sandbox cannot reach a
 ``generator.agent-host`` on a private host, and E2B builds a template for each
-new task image. The checks and the rollouts delete each E2B sandbox at the end of
-its lifetime, as ``rollout.environment`` describes; a check's ``harbor run`` names
-Reef's E2B environment class with ``-e`` and the lifetime with ``--ek``. A
-``harbor run -e e2b`` that Reef does not start uses Harbor's own E2B environment,
-which leaves the end of the sandbox to the service.
-``modal`` runs each task in a Modal sandbox. It needs
-``MODAL_TOKEN_ID`` and ``MODAL_TOKEN_SECRET`` exported where ``reef serve``
-starts, and ``reef-infra[modal]`` in the generator's interpreter. ``execution.generator`` selects the generator's executor, so a
+new task image. The E2B rules of ``rollout.environment`` apply to the checks
+and to the rollouts: the value for a self-hosted service, the sandbox
+lifetime, and the request to delete the sandbox at its end. A rollout takes
+the agent's time limits from ``generator.agent``. A check runs Harbor's oracle
+or nop agent, which sets no time limit, so only the task's time limits count
+for a check.
+
+``execution.generator`` selects the generator's executor, so a
 deployment can place it on another host. The generator runs its proposals,
 checks and rollouts at the same time.
 ``generator.concurrency`` limits only the rollouts in flight, so a proposal or a check never waits behind rollouts.
