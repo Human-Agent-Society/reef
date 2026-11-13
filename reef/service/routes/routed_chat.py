@@ -49,7 +49,8 @@ async def relay_routed_stream(
         }
         response = web.StreamResponse(status=upstream.status, headers=headers)
         await response.prepare(request)
-        relay = SSERelay(request.path, response, for_codex=for_codex)
+        # An external target has no Reef capture: its stream ends at its terminal frame, as an opaque proxy's does.
+        relay = SSERelay(request.path, response, for_codex=for_codex, captured_stream=False)
         async for chunk in upstream.chunks:
             body.extend(chunk)
             if await relay.feed(chunk):

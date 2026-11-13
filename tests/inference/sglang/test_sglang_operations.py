@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from reef.core.weight_layout import WeightFiles
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
 from reef.inference.deployment import InferenceConnection
@@ -44,6 +46,7 @@ def test_service_adapts_only_connections_with_a_control_executor_without_owning_
 
     assert operations.inference_url() == "http://inference:8000"
     assert operations.runtime_load_ids() == ("weights:1", "weights:1")
+    operations.pause()
     operations.pause()
     assert receiver.paused
     operations.resume()
@@ -229,8 +232,12 @@ def test_worker_reloads_full_weights_into_every_engine(monkeypatch):
     monkeypatch.setattr(worker_module.ray, "get", lambda refs: list(refs))
     worker = worker_module.SGLangWorker.__new__(worker_module.SGLangWorker)
     worker.cluster = SimpleNamespace(group=SimpleNamespace(all_engines=[engine(), engine()]))
-    worker.load_weights_from_disk("/ckpt/hf", "inc:3")
-    assert calls == [{"model_path": "/ckpt/hf", "runtime_load_id": "inc:3"}] * 2
+    backend = SGLangInferenceBackend(UniProcExecutor.from_workers([worker]))
+    # A repeated load of the same files reaches every engine again.
+    files = WeightFiles(Path("/ckpt/hf"), "full")
+    backend.load_weight_files(files, adapter_name=None, runtime_load_id="inc:3")
+    backend.load_weight_files(files, adapter_name=None, runtime_load_id="inc:3")
+    assert calls == [{"model_path": "/ckpt/hf", "runtime_load_id": "inc:3"}] * 4
     worker.cluster = SimpleNamespace(group=SimpleNamespace(all_engines=[engine({"success": False})]))
     with pytest.raises(RuntimeError, match="refused weights"):
         worker.load_weights_from_disk("/ckpt/hf", "inc:3")

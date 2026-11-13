@@ -17,11 +17,10 @@ from dataclasses import asdict
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.core.plugins import PluginConfigError, plugin_class_reference
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.execution.executor.config import role_executor_settings
-from reef.inference.deployment import BUILTIN_ENGINES, INFERENCE_BACKEND_GROUP
+from reef.inference.deployment import BUILTIN_ENGINES
 from reef.inference.interfaces import InferenceHandler
 from reef.service.deploy.service_config import ServiceSettings
 from reef.train.deployment import NO_INFERENCE_BACKEND, TrainingDeployment
@@ -112,7 +111,8 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceSettings) ->
     The engines are tensor-parallel engines of ``inference.tensor-parallel-size``
     GPUs (default 1) on ``inference.num-gpus`` GPUs (default one engine).
     ``inference.options`` are native engine options without Reef's managed
-    names. Raise ``DeployConfigError`` for anything else.
+    names. The engines keep each request on the weights that it selected, so ``inference.backend`` is ``sglang``
+    (the default) or ``vllm``. Raise ``DeployConfigError`` for anything else.
     """
     parallel_size = 1 if settings.tensor_parallel_size is None else settings.tensor_parallel_size
     num_gpus = parallel_size if settings.inference_num_gpus is None else settings.inference_num_gpus
@@ -126,16 +126,12 @@ def prepare_engine_serving(config: dict[str, Any], settings: ServiceSettings) ->
     if any(name.startswith("sglang-") for name in options):
         raise DeployConfigError("inference.options uses native SGLang names without the sglang- prefix")
     engine = settings.inference_backend or "sglang"
-    try:
-        # The inference component imports the class; this host only checks that the name selects one.
-        plugin_class_reference(
-            engine,
-            builtins={name: classes.service for name, classes in BUILTIN_ENGINES.items()},
-            entry_point_group=INFERENCE_BACKEND_GROUP,
-            setting="inference backend",
+    if engine not in BUILTIN_ENGINES:
+        raise DeployConfigError(
+            f"inference.backend: {engine} cannot serve published snapshots: the inference component keeps each "
+            "request on the weights that it selected only for sglang and vllm; another engine needs its own "
+            "serving runtime (inference.serving: module:Factory)"
         )
-    except PluginConfigError as exc:
-        raise DeployConfigError(str(exc)) from exc
     if engine == "vllm" and num_gpus != parallel_size:
         # vLLM ships no router, so one engine serves.
         raise DeployConfigError(

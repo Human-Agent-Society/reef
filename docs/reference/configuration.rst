@@ -577,7 +577,7 @@ weights, or a PEFT adapter with its rank and target modules.
        adapters the engines keep resident when the snapshots are PEFT adapters. Each scenario keeps its served adapter resident, so set at least the number of training scenarios; one more lets a scenario's new adapter load beside its served one
 
    ``inference.prefix-sharing`` : false
-       share prefix-cache entries between requests. Each snapshot load then retracts the requests in flight, which prefill again on the new weights. SGLang keeps the cache only where that is safe
+       ``true``: requests on the same weights share the engines' prefix cache. The engines finish their requests and clear the cache before each change of weights
 
 The engine settings are ``inference.backend``, ``inference.num-gpus``,
 ``inference.tensor-parallel-size``, ``inference.options``,
@@ -591,18 +591,46 @@ names how to fetch their weights (``TrainingDeployment.engine_weights``);
 Tinker's does. Otherwise the HTTP service refuses that pairing when it
 starts.
 
+With ``inference.serving: engines``, the inference component keeps each
+production request on the weights that the request selected (`Request
+pinning <../developer-guide/executors.rst#request-pinning>`__). No setting
+turns this off. It needs ``inference.backend: sglang`` (the default) or
+``vllm`` with the engine's own request handler, so Reef refuses another
+backend or ``inference.handler-factory`` here. Another engine needs its own
+serving runtime (``inference.serving: module:Factory``). With ``trainer``,
+Tinker's sampler serves each snapshot as an immutable revision, so it needs
+no pinning.
+
+With ``inference.prefix-sharing: true``, the engines clear their prefix
+cache before each change of weights or adapters, after the admitted
+requests finish. The clear covers the engine's own cache, which includes
+SGLang's host-memory tier (``enable_hierarchical_cache``). Engines that do
+not confirm the clear stay unavailable until the control plane replaces
+them. For adapter artifacts, SGLang keeps the cache only when it keys the
+entries by adapter; otherwise the engines run without a prefix cache.
+
+The clear does not cover KV that an engine keeps outside itself. Engine
+serving therefore refuses these ``inference.options``, with or without
+prefix sharing: SGLang's ``hicache_storage_backend`` and
+``enable_lmcache``, and vLLM's ``kv_transfer_config``,
+``kv_offloading_size`` and ``kv_offloading_backend``. Reef checks these
+option names only. Do not give the engines another KV store through a
+plugin or an environment variable.
+
 The control plane checks the inference component every 30 seconds. When the
 component has restarted, or an engine has failed, the control plane pauses
-generation, starts the lost engines again, loads each scenario's served
-artifact into them, and resumes.
+generation, replaces the component's engine stack, loads each scenario's
+served artifact again, and resumes.
 
 Engine-serving inference uses the same ``inference`` fields as standalone
-serving. ``inference.num-gpus`` is the total inference GPU budget;
+serving. ``inference.num-gpus`` is the total inference GPU budget; with
+``inference.remote.slot-urls``, it is the budget of each component.
 ``inference.tensor-parallel-size`` is the GPU count per engine (default 1).
-The total defaults to the per-engine count and must be a positive multiple of
-it. For example, 4 GPUs with tensor parallel size 2 creates two engines.
-Standalone serving currently supports one engine, so its total must equal its
-tensor parallel size. An external provider does not accept local GPU requests.
+The budget defaults to the per-engine count and must be a positive multiple
+of it. For example, 4 GPUs with tensor parallel size 2 creates two engines on
+one component. Standalone serving currently supports one engine on each
+component, so its budget must equal its tensor parallel size. An external
+provider does not accept local GPU requests.
 
 .. code:: yaml
 
@@ -690,7 +718,8 @@ handled by the inference component (see `Engine supervision
 ``inference.backend: vllm`` selects the vLLM engine integration. The
 inference component launches one vLLM server per engine on its GPUs with
 ``VLLM_SERVER_DEV_MODE=1`` and ``--logprobs-mode processed_logprobs``. It loads each published snapshot
-through vLLM's control routes: ``/pause?mode=keep`` (a retracting pause adds
+through vLLM's control routes: ``/pause?mode=keep`` (with
+``inference.prefix-sharing: true``, also
 ``/reset_prefix_cache?reset_running_requests=true``),
 ``/update_weight_version``, ``/collective_rpc reload_weights`` and the
 ``/v1/load_lora_adapter`` routes. Engines are single-node; more than one
@@ -708,7 +737,9 @@ Engine options use vLLM's engine-argument names. Reef sets ``model``,
 ``enable_sleep_mode``. It defaults
 ``generation_config`` to ``vllm``, so the model's own generation defaults
 cannot add truncation or a temperature the trainer never sees. It enables
-prefix caching only under a retracting pause.
+prefix caching only with ``inference.prefix-sharing: true``. Engine serving
+refuses a configured ``kv_transfer_config`` and vLLM's KV offloading options
+(see ``inference.prefix-sharing`` above).
 
 vLLM engines serve full-weight artifacts only. The HTTP service refuses
 adapter artifacts, such as Slime's with ``training.options.megatron-lora-rank``
@@ -1813,6 +1844,9 @@ the component:
    ``inference.remote.url``
        the component's HTTP(S) base URL, without credentials, query or fragment
 
+   ``inference.remote.slot-urls`` : []
+       base URLs of further components, in the form of ``url`` and all different; for full-weight artifacts only
+
    ``inference.remote.control-token-env`` : REEF_REMOTE_CONTROL_TOKEN
        variable with the component's control token; the process that starts the engines reads it
 
@@ -1824,6 +1858,37 @@ the component:
 
    ``inference.remote.model-path`` : ``inference.model-path`` as written
        the model that the component loads: a Hugging Face repository ID or a path on the component's host; this host may replace ``inference.model-path`` with a local snapshot
+
+One component serves one full-weight checkpoint. To let a scenario serve
+several checkpoints at the same time, name one more component for each
+further checkpoint:
+
+.. code:: yaml
+
+   inference:
+     remote:
+       url: https://gpu-a.example.com
+       slot-urls:
+         - https://gpu-b.example.com
+
+The one training scenario then serves as many checkpoints together as there
+are components. A further component does not add a training scenario. These
+rules apply:
+
+- Start each further component in the same way as the first one, with the
+  same ``--engine`` and the same two tokens. Reef starts the same model and
+  engine options on each one, and ``inference.num-gpus`` counts the GPUs of
+  one component.
+- Give each component GPUs that no other component uses: its own host or
+  visible GPUs, or one Ray cluster that all of them join
+  (``--ray-address``). Different URLs alone do not separate the GPUs.
+- Use ``slot-urls`` with full-weight artifacts only. Reef refuses it for
+  adapter artifacts and for a trainer's rollout engines.
+
+`Set what a scenario serves
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__ describes how a
+scenario uses the components, and how to replace a checkpoint when every
+component holds one.
 
 The ``training`` section
 ------------------------

@@ -158,7 +158,20 @@ def normalize_native_response(response: dict[str, Any]) -> dict[str, Any]:
 
 
 class NativeStreamCapture:
-    """Accumulate Reef's required disjoint SGLang stream events."""
+    """Accumulate the disjoint incremental events of one SGLang stream into its complete native response.
+
+    Values: ``text`` joins the events' text deltas in order, and ``output_ids`` joins their output token IDs.
+    ``meta`` holds each list field of ``_LIST_META_KEYS`` joined over the events in order, and the newest value of
+    every other ``meta_info`` field. ``last_output_logprobs`` holds the newest event's own
+    ``output_token_logprobs``. ``seen`` is whether an event arrived.
+
+    ``accept`` adds one event and returns its text delta. It raises ``ValueError`` for an event without
+    ``meta_info`` or ``output_token_logprobs``, for an event whose ``completion_tokens`` is not the running token
+    count (a cumulative stream: Reef requires ``--incremental-streaming-output``), and for inconsistent IDs, types
+    or text. ``response`` gives the native response that ``SGLangGenerateClient.parse`` reads. It raises
+    ``ValueError`` before any event and when no event gave a finish reason, so a truncated stream gives no response.
+    Purpose: ``SGLangInferenceHandler`` makes one for each stream.
+    """
 
     _LIST_META_KEYS = (
         "output_token_logprobs",
@@ -223,11 +236,19 @@ class NativeStreamCapture:
     def response(self) -> dict[str, Any]:
         if not self.seen:
             raise ValueError("SGLang stream completed without a generation event")
+        if self.meta.get("finish_reason") is None:
+            raise ValueError("SGLang stream ended without a finish reason")
         return {"text": self.text, "meta_info": dict(self.meta)}
 
 
 class SGLangInferenceHandler(TokenNativeChatHandler):
-    """Serve OpenAI or Anthropic chat over SGLang, streaming its incremental output."""
+    """Serve OpenAI or Anthropic chat over SGLang, streaming its incremental output.
+
+    It is a ``TokenNativeChatHandler`` whose default client is ``SGLangGenerateClient``, and it adds conditions to
+    streams. A stream's ``stream_interval`` defaults to 1, every decode step, and keeps a value that the sampling
+    parameters set. The handler reads the events with a ``NativeStreamCapture``. A stream without a finish reason
+    raises ``ValueError`` and records no response.
+    """
 
     def __init__(
         self,
@@ -261,9 +282,8 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
     ) -> InferenceStream:
         self._validate_stream_path(path)
         call = self._chat_call(path, payload)
-        # Force the scheduler to flush every available decode step. This is a
-        # request-local knob; deployments using SGLang's disjoint incremental
-        # output mode are supported by NativeStreamCapture as well.
+        # Flush every available decode step. NativeStreamCapture requires
+        # SGLang's disjoint incremental output mode.
         call.sampling_params.setdefault("stream_interval", 1)
         native_payload = self.client.payload(call.request, call.prompt_ids, call.sampling_params, stream=True)
         upstream = await HttpInferenceHandler.inference_stream(self, artifact, SGLANG_GENERATE_PATH, native_payload)
@@ -305,7 +325,8 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             for frame in relay.writer.start():
                 yield frame
             async for native_event in sse_json_events(upstream.chunks):
-                for kind, value in reasoning.feed(capture.accept(native_event)):
+                delta = capture.accept(native_event)
+                for kind, value in reasoning.feed(delta):
                     for frame in relay.piece(kind, value):
                         yield frame
                 if wants_logprobs and capture.last_output_logprobs:

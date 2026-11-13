@@ -1,11 +1,16 @@
 """Tinker training in the control plane, served by engines on an inference component, end to end on CPU.
 
-The component (``python -m reef.inference.remote``) runs in its own process
-with its own Ray session that declares two pretend GPUs, and starts the stub
-engine (``tests.support.stub_engine``). The test process is the control
+The component (``python -m reef.inference.remote --engine sglang``) runs in its
+own process with its own Ray session that declares two pretend GPUs. Its
+receiver, which pins each request to its weights, and Reef's SGLang service,
+control actor and backend are those of a deployment. Only the serving executor
+is the CPU stand-in of ``tests.support.stub_engine``, which the deployment
+selects as its ``rollout`` executor. The test process is the control
 plane: it builds Tinker's training component and the serving runtime of its
 adapters as the HTTP service does and drives one
-TTTD step through the Dispatcher, then restarts. The Tinker SDK and the
+TTTD step through the Dispatcher, then restarts. It sends generations through
+the runtime's request handler, as the inference service does, and checks which
+weights each published route reaches. The Tinker SDK and the
 cookbook converter are faked unless ``REEF_TEST_TINKER_REAL=1`` and
 ``TINKER_API_KEY`` are set, in which case the trainer, the checkpoint download
 and the PEFT conversion are real.
@@ -13,6 +18,7 @@ and the PEFT conversion are real.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
@@ -27,8 +33,13 @@ from pathlib import Path
 import pytest
 
 from tests.support.config_helpers import connect_training_objects
+from tests.support.stub_engine import adapter_weights_id
 
+from reef.core.errors import UpstreamStatusError
+from reef.core.served_models import ScenarioModel, ServedArtifact
 from reef.dispatcher import Dispatcher
+from reef.inference.interfaces import InferenceArtifact, InferenceOwnerLostError, RuntimeLoadId, full_weight_name
+from reef.inference.residency import adapter_name
 from reef.inference.serving import AdapterServingRuntime
 from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -38,7 +49,10 @@ from reef.train.jobs import JobLoopState
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MODEL = "Qwen/Qwen3-8B"
 REAL = os.environ.get("REEF_TEST_TINKER_REAL") == "1" and bool(os.environ.get("TINKER_API_KEY"))
-ENGINE = "tests.support.stub_engine:StubEngineService"
+ENGINE = "sglang"
+#: The CPU stand-in for the native engines: the deployment's ``rollout`` executor, which Reef's SGLang control actor
+#: makes in the component.
+SERVING_EXECUTOR = "tests.support.stub_engine:StubEngineExecutor"
 TOKENS = {"REEF_REMOTE_CONTROL_TOKEN": "control-secret", "REEF_REMOTE_INFERENCE_TOKEN": "inference-secret"}
 SCENARIO = "erdos"
 
@@ -188,7 +202,10 @@ def stop_process(process) -> None:
 
 @contextmanager
 def inference_component(tmp_path):
-    """Run the component with the stub engine on a free loopback port; yield its URL and its control client."""
+    """Run the component for Reef's SGLang stack on a free loopback port; yield its URL and a control client.
+
+    The client carries no serving-owner sequence. The receiver accepts its calls only until a control plane starts
+    engines with request pinning; after that, the test gives the client the owner's sequence."""
     from reef.inference.remote.service import RemoteControl
 
     with socket.socket() as probe:
@@ -197,6 +214,9 @@ def inference_component(tmp_path):
     url = f"http://127.0.0.1:{port}"
     log_path = tmp_path / "component.log"
     env = {key: value for key, value in os.environ.items() if not key.startswith(("REEF_", "RAY_"))}
+    # The component's Ray session declares two pretend GPUs and the stand-in runs no CUDA code. Ray refuses that
+    # count under an inherited device mask that names fewer devices, so the component gets no mask.
+    env.pop("CUDA_VISIBLE_DEVICES", None)
     env.update(TOKENS, PYTHONPATH=os.pathsep.join([str(REPO_ROOT), env.get("PYTHONPATH", "")]))
     command = [sys.executable, "-m", "reef.inference.remote", "--engine", ENGINE, "--host", "127.0.0.1"]
     command += ["--port", str(port), "--work-dir", str(tmp_path / "remote-work"), "--ray-num-gpus", "2"]
@@ -242,6 +262,8 @@ def control_plane(tmp_path, monkeypatch, url, repository):
         monkeypatch.setenv(name, value)
     raw = {
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
+        # The serving executor of the component's SGLang stack. The engine, receiver and handler stay built in.
+        "execution": {"rollout": SERVING_EXECUTOR},
         "pipeline": {
             "record2sample": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
             "sample2job": {"config": {"job_samples": 4}},
@@ -340,21 +362,52 @@ def served_adapters(tmp_path) -> list[Path]:
     return [path for path in (tmp_path / "remote-work").iterdir() if path.is_dir()]
 
 
-def wait_for_serving(dispatcher: Dispatcher, inference: AdapterServingRuntime, *, adapter: bool = True) -> None:
-    """Wait for the selected artifact: with ``adapter``, also for this runtime's recovery of its adapter. A base
-    root has no adapter."""
+def wait_for_serving(
+    dispatcher: Dispatcher, inference: AdapterServingRuntime, *, adapter: bool = True
+) -> ServedArtifact:
+    """Wait for the selected artifact and return its published route: with ``adapter``, also wait for this
+    runtime's recovery of its adapter. A base root has no adapter. The route counts when it names what the runtime
+    serves now, which a route of an earlier control plane does not."""
+    routes = dispatcher.coordination.served_models
     deadline = time.monotonic() + (1500 if REAL else 120)
     while time.monotonic() < deadline:
-        item = dispatcher.coordination.served_models.current_request(SCENARIO)
+        item = routes.current_request(SCENARIO)
         selected = dispatcher.get_or_create_scenario(SCENARIO).artifact_selection().to_dict()
         if item is not None and item.payload.get("selection") == selected:
             # A restart can read the prior worker's completed request before recovering its adapter.
             recovered = inference.serving_adapter_runtime_load_id(SCENARIO) is not None
-            if item.state == "finished" and (recovered or not adapter):
-                return
+            route = routes.read(ScenarioModel(SCENARIO))
+            published = route is not None and route.model_name == inference.served_model_name(SCENARIO)
+            if item.state == "finished" and (recovered or not adapter) and published:
+                return route
             assert item.state != "failed", item.error
         time.sleep(0.05)
     pytest.fail("the selected adapter did not start serving")
+
+
+def owner_sequence(inference: AdapterServingRuntime) -> int:
+    """The serving-owner sequence that this control plane's runtime sends with each control call to the component."""
+    return inference.engines.service.control.owner_sequence
+
+
+def generate(inference: AdapterServingRuntime, served: ServedArtifact) -> dict:
+    """Send one native generation to the route ``served`` and return the engines' answer.
+
+    The request is the one that the inference service makes for a route: the runtime's handler addresses it to the
+    route's model name and names that route to the receiver. ``UpstreamStatusError`` when the receiver or the
+    engines refuse it."""
+    handler = inference.inference_handler
+    request = handler.address_model({}, served.model_name)
+    payload = handler.client.payload(request, [1, 2, 3], {"max_new_tokens": 1}, stream=False)
+    artifact = InferenceArtifact(served.artifact_id, served_model=served.model_name)
+    return asyncio.run(handler.post_json(handler.client.generate_path, payload, artifact=artifact))
+
+
+def refusal_status(inference: AdapterServingRuntime, served: ServedArtifact) -> int:
+    """The HTTP status with which the component refuses a generation for the route ``served``."""
+    with pytest.raises(UpstreamStatusError) as refused:
+        generate(inference, served)
+    return refused.value.status
 
 
 @pytest.mark.integration
@@ -370,20 +423,44 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
             monkeypatch.delenv(key)
     with inference_component(tmp_path) as (url, control):
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
-            dispatcher.get_or_create_scenario(SCENARIO)
-            wait_for_serving(dispatcher, inference, adapter=False)
+            scenario = dispatcher.get_or_create_scenario(SCENARIO)
+            base_route = wait_for_serving(dispatcher, inference, adapter=False)
             assert inference.serving_adapter_runtime_load_id(SCENARIO) is None
-            assert inference.served_model_name(SCENARIO) == MODEL
-            assert served_adapters(tmp_path) == []
             initial = inference.base_version
+            # The route of the base root names the base model under the load ID that the owner gave it. The receiver
+            # admits a request only under such a bound name.
+            assert inference.served_model_name(SCENARIO) == full_weight_name(MODEL, initial)
+            assert base_route == ServedArtifact(scenario.serving_artifact_id(), url, full_weight_name(MODEL, initial))
+            assert served_adapters(tmp_path) == []
             assert inference.base_url == url
+            # The receiver pins requests, so it accepts a control call only with the owner's sequence.
+            with pytest.raises(InferenceOwnerLostError):
+                control.call("GET", "runtime-load-ids")
+            first_owner = owner_sequence(inference)
+            control.owner_sequence = first_owner
+            health = control.call("GET", "health", timeout_s=30)
+            assert (health["engines"], health["request_pinning"], health["binding_uncertain"]) == (True, True, False)
+            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [initial] * 2
+            # A request under the base route reaches the base model. A request without a bound name reaches nothing.
+            answer = generate(inference, base_route)
+            assert (answer["text"], answer["meta_info"]["weight_version"]) == (MODEL, initial)
+            assert refusal_status(inference, ServedArtifact(base_route.artifact_id, url, MODEL)) == 421
             train_one_step(dispatcher, inference)
-            wait_for_serving(dispatcher, inference)
+            adapter_route = wait_for_serving(dispatcher, inference)
             published = inference.serving_adapter_runtime_load_id(SCENARIO)
             assert published is not None and published != initial
+            assert inference.served_model_name(SCENARIO) == adapter_name(SCENARIO, published)
+            assert adapter_route == ServedArtifact(
+                scenario.serving_artifact_id(), url, adapter_name(SCENARIO, published)
+            )
+            assert adapter_route.artifact_id != base_route.artifact_id
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
             (adapter,) = served_adapters(tmp_path)
             assert (adapter / "adapter_config.json").is_file() and (adapter / "adapter_model.safetensors").is_file()
+            # A request under the adapter route reaches the weights of the files that the component received.
+            weights = adapter_weights_id(adapter)
+            answer = generate(inference, adapter_route)
+            assert (answer["text"], answer["meta_info"]["weight_version"]) == (weights, published)
             assert inference.inference_admission_status["open"]
             start = Path(loop_state(dispatcher.get_or_create_scenario(SCENARIO)).start)
             assert start.parent.parent == tmp_path / "tinker" / "jobs"
@@ -397,15 +474,38 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
                 assert [event["rows"] for event in events if event["event"] == "forward_backward"][-1] == 4
                 # The served rollouts carry no log probabilities: the trainer computes them at the job's start.
                 assert [event["rows"] for event in events if event["event"] == "forward"] == [4]
-        # Closing the control plane leaves the engines serving what they served, for the next control instance.
+        # Closing the control plane leaves the engines serving what they served: the published route still reaches
+        # the adapter. ``inference`` is here the runtime of the closed control plane, of which only the handler acts.
         assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
-        # A restarted control plane attaches to the engines and serves the committed adapter that they still hold,
-        # with no second load.
+        assert generate(inference, adapter_route)["text"] == weights
+        # A restarted control plane is a new serving owner. It takes over no engine: it starts a new stack on the
+        # component and loads the committed adapter into it once, under the first load ID of its own incarnation.
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
             scenario = dispatcher.get_or_create_scenario(SCENARIO)
-            wait_for_serving(dispatcher, inference)
-            assert inference.serving_adapter_runtime_load_id(SCENARIO) == published
-            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
+            restored_route = wait_for_serving(dispatcher, inference)
+            # The receiver now refuses the control calls of the first owner.
+            with pytest.raises(InferenceOwnerLostError):
+                control.call("GET", "runtime-load-ids")
+            assert owner_sequence(inference) > first_owner
+            control.owner_sequence = owner_sequence(inference)
+            restored = inference.serving_adapter_runtime_load_id(SCENARIO)
+            base = RuntimeLoadId.parse(inference.base_version)
+            assert base.incarnation != RuntimeLoadId.parse(initial).incarnation
+            assert restored == str(RuntimeLoadId(base.incarnation, base.sequence + 1))
+            assert restored != published
+            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [restored] * 2
+            # The new route binds the same artifact under the new adapter name.
+            assert restored_route == ServedArtifact(adapter_route.artifact_id, url, adapter_name(SCENARIO, restored))
+            assert inference.served_model_name(SCENARIO) == adapter_name(SCENARIO, restored)
             (adapter,) = served_adapters(tmp_path)
             assert (adapter / "adapter_config.json").is_file()
+            # The new stack serves the same weights under the new route only: the routes of the first owner name
+            # bindings that its engines held, and those engines are gone.
+            assert adapter_weights_id(adapter) == weights
+            answer = generate(inference, restored_route)
+            assert (answer["text"], answer["meta_info"]["weight_version"]) == (weights, restored)
+            assert refusal_status(inference, adapter_route) == 421
+            assert refusal_status(inference, base_route) == 421
+            health = control.call("GET", "health", timeout_s=30)
+            assert (health["engines"], health["request_pinning"], health["binding_uncertain"]) == (True, True, False)
             assert loop_state(scenario).start == str(start)

@@ -222,7 +222,9 @@ Add a runtime kind
 
 Use this playbook for a new inference provider or a runtime implementation that
 satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
-``reef/inference/interfaces.py`` before adding configuration.
+``reef/inference/interfaces.py`` before adding configuration. `What a runtime
+implements <../developer-guide/executors.rst#what-a-runtime-implements>`__
+gives the required members.
 
 - For an external runtime, subclass ``RuntimeFactory`` and use the reference
   ``package.module:ClassName`` of the class as the runtime ``type``. Reef
@@ -246,7 +248,15 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
   ``reef.inference_backends`` entry-point group, so the inference component
   can start the engines. A bundled engine adds its service class and its
   request handler class to ``BUILTIN_ENGINES`` in
-  ``reef/inference/deployment.py``. Shared monitoring and engine recovery belong in
+  ``reef/inference/deployment.py``. The serving runtimes refuse engines that
+  do not declare ``ServingEngines.request_pinning``, and the inference
+  component enforces it for the built-in SGLang and vLLM engines only. For
+  another backend, extend the component's request pinning to the backend's
+  generation route, or give the backend its own serving runtime
+  (``inference.serving: module:Factory``). `Request pinning
+  <../developer-guide/executors.rst#request-pinning>`__ lists what the
+  receiver must guarantee.
+  Shared monitoring and engine recovery belong in
   ``reef/inference/recovery.py``; adapter residency belongs in
   ``reef/inference/residency.py``. Shared contracts and version values belong in
   ``reef/inference/interfaces.py``.
@@ -268,8 +278,9 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - Keep provider authentication and provider-native request handling in the
   adapter. Do not import ``reef.train`` from ``reef/inference/``.
 - Test built-in name and reference resolution in
-  ``tests/reef_service/test_runtime_registry.py``. Add request, recovery, and
-  malformed-result contracts for every capability the runtime implements.
+  ``tests/reef_service/inference/test_runtime_registry.py``. Add request,
+  recovery, and malformed-result contracts for every capability the runtime
+  implements.
 - Add or update the stack that exercises the runtime under ``recipes/`` and
   document every public setting. Never commit credentials or real provider tokens.
 

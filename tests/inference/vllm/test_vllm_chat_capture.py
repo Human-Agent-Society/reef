@@ -12,7 +12,7 @@ from aiohttp.test_utils import TestServer
 from tests.support.tokenizers import FakeTokenizer
 
 from reef.core.errors import inference_aborted
-from reef.inference.interfaces import InferenceArtifact
+from reef.inference.interfaces import InferenceArtifact, full_weight_name
 from reef.inference.vllm.chat import VLLMGenerateClient, VLLMInferenceHandler, VLLMToolCallParser
 
 
@@ -65,6 +65,29 @@ async def serve(handler_body, run):
         return await run(str(server.make_url("")).rstrip("/"), received)
     finally:
         await server.close()
+
+
+@pytest.mark.unit
+def test_pinned_vllm_chat_sends_the_selected_weight_name_and_the_base_model() -> None:
+    artifact = InferenceArtifact("artifact-A", served_model=full_weight_name("/remote/model", "engine:6"))
+
+    async def run():
+        async def generate(request):
+            assert request.headers["x-reef-served-model"] == artifact.served_model
+            assert "model" not in await request.json()
+            return web.json_response(generate_response())
+
+        app = web.Application()
+        app.router.add_post("/inference/v1/generate", generate)
+        async with TestServer(app) as server:
+            handler = VLLMInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+            )
+            payload = handler.address_model({"messages": [{"role": "user", "content": "hi"}]}, artifact.served_model)
+            assert payload["model"] == "model"
+            assert (await handler.inference(artifact, "/v1/chat/completions", payload))["choices"]
+
+    asyncio.run(run())
 
 
 @pytest.mark.unit

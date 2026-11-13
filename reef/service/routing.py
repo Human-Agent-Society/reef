@@ -797,7 +797,11 @@ class RoutingAdapter:
         )
 
     async def check_ready(self) -> None:
-        """Check configured model availability; this does not verify model weights."""
+        """Check configured model availability; this does not verify model weights.
+
+        Each endpoint must answer ``/v1/models`` with HTTP 200 and a JSON model list that names every configured
+        model. The list is read as JSON whatever its media type: SGLang's model gateway labels its JSON as text.
+        """
         from aiohttp import ClientError, ClientSession, ClientTimeout
 
         probes: dict[tuple[str, str | None], set[str]] = {}
@@ -816,8 +820,8 @@ class RoutingAdapter:
                                 code="target_unavailable",
                                 status=503,
                             )
-                        payload: object = await response.json()
-                except (ClientError, TimeoutError, json.JSONDecodeError) as exc:
+                        payload: object = await response.json(content_type=None)
+                except (ClientError, TimeoutError, ValueError) as exc:  # ValueError: a body that is not JSON text
                     raise RoutingRequestError(
                         "routing readiness check failed", code="target_unavailable", status=503
                     ) from exc

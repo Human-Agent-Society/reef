@@ -129,7 +129,7 @@ def test_the_spade_example_selects_the_generated_task_recipe_and_the_spade_gener
     monkeypatch.setenv("REEF_TOKEN", "t")
     monkeypatch.setenv("TINKER_API_KEY", "tinker-test")
     monkeypatch.setenv("REEF_SPADE_STATE_DIR", str(tmp_path))
-    example = Path(__file__).parents[2] / "recipes/beta/spade/examples/tinker/serve.yaml"
+    example = Path(__file__).parents[3] / "recipes/beta/spade/examples/tinker/serve.yaml"
     resolved, _ = resolve_deployment_config(yaml.safe_load(example.read_text()), None, example)
     assert [service["name"] for service in resolved["services"]] == ["generator", "reef"]
     settings = service_config_from_mapping(resolved)

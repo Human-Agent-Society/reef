@@ -13,7 +13,7 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_served_artifacts import serving_dispatcher
+from tests.reef_service.inference.served_artifacts import serving_dispatcher
 from tests.support.artifact_versions import (
     ImportingComponent,
     RecordingExperimentTracker,

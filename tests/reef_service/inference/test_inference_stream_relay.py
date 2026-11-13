@@ -239,7 +239,14 @@ def test_non_codex_deployment_reads_the_raw_item(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "failure", [RuntimeError("bad headers"), ConnectionResetError("reset"), asyncio.CancelledError()]
+    "failure",
+    [
+        RuntimeError("bad headers"),
+        # The relay ends a started stream on a ValueError; before the response starts, it must raise it.
+        ValueError("bad header value"),
+        ConnectionResetError("reset"),
+        asyncio.CancelledError(),
+    ],
 )
 def test_stream_setup_failure_closes_the_provider_and_records_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException

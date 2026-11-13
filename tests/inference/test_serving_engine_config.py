@@ -153,7 +153,7 @@ def test_vllm_input_keeps_vllm_option_names_and_the_pause_mode():
 
 
 def test_vllm_refuses_adapter_releases():
-    # The serving assembly refuses more than one vLLM engine (tests/reef_service/test_training_startup.py).
+    # The serving assembly refuses more than one vLLM engine (tests/reef_service/deploy/test_training_startup.py).
     with pytest.raises(ValueError, match="vllm serves full weights only"):
         engine_input("vllm", artifact_format=ADAPTER)
 

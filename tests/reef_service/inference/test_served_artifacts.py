@@ -3,84 +3,38 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.artifact_versions import ImportingComponent, ImportingInference, dispatcher, train
+from tests.reef_service.inference.served_artifacts import (
+    ArtifactEcho,
+    NamedComponent,
+    answering_each_artifact,
+    serving_dispatcher,
+    two_artifacts,
+)
+from tests.support.artifact_versions import ImportingComponent, dispatcher, train
+from tests.support.harness_jobs import COMPONENT, MODEL, harness_recipe
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
-from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
+from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactNotFoundError
+from reef.artifact.sources import DirectorySource
 from reef.core.errors import ReefError
-from reef.core.served_models import ServedArtifact
+from reef.core.served_models import ScheduledStop, ServedArtifact
 from reef.dispatcher import Dispatcher
-from reef.inference.interfaces import InferenceHandler
+from reef.dispatcher.serving import ServingWorker
+from reef.inference.interfaces import FixedEngineClients
 from reef.service.app import create_app
+from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, build_inference_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
 CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
-
-
-class ArtifactEcho(InferenceHandler):
-    """Answer each call with the snapshot it was given, so a test sees which snapshot answered."""
-
-    def __init__(self) -> None:
-        self.artifact_ids: list[str] = []
-
-    async def inference(self, artifact, path, payload):
-        del path, payload
-        self.artifact_ids.append(artifact.artifact_id)
-        return {"choices": [{"message": {"content": "ok"}}]}
-
-
-class NamedInference(ImportingInference):
-    """An ``ImportingInference`` whose engine serves every scenario under one model name, so inference writes the
-    scenario's ``served_models`` rows and the inference routes answer."""
-
-    def served_model_name(self, scenario: str) -> str:
-        return "stub-model"
-
-
-class NamedComponent(ImportingComponent):
-    """An ``ImportingComponent`` whose checkpoints a ``NamedInference`` serves."""
-
-    def __init__(self, checkpoint_dir) -> None:
-        super().__init__(checkpoint_dir)
-        self.inference = NamedInference(self.restore_order)
-
-
-def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, RepositoryBackendFactory]:
-    """The dispatcher of ``tests.support.artifact_versions.dispatcher`` whose runtime serves under a model name."""
-    component = NamedComponent(tmp_path / "exported")
-    backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
-    value = Dispatcher(
-        TestPolicyRecipe(),
-        backend_factory,
-        live=live_objects(component, component.inference),
-        local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-        coordination=memory_coordination(),
-    )
-    return value, component, backend_factory
-
-
-def answering_each_artifact(runtime) -> None:
-    """Make the stub runtime answer each call from the snapshot that the call names, as Tinker does."""
-    runtime.inference.answers_each_artifact = True
-
-
-def two_artifacts(tmp_path):
-    """A scenario that trained twice: the newest artifact is active, and ``older`` is the one before it."""
-    value, runtime, backend_factory = serving_dispatcher(tmp_path)
-    answering_each_artifact(runtime)
-    train(value, 1)
-    train(value, 2)
-    newest, older, _ = value.get_or_create_scenario("math").artifacts()
-    return value, runtime, backend_factory, newest, older
 
 
 @pytest.mark.unit
@@ -133,6 +87,87 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
             value.close()
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_a_harness_artifact_served_beside_the_active_one_answers_under_its_own_id(tmp_path) -> None:
+    """A harness scenario loads no weights, so one endpoint model answers every route. The route of an artifact that
+    serves beside the active one still names that artifact, at its own URL and in a traffic split."""
+    recipe, live = harness_recipe(tmp_path, lambda workspace, services: None)
+    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    coordination = memory_coordination()
+    storage = SQLiteScenarioStorage(tmp_path / "agent-record")
+    control = Dispatcher(
+        recipe,
+        backends,
+        live=live,
+        scenario_storage=storage,
+        coordination=coordination,
+        components=frozenset({"control"}),
+        local_artifact_dir=tmp_path / "staged",
+    )
+    worker = ServingWorker(
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+    )
+    tree, imported = tmp_path / "tree", tmp_path / "imported"
+    tree.mkdir()
+    imported.mkdir()
+    (tree / "rules.md").write_text("Harness two.\n")
+    handler = ArtifactEcho()
+    app = build_inference_app(coordination.served_models, storage, FixedEngineClients(handler), tokens=None)
+
+    async def answers(beside: str) -> list[tuple[int, str, str]]:
+        """The status, artifact header and record ID of a request to the artifact's URL, then of a split request."""
+        async with TestClient(TestServer(app)) as client:
+            named = await client.post(f"/reef/scenarios/math/artifacts/{beside}/v1/chat/completions", json=CHAT)
+            split = await client.post("/v1/chat/completions", json=CHAT, headers={"x-reef-scenario": "math"})
+            return [
+                (answer.status, answer.headers.get(ARTIFACT_HEADER, ""), answer.headers.get(RECORD_HEADER, ""))
+                for answer in (named, split)
+            ]
+
+    try:
+        scenario = control.create_scenario("math")[0]
+        active = scenario.serving_artifact_id()
+        beside = scenario.import_artifact(
+            DirectorySource(tree, source_version="", link=False),
+            COMPONENT,
+            source={"uri": tree.as_uri(), "version": ""},
+            directory=imported,
+        ).artifact_id
+        control.set_served("math", {active: 100, beside: 0})
+        while worker.run_once():
+            pass
+        rows = coordination.served_models.read_scenario("math")
+        assert active != beside and rows["active"] == ServedArtifact(active, MODEL.base_url, MODEL.model)
+        assert rows[beside] == ServedArtifact(beside, MODEL.base_url, MODEL.model)
+        # A split that gives every conversation to the artifact beside the active one.
+        control.publisher.write_traffic_weights("math", {active: 0, beside: 100})
+
+        answered = asyncio.run(answers(beside))
+        assert [(status, artifact_id) for status, artifact_id, record_id in answered] == [(200, beside)] * 2
+        assert handler.artifact_ids == [beside] * 2
+        records = scenario.records
+        assert [records.read("math", record_id).artifact_id for status, artifact_id, record_id in answered] == [
+            beside
+        ] * 2
+
+        # The scenario serves nothing, and the stops of its withdrawn routes come due. No engine holds weights for
+        # these routes, so the same mapping activates nothing: the endpoint model answers both artifacts again.
+        routes = coordination.served_models
+        assert control.set_served("math", {}) == {"served": {}} and routes.read_scenario("math") == {}
+        for served in set(rows.values()):
+            routes.schedule_stop(ScheduledStop(served, 0), control_lease_number=control.publisher.lease_number)
+        while worker.run_once():
+            pass
+        assert routes.due_stops(time.time()) == ()
+        control.set_served("math", {active: 100, beside: 0})
+        while worker.run_once():
+            pass
+        assert routes.read_scenario("math") == rows and worker.activated == {}
+    finally:
+        worker.stop()
+        control.close()
 
 
 @pytest.mark.unit
@@ -347,8 +382,131 @@ def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_second_se
     ):
         with pytest.raises(ReefError, match="answers only from the snapshot it has loaded"):
             value.set_served("math", mapping)
+    # The scenario itself refuses the artifact too, for a caller that does not pass a mapping.
+    with pytest.raises(ReefError, match="answers only from the snapshot it has loaded"):
+        scenario.serve(older["artifact_id"], older["component"])
     assert len(scenario.store.history()) == steps
     assert scenario.serving_artifact_id() == active["artifact_id"]
+    assert not scenario.served_beside()
+    value.close()
+
+
+@pytest.mark.unit
+def test_a_runtime_with_two_checkpoint_slots_serves_two_artifacts_and_refuses_a_third_over_http(tmp_path) -> None:
+    async def run() -> None:
+        trained = two_artifacts(tmp_path, checkpoint_slots=True)
+        value, newest, older = trained[0], trained[3], trained[4]
+        scenario = value.get_or_create_scenario("math")
+        new_id, old_id = newest["artifact_id"], older["artifact_id"]
+        # The artifact that the scenario started with is the third one.
+        root_id = scenario.artifacts()[-1]["artifact_id"]
+        served_models = value.coordination.served_models
+        client = TestClient(TestServer(create_app(value)))
+        await client.start_server()
+
+        async def update(mapping: dict[str, int]):
+            body = {"served": mapping, "component": older["component"]}
+            return await client.post("/reef/scenarios/math/update", json=body)
+
+        async def served() -> dict[str, dict[str, int]]:
+            return (await (await client.get("/reef/scenarios/math/settings")).json())["served"]
+
+        def state() -> tuple[object, ...]:
+            request = served_models.current_request("math")
+            return (
+                [record.operation for record in scenario.store.history()],
+                scenario.serving_artifact_id(),
+                sorted(scenario.served_beside()),
+                served_models.read_scenario("math"),
+                served_models.read_traffic_weights("math"),
+                (request.id, request.state),
+            )
+
+        try:
+            # The older artifact loads beside the active one with weight 0, takes a share of the traffic, becomes the
+            # active one, and steps back. Each mapping names two artifacts, as many as the runtime keeps loaded.
+            for mapping, active_id in (
+                ({new_id: 100, old_id: 0}, new_id),
+                ({new_id: 70, old_id: 30}, new_id),
+                ({new_id: 0, old_id: 100}, old_id),
+                ({new_id: 100, old_id: 0}, new_id),
+            ):
+                accepted = await update(mapping)
+                assert accepted.status == 200, (mapping, await accepted.text())
+                assert await accepted.json() == {"scenario": "math", "served": mapping}
+                assert await served() == {"weights": mapping}
+                assert scenario.serving_artifact_id() == active_id
+                assert set(scenario.served_beside()) == {new_id, old_id} - {active_id}
+                split = mapping if min(mapping.values()) > 0 else {}
+                assert served_models.read_traffic_weights("math") == split
+            # Each of the two artifacts has its own route: the runtime loaded the older one under its own model name.
+            wait_for_serving(value)
+            rows = served_models.read_scenario("math")
+            assert rows["active"] == rows[new_id] == ServedArtifact(new_id, "http://trainer", "stub-model")
+            assert rows[old_id] == ServedArtifact(old_id, "http://trainer", f"sampler:{old_id}")
+            assert root_id not in rows
+
+            # A third artifact is one more than the runtime keeps loaded, whatever its weight. The refusal comes
+            # before every change: the commit history, the selection, the routes, the traffic split and the request
+            # to inference stay as they were.
+            before = state()
+            for mapping in (
+                {new_id: 100, old_id: 0, root_id: 0},
+                {new_id: 50, old_id: 30, root_id: 20},
+                {new_id: 0, old_id: 0, root_id: 100},
+            ):
+                refused = await update(mapping)
+                assert refused.status == 400, mapping
+                reason = await refused.text()
+                assert f"keeps at most 2 artifacts of component {older['component']!r} loaded at once" in reason
+                assert "cannot serve the 3 artifacts" in reason
+            assert state() == before
+            assert await served() == {"weights": {new_id: 100, old_id: 0}}
+
+            # The runtime serves the artifacts that a mapping deploys. It still evaluates no candidate.
+            refusal = scenario.evaluation_refusal(older["component"])
+            assert refusal is not None and "serves only its current artifact" in refusal
+
+            # A scenario that serves nothing gets the same refusal, also before every change: it still serves
+            # nothing. A mapping of two artifacts then serves both again under the routes from before.
+            stopped = await client.post("/reef/scenarios/math/update", json={"served": {}})
+            assert (stopped.status, await served()) == (200, {"weights": {}})
+            before = state()
+            refused = await update({new_id: 50, old_id: 30, root_id: 20})
+            assert refused.status == 400 and "cannot serve the 3 artifacts" in await refused.text()
+            assert state() == before and not scenario.serves and value.publisher.desired("math") == {}
+            assert await served() == {"weights": {}}
+            restored = await update({new_id: 100, old_id: 0})
+            assert (restored.status, await served()) == (200, {"weights": {new_id: 100, old_id: 0}})
+            wait_for_serving(value)
+            assert served_models.read_scenario("math") == rows
+        finally:
+            await client.close()
+            value.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_a_mapping_that_replaces_one_of_two_loaded_artifacts_counts_only_the_artifacts_that_it_names(tmp_path) -> None:
+    trained = two_artifacts(tmp_path, checkpoint_slots=True)
+    value, newest, older = trained[0], trained[3], trained[4]
+    scenario = value.get_or_create_scenario("math")
+    new_id, old_id = newest["artifact_id"], older["artifact_id"]
+    root_id = scenario.artifacts()[-1]["artifact_id"]
+    value.set_served("math", {new_id: 100, old_id: 0})
+    # The mapping keeps the older artifact and replaces the newest one. The test covers only how control accepts the
+    # final mapping, which names two artifacts, as many as the runtime keeps loaded. ``TwoSlotInference`` is a stub
+    # without slots: the test does not show that a real runtime with both slots in use can make this change before
+    # the stopped artifact retires. ``CheckpointSlotsRuntime`` refuses the added artifact until then.
+    mapping = {old_id: 100, root_id: 0}
+    assert value.set_served("math", mapping) == {"served": mapping}
+    assert [record.operation for record in scenario.store.history()[-3:]] == ["serve", "activate", "stop_serving"]
+    assert scenario.serving_artifact_id() == old_id
+    assert set(scenario.served_beside()) == {root_id}
+    assert value.scenario_settings("math")["served"] == {"weights": mapping}
+    rows = {row["artifact_id"]: row for row in value.list_artifacts("math")}
+    assert (rows[new_id]["served"], rows[new_id]["active"]) == (False, False)
     value.close()
 
 
