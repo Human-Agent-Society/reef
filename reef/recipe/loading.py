@@ -55,6 +55,11 @@ from reef.train.pipeline import PipelineSettings
 RECIPE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
+#: The scenario name with which ``load_recipe`` builds a loaded recipe's components to check them; the components do
+#: not depend on it.
+LOADED_RECIPE_SCENARIO = "recipe-load-check"
+
+
 def load_recipe(
     recipe_class: type[Recipe],
     config: Mapping[str, Any],
@@ -69,8 +74,10 @@ def load_recipe(
     for example to connect the training component first; else the loader resolves them from ``data`` and
     ``environ``.
 
-    The class's own ``__post_init__`` checks the relations between the values. Raise ``RecipeConfigError`` for an
-    invalid config.
+    The class's own ``__post_init__`` checks the relations between the values, and the loader builds the recipe's
+    components once (``Recipe.build_components``, a function of the configuration alone), so a declaration that
+    ``ScenarioComponents`` refuses, such as a check of a whole snapshot of several components, fails the load
+    before any scenario exists. Raise ``RecipeConfigError`` for an invalid config.
     """
     if field_values is None:
         field_values = resolve_config_field_values(recipe_class, config.get("data", {}), environ)
@@ -96,7 +103,9 @@ def load_recipe(
                 arguments["activation"] = activation_reference(config["activation"])
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
-        return recipe_class(**arguments, **field_values)
+        recipe = recipe_class(**arguments, **field_values)
+        recipe.build_components(LOADED_RECIPE_SCENARIO)
+        return recipe
     except RecipeConfigError:
         raise
     except ValueError as exc:

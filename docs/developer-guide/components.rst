@@ -20,7 +20,7 @@ Scope
 
 A recipe's components own the serving-side facts of its artifacts:
 
-- the admission check that runs before a component is published or activated;
+- the admission check that runs before a component's artifact is stored;
 - the layout that an imported artifact must meet;
 - the kind of artifact, which decides whether the inference runtime loads it;
 - the file tree that a client pulls.
@@ -45,8 +45,9 @@ flat; a snapshot of several components has one directory per component. That
 view does not create a new artifact identity.
 
 Publication admits the changed component and carries the others as previously
-admitted. Activation validates the target component and changes the complete
-scenario selection atomically. It does not publish a repository snapshot. The
+admitted. Activation changes the complete scenario selection atomically and
+runs no check: every artifact was admitted when it was stored, and a stored
+artifact does not change. It does not publish a repository snapshot. The
 runtime loads a snapshot only when its loaded component changed. See the
 `state model <../advanced_topics/state-model.rst>`__ for ordering and recovery.
 
@@ -56,8 +57,9 @@ Fields and where Reef reads them
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``ComponentSpec`` field          | Read in                             | Meaning                                                              |
 +==================================+=====================================+======================================================================+
-| ``validator``                    | ``scenario/committer.py``,          | Admit a component before it is published or activated. Raising       |
-|                                  | ``scenario/factory.py``             | rejects the step or the activation. The default accepts anything.    |
+| ``validator``                    | ``train/job_queue.py``,             | Admit an artifact of the component before it is stored. Raising      |
+|                                  | ``scenario/committer.py``,          | fails the training job or refuses the import. The default accepts    |
+|                                  | ``scenario/factory.py``             | anything. See `Admission checks`_.                                   |
 +----------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``layout``                       | ``scenario/committer.py``,          | Check an imported directory against the component's snapshot layout  |
 |                                  | ``scenario/factory.py``             | before admission. Without ``layout``, the component takes no import. |
@@ -169,6 +171,27 @@ The root snapshot of such a scenario keeps one directory per component
 maps each component name to an existing flat recipe. Reef builds exactly
 this from the mapping, and runs each recipe's trainer as its own worker; see `configuration
 <../reference/configuration.rst#recipe-configuration>`__ for its layout.
+
+Admission checks
+----------------
+
+A validator reads the files of one artifact of its component, in a local
+directory, and raises ``ValueError`` or a ``ReefError`` that names what does
+not hold. The process that holds the files for its own work runs it once,
+before the artifact is stored:
+
+- the training service runs it on each checkpoint of a training job. A refused
+  checkpoint is not stored, and its job fails with the validator's message;
+  the samples of the job count as trained, as for any failed job;
+- control runs it on an import, on a person's synced tree and on the artifact
+  item that starts a scenario, since it copies those files. A refused import
+  returns HTTP 400.
+
+Activation, restore, serving and a train-from run no check, so no process
+fetches files to check them again. A check therefore applies to artifacts
+stored after it was configured. A snapshot of several components has no check
+of its own (``ScenarioComponents.validator`` is ``AcceptAnyArtifact``): each
+component is checked alone.
 
 Remote weight snapshots
 -----------------------

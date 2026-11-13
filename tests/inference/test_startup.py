@@ -469,14 +469,17 @@ def test_a_fresh_owner_opens_the_runtime_before_cleanup(startup, tmp_path):
 @pytest.mark.unit
 def test_owner_lease_loss_stops_the_runtime_and_prevents_reacquisition(startup):
     control, worker, runtime, _ = startup
-    control.coordination.work_queue.lease_seconds = 0.3
+    # The owner renews its lease every third of it, so it sees the takeover within a second. A shorter lease can
+    # expire on a loaded host before the owner starts its item, and the test then fails before the takeover.
+    control.coordination.work_queue.lease_seconds = 3.0
     control.create_scenario("math")
     runtime.release.set()
     assert worker.run_once()
     owner = worker.owner
     assert owner is not None
     control.coordination.work_queue.cancel(owner.item.queue, owner.item.id, "test takeover")
-    assert owner.lease_lost.wait(2)
+    # The bound is for a loaded host; the wait ends when the owner sees the loss.
+    assert owner.lease_lost.wait(30)
     owner.stop()
     assert runtime.shutdowns == 1 and worker.stopped.is_set()
     assert not worker.run_once()

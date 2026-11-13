@@ -464,12 +464,10 @@ class ScenarioFactory:
             directory.mkdir()
             stored = layout.stored(start.files, directory, artifact_id=start.item.artifact_id)
             source = RootSource("item", item=start.item.item_id, uri=start.uri, version=start.files.version)
-            # The admission checks of an import: the snapshot's own with one component, else the component's here and
-            # the snapshot's on the composed root.
+            # The admission checks of an import, on the files that this process copied.
+            components.validate(directory, component)
             if components.single:
-                components.validate(stored)
                 return stored, source
-            components.components[component].validator.validate(stored)
             item = (component, stored)
             default = default_start(self._recipe, self.live)
         tree = work / "default"
@@ -490,9 +488,7 @@ class ScenarioFactory:
         if item is None:
             return compose_snapshot(artifacts, directory=work / "root"), source
         artifacts[item[0]] = item[1]
-        root = compose_snapshot(artifacts, directory=work / "root")
-        components.validator.validate(root)
-        return root, source
+        return compose_snapshot(artifacts, directory=work / "root"), source
 
     def _recover(
         self,

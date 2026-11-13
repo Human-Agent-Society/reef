@@ -867,9 +867,15 @@ class Trainer:
             state = JobLoopState.from_dict(self._state)
         self._job_loop.cancel(state)
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        """The files of a start that ``import_start`` reads (``TrainingComponent.start_files``); None for all of
+        them, and for a trainer that trains nothing."""
+        return None if self._job_loop is None else self._job_loop.component.start_files
+
     def import_start(self, artifact: Artifact) -> str:
-        """The start of a job that trains from ``artifact``, the trainer's component of a snapshot, materialized
-        (``TrainingComponent.snapshot_start``): control's component checks the artifact and names its snapshot, and
+        """The start of a job that trains from ``artifact``, the trainer's component of a snapshot, local with at
+        least the files of ``start_files`` (``TrainingComponent.snapshot_start``): control's component checks the artifact and names its snapshot, and
         the training service imports it when it takes the job. Raise ``TrainingStartRefusedError`` when this
         trainer cannot start from ``artifact``."""
         if artifact.local_path is None:

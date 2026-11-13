@@ -5,7 +5,9 @@ holds the backend's facts (``TrainingBackendFacts``) and the work queue: it answ
 ``TrainingJob`` to the ``jobs`` queue, and reads the job's ``JobStatus`` back from the queue item.
 ``TrainingJobWorker`` runs in the training service: it takes the jobs of its component, has the component run each
 one, stores the files of each saved checkpoint in the artifact store, records the checkpoint in the item's
-progress, and ends the item with the job.
+progress, and ends the item with the job. It runs the admission check of the job's component on each checkpoint
+before it stores it (``ComponentChecks``), so no other process fetches a checkpoint to check it; a refused
+checkpoint fails its job.
 
 What only the component can answer, control asks through the ``training_checks`` queue, and
 ``TrainingCheckWorker`` answers in the training service. An item of that queue:
@@ -79,9 +81,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from reef.artifact.artifact import Artifact, ArtifactError
+from reef.artifact.components import ComponentChecks
 from reef.artifact.repository import Repository, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.errors import InternalError
+from reef.core.errors import InternalError, ReefError
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.observability.base import (
@@ -480,8 +483,9 @@ class JobQueueComponent(TrainingComponent):
 
     - ``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs`` and ``parameters_schema`` are the
       facts' members, which equal the component's.
-    - ``root_start(root)`` raises as ``component.root_start(root)`` does (``facts.check_root_start``). Otherwise it
-      returns the name of the root snapshot, ``SnapshotStart(revision, root.source).to_text()``.
+    - ``start_files`` is ``facts.start_files``. ``root_start(root)`` raises as ``component.root_start(root)`` does
+      (``facts.check_root_start`` of ``root`` with ``files`` set to ``start_files``, so only those files are made
+      local). Otherwise it returns the name of the root snapshot, ``SnapshotStart(revision, root.source).to_text()``.
       ``snapshot_start(artifact)`` raises as ``component.snapshot_start(artifact)`` does
       (``facts.check_import_start``), else returns ``SnapshotStart(revision).to_text()``. The training service
       makes the component's start of the snapshot when it takes a job that names it (``resolved_job``).
@@ -535,8 +539,12 @@ class JobQueueComponent(TrainingComponent):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.facts.parameters_schema(kind)
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        return self.facts.start_files
+
     def root_start(self, root: ScenarioRoot) -> str:
-        self.facts.check_root_start(root)
+        self.facts.check_root_start(replace(root, files=self.facts.start_files))
         return SnapshotStart(root.artifact.ref.revision, root.source).to_text()
 
     def snapshot_start(self, artifact: Artifact) -> str:
@@ -752,7 +760,8 @@ class TrainingJobWorker(QueueWorker):
     Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``data_store`` is the data store,
     which keeps the data directory of each job; ``backends`` opens the artifact store of a scenario, where the
     worker stores the files of each checkpoint and reads the snapshot that a job's start names;
-    ``local_artifact_dir`` is where such a snapshot is made local (``resolved_job``). ``poll_seconds`` is also
+    ``checks`` are the admission checks of the scenarios' components; ``local_artifact_dir`` is where such a
+    snapshot is made local (``resolved_job``). ``poll_seconds`` is also
     the wait between two looks at a running job; ``slots`` is the number of jobs that the worker runs at the same
     time.
 
@@ -769,6 +778,7 @@ class TrainingJobWorker(QueueWorker):
         data_store: DataStore,
         backends: RepositoryBackendFactory,
         *,
+        checks: ComponentChecks,
         worker_id: str,
         local_artifact_dir: Path | None = None,
         poll_seconds: float = 0.5,
@@ -776,12 +786,15 @@ class TrainingJobWorker(QueueWorker):
     ) -> None:
         if isinstance(component, JobQueueComponent):
             raise TypeError("a training worker runs jobs on the component itself, not on a jobs-queue component")
+        if not isinstance(checks, ComponentChecks):
+            raise TypeError(f"checks must be ComponentChecks, got {type(checks).__name__}")
         super().__init__(
             queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds, slots=slots
         )
         self.component = component
         self.data_store = data_store
         self.backends = backends
+        self.checks = checks
         self.local_artifact_dir = local_artifact_dir
 
     def start(self) -> None:
@@ -800,7 +813,10 @@ class TrainingJobWorker(QueueWorker):
         """Run the job of ``item`` on the component, and store and record its checkpoints, by step.
 
         The component gets the job with its own start (``resolved_job``). For each checkpoint that the item does
-        not hold yet, the worker writes the name of its content (``checkpoint_content``) into the item's
+        not hold yet, the worker first runs the admission check of the job's component on the checkpoint's
+        ``artifact_path`` (``ComponentChecks.validate``). A refusal (``ValueError`` or ``ReefError``) cancels the
+        component's run, the worker stores the job's record files, and the job fails for good with the refusal's
+        message; the job's earlier checkpoints stay recorded. Then the worker writes the name of its content (``checkpoint_content``) into the item's
         metadata, then stores the files of its ``artifact_path`` under that name in the artifact store of the
         job's scenario, and then appends the progress entry, which names that content and the parts that the
         checkpoint changed from the start (``TrainingComponent.changed_parts``). A worker that stops after it
@@ -829,16 +845,7 @@ class TrainingJobWorker(QueueWorker):
                 status = self.component.status(job.job_id)
                 if status.state != "running":
                     job_progress = None
-                    records = self.component.job_records(job.job_id)
-                    if records is not None:
-                        backend = self.backends(job.scenario)
-                        backend.store_content(job_records_content(item.id), records)
-                        held = self.queue.read(JOBS_QUEUE, item.id)
-                        if held is None or held.worker_id != self.worker_id or held.final:
-                            # The job was cancelled meanwhile, as the delete of its scenario does: no page reads
-                            # these records, and the delete discarded the scenario's content before this store.
-                            backend.discard_content(job_records_content(item.id))
-                            raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
+                    self.store_records(item, job)
                 if job_progress != written_progress:
                     value = None if job_progress is None else cast(JsonValue, dict(job_progress))
                     self.queue.write_metadata(JOBS_QUEUE, item.id, PROGRESS_METADATA_KEY, value)
@@ -850,6 +857,15 @@ class TrainingJobWorker(QueueWorker):
                         raise InternalError(
                             f"the {self.component.name} training component reported a checkpoint with no directory"
                         )
+                    try:
+                        self.checks.validate(job.scenario, job.component, Path(checkpoint.artifact_path))
+                    except (ValueError, ReefError) as exc:
+                        self.component.cancel(job.job_id)
+                        # A person reads the records of a refused job first.
+                        self.store_records(item, job)
+                        raise ItemFailedError(
+                            f"the scenario's check refused checkpoint {checkpoint.step} of job {job.job_id}: {exc}"
+                        ) from exc
                     content = checkpoint_content(item.id, checkpoint.step)
                     if content not in stored_names:
                         stored_names.append(content)
@@ -893,6 +909,22 @@ class TrainingJobWorker(QueueWorker):
             logger.warning("training worker %s lost job %s; cancelling its local run", self.worker_id, item.id)
             self.component.cancel(item.id)
             raise
+
+    def store_records(self, item: WorkItem, job: TrainingJob) -> None:
+        """Store the record files of the ended ``job`` of ``item`` (``TrainingComponent.job_records``) as the content
+        ``job_records_content(item.id)``; nothing when the component kept none. Raise ``WorkLeaseLostError``, and
+        discard what it stored, when the job was cancelled or taken meanwhile."""
+        records = self.component.job_records(job.job_id)
+        if records is None:
+            return
+        backend = self.backends(job.scenario)
+        backend.store_content(job_records_content(item.id), records)
+        held = self.queue.read(JOBS_QUEUE, item.id)
+        if held is None or held.worker_id != self.worker_id or held.final:
+            # The job was cancelled meanwhile, as the delete of its scenario does: no page reads these records, and
+            # the delete discarded the scenario's content before this store.
+            backend.discard_content(job_records_content(item.id))
+            raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
 
 
 class TrainingCheckWorker(QueueWorker):

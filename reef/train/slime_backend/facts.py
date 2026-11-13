@@ -186,6 +186,11 @@ class SlimeFacts(TrainingBackendFacts):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any]:
         return slime_parameters_schema(kind)
 
+    @property
+    def start_files(self) -> tuple[str, ...]:
+        """No file: a root is checked by its source, and a published snapshot is refused unread."""
+        return ()
+
     def check_root_start(self, root: ScenarioRoot) -> None:
         configured = dict(self.default_start_inputs)
         if root.source.kind != "default" or dict(root.source.inputs) != configured:

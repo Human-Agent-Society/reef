@@ -18,12 +18,13 @@ What the tests prove, and what they do not:
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event
 
@@ -35,16 +36,20 @@ from tests.support.records import report, token_inference
 from tests.support.runtime_stubs import VERSION_FILE, StubFacts, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples import data_storage
 
-from reef.artifact import GitLFSRepositoryBackend, RepositoryBackendFactory
-from reef.artifact.sources import DirectorySource
+from reef.artifact import Artifact, ArtifactValidator, GitLFSRepositoryBackend, RepositoryBackendFactory
+from reef.artifact.components import ComponentSpec, ScenarioComponents
+from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
+from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.harness.tree import TreePatch
 from reef.recipe import Recipe
+from reef.recipe.base import WEIGHTS_COMPONENT
 from reef.recipe.composite import CompositeRecipe
 from reef.record2sample.service.worker import SAMPLES_QUEUE
-from reef.scenario.live_objects import LiveObjects
+from reef.scenario.factory import ItemStart
+from reef.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.service.request_service import RequestService
 from reef.service.scenario_files import artifact_directory
 from reef.storage.sql_coordination import open_coordination
@@ -66,20 +71,63 @@ WAIT_SECONDS = 180.0
 
 
 class SentinelWeights(StubTrainingComponent):
-    """A training component whose every checkpoint holds a weight file with ``SENTINEL`` and the job's number.
-    A job trains only while ``may_train`` is set, which it is unless a test clears it."""
+    """A training component whose every checkpoint holds a weight file with ``SENTINEL``, the job's number and
+    ``marker``. A job trains only while ``may_train`` is set, which it is unless a test clears it."""
 
     def __init__(self, checkpoint_root: Path) -> None:
         super().__init__(checkpoint_root)
         self.may_train = Event()
         self.may_train.set()
+        self.marker = b""
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         if not self.may_train.wait(WAIT_SECONDS):
             raise RuntimeError("the test did not let the weights train")
         (checkpoint,) = super().train(job)
-        (Path(checkpoint.path) / MODEL).write_bytes(SENTINEL + str(len(self.submitted)).encode())
+        (Path(checkpoint.path) / MODEL).write_bytes(SENTINEL + str(len(self.submitted)).encode() + self.marker)
         return (checkpoint,)
+
+
+#: The bytes in a weight file, or in a reference, that ``SentinelCheck`` refuses.
+REFUSED = b"refused-weights"
+
+
+class SentinelCheck(ArtifactValidator):
+    """Refuse weights any file of which holds ``REFUSED``. It reads every file of the artifact that it gets, and
+    ``directories`` lists the local directory of each one."""
+
+    def __init__(self) -> None:
+        self.directories: list[Path] = []
+
+    def validate(self, artifact: Artifact) -> None:
+        directory = artifact.local_path
+        assert directory is not None, "a check gets the files of an artifact in a local directory"
+        self.directories.append(directory)
+        if any(REFUSED in path.read_bytes() for path in directory.rglob("*") if path.is_file()):
+            raise ValueError("the check refused the weights")
+
+
+@dataclass(frozen=True)
+class CheckedPolicyRecipe(TestPolicyRecipe):
+    """The policy recipe whose weights ``check`` admits."""
+
+    check: SentinelCheck = field(default_factory=SentinelCheck, compare=False)
+
+    def build_components(self, scenario: str) -> ScenarioComponents:
+        return ScenarioComponents({WEIGHTS_COMPONENT: ComponentSpec(validator=self.check)})
+
+
+class PinnedWeights(DirectorySource):
+    """A directory of weights whose source keeps it fixed, as a Hugging Face commit does: the import stores the
+    reference to ``repository``, not the weights."""
+
+    def __init__(self, directory: Path, repository: str) -> None:
+        super().__init__(directory, source_version="0" * 40, link=False)
+        self.repository = repository
+
+    @property
+    def reference(self):
+        return {REFERENCE_FILE: json.dumps(HuggingFaceRevision(self.repository, "0" * 40).to_dict()).encode()}
 
 
 def weight_bytes_in(directory: Path) -> list[str]:
@@ -166,20 +214,33 @@ def split(
             components=frozenset({"inference"}),
         )
     training_backends = git_backends(tmp_path / "training")
-    workers = []
+    workers: list[TrainingJobWorker | TrainingCheckWorker] = []
     for component in components:
-        for worker_type, name in ((TrainingJobWorker, "jobs"), (TrainingCheckWorker, "checks")):
-            worker = worker_type(
+        workers.append(
+            TrainingJobWorker(
                 component,
                 coordination.work_queue,
                 control.job_directory_store,
                 training_backends,
-                worker_id=f"split-training-{name}-{component.name}",
+                checks=RecipeChecks(recipe),
+                worker_id=f"split-training-jobs-{component.name}",
                 local_artifact_dir=tmp_path / "training" / "staged",
                 poll_seconds=0.02,
             )
-            worker.start()
-            workers.append(worker)
+        )
+        workers.append(
+            TrainingCheckWorker(
+                component,
+                coordination.work_queue,
+                control.job_directory_store,
+                training_backends,
+                worker_id=f"split-training-checks-{component.name}",
+                local_artifact_dir=tmp_path / "training" / "staged",
+                poll_seconds=0.02,
+            )
+        )
+    for worker in workers:
+        worker.start()
     try:
         yield control
     finally:
@@ -255,6 +316,103 @@ def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_weight_byte_in_c
         )
     assert not list((tmp_path / "control").rglob("checkpoints"))
     assert stored_content_refs(tmp_path) == []
+
+
+@pytest.mark.integration
+def test_a_check_that_reads_the_weights_runs_where_they_are_and_brings_no_weight_byte_to_control(
+    tmp_path: Path, real_lfs: None
+) -> None:
+    """The weights' check reads their files. The training service runs it on each checkpoint before it stores it,
+    and control runs it on the reference that an import stores. An activation and a restore run no check. A
+    train-from and a new trainer's root make local only the files that the facts' start checks read
+    (``TrainingBackendFacts.start_files``). The inference service runs apart, so every weight byte under control's
+    directory would be one that control fetched; after each operation, none is there. A refusal still refuses: a
+    refused checkpoint fails its job, and a refused import raises the check's ``ValueError``, as before."""
+    component = SentinelWeights(tmp_path / "training" / "checkpoints")
+    live = LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component))
+    recipe = CheckedPolicyRecipe(max_staleness=4)
+    control_directory = tmp_path / "control"
+    done: list[str] = []
+
+    def checked(operation: str) -> None:
+        assert weight_bytes_in(control_directory) == [], f"after {operation} (before it: {done})"
+        done.append(operation)
+
+    with split(tmp_path, recipe, live, (component,), inference_apart=True) as control:
+        scenario = control.get_or_create_scenario("math")
+        root = scenario.serving_artifact_id()
+        control.accept_record(token_inference("i1", artifact_id=root))
+        control.accept_record(report("r1", "i1"))
+        wait_until(lambda: scenario.trainer.state["finished_jobs"] == 1, "the job did not train to a commit")
+        trained = scenario.artifact_status()["weights"]["active"]
+        assert trained != root
+        after_training = scenario.commit_number
+        # The check read the checkpoint in the training service's own directory.
+        assert [path.is_relative_to(tmp_path / "training") for path in recipe.check.directories] == [True]
+        checked("a training commit")
+
+        component.marker = REFUSED
+        control.accept_record(token_inference("i2", artifact_id=trained))
+        control.accept_record(report("r2", "i2"))
+        wait_until(lambda: scenario.trainer.state["finished_jobs"] == 2, "the refused job did not end")
+        refused = [job for job in scenario_jobs(control.queue, "math") if job["state"] == "failed"]
+        assert len(refused) == 1 and "the check refused the weights" in refused[0]["error"]
+        assert refused[0]["checkpoints"] == []
+        assert scenario.trainer.state["last_job"]["event"] == "failed"
+        assert scenario.artifact_status()["weights"]["active"] == trained
+        checked("a refused training commit")
+
+        given = tmp_path / "given"
+        given.mkdir()
+        (given / "config.json").write_text("{}")
+        (given / MODEL).write_bytes(SENTINEL + b"given")
+        for work in ("import-work", "refused-import-work"):
+            (control_directory / work).mkdir()
+        imported = control.import_artifact(
+            "math",
+            PinnedWeights(given, "org/weights"),
+            None,
+            source={"uri": f"hf://org/weights@{'0' * 40}", "version": "0" * 40},
+            directory=control_directory / "import-work",
+        )
+        # Control checked what it stored: the reference, in its own import directory.
+        assert recipe.check.directories[-1] == control_directory / "import-work"
+        checked("an import")
+        with pytest.raises(ValueError, match="the check refused the weights"):
+            control.import_artifact(
+                "math",
+                PinnedWeights(given, "org/refused-weights"),
+                None,
+                source={"uri": f"hf://org/refused-weights@{'0' * 40}", "version": "0" * 40},
+                directory=control_directory / "refused-import-work",
+            )
+        checked("a refused import")
+
+        checks = len(recipe.check.directories)
+        control.activate("math", imported.artifact_id)
+        checked("activate the import")
+        control.activate("math", root)
+        checked("activate the root")
+        assert control.restore("math", after_training) == {"weights": trained}
+        checked("restore")
+        # A selection checks nothing: each artifact was admitted when it was stored.
+        assert len(recipe.check.directories) == checks
+        # The facts' start check of a train-from reads only the files that the facts name, and the stub's none.
+        control.train_from("math", trained)
+        checked("train from an earlier commit")
+
+        # A scenario whose root is an artifact item: its new trainer's start check reads only those files too. The
+        # stub trains one scenario per process, so the first goes first.
+        control.delete_scenario("math")
+        item = ItemStart(
+            ItemIdentity("weights-item"),
+            f"hf://org/weights@{'0' * 40}",
+            PinnedWeights(given, "org/weights"),
+        )
+        other, created = control.create_scenario("item", item)
+        assert created and other.trainer.state["finished_jobs"] == 0
+        checked("create a scenario from an item root")
+    assert not list(control_directory.rglob("checkpoints"))
 
 
 @pytest.mark.integration
@@ -415,6 +573,7 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
         control.set_served("agent", {active["weights"]: 50, root["weights"]: 50}, "weights")
         checked("serve two weights")
         control.train_from("agent", root["weights"], "weights")
+        control.train_from("agent", active["weights"], "weights")
         control.train_from("agent", active["harness"], "harness")
         checked("train from")
         EndedWorkSweeper(control.queue, control.backend_factory, retention_seconds=1e-6).sweep()
