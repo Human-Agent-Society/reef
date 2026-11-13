@@ -13,7 +13,7 @@ import pytest
 from tests.support.git_lfs import fake_git_lfs
 from tests.support.harness_jobs import rebuilt_recipe
 
-from reef.execution.sandbox.process import SandboxExecutor
+from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.harness import TaskResult
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
@@ -137,12 +137,13 @@ class Proposals(ModelBinding):
 @pytest.fixture
 def campaign(driver, monkeypatch, tmp_path, fake_git_lfs):
     # The campaign's commits, not Git LFS, are under test here; tests/artifact covers real LFS.
-    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
+    monkeypatch.setattr(BwrapExecutor, "preflight", lambda self: None)
     launches = []
 
     def launch(descriptor, files, task, **kwargs):
         launches.append(kwargs)
-        assert isinstance(kwargs["executor"], SandboxExecutor)
+        assert isinstance(kwargs["executor"], BwrapExecutor)
         assert kwargs["timeout"] == 9000
         return task_run(task, int("# improved" in files.get("terminus/context/agent.py", "")))
 

@@ -350,8 +350,9 @@ Running runs
    * - ``local`` (default)
      - a plain subprocess, with no isolation; for development
    * - ``sandbox``
-     - a bubblewrap jail: read-only base, explicit credentials only, no
-       network unless ``evolution.sandbox.egress_hosts`` is set
+     - a local sandbox: read-only base, explicit credentials only, no
+       network unless ``evolution.sandbox.egress_hosts`` is set. Linux uses
+       a bubblewrap jail; macOS uses a Seatbelt profile
    * - ``e2b``, ``modal``
      - one cloud sandbox per run (``reef-infra[e2b]`` or
        ``reef-infra[modal]``), with outbound internet

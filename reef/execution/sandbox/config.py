@@ -3,25 +3,27 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, resolve_plugin_class
+from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.modal import ModalExecutor
-from reef.execution.sandbox.process import (
-    LocalExecutor,
-    ProgramExecutor,
-    SandboxExecutor,
-    SandboxLimits,
-    SandboxUnavailableError,
-)
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailableError
 from reef.execution.sandbox.remote import RemoteExecutor, deployment_owner
+from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 
 #: The cloud sandbox providers, by the name a deployment selects.
 REMOTE_EXECUTORS: Mapping[str, type[RemoteExecutor]] = {"e2b": E2BExecutor, "modal": ModalExecutor}
+
+
+def host_sandbox() -> type[SandboxExecutor]:
+    """The local sandbox this host runs: Seatbelt on macOS, else bubblewrap."""
+    return SeatbeltExecutor if sys.platform == "darwin" else BwrapExecutor
 
 
 def remote_executor(
@@ -66,9 +68,9 @@ def build_executor(
 ) -> ProgramExecutor:
     """Build the executor a deployment selected.
 
-    ``executor`` is ``local`` (default), ``sandbox``, or a cloud sandbox (``e2b``, ``modal``); a sandbox reads its
-    ``egress_hosts``, ``limits``, and an explicit ``env_from`` list of host
-    variable names from the same section. The executor is
+    ``executor`` is ``local`` (default), ``sandbox``, or a cloud sandbox (``e2b``, ``modal``). ``sandbox`` is the
+    host's local sandbox (``host_sandbox``): bubblewrap on Linux, Seatbelt on macOS. Each executor reads its
+    options from the ``sandbox`` section with its ``from_config``. The executor is
     preflighted at build so a hosted deployment that requires the sandbox
     fails to start, not at the first run. The caller binds the result to
     the program it runs with :meth:`ProgramExecutor.for_program`.
@@ -78,39 +80,16 @@ def build_executor(
     values = os.environ if environ is None else environ
     if kind == "local":
         return LocalExecutor()
+    section = config.get("sandbox") or {}
+    if not isinstance(section, Mapping):
+        raise ReefError("evolution.sandbox must be a mapping")
+    executor: ProgramExecutor
     if isinstance(kind, str) and kind in REMOTE_EXECUTORS:
-        section = config.get("sandbox") or {}
-        if not isinstance(section, Mapping):
-            raise ReefError("evolution.sandbox must be a mapping")
-        remote = REMOTE_EXECUTORS[kind].from_config(section, values)
-        remote.preflight()
-        return remote
-    if kind != "sandbox":
+        executor = REMOTE_EXECUTORS[kind].from_config(section, values)
+    elif kind == "sandbox":
+        executor = host_sandbox().from_config(section, values)
+    else:
         kinds = ", ".join(f"'{name}'" for name in ("local", "sandbox", *sorted(REMOTE_EXECUTORS)))
         raise ReefError(f"unknown run executor {kind!r}; use one of {kinds}")
-    sandbox_config = config.get("sandbox") or {}
-    if not isinstance(sandbox_config, Mapping):
-        raise ReefError("evolution.sandbox must be a mapping")
-    egress = tuple(str(host) for host in (sandbox_config.get("egress_hosts") or ()))
-    limits_config = sandbox_config.get("limits") or {}
-    if not isinstance(limits_config, Mapping):
-        raise ReefError("evolution.sandbox.limits must be a mapping")
-    limits = SandboxLimits(
-        cpu_seconds=int(limits_config.get("cpu_seconds", 0)),
-        memory_bytes=int(limits_config.get("memory_bytes", 0)),
-        processes=int(limits_config.get("processes", 0)),
-        file_bytes=int(limits_config.get("file_bytes", 0)),
-    )
-    names = sandbox_config.get("env_from", [])
-    if not isinstance(names, (list, tuple)) or not all(
-        isinstance(name, str) and name.isidentifier() for name in names
-    ):
-        raise ReefError("evolution.sandbox.env_from must be a list of environment variable names")
-    env = {}
-    for name in names:
-        if name not in values or not values[name]:
-            raise ReefError(f"evolution.sandbox.env_from requires environment variable {name!r}")
-        env[name] = values[name]
-    executor = SandboxExecutor(egress_hosts=egress, limits=limits, env=env)
     executor.preflight()
     return executor

@@ -295,7 +295,8 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
     from harbor.utils.import_path import import_class
     from reef_terminus import runner
 
-    from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
+    from reef.execution.sandbox.bwrap import BwrapExecutor
+    from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()
     proposed = HarnessTree({**SEED.files, "extensions/agent.py": code})
@@ -334,8 +335,9 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
             return ProcessOutcome(runner.run(argv[-1]), "", "")
 
     monkeypatch.setattr("reef_eval.Lab", Lab)
-    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
-    monkeypatch.setattr(SandboxExecutor, "launch", launch)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
+    monkeypatch.setattr(BwrapExecutor, "preflight", lambda self: None)
+    monkeypatch.setattr(BwrapExecutor, "launch", launch)
     config = meta_harness_sections(tmp_path, adapter="terminus")
     evolution = config["evolution"]
     evolution.pop("binary")
