@@ -57,6 +57,7 @@ from sqlalchemy import (
     literal,
     literal_column,
     select,
+    true,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -66,6 +67,7 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import FromClause, TableValuedAlias
 
 from reef.core.atif_payloads import call_shape, provider_payload
 from reef.core.config import config_metadata, config_option
@@ -451,6 +453,11 @@ class SQLDataStore(DataStore):
     def in_benchmark(self, benchmark: str) -> ColumnElement[bool]:
         """The condition that the list under ``benchmarks`` in the ``metadata_json`` of an item row has the string
         ``benchmark``."""
+
+    @abstractmethod
+    def benchmark_names(self) -> TableValuedAlias:
+        """The strings of the list under ``benchmarks`` in the ``metadata_json`` of an item row, as a table of one
+        column, ``value``, that a query joins to the item rows."""
 
     @abstractmethod
     def record_source(self) -> ColumnElement[str]:
@@ -1071,6 +1078,31 @@ class SQLDataStore(DataStore):
         statement = select(func.count()).select_from(self.items_table).where(*self.set_members(owner, kind, name))
         return int(connection.execute(statement).scalar_one())
 
+    def set_counts(self, connection: Connection, owner: str, kind: str, names: Iterable[str]) -> dict[str, int]:
+        """The number of items of ``owner`` in each set of ``names`` of ``kind``, by name, as ``set_count`` gives it.
+        A set with no item has no entry. One query reads the items of the kind once for all the sets: a query for
+        each set read them again for each, 0.25 s each time for 60,000 tasks."""
+        wanted = sorted(set(names))
+        if not wanted:
+            return {}
+        items = self.items_table
+        name: ColumnElement[str]
+        source: FromClause
+        if kind == "benchmark":
+            names_of_item = self.benchmark_names()
+            name = names_of_item.c.value
+            source = items.join(names_of_item, true())
+        else:
+            name = self.metadata_string(TRAJECTORY_SET_KEY)
+            source = items
+        statement = (
+            select(name, func.count(items.c.item_id.distinct()))
+            .select_from(source)
+            .where(items.c.owner == owner, items.c.kind == HOLD_ITEM_KINDS[kind], name.in_(wanted))
+            .group_by(name)
+        )
+        return {str(row[0]): int(row[1]) for row in connection.execute(statement)}
+
     def hold(self, owner: str, scenario: str, kind: str, name: str, split: str) -> ScenarioHold:
         check_owner(owner)
         check_hold(scenario, kind, name, split)
@@ -1142,12 +1174,14 @@ class SQLDataStore(DataStore):
             .order_by(holds.c.kind, holds.c.name, holds.c.split)
         )
         with self.transaction(read_only=True) as connection:
-            return tuple(
-                ScenarioHold(
-                    scenario, row.kind, row.name, row.split, self.set_count(connection, owner, row.kind, row.name)
-                )
-                for row in connection.execute(statement).all()
-            )
+            rows = connection.execute(statement).all()
+            counts = {
+                kind: self.set_counts(connection, owner, kind, [row.name for row in rows if row.kind == kind])
+                for kind in {row.kind for row in rows}
+            }
+        return tuple(
+            ScenarioHold(scenario, row.kind, row.name, row.split, counts[row.kind].get(row.name, 0)) for row in rows
+        )
 
     def holding_scenarios(self, owner: str, kind: str, names: Sequence[str]) -> tuple[str, ...]:
         check_owner(owner)
@@ -1805,6 +1839,9 @@ class SQLiteDataStore(SQLDataStore):
         names = func.json_each(self.items_table.c.metadata_json, "$.benchmarks").table_valued("value")
         return exists().where(names.c.value == benchmark)
 
+    def benchmark_names(self) -> TableValuedAlias:
+        return func.json_each(self.items_table.c.metadata_json, "$.benchmarks").table_valued("value")
+
     def record_source(self) -> ColumnElement[str]:
         return func.coalesce(func.json_extract(self.items_table.c.metadata_json, "$.origin.source"), "inference")
 
@@ -1904,6 +1941,14 @@ class PostgresDataStore(SQLDataStore):
 
     def in_benchmark(self, benchmark: str) -> ColumnElement[bool]:
         return cast(self.items_table.c.metadata_json, JSONB).contains({"benchmarks": [benchmark]})
+
+    def benchmark_names(self) -> TableValuedAlias:
+        # Only a list has elements: jsonb_array_elements_text refuses another value.
+        metadata = cast(self.items_table.c.metadata_json, JSONB)
+        listed = case(
+            (func.jsonb_typeof(metadata["benchmarks"]) == "array", metadata["benchmarks"]), else_=cast("[]", JSONB)
+        )
+        return func.jsonb_array_elements_text(listed).table_valued("value")
 
     def record_source(self) -> ColumnElement[str]:
         metadata = cast(self.items_table.c.metadata_json, JSONB)
