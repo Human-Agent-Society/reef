@@ -155,7 +155,7 @@ def _relay_client(tmp_path: Path, *, for_codex: bool) -> tuple[TestClient, SQLit
     number = coordination.control_lease.acquire("control-1").number
     table.write(
         ScenarioModel("reef-codex", ACTIVE),
-        ServedArtifact("release-1", "http://engine.invalid", "anthropic/claude"),
+        ServedArtifact("artifact-1", "http://engine.invalid", "anthropic/claude"),
         control_lease_number=number,
     )
     replica = InferenceReplica(

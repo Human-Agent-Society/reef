@@ -252,7 +252,7 @@ def settle_weights_job(scenario: Scenario) -> None:
 
 
 @pytest.mark.unit
-def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispatchers) -> None:
+def test_component_trainers_take_turns_on_one_snapshot_chain(dispatchers: _Dispatchers) -> None:
     dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     scenario = loaded(dispatcher, 1)
     assert [component_trainer.component for component_trainer in scenario.trainers] == [WEIGHTS, HARNESS]
@@ -312,7 +312,7 @@ def job_event(record: CommitRecord) -> str | None:
 
 
 @pytest.mark.unit
-def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
+def test_a_weights_job_trainer_and_the_harness_trainer_share_one_snapshot_chain(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
     """The weights trainer commits its job's submission, its checkpoint and its end; the harness commits between them
@@ -1323,7 +1323,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert required_by(catalog, component_id(scenario, h1, HARNESS)) == [{"name": "TOKEN", "kind": "env"}]
 
     # Weights held for review are activated as weights: the served tree stays, so the head stays a listed
-    # release and names no weights artifact or combination.
+    # snapshot and names no weights artifact or combination.
     _append_records(scenario, 4)
     backends[WEIGHTS].hold_next = True
     assert append_commit(scenario, WEIGHTS) is not None
@@ -1342,7 +1342,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
 
 
 @pytest.mark.unit
-def test_a_training_step_carries_the_active_release_and_keeps_an_activated_component(
+def test_a_training_step_carries_the_active_artifact_and_keeps_an_activated_component(
     dispatchers: _Dispatchers,
 ) -> None:
     """After an older weights artifact is activated, a harness step carries the active weights, not the chain tip's."""
@@ -1440,7 +1440,7 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
 
 
 @pytest.mark.unit
-def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatchers: _Dispatchers) -> None:
+def test_an_activation_of_weights_held_at_step_one_is_no_harness_artifact(dispatchers: _Dispatchers) -> None:
     """The creation artifact has no record; its manifest still says the activated tree did not change."""
     dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     backends[WEIGHTS].hold_next = True
@@ -1710,7 +1710,7 @@ def test_a_manual_weights_trainer_submits_the_samples_that_its_request_names(
     assert held == (stage_item_id("agent", f"{WEIGHTS}:r1:0"),)
     dispatcher.accept_request(
         "agent",
-        {"text": "learn the tool", "session": "session-1", "artifact_id": "release-1", "samples": list(held)},
+        {"text": "learn the tool", "session": "session-1", "artifact_id": "artifact-1", "samples": list(held)},
         request_id="t1",
     )
     assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]

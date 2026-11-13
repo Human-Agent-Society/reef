@@ -360,7 +360,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
 # -- the seed ------------------------------------------------------------------------------------
 
 
-def test_the_seed_is_a_directory_whose_tree_is_the_root_release(tmp_path: Path) -> None:
+def test_the_seed_is_a_directory_whose_tree_is_the_root_snapshot(tmp_path: Path) -> None:
     seed = tmp_path / "seed"
     PI_SEED.write(seed)
     built, _ = from_config(evolution_config(seed=str(seed)))
@@ -1211,7 +1211,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
 
         started = dispatcher.train_from("start", first["artifact_id"])
         assert (started.artifact_id, started.component) == (first["artifact_id"], first["component"])
-        # What serves stays the second release.
+        # What serves stays the second snapshot.
         assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
         record = scenario.store.history()[-1]
         assert (record.operation, scenario.repository.resolve(record.snapshot).artifact_id) == (
@@ -1228,7 +1228,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         assert scenario is not None
         assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
         # The next step evolves the first snapshot's tree: r3 joins r1, and r2 is not there. It publishes on the
-        # chain tip, the second release.
+        # chain tip, the second snapshot.
         result = run_step(scenario, "3")
         assert result.artifact is not None
         newest = last_made(scenario)

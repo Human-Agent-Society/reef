@@ -22,11 +22,11 @@ class EndpointsRuntime(InferenceProxyRuntime):
 
 
 def test_each_url_that_the_runtime_serves_uses_its_handler_and_other_urls_a_proxy() -> None:
-    runtime = EndpointsRuntime(("https://engine.example/release-1",))
+    runtime = EndpointsRuntime(("https://engine.example/artifact-1",))
     clients = DeploymentEngineClients(runtime, provider_key=None, timeout_seconds=5)
 
-    served = ServedArtifact("a1", "https://engine.example/release-1", "model")
-    assert clients.handler(served) is runtime.handlers["https://engine.example/release-1"]
+    served = ServedArtifact("a1", "https://engine.example/artifact-1", "model")
+    assert clients.handler(served) is runtime.handlers["https://engine.example/artifact-1"]
 
     elsewhere = ServedArtifact("a2", "https://provider.example/v1", "model")
     proxy = clients.handler(elsewhere)

@@ -329,7 +329,7 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
 
 
 @pytest.mark.unit
-def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None:
+def test_two_jobs_form_one_deterministic_snapshot_chain(start_dispatcher) -> None:
     component, dispatcher = start_dispatcher()
     _submit_pair(dispatcher)
     _wait_for_jobs(dispatcher, 1)

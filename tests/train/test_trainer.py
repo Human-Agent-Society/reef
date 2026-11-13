@@ -113,7 +113,7 @@ def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> N
         commit=CommitRecord(
             scenario="math",
             commit_number=step,
-            snapshot=SnapshotRef(f"release:{step}", "base"),
+            snapshot=SnapshotRef(f"snapshot:{step}", "base"),
             checkpoint=True,
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,

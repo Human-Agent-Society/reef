@@ -283,11 +283,11 @@ class HarnessTrainingComponent(LocalJobComponent):
         return frozenset(self.descriptor.layout.part_names(changes).values())
 
     def import_start(self, artifact_dir: Path) -> str:
-        """Copy the tree of ``release`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
+        """Copy the tree of ``artifact_dir`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
         tree fails validation.
 
         The tree is the snapshot's text files without the repository's own files (``TextFileTree``), as a client
-        pulls it: a Git LFS release directory also holds ``.gitattributes``.
+        pulls it: a Git LFS snapshot directory also holds ``.gitattributes``.
         """
         tree = self.facts.tree_in(artifact_dir)
         directory = self.starts_root / tree.checksum()

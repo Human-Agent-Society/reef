@@ -57,7 +57,7 @@ LEARNING = [
     ("Records", "matches feedback to", "recorded interactions"),
     ("Trainer", "runs the recipe", "weights or harness"),
     ("Evaluation", "evaluates the candidate", "selects or rejects it"),
-    ("Release", "accepted artifact with", "its parent history"),
+    ("Snapshot", "accepted artifact with", "its parent history"),
 ]
 STEPS = [
     ("Serve", "request served and recorded"),
@@ -66,7 +66,7 @@ STEPS = [
     ("Commit", "evaluated, then published"),
 ]
 # Which step lights each box up.
-PHASE_OF = {"Harness": 1, "Scenario": 1, "Inference": 1, "Records": 2, "Trainer": 3, "Evaluation": 4, "Release": 4}
+PHASE_OF = {"Harness": 1, "Scenario": 1, "Inference": 1, "Records": 2, "Trainer": 3, "Evaluation": 4, "Snapshot": 4}
 
 # Type scale.
 TITLE, BODY, LABEL, NOTE, CAPS = 24, 17, 16, 15, 14
@@ -202,7 +202,7 @@ def render(theme: str, fonts) -> str:
             f'width="{W}" height="{H}" viewBox="0 0 {W} {H}" role="img" '
             f'aria-label="Reef architecture: a harness sends requests through a scenario to inference; '
             f"records match feedback to the interactions, the trainer runs the recipe, evaluation accepts "
-            f'or rejects the candidate, and the accepted release serves the next request.">'
+            f'or rejects the candidate, and the accepted snapshot serves the next request.">'
         ),
         styles(p, fonts),
     ]
@@ -244,7 +244,7 @@ def render(theme: str, fonts) -> str:
     lx, lw = ROW2[3]
     o.append(label(lx + lw / 2, Y2 + BH + 48, "harness pulls the snapshot", p["faint"], size=NOTE))
 
-    # scenario -> records, and release -> scenario
+    # scenario -> records, and snapshot -> scenario
     sx, sw = ROW1[1]
     rx, rw = ROW2[0]
     down_x, up_x = sx + 60, sx + sw - 60

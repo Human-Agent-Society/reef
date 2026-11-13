@@ -217,7 +217,7 @@ def test_non_atif_payloads_are_not_accepted_as_trajectories():
 
 
 def test_request_only_batch_preserves_manual_training_contract():
-    request = TrainingRequest("Improve the harness", "session", "release", id="request")
+    request = TrainingRequest("Improve the harness", "session", "artifact-1", id="request")
     batch = JobData("manual", request=request)
     assert trajectories(batch) == ()
     assert replace(batch, data_id="next").request is request

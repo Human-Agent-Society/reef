@@ -1,4 +1,4 @@
-"""Multi-component releases: the manifest, component views, per-component specs, and commits."""
+"""Multi-component snapshots: the manifest, component views, per-component specs, and commits."""
 
 from __future__ import annotations
 
@@ -91,19 +91,19 @@ def test_manifest_preserves_component_ids_without_a_combination_identity() -> No
 
 
 @pytest.mark.unit
-def test_component_views_of_a_composed_release(tmp_path: Path) -> None:
+def test_component_views_of_a_composed_snapshot(tmp_path: Path) -> None:
     weights = Artifact.local(
         tree(tmp_path / "w", {"adapter_config.json": "{}"}), metadata={"runtime_load_id": "inc:3"}
     )
     harness = Artifact.local(tree(tmp_path / "h", {"AGENTS.md": "rules"}))
-    composed = compose_snapshot({WEIGHTS: weights, HARNESS: harness}, directory=tmp_path / "release")
+    composed = compose_snapshot({WEIGHTS: weights, HARNESS: harness}, directory=tmp_path / "snapshot")
 
     assert composed.components is not None
     assert composed.components.names == (WEIGHTS, HARNESS)
     with pytest.raises(ArtifactNotFoundError, match="holds components"):
         _ = composed.artifact_id
     view = composed.component(WEIGHTS)
-    assert view.local_path == tmp_path / "release" / WEIGHTS
+    assert view.local_path == tmp_path / "snapshot" / WEIGHTS
     assert view.artifact_id == weights.artifact_id
     assert view.ref.revision == composed.ref.revision
     assert dict(view.metadata) == {"runtime_load_id": "inc:3"}
@@ -118,7 +118,7 @@ def test_component_views_of_a_composed_release(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_materialized_releases_keep_their_manifest_and_composed_staging_carries_components(tmp_path: Path) -> None:
+def test_materialized_snapshots_keep_their_manifest_and_composed_staging_carries_components(tmp_path: Path) -> None:
     root = tmp_path / "root"
     tree(root / WEIGHTS, {"adapter_config.json": "{}"})
     tree(root / HARNESS, {"AGENTS.md": "seed"})
@@ -321,7 +321,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert service.harness_manifest(headers)["artifact_id"] == after_harness.component(HARNESS).artifact_id
 
         # Activating the root's weights loads them and keeps the served harness; the chain tip stays. The root
-        # release made its artifacts, so their artifact_id is the root snapshot's.
+        # snapshot made its artifacts, so their artifact_id is the root snapshot's.
         base_weights_id = base.components.artifact_ids(base.ref.revision)[WEIGHTS]
         assert base_weights_id == base.component(WEIGHTS).artifact_id
         assert base_weights_id != scenario.repository.start_artifact.revision
@@ -621,8 +621,8 @@ def test_selection_recovers_after_record_append_before_head_movement(tmp_path: P
 
 
 @pytest.mark.unit
-def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: Path) -> None:
-    """An activation reads the active selection and the artifact's release only: the creation's bytes may be gone."""
+def test_a_held_artifact_activates_without_the_manifest_of_its_parent(tmp_path: Path) -> None:
+    """An activation reads the active selection and the artifact's snapshot only: the creation's bytes may be gone."""
     dispatcher = Dispatcher(
         _TwoComponentRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
@@ -656,7 +656,7 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
 
 
 @pytest.mark.unit
-def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp_path: Path) -> None:
+def test_an_activation_after_a_rejected_harness_step_adds_no_harness_artifact(tmp_path: Path) -> None:
     """The tree a rejected step served is the last one named; activating the served artifact changes nothing."""
     dispatcher = Dispatcher(
         _TwoComponentRecipe(),
@@ -727,9 +727,9 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
 
 
 def seedless_snapshot(tmp_path: Path) -> Artifact:
-    release = tmp_path / "release"
-    (release / "harness").mkdir(parents=True)
-    (release / "harness" / "AGENTS.md").write_text("seed", encoding="utf-8")
+    snapshot_dir = tmp_path / "snapshot"
+    (snapshot_dir / "harness").mkdir(parents=True)
+    (snapshot_dir / "harness" / "AGENTS.md").write_text("seed", encoding="utf-8")
     manifest = {
         "harness": {"artifact_id": "artifact:harness", "metadata": {}},
         "weights": {"artifact_id": "artifact:weights", "metadata": {}},
@@ -737,7 +737,7 @@ def seedless_snapshot(tmp_path: Path) -> Artifact:
     return Artifact(
         SnapshotRef("rel-1", None),
         None,
-        local_path=release,
+        local_path=snapshot_dir,
         metadata={COMPONENTS_METADATA_KEY: manifest},
     )
 
@@ -770,4 +770,4 @@ def test_two_readers_of_a_seedless_component_both_get_its_directory(tmp_path: Pa
     for thread in threads:
         thread.join(timeout=10)
     assert [repr(error) for error in errors] == []
-    assert artifact.component("weights").local_path == tmp_path / "release" / "weights"
+    assert artifact.component("weights").local_path == tmp_path / "snapshot" / "weights"

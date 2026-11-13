@@ -27,7 +27,7 @@ class MemoryArtifactBackend(CachedRepositoryBackendFactory, ConfigurableReposito
         return cls(context, label=str(config["label"]))
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
-        return InMemoryRepositoryBackend(scenario, directory=self.context.cache_dir / "releases")
+        return InMemoryRepositoryBackend(scenario, directory=self.context.cache_dir / "snapshots")
 
 
 class UnreachableArtifactBackend(CachedRepositoryBackendFactory, ConfigurableRepositoryBackendFactory):

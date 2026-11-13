@@ -1,4 +1,4 @@
-"""Release readers stay live during evolution without observing partial publication."""
+"""Snapshot readers stay live during evolution without observing partial publication."""
 
 from __future__ import annotations
 
@@ -161,7 +161,7 @@ def _model_text(artifact: Artifact) -> str:
 
 
 @pytest.mark.unit
-def test_release_reads_remain_live_during_local_training(local_scenario) -> None:
+def test_snapshot_reads_remain_live_during_local_training(local_scenario) -> None:
     scenario, backend = local_scenario
     initial_ref = scenario.current_snapshot()
     scenario.commit(_prepare(scenario))
@@ -214,7 +214,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
 
 @pytest.mark.unit
 @pytest.mark.parametrize("operation", ["commit", "activate"])
-def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch, operation) -> None:
+def test_snapshot_reads_wait_for_complete_publication(local_scenario, monkeypatch, operation) -> None:
     scenario, _ = local_scenario
     initial_ref = scenario.current_snapshot()
     scenario.commit(_prepare(scenario))

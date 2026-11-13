@@ -46,11 +46,11 @@ class Engines(EngineClients):
         return HttpInferenceHandler(served.url)
 
 
-def commit(release_id: str) -> CommitRecord:
+def commit(revision: str) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         commit_number=1,
-        snapshot=SnapshotRef(release_id, "base"),
+        snapshot=SnapshotRef(revision, "base"),
         checkpoint=True,
         algorithm_state={},
         consumed_ids=frozenset(),
@@ -67,13 +67,13 @@ def inference_records(records: Any) -> tuple[Any, ...]:
 async def ask(tmp_path: Path, *, write: bool = True) -> tuple[int, dict[str, Any], Any]:
     storage = SQLiteScenarioStorage(tmp_path / "records")
     store = storage.open("math")
-    store.append_commit(expected_commit_number=0, commit=commit("release-1"))
+    store.append_commit(expected_commit_number=0, commit=commit("artifact-1"))
     coordination = memory_coordination()
     table = coordination.served_models
     number = coordination.control_lease.acquire("control-1").number
     async with TestServer(engine_app()) as engine:
         if write:
-            served = ServedArtifact("release-1", str(engine.make_url("/")), "math-v1")
+            served = ServedArtifact("artifact-1", str(engine.make_url("/")), "math-v1")
             table.write(ScenarioModel("math", ACTIVE), served, control_lease_number=number)
         app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
         async with TestClient(TestServer(app)) as client:
@@ -87,10 +87,10 @@ async def ask(tmp_path: Path, *, write: bool = True) -> tuple[int, dict[str, Any
 def test_a_request_goes_to_the_served_artifact_and_its_record_joins_the_record_store(tmp_path: Path) -> None:
     status, headers, records = asyncio.run(ask(tmp_path))
     assert status == 200
-    assert headers[ARTIFACT_HEADER] == "release-1"
+    assert headers[ARTIFACT_HEADER] == "artifact-1"
     (item,) = inference_records(records)
     assert item.agent_record_id == headers[RECORD_HEADER]
-    assert item.artifact_id == "release-1"
+    assert item.artifact_id == "artifact-1"
     assert item.payload["metadata"]["tags"] == {"session": "s1"}
     assert item.payload["response"]["model"] == "math-v1"
 
@@ -119,7 +119,7 @@ class BrokenStorage(SQLiteScenarioStorage):
 async def ask_failing(tmp_path: Path, *, engine_url: str | None, refuse_records: bool) -> int:
     storage = BrokenStorage(tmp_path / "records")
     storage.refuse = False
-    storage.open("math").append_commit(expected_commit_number=0, commit=commit("release-1"))
+    storage.open("math").append_commit(expected_commit_number=0, commit=commit("artifact-1"))
     storage.refuse = refuse_records
     coordination = memory_coordination()
     table = coordination.served_models
@@ -127,7 +127,7 @@ async def ask_failing(tmp_path: Path, *, engine_url: str | None, refuse_records:
     async with TestServer(engine_app()) as engine:
         url = engine_url or str(engine.make_url("/"))
         table.write(
-            ScenarioModel("math", ACTIVE), ServedArtifact("release-1", url, "math-v1"), control_lease_number=number
+            ScenarioModel("math", ACTIVE), ServedArtifact("artifact-1", url, "math-v1"), control_lease_number=number
         )
         async with TestClient(TestServer(build_inference_app(table, storage, Engines(), tokens=TOKEN))) as client:
             response = await client.post(
@@ -162,12 +162,12 @@ def refusing_engine_app(status: int, message: str) -> web.Application:
 
 async def ask_refused(tmp_path: Path, status: int, message: str, *, stream: bool) -> tuple[int, str]:
     storage = SQLiteScenarioStorage(tmp_path / "records")
-    storage.open("math").append_commit(expected_commit_number=0, commit=commit("release-1"))
+    storage.open("math").append_commit(expected_commit_number=0, commit=commit("artifact-1"))
     coordination = memory_coordination()
     table = coordination.served_models
     number = coordination.control_lease.acquire("control-1").number
     async with TestServer(refusing_engine_app(status, message)) as engine:
-        served = ServedArtifact("release-1", str(engine.make_url("/")), "math-v1")
+        served = ServedArtifact("artifact-1", str(engine.make_url("/")), "math-v1")
         table.write(ScenarioModel("math", ACTIVE), served, control_lease_number=number)
         async with TestClient(TestServer(build_inference_app(table, storage, Engines(), tokens=TOKEN))) as client:
             response = await client.post(
@@ -200,9 +200,9 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
         item = table.request(
             "math",
             {
-                "artifact_id": "release-1",
-                "aliases": ["release-1:weights"],
-                "beside": {"release-0": {"component": "weights", "artifact_id": "release-0"}},
+                "artifact_id": "artifact-1",
+                "aliases": ["artifact-1:weights"],
+                "beside": {"artifact-0": {"component": "weights", "artifact_id": "artifact-0"}},
             },
             control_lease_number=lease.number,
         )
@@ -214,7 +214,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                 before = table.current_request("math")
                 response = await client.get(path, headers=HEADERS)
                 assert await response.json() == {
-                    "artifact_id": "release-1",
+                    "artifact_id": "artifact-1",
                     "state": "pending",
                     "error": None,
                     "engine": None,
@@ -229,10 +229,10 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                 }
                 assert response.headers["Cache-Control"] == "no-store"
                 assert table.current_request("math") == before
-                alias = await client.get(path + "?model=release-1:weights", headers=HEADERS)
-                assert (await alias.json())["artifact_id"] == "release-1"
-                beside = await client.get(path + "?model=release-0", headers=HEADERS)
-                assert (await beside.json())["artifact_id"] == "release-0"
+                alias = await client.get(path + "?model=artifact-1:weights", headers=HEADERS)
+                assert (await alias.json())["artifact_id"] == "artifact-1"
+                beside = await client.get(path + "?model=artifact-0", headers=HEADERS)
+                assert (await beside.json())["artifact_id"] == "artifact-0"
                 assert (await client.get(path + "?model=unknown", headers=HEADERS)).status == 404
 
                 response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
@@ -253,14 +253,14 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                 table.complete_request(
                     taken,
                     "worker",
-                    {ACTIVE: ServedArtifact("release-1", "http://engine", "math")},
+                    {ACTIVE: ServedArtifact("artifact-1", "http://engine", "math")},
                     serving_config={},
                     stop_delay_seconds=60,
                 )
                 response = await client.get(path, headers=HEADERS)
                 # The plain HTTP handler cannot tell its engine's state.
                 assert await response.json() == {
-                    "artifact_id": "release-1",
+                    "artifact_id": "artifact-1",
                     "state": "ready",
                     "error": None,
                     "engine": None,
@@ -281,7 +281,7 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
         storage = SQLiteScenarioStorage(tmp_path / "records")
         table, queue = coordination.served_models, coordination.work_queue
         lease = coordination.control_lease.acquire("control")
-        table.request("math", {"artifact_id": "release-1"}, control_lease_number=lease.number)
+        table.request("math", {"artifact_id": "artifact-1"}, control_lease_number=lease.number)
         taken = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND])
         queue.fail(SERVING_QUEUE, taken.id, "worker", "private startup diagnostic", retryable=False)
         app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
@@ -290,7 +290,7 @@ def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) 
                 response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
                 status = await response.json()
                 assert status == {
-                    "artifact_id": "release-1",
+                    "artifact_id": "artifact-1",
                     "state": "failed",
                     "error": "The inference engine did not start. Check the service logs.",
                     "engine": None,
@@ -325,13 +325,13 @@ def test_an_artifact_that_serves_already_stays_ready_while_another_one_starts_or
         lease = coordination.control_lease.acquire("control")
         table.write(
             ScenarioModel("math", ACTIVE),
-            ServedArtifact("release-1", "http://127.0.0.1:9", "math-v1"),
+            ServedArtifact("artifact-1", "http://127.0.0.1:9", "math-v1"),
             control_lease_number=lease.number,
         )
         payload = {
-            "artifact_id": "release-1",
+            "artifact_id": "artifact-1",
             "aliases": [],
-            "beside": {"release-0": {"component": "weights", "artifact_id": "release-0"}},
+            "beside": {"artifact-0": {"component": "weights", "artifact_id": "artifact-0"}},
         }
         table.request("math", payload, control_lease_number=lease.number)
         app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
@@ -341,7 +341,7 @@ def test_an_artifact_that_serves_already_stays_ready_while_another_one_starts_or
 
                 async def states() -> tuple[str, str]:
                     active = await (await client.get(path, headers=HEADERS)).json()
-                    beside = await (await client.get(path + "?model=release-0", headers=HEADERS)).json()
+                    beside = await (await client.get(path + "?model=artifact-0", headers=HEADERS)).json()
                     return active["state"], beside["state"]
 
                 assert await states() == ("ready", "pending")
@@ -391,17 +391,17 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
             async with TestServer(engine_app()) as engine:
                 table.write(
                     ScenarioModel("math", ACTIVE),
-                    ServedArtifact("release-1", str(engine.make_url("/")), "math-v1"),
+                    ServedArtifact("artifact-1", str(engine.make_url("/")), "math-v1"),
                     control_lease_number=lease.number,
                 )
-                table.request("math", {"artifact_id": "release-2"}, control_lease_number=lease.number)
+                table.request("math", {"artifact_id": "artifact-2"}, control_lease_number=lease.number)
                 app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
                 async with TestClient(TestServer(app)) as client:
                     response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
                     created_at = table.current_request("math").created_at
                     prepare = {"phase": "prepare", "started_at": created_at, "ended_at": None, "detail": None}
                     assert await response.json() == {
-                        "artifact_id": "release-2",
+                        "artifact_id": "artifact-2",
                         "state": "pending",
                         "error": None,
                         "engine": None,
@@ -410,7 +410,7 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
                     }
                     response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
                     assert response.status == 200
-                    assert response.headers[ARTIFACT_HEADER] == "release-1"
+                    assert response.headers[ARTIFACT_HEADER] == "artifact-1"
         finally:
             storage.close()
             coordination.close()
@@ -473,10 +473,10 @@ def test_a_ready_status_names_the_engine_state_that_its_handler_reports(tmp_path
         storage = SQLiteScenarioStorage(tmp_path / "records")
         table, queue = coordination.served_models, coordination.work_queue
         lease = coordination.control_lease.acquire("control")
-        table.request("math", {"artifact_id": "release-1"}, control_lease_number=lease.number)
+        table.request("math", {"artifact_id": "artifact-1"}, control_lease_number=lease.number)
         taken = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND])
         queue.start(SERVING_QUEUE, taken.id, "worker")
-        served = ServedArtifact("release-1", "http://127.0.0.1:9", "math")
+        served = ServedArtifact("artifact-1", "http://127.0.0.1:9", "math")
         table.complete_request(taken, "worker", {ACTIVE: served}, serving_config={}, stop_delay_seconds=60)
         app = build_inference_app(table, storage, ColdEngines(), tokens=TOKEN)
         try:

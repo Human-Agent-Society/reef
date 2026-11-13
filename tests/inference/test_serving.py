@@ -652,7 +652,7 @@ def checkpoint_slots(*slot_engines: SlotEngines) -> CheckpointSlotsRuntime:
 
 
 def checkpoints(path: Path) -> list[Artifact]:
-    """The saved full-weight releases ``a``, ``b`` and ``c``."""
+    """The saved full-weight snapshots ``a``, ``b`` and ``c``."""
     return [published_snapshot(saved_full_weights(path / name), name) for name in "abc"]
 
 

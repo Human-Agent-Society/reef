@@ -226,7 +226,7 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
 
 
 @pytest.mark.unit
-def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_without_a_release() -> None:
+def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_without_an_artifact_id() -> None:
     # The producing artifact lives in payload["artifact_id"], set by the
     # inference service. The sample must still record it, or the staleness
     # check finds the sample stale and no SAO step ever runs.
@@ -481,7 +481,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
 
         _wait_for_finished_jobs(dispatcher, 1)
 
-        # The checkpoint is published as the chain tip, but never serves: only the root release was activated.
+        # The checkpoint is published as the chain tip, but never serves: only the root snapshot was activated.
         assert inference.activated == base
         [job] = component.submitted
         [record] = _checkpoint_commits(dispatcher)
@@ -521,7 +521,7 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
         _wait_for_finished_jobs(dispatcher, 1)
         head = scenario.repository.require_current_artifact()
         wait_for_serving(dispatcher)
-        # The new head is the saved release of the trained checkpoint, and it
+        # The new head is the saved snapshot of the trained checkpoint, and it
         # actually moved off the pre-train head (guards against a constant stub).
         assert head.revision != pre_head.revision
         # The runtime loaded the checkpoint once, and the scenario serves its artifact.
@@ -625,7 +625,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             commit=CommitRecord(
                 scenario="math",
                 commit_number=step,
-                snapshot=SnapshotRef("release:base", "base"),
+                snapshot=SnapshotRef("snapshot:base", "base"),
                 checkpoint=False,
                 algorithm_state=prepared.algorithm_state,
                 high_water_sequence=prepared.high_water_sequence,

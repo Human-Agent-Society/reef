@@ -81,7 +81,7 @@ Reef 的每个学习周期分为四步，下表同时列出各步骤对应的模
 | **1&nbsp;·&nbsp;Serve** | 响应 Agent 请求，记录每次交互。 | [`service/`](reef/service) — Agent 请求与交互记录<br>[`inference/`](reef/inference) — 推理与 artifact 更新 |
 | **2&nbsp;·&nbsp;Observe** | 将反馈匹配到已记录的交互。 | [`storage/records.py`](reef/storage/records.py) — 已存储的交互与反馈<br>[`record2sample/`](reef/record2sample) — 反馈匹配、条件判定与样本生成 |
 | **3&nbsp;·&nbsp;Grow** | 从符合条件的记录中产出一次更新。 | [`recipe/`](reef/recipe) — recipe 接入<br>[`train/`](reef/train) — 训练管线、训练任务数据（job data）与训练任务 |
-| **4&nbsp;·&nbsp;Commit** | 应用配置的选择策略并发布通过的更新。 | [`evaluation/`](reef/evaluation) — 候选评估<br>[`artifact/`](reef/artifact) — 版本历史与 release 组件 |
+| **4&nbsp;·&nbsp;Commit** | 应用配置的选择策略并发布通过的更新。 | [`evaluation/`](reef/evaluation) — 候选评估<br>[`artifact/`](reef/artifact) — 版本历史与 snapshot 组件 |
 
 
 ## 📦 安装
@@ -204,14 +204,14 @@ reef.post(
 
 用模型 API（而非 GPU），根据打分反馈进化编码 agent 的 skills 和 rules。
 
-Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。每一步，method 根据该步的 trace 修改这个 tree 的副本，评估用候选版本让真实的 agent 运行任务，胜出的候选版本发布为任何客户端都能拉取的 release。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
+Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。每一步，method 根据该步的 trace 修改这个 tree 的副本，评估用候选版本让真实的 agent 运行任务，胜出的候选版本发布为任何客户端都能拉取的 snapshot。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
 cd tutorials/evolve-your-harness
 ./run.sh
 ```
 
-`configs/serve.yaml` 指定端点（`inference.upstream-url`，不带 `/v1` 后缀）和模型（`inference.upstream-model`）。把它们改成你自己的 provider；端点需要密钥时设置 `REEF_UPSTREAM_API_KEY`。`run.sh` 在 `127.0.0.1:8900` 启动 Reef，经由它发送任务、上报每个分数，并拉取已发布的 tree。每次运行都会写出 `work/replay.html`，其中包含 release 链和每个步骤修改的文件。
+`configs/serve.yaml` 指定端点（`inference.upstream-url`，不带 `/v1` 后缀）和模型（`inference.upstream-model`）。把它们改成你自己的 provider；端点需要密钥时设置 `REEF_UPSTREAM_API_KEY`。`run.sh` 在 `127.0.0.1:8900` 启动 Reef，经由它发送任务、上报每个分数，并拉取已发布的 tree。每次运行都会写出 `work/replay.html`，其中包含 snapshot 链和每个步骤修改的文件。
 
 `GET /reef/harness` 提供已发布的 tree，按部署的 adapter 渲染。这些文件不含端点、密钥或模型：客户端把它们写到 agent 读取的位置，并把 agent 的模型绑定到这个 Reef（见 [Use a published tree](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#use-a-published-tree)）。请把 tree 放在 agent 工作的项目之外：会话可以写入其项目中的文件，tree 若在项目内，就可能改变下一个会话运行的内容。[Evolve agent prompts, rules, and skills](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) 说明了该循环及其配置。
 

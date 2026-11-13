@@ -153,7 +153,7 @@ def test_status_names_the_served_artifact_and_the_inference_admission() -> None:
 
 
 def test_status_exposes_terminal_processor_outcomes() -> None:
-    outcome = {"failed_steps": [{"step": 1, "reason": "mixed_release_ids", "release_ids": ["old", "new"]}]}
+    outcome = {"failed_steps": [{"step": 1, "reason": "mixed_artifact_ids", "artifact_ids": ["old", "new"]}]}
     dispatcher = bound_dispatcher(scenario_double(pipeline_status=outcome))
 
     assert dispatcher.build_training_status()["scenarios"]["s"]["processor"] == outcome

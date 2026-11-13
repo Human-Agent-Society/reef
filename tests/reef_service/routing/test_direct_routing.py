@@ -457,7 +457,7 @@ def test_forged_conflicting_or_cross_scenario_requests_never_reach_a_model(
         ("GET", "/reef/scenarios/coding/evaluations"),
         ("GET", "/reef/scenarios/coding/evaluations/id"),
         ("POST", "/reef/scenarios/coding/artifacts"),
-        ("POST", "/reef/scenarios/coding/artifacts/release-1/v1/chat/completions"),
+        ("POST", "/reef/scenarios/coding/artifacts/artifact-1/v1/chat/completions"),
         ("POST", "/reef/scenarios/coding/update"),
         ("GET", "/reef/scenarios/coding/samples"),
         ("GET", "/reef/scenarios/coding/buffer"),

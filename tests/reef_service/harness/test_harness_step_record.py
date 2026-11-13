@@ -118,8 +118,8 @@ def native_backend(
         **fields,
     )
     recipe, live = rebuilt_recipe(recipe, live, worker_executor=ExecutorSettings(workers=workers))
-    releases = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, live, "demo", releases), releases
+    artifacts = TreeArtifacts(recipe.seed)
+    return build_harness_backend(recipe, live, "demo", artifacts), artifacts
 
 
 def steps_dir(tmp_path: Path) -> Path:

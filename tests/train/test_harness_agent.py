@@ -133,8 +133,8 @@ def agent_backend(tmp_path: Path, upstream: Upstream, mode: str = ""):
         agent=AgentSettings("pi", LocalExecutor(), 60.0, str(binary)),
         models={"proposer": ModelBinding(base_url=upstream.base_url, model="proposer-model", api_key="k")},
     )
-    releases = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, live, "demo", releases)
+    artifacts = TreeArtifacts(recipe.seed)
+    return build_harness_backend(recipe, live, "demo", artifacts)
 
 
 def test_the_agent_edits_the_workspace_through_its_tools_and_its_notes_become_the_steps(

@@ -109,7 +109,7 @@ def test_harbor_task_values_and_validation_do_not_depend_on_harness() -> None:
         assert _imports_of(imported, "reef.harness") == [], module_name
 
 
-def test_release_id_chain_does_not_depend_on_scenario_or_trainer() -> None:
+def test_snapshot_chain_does_not_depend_on_scenario_or_trainer() -> None:
     module = importlib.import_module("reef.artifact.snapshot_chain")
     tree = ast.parse(inspect.getsource(module))
 

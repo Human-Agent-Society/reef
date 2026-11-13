@@ -76,8 +76,8 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             # The harness service reads the snapshot that control committed.
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert source["artifact_id"] == imported["artifact_id"] and source["files"]["rules.md"] == "Mine.\n"
-            releases = await (await client.get("/reef/harness/artifacts", headers=HEADERS)).json()
-            assert releases["artifacts"][-1]["artifact_id"] == imported["artifact_id"]
+            catalog = await (await client.get("/reef/harness/artifacts", headers=HEADERS)).json()
+            assert catalog["artifacts"][-1]["artifact_id"] == imported["artifact_id"]
             # The same files again are a new import, which merges onto the tree they made: nothing changes.
             again = await client.post(
                 "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_artifact_id": base}

@@ -85,11 +85,11 @@ def test_a_job_status_is_consistent(values, message):
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("step", "path", "release"), [(-1, "/a", "/a"), (True, "/a", "/a"), (0, "", "/a"), (0, "/a", "")]
+    ("step", "path", "artifact_path"), [(-1, "/a", "/a"), (True, "/a", "/a"), (0, "", "/a"), (0, "/a", "")]
 )
-def test_a_saved_checkpoint_has_a_step_a_path_and_a_release(step, path, release):
+def test_a_saved_checkpoint_has_a_step_a_path_and_an_artifact_path(step, path, artifact_path):
     with pytest.raises(ValueError):
-        SavedCheckpoint(step, path, release)
+        SavedCheckpoint(step, path, artifact_path)
 
 
 @pytest.mark.unit
@@ -133,14 +133,14 @@ def test_a_prepared_training_step_is_a_train_step_with_a_payload_or_a_skip(value
         (("adapter", 8, ("q_proj", "")), "non-empty tuple of module names"),
     ],
 )
-def test_a_release_format_sets_the_adapter_rank_and_modules_exactly_for_adapters(values, message):
+def test_an_artifact_format_sets_the_adapter_rank_and_modules_exactly_for_adapters(values, message):
     with pytest.raises(ValueError, match=message):
         ArtifactFormat(*values)
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("value", [ArtifactFormat("full"), ArtifactFormat("adapter", 16, ("q_proj", "v_proj"))])
-def test_a_release_format_reads_back_what_it_writes(value):
+def test_an_artifact_format_reads_back_what_it_writes(value):
     assert ArtifactFormat.from_dict(value.to_dict()) == value
     assert ArtifactFormat.from_dict({"layout": "full"}) == ArtifactFormat("full")
 
@@ -155,13 +155,13 @@ def test_a_release_format_reads_back_what_it_writes(value):
         ({"layout": "lora"}, "layout must be 'full' or 'adapter'"),
     ],
 )
-def test_a_release_format_refuses_another_shape(value, message):
+def test_an_artifact_format_refuses_another_shape(value, message):
     with pytest.raises(ValueError, match=message):
         ArtifactFormat.from_dict(value)
 
 
 @pytest.mark.unit
-def test_an_imported_release_must_have_the_layout_of_the_components_releases(tmp_path):
+def test_an_imported_artifact_must_have_the_layout_of_the_components_artifacts(tmp_path):
     full, adapter = tmp_path / "full", tmp_path / "adapter"
     full.mkdir()
     (adapter / ADAPTER_DIR).mkdir(parents=True)

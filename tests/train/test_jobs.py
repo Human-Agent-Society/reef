@@ -58,9 +58,9 @@ class FakeComponent(TrainingComponent):
     def root_start(self, root: ScenarioRoot) -> str:
         return "fake:base"
 
-    def import_start(self, release: Path) -> str:
-        self.imported.append(release)
-        return f"fake:{release.name}"
+    def import_start(self, artifact_dir: Path) -> str:
+        self.imported.append(artifact_dir)
+        return f"fake:{artifact_dir.name}"
 
     def submit(self, job: TrainingJob) -> None:
         self.jobs.append(job)
@@ -215,7 +215,7 @@ def test_a_checkpoint_moves_the_training_start_only_for_the_job_that_continues_i
     loop = loop_with(component)
     named, continuing = RunningJob("named", "fake:a1", train_from="a1"), RunningJob("continuing", "fake:base")
     state = JobLoopState("fake:base", (named, continuing))
-    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"))
+    saved = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-artifact"))
 
     published = loop.publish(state, named, saved).result
     # The commit names the start of the job, so its artifact does not become the training start.
@@ -267,11 +267,11 @@ def test_each_saved_checkpoint_is_published_and_the_next_job_continues_from_it(c
     state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
     job_id = state.jobs[0].job_id
     assert loop.poll(state) is None
-    first = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-release"), {"loss": 0.5})
+    first = SavedCheckpoint(1, str(tmp_path / "1"), str(tmp_path / "1-artifact"), {"loss": 0.5})
     component.statuses[job_id] = JobStatus(job_id, "running", (first,))
     publication = loop.poll(state)
     published = publication.result
-    assert published.artifact is not None and published.artifact.local_path == tmp_path / "1-release"
+    assert published.artifact is not None and published.artifact.local_path == tmp_path / "1-artifact"
     # The commit carries the training metrics and the checkpoint's place in its job, and no selection.
     assert published.metrics == {
         "loss": 0.5,
@@ -390,8 +390,8 @@ def job_trainer(state: JobLoopState, component: TrainingComponent) -> Trainer:
 def test_start_from_an_imported_artifact_cancels_the_continuing_job_and_keeps_a_job_with_its_own_start(component):
     named = RunningJob("job-2", "fake:a1", train_from="a1")
     trainer = job_trainer(JobLoopState("/start", (RunningJob("job-1", "/start"), named), 1, FINISHED), component)
-    trainer.start_from(trainer.import_start(Artifact.local(Path("/releases/old"))))
-    assert component.imported == [Path("/releases/old")]
+    trainer.start_from(trainer.import_start(Artifact.local(Path("/snapshots/old"))))
+    assert component.imported == [Path("/snapshots/old")]
     assert component.cancelled == ["job-1"]
     # The job with its own start runs on, and the jobs that ended stay counted.
     assert JobLoopState.from_dict(trainer.state) == JobLoopState("fake:old", (named,), 1, FINISHED)
@@ -403,18 +403,18 @@ def test_an_import_is_refused_without_a_change_when_the_trainer_cannot_start(com
     running = JobLoopState("/start", (RunningJob("job-1", "/start"),))
     trainer = job_trainer(running, component)
 
-    def refuse(release):
+    def refuse(artifact_dir):
         raise ValueError("these weights cannot train")
 
     monkeypatch.setattr(component, "import_start", refuse)
     with pytest.raises(TrainingStartRefusedError, match="these weights cannot train"):
-        trainer.start_from(trainer.import_start(Artifact.local(Path("/releases/old"))))
+        trainer.start_from(trainer.import_start(Artifact.local(Path("/snapshots/old"))))
     assert component.cancelled == []
     assert JobLoopState.from_dict(trainer.state) == running
     # A trainer that trains nothing has no start to set.
     observer = Trainer.build("math", memory_records("math"), pipeline_factory=threshold_pipeline)
     with pytest.raises(TrainingStartRefusedError, match="trains nothing"):
-        observer.import_start(Artifact.local(Path("/releases/old")))
+        observer.import_start(Artifact.local(Path("/snapshots/old")))
 
 
 @pytest.mark.unit

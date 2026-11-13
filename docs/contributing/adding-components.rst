@@ -300,7 +300,7 @@ Add a component or artifact type
 Artifacts own immutable bytes and snapshot heads. A recipe's components own
 admission, import layouts, kinds and client file trees. Runtimes own loading.
 Read `Scenario components <../developer-guide/components.rst>`__ and the
-release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
+snapshot-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 
 - Put storage, materialization, or version identity behavior in
   ``reef/artifact/``. A new storage backend implements ``RepositoryBackend``

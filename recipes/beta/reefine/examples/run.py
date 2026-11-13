@@ -69,7 +69,7 @@ WORK = HERE / "work"
 # The install writes the rendered tree and the snapshot metadata file here.
 INSTALL_ROOT = WORK / "harness"
 DEMOS = HERE / "demos"
-RELEASE_FILE = ".reef-harness-release"
+SNAPSHOT_FILE = ".reef-harness-release"
 #: pi's provider file: the model binding writes provider reef there, and pi sends that provider's headers.
 PI_MODELS = "pi-agent/models.json"
 SHOW_TIMEOUT_S = 600.0
@@ -218,7 +218,7 @@ def requires_of(items):
 def installed_artifact():
     """The ID of the installed artifact, or None when nothing is installed. Install again to replace an older install."""
     try:
-        metadata = json.loads((INSTALL_ROOT / RELEASE_FILE).read_text(encoding="utf-8"))
+        metadata = json.loads((INSTALL_ROOT / SNAPSHOT_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     return metadata.get("artifact_id")
@@ -279,7 +279,7 @@ def install(artifact_id=None):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
     record = {"artifact_id": manifest["artifact_id"], "files": sorted(files)}
-    (INSTALL_ROOT / RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    (INSTALL_ROOT / SNAPSHOT_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     say(f"installed artifact {manifest['artifact_id']} at {INSTALL_ROOT}")
     return manifest["artifact_id"]
 
@@ -380,7 +380,7 @@ def show(mode, run_dir):
     files = {
         path.relative_to(INSTALL_ROOT).as_posix(): path.read_text(encoding="utf-8")
         for path in sorted(INSTALL_ROOT.rglob("*"))
-        if path.is_file() and path.name != RELEASE_FILE
+        if path.is_file() and path.name != SNAPSHOT_FILE
     }
     try:
         outcome, trajectory = launch_pi(
@@ -484,7 +484,7 @@ def demo(mode):
             write_record(record_path, record)
             raise SystemExit(2)
     else:
-        say(f"the active selection did not change: release {installed_before} stays installed")
+        say(f"the active selection did not change: artifact {installed_before} stays installed")
         installed = installed_before
     # From the evolve call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)

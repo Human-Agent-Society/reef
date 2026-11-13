@@ -88,8 +88,8 @@ def sdk(tmp_path, monkeypatch) -> SDK:
     return value
 
 
-def release(tmp_path: Path, checkpoint: TinkerCheckpoint = CHECKPOINT) -> Path:
-    directory = tmp_path / "release"
+def artifact_directory(tmp_path: Path, checkpoint: TinkerCheckpoint = CHECKPOINT) -> Path:
+    directory = tmp_path / "artifact"
     checkpoint.write(directory)
     return directory
 
@@ -97,7 +97,7 @@ def release(tmp_path: Path, checkpoint: TinkerCheckpoint = CHECKPOINT) -> Path:
 @pytest.mark.unit
 def test_the_adapter_at_the_sampler_path_is_downloaded_converted_and_then_cached(tmp_path, sdk):
     weights = TinkerSamplerWeights(tmp_path / "cache", api_key="key", project_id="p")
-    files = weights.weight_files(release(tmp_path), "adapter")
+    files = weights.weight_files(artifact_directory(tmp_path), "adapter")
     digest = hashlib.sha256(CHECKPOINT.sampler_path.encode()).hexdigest()
     assert (files.path, files.layout) == (tmp_path / "cache" / digest / "adapter", "adapter")
     assert sdk.conversions == [(MODEL, b"tinker")]
@@ -105,20 +105,22 @@ def test_the_adapter_at_the_sampler_path_is_downloaded_converted_and_then_cached
     # Only the converted adapter stays: the download and the staging directory are gone.
     assert [path.name for path in (tmp_path / "cache" / digest).iterdir()] == ["adapter"]
     # A sampler path names immutable weights, so a second load reads the cache.
-    assert weights.weight_files(release(tmp_path), "adapter") == files
+    assert weights.weight_files(artifact_directory(tmp_path), "adapter") == files
     assert sdk.requested == [CHECKPOINT.sampler_path]
 
 
 @pytest.mark.unit
-def test_a_release_the_weights_cannot_give_is_refused(tmp_path, sdk, monkeypatch):
+def test_an_artifact_the_weights_cannot_give_is_refused(tmp_path, sdk, monkeypatch):
     weights = TinkerSamplerWeights(tmp_path / "cache", api_key="key")
     with pytest.raises(ReefError, match="serves as an adapter, not as full weights"):
-        weights.weight_files(release(tmp_path), "full")
+        weights.weight_files(artifact_directory(tmp_path), "full")
     with pytest.raises(ReefError, match=r"held by https://spindle\.example, not by hosted Tinker"):
-        weights.weight_files(release(tmp_path, replace(CHECKPOINT, service="https://spindle.example")), "adapter")
+        weights.weight_files(
+            artifact_directory(tmp_path, replace(CHECKPOINT, service="https://spindle.example")), "adapter"
+        )
     missing = TinkerCheckpoint(MODEL, 32, "tinker://run/weights/5", "tinker://run/sampler_weights/5")
     with pytest.raises(ReefError, match="gives no download of tinker://run/sampler_weights/5"):
-        weights.weight_files(release(tmp_path, missing), "adapter")
+        weights.weight_files(artifact_directory(tmp_path, missing), "adapter")
     assert sdk.closed == ["errored"]
     with pytest.raises(ReefError, match="holds no Tinker checkpoint manifest"):
         weights.weight_files(tmp_path / "empty", "adapter")
@@ -128,7 +130,7 @@ def test_a_release_the_weights_cannot_give_is_refused(tmp_path, sdk, monkeypatch
 
 
 @pytest.mark.unit
-def test_a_release_without_an_adapter_gives_no_adapter_files(tmp_path):
+def test_an_artifact_without_an_adapter_gives_no_adapter_files(tmp_path):
     with pytest.raises(ReefError, match="holds no PEFT adapter in adapter/"):
         ArtifactWeightFiles().weight_files(tmp_path, "adapter")
     assert ArtifactWeightFiles().weight_files(tmp_path, "full").path == tmp_path
@@ -136,7 +138,7 @@ def test_a_release_without_an_adapter_gives_no_adapter_files(tmp_path):
 
 def test_the_serving_side_reads_the_sampler_of_a_whole_manifest():
     manifest = replace(CHECKPOINT, algorithm_state={"steps": 2}, objective="sao", service="https://spindle.example")
-    release = TinkerArtifact.from_dict(manifest.to_dict())
-    assert release == TinkerArtifact(MODEL, CHECKPOINT.sampler_path, "https://spindle.example")
+    artifact = TinkerArtifact.from_dict(manifest.to_dict())
+    assert artifact == TinkerArtifact(MODEL, CHECKPOINT.sampler_path, "https://spindle.example")
     with pytest.raises(ValueError, match="manifest version"):
         TinkerArtifact.from_dict({**manifest.to_dict(), "schema_version": 2})

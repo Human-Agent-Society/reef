@@ -78,7 +78,7 @@ def test_a_mode_that_the_settings_contradict_is_refused(settings, backend, messa
         serving_mode(settings, backend)
 
 
-def test_engine_serving_runs_the_settings_engines_for_the_components_release_format():
+def test_engine_serving_runs_the_settings_engines_for_the_components_artifact_format():
     settings = slime(
         inference_backend="sglang",
         inference_num_gpus=4,
@@ -131,7 +131,7 @@ def test_engine_serving_accepts_prefix_sharing_for_both_built_in_engines(engine)
         slime(inference_backend=engine, inference_prefix_sharing="yes")
 
 
-def test_engines_load_tinker_releases_from_their_sampler_paths():
+def test_engines_load_tinker_snapshots_from_their_sampler_paths():
     resolved = tinker(inference_backend="sglang", inference_num_gpus=1, tensor_parallel_size=1)
     config = serving_runtime_config(resolved, TinkerDeployment(), None)
     # A Tinker artifact holds only its manifest: the engines load the adapter that TinkerSamplerWeights downloads.
@@ -148,7 +148,7 @@ def test_engines_load_tinker_releases_from_their_sampler_paths():
     }
 
 
-def test_engines_cannot_serve_releases_without_weight_files_or_unresolved_engine_sizes():
+def test_engines_cannot_serve_snapshots_without_weight_files_or_unresolved_engine_sizes():
     resolved = slime(inference_backend="sglang", inference_num_gpus=1, tensor_parallel_size=1)
     with pytest.raises(DeployConfigError, match="names no way to fetch them"):
         serving_runtime_config(resolved, SlimeDeployment(), None)
@@ -172,7 +172,7 @@ def test_trainer_and_none_serving_build_the_backends_own_and_the_null_runtime():
 
 
 @pytest.mark.parametrize("artifact_format", [ADAPTER, None])
-def test_a_module_factory_gets_its_serving_config_and_the_release_format(artifact_format):
+def test_a_module_factory_gets_its_serving_config_and_the_artifact_format(artifact_format):
     settings = tinker(inference_serving="my.serving:Factory", inference_serving_config={"replicas": 2})
     assert serving_mode(settings, TinkerDeployment()) == "my.serving:Factory"
     assert serving_runtime_config(settings, TinkerDeployment(), artifact_format) == {

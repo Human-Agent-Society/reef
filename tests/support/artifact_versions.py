@@ -54,9 +54,9 @@ class ImportingComponent(StubTrainingComponent):
     def trained(self) -> int:
         return len(self.submitted)
 
-    def import_start(self, release):
+    def import_start(self, artifact_dir):
         self.restore_order.append("training")
-        return super().import_start(release)
+        return super().import_start(artifact_dir)
 
 
 class RecordingExperimentTracker(ExperimentTracker):

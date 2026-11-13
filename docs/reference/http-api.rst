@@ -1834,7 +1834,7 @@ For example:
      "attempt_count": 1,
      "checkpoints": [
        {"step": 1, "path": "/jobs/4f2a9c1e/step-1",
-        "artifact_path": "/jobs/4f2a9c1e/step-1/release", "metrics": {"loss": 0.41},
+        "artifact_path": "/jobs/4f2a9c1e/step-1/artifact", "metrics": {"loss": 0.41},
         "changed_parts": []}
      ],
      "result": {"state": "finished", "metrics": {"loss": 0.41}},
@@ -2169,7 +2169,7 @@ route after startup succeeds. Read its state with:
 
 .. code:: json
 
-   {"artifact_id": "release-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
+   {"artifact_id": "artifact-1", "state": "starting", "error": null, "engine": null, "engine_detail": null,
     "startup": {"steps": [{"phase": "prepare", "started_at": 1794150000.1, "ended_at": 1794150480.6,
                            "detail": "Quantizing to NVFP4"},
                           {"phase": "start", "started_at": 1794150480.6, "ended_at": null,

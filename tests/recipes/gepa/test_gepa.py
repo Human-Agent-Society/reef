@@ -96,8 +96,8 @@ def gepa_backend(
         tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary)
     )
     recipe, live = rebuilt_recipe(recipe, live, models={"reflection": FakeChat() if reflector is None else reflector})
-    releases = TreeArtifacts(recipe.seed)
-    return build_harness_backend(recipe, live, "demo", releases), releases
+    artifacts = TreeArtifacts(recipe.seed)
+    return build_harness_backend(recipe, live, "demo", artifacts), artifacts
 
 
 def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainingCommit:
@@ -389,7 +389,7 @@ def test_a_step_reflects_on_the_served_trees_traces_and_the_next_step_settles_it
     tmp_path: Path,
 ) -> None:
     reflector = FakeChat()
-    backend, releases = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
+    backend, artifacts = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
     first = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
 
     # The served tree's traces are the parent's minibatch, graded by the feedback hook: only the child ran.
@@ -419,7 +419,7 @@ def test_a_step_reflects_on_the_served_trees_traces_and_the_next_step_settles_it
     (call,) = json.loads((Path(first.metrics["step_record"]) / "calls.json").read_text())
     assert (call["messages"][0]["content"], call["reply"]) == (prompt, FENCED_REPLY)
 
-    releases.publish("r1", HarnessTree.read(first.artifact.local_path))
+    artifacts.publish("r1", HarnessTree.read(first.artifact.local_path))
     second = step(backend, 2, first.state, sample("a2", 1.0))
     # The next step folds the validation in from the history; the task that could not run is a zero, not a gap.
     settled = archive_of(second)
