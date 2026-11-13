@@ -13,7 +13,7 @@ from collections.abc import Mapping
 
 from reef_terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
 
-from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, SandboxExecutor
+from reef.execution.sandbox.process import LocalSandboxExecutor, ProgramExecutor, ProgramLaunchError
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.harness.adapters.descriptor import ExecutionValidator
 
@@ -26,7 +26,7 @@ class TerminusExecutionValidator(ExecutionValidator):
         except TerminusTreeError as exc:
             raise ProgramLaunchError(str(exc)) from exc
         remote = " or ".join(sorted(REMOTE_TASK_ENVIRONMENTS))
-        if isinstance(executor, SandboxExecutor):
+        if isinstance(executor, LocalSandboxExecutor):
             environment = executor.env.get(ENVIRONMENT_ENV, "")
             credentials = REMOTE_TASK_ENVIRONMENTS.get(environment)
             if credentials is None:

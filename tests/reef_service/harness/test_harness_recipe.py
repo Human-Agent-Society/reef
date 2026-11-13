@@ -568,6 +568,7 @@ def test_recipe_selects_the_run_executor(monkeypatch: pytest.MonkeyPatch) -> Non
     assert type(harness_component(from_config(evolution_config())[1]).executor).__name__ == "LocalExecutor"
     local = harness_component(from_config(evolution_config(executor="local"))[1])
     assert type(local.executor).__name__ == "LocalExecutor"
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(ConfigError, match="bubblewrap"):
         from_config(evolution_config(executor="sandbox"))

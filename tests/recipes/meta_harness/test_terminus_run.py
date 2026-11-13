@@ -25,6 +25,7 @@ import pytest
 from reef_terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV, trial_record
 
 from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, SandboxExecutor
+from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskRunError, run_task
@@ -253,9 +254,10 @@ def test_an_executor_other_than_the_local_one_gets_no_service_settings(tmp_path:
 
 
 @pytest.mark.unit
-def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sandbox", [SandboxExecutor, SeatbeltExecutor])
+def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path, sandbox) -> None:
     # terminus isolates runs in Harbor's container, which cannot nest in
-    # bubblewrap. Every caller of run_task is told, not just one backend.
+    # a local sandbox. Every caller of run_task is told, not just one backend.
     descriptor = get_adapter("terminus")
     with pytest.raises(TaskRunError, match=r"cannot run under evolution\.executor: sandbox"):
         run_task(
@@ -264,7 +266,7 @@ def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path
             "hello-world",
             binary=sys.executable,
             timeout=60.0,
-            executor=SandboxExecutor(),
+            executor=sandbox(),
         )
 
 

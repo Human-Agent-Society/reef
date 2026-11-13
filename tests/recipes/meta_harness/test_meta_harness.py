@@ -334,6 +334,7 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
             return ProcessOutcome(runner.run(argv[-1]), "", "")
 
     monkeypatch.setattr("reef_eval.Lab", Lab)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox_kind", lambda: "bwrap")
     monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
     monkeypatch.setattr(SandboxExecutor, "launch", launch)
     config = meta_harness_sections(tmp_path, adapter="terminus")

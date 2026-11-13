@@ -280,7 +280,7 @@ def test_sandbox_explicit_environment_and_isolation_marker(monkeypatch, tmp_path
 
 @pytest.mark.parametrize("names", ["REMOTE_KEY", [None], [""]])
 def test_sandbox_refuses_invalid_env_from(names) -> None:
-    with pytest.raises(ReefError, match="env_from must be a list"):
+    with pytest.raises(ReefError, match="env_from must list environment variable names"):
         build_executor({"executor": "sandbox", "sandbox": {"env_from": names}})
 
 

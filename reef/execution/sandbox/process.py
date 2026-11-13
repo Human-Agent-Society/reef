@@ -32,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Self
 
 from reef.core.errors import InternalError, ReefError
 from reef.execution.processes import (
@@ -345,8 +346,88 @@ class SandboxLimits(ProcessSetup):
                 resource.setrlimit(kind, (value, value))
 
 
+def parse_env_from(section: Mapping[str, object], environ: Mapping[str, str]) -> dict[str, str]:
+    """``sandbox.env_from``: the named host variables and their values; each must be set and non-empty."""
+    names = section.get("env_from", [])
+    if not isinstance(names, (list, tuple)) or not all(
+        isinstance(name, str) and name.isidentifier() for name in names
+    ):
+        raise SandboxUnavailableError("sandbox.env_from must list environment variable names")
+    env = {}
+    for name in names:
+        if not environ.get(name):
+            raise SandboxUnavailableError(f"sandbox.env_from requires environment variable {name!r}")
+        env[name] = environ[name]
+    return env
+
+
 @dataclass(frozen=True)
-class SandboxExecutor(ProgramExecutor):
+class LocalSandboxExecutor(ProgramExecutor):
+    """Run the binary on the Reef host inside a sandbox that the host's kernel enforces.
+
+    Values: ``egress_hosts`` are the endpoints a run must reach; empty, the ``default`` network allows no network
+    access, and nonempty, it opens the network. ``network`` is ``default`` or ``isolated``: ``isolated`` opens the
+    internet and allows no host loopback port except ``forward_ports``, which are distinct TCP ports. ``limits`` bound
+    each run's resources. ``base_paths`` are the host directories a run may read so its binary and runtime resolve.
+    ``env`` is the deployment's explicit environment for every run; a run inherits no other host variable.
+
+    Each subclass enforces these values with one host mechanism and implements :meth:`preflight` and :meth:`launch`.
+    Purpose: :mod:`reef.execution.sandbox.config` builds one with :meth:`from_config` from a deployment's sandbox
+    section, as it builds a ``RemoteExecutor``; a caller binds it to a program with :meth:`for_program`.
+    """
+
+    egress_hosts: tuple[str, ...] = ()
+    network: str = "default"
+    forward_ports: tuple[int, ...] = ()
+    limits: SandboxLimits = field(default_factory=SandboxLimits)
+    base_paths: tuple[str, ...] = ()
+    #: Explicit deployment credentials/settings; never inherited from the candidate tree.
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_config(cls, section: Mapping[str, object], environ: Mapping[str, str]) -> Self:
+        """The sandbox that ``section``'s ``egress_hosts``, ``limits`` and ``env_from`` describe.
+
+        ``env_from`` names variables of ``environ``. Raise ``ReefError`` for a malformed option.
+        """
+        egress_hosts = section.get("egress_hosts") or ()
+        if not isinstance(egress_hosts, (list, tuple)):
+            raise ReefError("evolution.sandbox.egress_hosts must be a list")
+        limits = section.get("limits") or {}
+        if not isinstance(limits, Mapping):
+            raise ReefError("evolution.sandbox.limits must be a mapping")
+        return cls(
+            egress_hosts=tuple(str(host) for host in egress_hosts),
+            limits=SandboxLimits(
+                cpu_seconds=int(limits.get("cpu_seconds", 0)),
+                memory_bytes=int(limits.get("memory_bytes", 0)),
+                processes=int(limits.get("processes", 0)),
+                file_bytes=int(limits.get("file_bytes", 0)),
+            ),
+            env=parse_env_from(section, environ),
+        )
+
+    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
+        """Let a run read the whole install of a binary Reef installed: npm launchers are symlinks into packages,
+        and git installs need both their editable source and their venv."""
+        if binary is not None:
+            return self, binary
+        resolved = program.host_binary()
+        install_dir = program.host_install_dir()
+        if install_dir is None:
+            return self, resolved
+        return replace(self, base_paths=(*self.base_paths, str(install_dir))), resolved
+
+    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> ProgramExecutor:
+        """An isolated network adds the run's ports; the default network already reaches the host."""
+        ports = tuple(dict.fromkeys((*self.forward_ports, *forward_ports)))
+        if self.network != "isolated" or ports == self.forward_ports:
+            return self
+        return replace(self, forward_ports=ports)
+
+
+@dataclass(frozen=True)
+class SandboxExecutor(LocalSandboxExecutor):
     """Run the binary inside a bubblewrap jail.
 
     bubblewrap (``bwrap``) is an unprivileged, daemonless sandbox: it builds a
@@ -355,23 +436,17 @@ class SandboxExecutor(ProgramExecutor):
     dies with its parent. Network is unshared (no egress) unless
     ``egress_hosts`` lists the model endpoint the run must reach, in which
     case the network namespace is shared so the endpoint is reachable; a
-    single-host firewall is the follow-up (issue #18). The jail also carries
+    single-host firewall is the follow-up (issue #18). An ``isolated`` network
+    is a network namespace of its own that pasta connects to the internet: no
+    host address is reachable (``--no-map-gw``) except the loopback ports in
+    ``forward_ports``, which pasta forwards to the host. The jail also carries
     ``REEF_NATIVE_ENFORCE=bwrap``, so the native loop runs each tool call in
     a nested jail derived from the tool's declared capabilities; preflight
     proves the host can nest one.
     """
 
-    egress_hosts: tuple[str, ...] = ()
-    #: ``isolated`` runs the jail in a network namespace of its own that pasta connects to the internet: no
-    #: host address is reachable (``--no-map-gw``) except the loopback ports in ``forward_ports``, which pasta
-    #: forwards to the host's loopback. The default leaves the network to ``egress_hosts``.
-    network: str = "default"
-    forward_ports: tuple[int, ...] = ()
-    limits: SandboxLimits = field(default_factory=SandboxLimits)
     #: Base directories bound read-only so the binary and its runtime resolve.
     base_paths: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/etc/alternatives", "/etc/ssl", "/opt")
-    #: Explicit deployment credentials/settings; never inherited from the candidate tree.
-    env: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def preflight(self) -> None:
         if shutil.which("bwrap") is None:
@@ -403,24 +478,6 @@ class SandboxExecutor(ProgramExecutor):
                 "the sandbox executor cannot nest a bubblewrap jail on this host, which every sandboxed native "
                 f"tool call needs: {done.stderr.strip()[-600:]}"
             )
-
-    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
-        """Bind the whole install of a binary Reef installed: npm launchers are symlinks into packages, and git
-        installs need both their editable source and their venv."""
-        if binary is not None:
-            return self, binary
-        resolved = program.host_binary()
-        install_dir = program.host_install_dir()
-        if install_dir is None:
-            return self, resolved
-        return replace(self, base_paths=(*self.base_paths, str(install_dir))), resolved
-
-    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> ProgramExecutor:
-        """An isolated network forwards the run's ports; the default network already reaches the host."""
-        ports = tuple(dict.fromkeys((*self.forward_ports, *forward_ports)))
-        if self.network != "isolated" or ports == self.forward_ports:
-            return self
-        return replace(self, forward_ports=ports)
 
     def preflight_pasta(self) -> None:
         """An isolated network is one pasta sets up: prove it can on this host, as this user.

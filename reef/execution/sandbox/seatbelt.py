@@ -7,15 +7,13 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from reef.execution.sandbox.process import (
     ISOLATION_ENV,
+    LocalSandboxExecutor,
     ProcessOutcome,
-    ProgramExecutor,
-    SandboxLimits,
-    SandboxProgram,
     SandboxUnavailableError,
     inherited_environment,
     run_process,
@@ -37,28 +35,20 @@ PROFILE_HEAD = """(version 1)
 
 
 @dataclass(frozen=True)
-class SeatbeltExecutor(ProgramExecutor):
+class SeatbeltExecutor(LocalSandboxExecutor):
     """Run the binary under a Seatbelt profile, the macOS counterpart of ``SandboxExecutor``.
 
-    Values: ``egress_hosts``, ``network``, ``forward_ports``, ``limits`` and ``env`` have the meaning they have on
-    ``SandboxExecutor``, except that ``limits.memory_bytes`` must be zero: macOS refuses ``RLIMIT_AS``. ``base_paths`` are the host directories a run may read so its binary and runtime resolve.
-    The profile lets a run read the base paths and the run root, and write only the workspace, the declared
-    writable paths and a private temporary directory. Read-only inputs inside a writable path stay read-only. The
-    environment holds only the inherited minimum, the run's variables and ``env``.
-
-    The network follows ``network``. ``default`` denies all network access unless ``egress_hosts`` is set, in which
-    case the network is open, as on Linux. ``isolated`` opens outbound internet and denies every loopback port except
-    ``forward_ports``; unlike pasta, it cannot hide the host's LAN addresses.
+    Values: those of ``LocalSandboxExecutor``, except that ``limits.memory_bytes`` must be zero: macOS refuses
+    ``RLIMIT_AS``. The profile lets a run read the base paths and the run root, and write only the workspace, the
+    declared writable paths and a private temporary directory. Read-only inputs inside a writable path stay
+    read-only. The environment holds only the inherited minimum, the run's variables and ``env``. Unlike pasta, an
+    ``isolated`` network cannot hide the host's LAN addresses.
 
     Seatbelt profiles do not nest: a process under a profile cannot apply another one. A native loop in this sandbox
     therefore runs its tool calls under the run's profile (``REEF_NATIVE_ENFORCE=none``), not a narrower profile per
     tool. ``SandboxExecutor`` narrows each call on Linux.
     """
 
-    egress_hosts: tuple[str, ...] = ()
-    network: str = "default"
-    forward_ports: tuple[int, ...] = ()
-    limits: SandboxLimits = field(default_factory=SandboxLimits)
     base_paths: tuple[str, ...] = (
         "/usr",
         "/bin",
@@ -74,7 +64,6 @@ class SeatbeltExecutor(ProgramExecutor):
         "/opt/homebrew",
         "/usr/local",
     )
-    env: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     def preflight(self) -> None:
         if shutil.which("sandbox-exec") is None:
@@ -106,23 +95,6 @@ class SeatbeltExecutor(ProgramExecutor):
             raise SandboxUnavailableError(
                 f"sandbox-exec cannot start a run on this host: {done.stderr.strip()[-600:]}"
             )
-
-    def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
-        """Allow reads of the whole install of a binary Reef installed, as ``SandboxExecutor`` binds it."""
-        if binary is not None:
-            return self, binary
-        resolved = program.host_binary()
-        install_dir = program.host_install_dir()
-        if install_dir is None:
-            return self, resolved
-        return replace(self, base_paths=(*self.base_paths, str(install_dir))), resolved
-
-    def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> ProgramExecutor:
-        """An isolated network allows the run's ports; the default network already reaches the host."""
-        ports = tuple(dict.fromkeys((*self.forward_ports, *forward_ports)))
-        if self.network != "isolated" or ports == self.forward_ports:
-            return self
-        return replace(self, forward_ports=ports)
 
     def profile(
         self,
