@@ -142,6 +142,10 @@ class ArtifactRuntime(InferenceRuntime):
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
 
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact:
+        """The test binding: the test engine answers every scenario's active artifact under ``base``."""
+        return ServedArtifact(artifact_id, self.base_url, self.served_model_name(scenario))
+
 
 @dataclass(frozen=True, kw_only=True)
 class WeightRecipe(Recipe):

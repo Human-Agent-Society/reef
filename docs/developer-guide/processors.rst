@@ -332,15 +332,24 @@ names it there, and Reef refuses job data with a task that has no ``files``.
 The samples that Reef makes from imported and generated tasks have it.
 
 A directory does not change after Reef writes it, and several jobs can read
-it, so a component must not write in it. A component reads the data with
-``job.read_data()``. Each task sample of the result has a local
-``task_path``, which the data store took from the task file store when it
-opened the job. The component must not change that directory.
+it, so a component must not write in it.
 
-A component that runs the job elsewhere, such as in a container, gives that
-place ``job.data_uri`` and mounts or copies the directory there. That place
-reads ``files`` from each task line and gets the directory from the task file
-store of the deployment by ``partition`` and ``digest``.
+A job holds a reference to its directory (``JobDataRef``). The reference
+copies nothing. What Reef copies to its own host depends on what the
+component reads:
+
+- A component that trains on Reef's host reads the data with
+  ``job.read_data()``, or the directory at ``job.data_dir``. That read makes
+  the local copy of the directory. For a job of tasks, it also takes the local
+  directory of each task from the task file store, several at a time. Each
+  task sample of the result has that directory as its ``task_path``. The
+  component must not change it. A missing directory or task fails this read.
+- A component that runs the job elsewhere, such as in a container, gives that
+  place ``job.data_uri`` and mounts or copies the directory there. That place
+  reads ``files`` from each task line and gets the directory from the task
+  file store of the deployment by ``partition`` and ``digest``. Such a
+  component must not read ``job.data_dir`` or ``job.read_data()``: with a
+  remote store, each copies files that the job does not use.
 
 The data store keeps the directories (``DataStore.write_job_directory``,
 ``open_job_directory`` and ``delete_unused_job_directories``) in its segment

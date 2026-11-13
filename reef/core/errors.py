@@ -118,3 +118,17 @@ def inference_aborted(response: Mapping[str, object]) -> bool:
         )
         for choice in choices
     )
+
+
+def inference_incomplete(response: Mapping[str, object]) -> bool:
+    """Whether a response explicitly reports an abort or incomplete stream delivery.
+
+    Diagnostic records remain readable but cannot become training samples. Older buffered records without
+    delivery metadata retain their existing eligibility; a provider's own ``complete`` field is not a receipt.
+    """
+    delivery = response.get("stream_delivery")
+    return (
+        inference_aborted(response)
+        or (isinstance(delivery, Mapping) and delivery.get("complete") is False)
+        or (response.get("stream") is True and response.get("complete") is False)
+    )

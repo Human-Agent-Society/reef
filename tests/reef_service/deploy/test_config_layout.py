@@ -255,7 +255,7 @@ def test_shipped_reef_yamls_use_the_public_layout():
     import re
     from pathlib import Path
 
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     configs = []
     for directory in ("recipes", "tutorials", "tests/packaging"):
         for path in (root / directory).rglob("*.yaml"):

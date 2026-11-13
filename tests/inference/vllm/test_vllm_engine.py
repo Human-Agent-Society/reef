@@ -108,6 +108,17 @@ def test_pause_keeps_requests_and_retract_also_frees_their_kv(engine):
         engine.pause_generation("drain")
 
 
+@pytest.mark.parametrize(
+    "reply", [{}, {"results": []}, {"results": [None, False]}, {"results": [{"error": "load failed"}]}]
+)
+def test_an_unacknowledged_reload_never_stamps_a_new_version(engine, reply):
+    engine, http = engine
+    http.answer(reply)
+    with pytest.raises(RuntimeError, match="did not acknowledge"):
+        engine.update_weights_from_disk("/ckpt/b", runtime_load_id="reef:2")
+    assert [call[1] for call in http.calls] == ["collective_rpc"]
+
+
 def test_weights_reload_and_adapters_report_vllm_answers(engine):
     engine, http = engine
     http.answer({"results": [None]})

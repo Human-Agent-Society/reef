@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
-from aiohttp import web
+from aiohttp import ClientPayloadError, web
 from aiohttp.test_utils import TestServer
 from tests.support import tokenizers
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact
 from reef.core.errors import inference_aborted
-from reef.inference.interfaces import InferenceArtifact
+from reef.inference.chat import sse_json_events
+from reef.inference.interfaces import InferenceArtifact, full_weight_name
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.service.streaming import stream_record
 
@@ -213,6 +215,30 @@ def live_artifact() -> InferenceArtifact:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("failure", ["transport", "trailing-data"])
+def test_native_terminal_marker_does_not_hide_a_late_failure(failure) -> None:
+    async def chunks():
+        yield b'data: {"text":"answer"}\n\ndata: [DONE]\n\n'
+        if failure == "transport":
+            raise ClientPayloadError("truncated body")
+        yield b'data: {"error":{"message":"late failure"}}\n\n'
+
+    async def run():
+        with pytest.raises((ClientPayloadError, ValueError)):
+            [event async for event in sse_json_events(chunks())]
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_native_stream_capture_requires_a_finish_reason() -> None:
+    capture = NativeStreamCapture()
+    capture.accept({"text": "partial", "meta_info": {"completion_tokens": 1, "output_token_logprobs": [[-0.5, 20]]}})
+    with pytest.raises(ValueError, match="without a finish reason"):
+        capture.response()
+
+
+@pytest.mark.unit
 def test_native_stream_capture_rejects_cumulative_chunks() -> None:
     capture = NativeStreamCapture()
     capture.accept(
@@ -314,6 +340,37 @@ def test_chat_facade_answers_from_engine_native_ids_without_retokenizing(tmp_pat
         logprobs = response["choices"][0]["logprobs"]["content"]
         assert [(item["token"], item["logprob"]) for item in logprobs] == [("<20>", -0.25), ("<21>", -0.5)]
         assert "training" not in response, "serving returns no training tensors"
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_pinned_chat_sends_the_selected_weight_name_and_the_base_model() -> None:
+    body = {
+        "text": "answer",
+        "meta_info": {
+            "finish_reason": {"type": "stop"},
+            "completion_tokens": 3,
+            "output_token_logprobs": [[-0.1, 20], [-0.2, 21], [-0.3, 22]],
+        },
+    }
+    artifact = InferenceArtifact("artifact-A", served_model=full_weight_name("/remote/model", "engine:6"))
+
+    async def run():
+        async def generate(request):
+            assert request.headers["x-reef-served-model"] == artifact.served_model
+            assert "lora_path" not in await request.json()
+            return web.json_response(body)
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        async with TestServer(app) as server:
+            handler = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+            )
+            payload = handler.address_model({"messages": [{"role": "user", "content": "hi"}]}, artifact.served_model)
+            assert payload["model"] == "model"
+            assert (await handler.inference(artifact, "/v1/chat/completions", payload))["choices"]
 
     asyncio.run(run())
 
@@ -684,6 +741,74 @@ def test_anthropic_facade_converts_tool_history_and_sampled_tool_use(tmp_path) -
         assert response["content"][0]["name"] == "write_file"
         assert response["content"][0]["input"] == {"path": "out.txt"}
         assert "training" not in response
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("finished", [True, False], ids=["finished", "missing-finish"])
+def test_pinned_stream_ends_with_its_terminal_event_only_after_a_finish_reason(finished) -> None:
+    artifact = InferenceArtifact("artifact-A", served_model=full_weight_name("/remote/model", "engine:6"))
+    # Each sampled token has its own log probability, so the client's entries show their alignment.
+    sampled = [("<20>", -0.25), ("<21>", -0.75)]
+
+    async def run() -> None:
+        async def generate(request):
+            assert request.headers["x-reef-served-model"] == artifact.served_model
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            for index, text in enumerate(("first", "later")):
+                event = {
+                    "text": text,
+                    "output_ids": [20 + index],
+                    "meta_info": {
+                        "completion_tokens": index + 1,
+                        "output_token_logprobs": [[sampled[index][1], 20 + index]],
+                        "finish_reason": {"type": "stop"} if index == 1 and finished else None,
+                    },
+                }
+                await response.write(f"data: {json.dumps(event)}\n\n".encode())
+            await response.write(b"data: [DONE]\n\n")
+            return response
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        async with TestServer(app) as server:
+            handler = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path="model", tokenizer=FakeTokenizer()
+            )
+            stream = await handler.inference_stream(
+                artifact,
+                "/v1/chat/completions",
+                {
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_completion_tokens": 2,
+                    "stream": True,
+                    "logprobs": True,
+                },
+            )
+            body = bytearray()
+            try:
+                with nullcontext() if finished else pytest.raises(ValueError, match="without a finish reason"):
+                    async for chunk in stream.chunks:
+                        body.extend(chunk)
+            finally:
+                await stream.close()
+            assert b'"content": "first"' in body
+            assert b'"content": "later"' in body
+            assert body.endswith(b"data: [DONE]\n\n") is finished
+            assert (stream.record_response is not None) is finished
+            streamed = [
+                (entry["token"], entry["logprob"])
+                for line in bytes(body).split(b"\n")
+                if line.startswith(b"data: {")
+                for choice in json.loads(line.removeprefix(b"data: "))["choices"]
+                for entry in (choice.get("logprobs") or {}).get("content", [])
+            ]
+            assert streamed == sampled
+            if finished:
+                recorded = stream.record_response["choices"][0]["logprobs"]["content"]
+                assert [(entry["token"], entry["logprob"]) for entry in recorded] == sampled
 
     asyncio.run(run())
 

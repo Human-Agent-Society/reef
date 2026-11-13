@@ -183,7 +183,7 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         remote = RemoteInferenceSettings.from_mapping(settings.inference_remote)
         if remote.model_path is None:
             remote = replace(remote, model_path=settings.model_path)
-        config["reef"]["inference_remote"] = asdict(remote)
+        config["reef"]["inference_remote"] = remote.to_dict()
         settings = service_config_from_mapping(config)
         # The HTTP service starts the engines before it serves its first request.
         config["ready_timeout"] = max(int(config.get("ready_timeout", 30)), int(settings.training_ready_timeout))

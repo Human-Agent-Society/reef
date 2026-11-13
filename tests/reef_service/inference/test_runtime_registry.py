@@ -6,11 +6,12 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 
-from reef.artifact import Artifact, InMemoryRepositoryBackend, SnapshotRef
+from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core.errors import RuntimeConfigError
+from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
-from reef.inference.interfaces import InferenceHandler, InferenceRuntime
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
 from reef.scenario.live_objects import LiveObjects
@@ -116,6 +117,12 @@ inference:
 def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_path) -> None:
     async def run() -> None:
         class RoutingRuntime(InferenceRuntime):
+            """The runtime of the recipe ``recipe``: its handler answers each call with the recipe's name.
+
+            It loads no weights, so it binds no artifact (``served_artifact`` is None), and an activation returns
+            the snapshot's revision. Its model ``<recipe>-model`` answers snapshots without weights.
+            """
+
             def __init__(self, recipe: str) -> None:
                 super().__init__(base_url="http://recipe-runtime")
                 self.recipe = recipe
@@ -136,6 +143,14 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
 
             def activate_checkpoint(self, artifact, *, scenario=None) -> str:
                 return artifact.ref.revision
+
+            def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+                # It loads no weights, so it binds no artifact's weights.
+                return None
+
+            def endpoint_model_name(self, scenario: str) -> str | None:
+                # A record-only snapshot loads no weights: this runtime's model answers it.
+                return self.model_path
 
         backend_factory = InMemoryRepositoryBackend.factory()
         dispatchers = {
@@ -222,7 +237,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(SnapshotRef("version-1", None), None, artifact_id="version-1"),
+                InferenceArtifact("version-1"),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}]},
             )
@@ -235,7 +250,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
             }
 
             stream = await runtime.inference_handler.inference_stream(
-                Artifact(SnapshotRef("version-1", None), None, artifact_id="version-1"),
+                InferenceArtifact("version-1"),
                 "/v1/chat/completions",
                 {"messages": [], "stream": True},
             )
@@ -277,7 +292,7 @@ def test_recipe_runtime_proxies_anthropic_auth_and_version() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(SnapshotRef("rev", None), None, artifact_id="rev"),
+                InferenceArtifact("rev"),
                 "/v1/messages",
                 {"model": "claude-compatible", "messages": []},
             )
@@ -319,3 +334,18 @@ def test_inference_proxy_runtime_inherits_runtime_base() -> None:
             api_key="secret",
             inference_timeout_s=0,
         )
+
+
+@pytest.mark.unit
+def test_an_inference_proxy_binds_no_weights_and_names_its_configured_model(tmp_path) -> None:
+    runtime = InferenceProxyRuntime(model_path="mutable-model-alias", base_url="https://provider.invalid")
+    # Nothing ties a Reef artifact's weights to what the provider serves under its model name.
+    assert runtime.served_artifact("never-activated-artifact", "never-seen-scenario") is None
+    # The proxy loads no weights, so no activation establishes a binding either.
+    artifact = Artifact.local(tmp_path)
+    with pytest.raises(ValueError, match="loads no weights"):
+        runtime.activate_checkpoint(artifact)
+    assert runtime.served_artifact(artifact.artifact_id, "math") is None
+    # A snapshot without weights is answered by the configured model; a proxy that names no model answers none.
+    assert runtime.endpoint_model_name("math") == "mutable-model-alias"
+    assert InferenceProxyRuntime(base_url="https://provider.invalid").endpoint_model_name("math") is None

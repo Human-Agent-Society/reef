@@ -13,13 +13,13 @@ This module defines the item values, the metadata rules, the ``DataStore`` plugi
 from __future__ import annotations
 
 import copy
-import json
 import re
 import tempfile
 import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Literal, Self, get_args
@@ -27,14 +27,14 @@ from typing import Any, Literal, Self, get_args
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.evaluation import EvaluationCallSummary, require_integer
-from reef.core.job_data import JobData, TaskFiles, TaskSample
+from reef.core.job_data import JobData, TaskFiles
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.job_data import (
     JOB_DATA_PREFIX,
-    JOB_FILE,
+    JobDataReader,
     JobDataRef,
     job_data_key,
     job_data_kind,
@@ -55,6 +55,9 @@ FIXED_KEYS = ("kind", "owner", "origin", "evaluation_id")
 RECORD_SOURCES = ("inference", "evaluation")
 #: The most items that one query returns.
 MAX_QUERY_LIMIT = 1000
+#: The task directories that a data store reads from the task file store at the same time. A remote store downloads
+#: each directory, and one download at a time takes minutes for some thousand tasks.
+TASK_PATH_READERS = 8
 
 
 class ItemConflictError(ReefError):
@@ -431,7 +434,7 @@ class RecordLink:
 JOB_DIRECTORY_TTL_SECONDS = 7 * 24 * 3600.0
 
 
-class DataStore(Plugin, ABC):
+class DataStore(Plugin, JobDataReader, ABC):
     """The data of a deployment: items of content and metadata, each in one owner.
 
     Values: the state of a store is a finite set of ``StoredItem`` values. Within one owner, no two items have
@@ -514,8 +517,11 @@ class DataStore(Plugin, ABC):
 
     * ``write_job_directory(data)`` writes the directory of ``data`` if the store does not hold it, records its use,
       and returns its reference.
-    * ``open_job_directory(value)`` gives the reference that ``JobDataRef.to_dict`` wrote, with a local copy of the
-      directory, and records its use.
+    * ``open_job_directory(value)`` gives the reference that ``JobDataRef.to_dict`` wrote, and records its use. It
+      reads and copies no file.
+    * The store is the ``JobDataReader`` of these references. ``job_directory(uri)`` gives the local copy of a
+      directory, and ``job_task_paths(directory)`` the local directory of each of its tasks, ``TASK_PATH_READERS``
+      at a time. A reference calls them when a component reads its ``path``, ``task_paths`` or ``read``.
     * ``delete_unused_job_directories(time)`` deletes each directory that no job used since ``time``, and returns
       their number.
 
@@ -723,28 +729,26 @@ class DataStore(Plugin, ABC):
                 write_job_data(data, directory)
                 uri = self.job_directories.write_directory(name, directory)
         self.write_job_directory_use(key, time.time())
-        path = self.job_directories.open_directory(uri)
-        # The samples hold the directories that the task file store gave when it made them.
-        task_paths = tuple(sample.task_path for sample in data.samples if isinstance(sample, TaskSample))
-        return JobDataRef(uri, path, data.data_id, len(data.samples), job_data_kind(data), task_paths)
+        return JobDataRef(uri, key, data.data_id, len(data.samples), job_data_kind(data), self)
 
     def item_task_files(self, item: StoredItem) -> TaskFiles:
         """The name in the task file store of the directory of the task item ``item``, which ``task_path`` returns."""
         return TaskFiles(task_partition(item.owner), item.digest)
 
+    def job_directory(self, uri: str) -> Path:
+        return self.job_directories.open_directory(uri)
+
     def job_task_paths(self, directory: Path) -> tuple[Path, ...]:
-        """The local directory of each task of the job data directory ``directory``, in job order, from the task file
-        store. ``TaskStoreError`` for a task whose files the store does not hold."""
-        return tuple(self.task_files.path(files.partition, files.digest) for files in job_task_files(directory))
+        files = job_task_files(directory)
+        if not files:
+            return ()
+        with ThreadPoolExecutor(max_workers=TASK_PATH_READERS) as readers:
+            return tuple(readers.map(lambda task: self.task_files.path(task.partition, task.digest), files))
 
     def open_job_directory(self, value: Mapping[str, Any]) -> JobDataRef:
-        uri = value.get("uri")
-        if not isinstance(uri, str) or not uri:
-            raise ValueError("a job data reference has a uri")
-        path = self.job_directories.open_directory(uri)
-        header = json.loads((path / JOB_FILE).read_text(encoding="utf-8"))
-        self.write_job_directory_use(header["key"], time.time())
-        return JobDataRef.from_dict(value, path, self.job_task_paths(path))
+        ref = JobDataRef.from_dict(value, self)
+        self.write_job_directory_use(ref.key, time.time())
+        return ref
 
     def delete_unused_job_directories(self, time: float) -> int:
         unused = self.job_directories_unused_since(time)

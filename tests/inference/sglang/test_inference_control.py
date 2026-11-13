@@ -70,7 +70,7 @@ class BorrowingControl:
 def test_a_borrowed_control_connection_reaches_the_engines_and_leaves_them_to_their_owner(monkeypatch):
     ray = pytest.importorskip("ray")
     monkeypatch.delenv("RAY_ADDRESS", raising=False)
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     ray.init(
         address="local",
         num_cpus=4,

@@ -146,7 +146,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ),
         ({"inference.serving": "trainer"}, "needs a training backend that serves its own snapshots"),
         ({"inference.serving": "elsewhere"}, "engines, trainer, none or module:Factory"),
-        ({"inference.backend": "tinker-engine"}, "unknown inference backend 'tinker-engine'"),
+        ({"inference.backend": "tinker-engine"}, "inference.backend: tinker-engine cannot serve published snapshots"),
     ],
 )
 def test_invalid_training_inputs_fail_before_downloads_and_processes(tmp_path, monkeypatch, capsys, override, match):

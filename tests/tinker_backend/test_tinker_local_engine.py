@@ -294,6 +294,7 @@ def test_remote_engines_keep_the_section_and_start_no_local_component(tmp_path):
         "inference_token_env": "GPU_HOST_TOKEN",
         "startup_timeout_s": 3600.0,
         "model_path": "Qwen/Qwen3-8B",
+        "slot_urls": [],
     }
     assert serving_config(config)["remote"] == config["reef"]["inference_remote"]
 

@@ -101,7 +101,7 @@ def test_sigterm_during_startup_stops_the_service_process(tmp_path: Path) -> Non
         f"orchestrator.validate_services = lambda config, path: {services!r}\n"
         "main(['serve', '-c', 'stack.yaml'])\n"
     )
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (str(root), os.environ.get("PYTHONPATH"))))}
     process = subprocess.Popen(
         [sys.executable, script.name],

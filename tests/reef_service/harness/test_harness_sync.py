@@ -20,8 +20,8 @@ import pytest
 from aiohttp import web
 from reef_client import ReefClient
 from reef_client.harness import SYNC_LOG, HarnessInstall, HarnessSyncError, commands_root, connect
-from tests.reef_service.test_harness_channel import HEADERS, PATCHES, channel_dispatcher, evaluated_step
-from tests.reef_service.test_harness_channel import served as served_client
+from tests.reef_service.harness.harness_channel import HEADERS, PATCHES, channel_dispatcher, evaluated_step
+from tests.reef_service.harness.harness_channel import served as served_client
 from tests.support.harness_jobs import PI_SEED
 from tests.support.harness_service import EchoInference
 from tests.support.serving import wait_for_serving

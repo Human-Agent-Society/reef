@@ -56,7 +56,7 @@ from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
 
-EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-harness"
+EXAMPLE_DIR = Path(__file__).resolve().parents[3] / "tutorials" / "evolve-your-harness"
 REPO_ROOT = EXAMPLE_DIR.parents[1]
 PI_SEED = HarnessTree.read(EXAMPLE_DIR / "seeds" / "pi")
 NATIVE_SEED = HarnessTree.read(EXAMPLE_DIR / "seeds" / "native")

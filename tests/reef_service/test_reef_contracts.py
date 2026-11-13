@@ -8,7 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from aiohttp import web
+from aiohttp import ClientPayloadError, web
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import StubInferenceRuntime, live_objects
@@ -28,7 +28,7 @@ from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
 from reef.inference.http import HttpInferenceHandler
-from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
+from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream, RuntimeLoadMismatchError
 from reef.recipe import Recipe
 from reef.record2sample.service import SAMPLES_QUEUE
 from reef.scenario.live_objects import LiveObjects
@@ -68,9 +68,9 @@ class RegisterFailingBackend(InMemoryRepositoryBackend):
 SERVED_MODEL = "stub-model"
 
 
-def serving_runtime() -> StubInferenceRuntime:
+def serving_runtime(*, inference_timeout_s: float = 300.0) -> StubInferenceRuntime:
     """A stub runtime whose engine has a URL and a model name, so inference can publish a ``served_models`` row for it."""
-    return StubInferenceRuntime(model_path=SERVED_MODEL)
+    return StubInferenceRuntime(model_path=SERVED_MODEL, inference_timeout_s=inference_timeout_s)
 
 
 def weight_dispatcher(tmp_path, *, training: bool = False):
@@ -93,13 +93,13 @@ def serving_client(dispatcher, backend=None, **options) -> TestClient:
     return TestClient(TestServer(create_app(dispatcher, **options)))
 
 
-def serving_dispatcher(tmp_path) -> Dispatcher:
+def serving_dispatcher(tmp_path, *, inference_timeout_s: float = 300.0) -> Dispatcher:
     """A dispatcher of the record-only recipe whose runtime serves the created scenario "chat"; a /v1 call answers
     only for a scenario that exists. A commit's activation queues a serving request."""
     dispatcher = Dispatcher(
         Recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
-        live=LiveObjects(runtime=serving_runtime()),
+        live=LiveObjects(runtime=serving_runtime(inference_timeout_s=inference_timeout_s)),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -404,7 +404,10 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
         upstream_app.router.add_post("/v1/chat/completions", upstream)
         async with TestServer(upstream_app) as server:
             inference_handler = HttpInferenceHandler(str(server.make_url("")).rstrip("/"))
-            assert await inference_handler.inference(artifact, "/v1/chat/completions", payload) == {"provider": "ok"}
+            response = await inference_handler.inference(
+                InferenceArtifact.from_artifact(artifact), "/v1/chat/completions", payload
+            )
+            assert response == {"provider": "ok"}
 
     asyncio.run(run())
     assert received == {
@@ -530,17 +533,21 @@ def test_anthropic_stream_attaches_receipt_only_after_record_is_stored(tmp_path)
 
 
 @pytest.mark.unit
-def test_responses_stream_is_forwarded_and_attaches_its_receipt_to_response_completed(tmp_path) -> None:
+@pytest.mark.parametrize("tail", ["closed", "done", "open"])
+def test_responses_stream_is_forwarded_and_attaches_its_receipt_to_response_completed(tmp_path, tail) -> None:
     delta = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
     completed = b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
     received = {}
+    release = asyncio.Event()
 
     async def upstream(request):
         received["payload"] = await request.json()
         response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
         await response.prepare(request)
         await response.write(delta)
-        await response.write(completed)
+        await response.write(completed + (b"data: [DONE]\n\n" if tail == "done" else b""))
+        if tail == "open":
+            await asyncio.wait_for(release.wait(), 5)
         return response
 
     async def run() -> None:
@@ -548,7 +555,10 @@ def test_responses_stream_is_forwarded_and_attaches_its_receipt_to_response_comp
             payload = {"model": "gpt-4o", "input": [{"role": "user", "content": "hi"}], "stream": True}
             response = await client.post("/v1/responses", headers={"x-reef-scenario": "chat"}, json=payload)
             assert response.status == 200
-            body = await response.read()
+            try:
+                body = await asyncio.wait_for(response.read(), 2)
+            finally:
+                release.set()
             assert body.startswith(delta)
             terminal = body[len(delta) :].decode()
             assert terminal.startswith("event: response.completed\n")
@@ -581,7 +591,8 @@ def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tm
                 json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
             )
             assert "x-reef-agent-record-id" not in response.headers
-            assert await response.read() == content
+            with pytest.raises(ClientPayloadError):
+                await response.read()
             [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
             assert record.payload["response"]["complete"] is False
             assert record.payload["response"]["error"] == "the engine's SSE stream ended without a terminal event"
@@ -741,6 +752,54 @@ class StreamRecordHandler(InferenceHandler):
         return stream
 
 
+class FinalizingStreamHandler(InferenceHandler):
+    """An engine that finalizes its capture after emitting its configured frames.
+
+    ``capture`` may be absent or aborted; ``failure`` simulates a transport error during finalization.
+    ``frames`` defaults to a successful chat stream; ``stall`` waits until the request deadline cancels it.
+    ``calls`` counts stream starts, and ``exhausted`` marks finalization after the last frame.
+    A terminal frame alone must not make any of these cases successful.
+    """
+
+    def __init__(
+        self,
+        capture: dict | None,
+        *,
+        failure: Exception | None = None,
+        frames: tuple[bytes, ...] | None = None,
+        stall: bool = False,
+    ) -> None:
+        self.capture = capture
+        self.failure = failure
+        self.frames = CHAT_STREAM_FRAMES if frames is None else frames
+        self.stall = stall
+        self.exhausted = False
+        self.calls = 0
+
+    async def inference(self, artifact, path, payload):
+        raise AssertionError("a streamed request must not call the buffered route")
+
+    async def inference_stream(self, artifact, path, payload):
+        self.calls += 1
+
+        async def chunks():
+            yield b"".join(self.frames)
+            if self.stall:
+                await asyncio.Event().wait()
+            stream.record_response = self.capture
+            self.exhausted = True
+            if self.failure is not None:
+                raise self.failure
+
+        stream = InferenceStream(
+            status=200,
+            headers={"Content-Type": "text/event-stream"},
+            chunks=chunks(),
+            record_response_pending=True,
+        )
+        return stream
+
+
 STREAM_TRAINING = {"tokens": [10, 11, 20, 21], "loss_mask": [1, 1], "rollout_log_probs": [-0.5, -0.5]}
 CHAT_STREAM_FRAMES = (b'data: {"choices":[{"delta":{"content":"a b"}}]}\n\n', b"data: [DONE]\n\n")
 MESSAGES_STREAM_FRAMES = (
@@ -770,8 +829,8 @@ ABORTED_MESSAGES_RECORD = {
 }
 
 
-def post_stream(dispatcher, handler, path: str):
-    """Post one streamed turn to ``path``; the response's status, headers and body."""
+def post_stream(dispatcher, handler, path: str, *, expect_failure: bool = False):
+    """Read one streamed turn, checking whether its HTTP body completes or fails."""
 
     async def run():
         async with serving_client(dispatcher, inference_handler=handler) as client:
@@ -781,7 +840,16 @@ def post_stream(dispatcher, handler, path: str):
                 headers={"x-reef-scenario": "chat"},
                 json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
             )
-            return response.status, dict(response.headers), await response.read()
+            body = bytearray()
+            try:
+                async for chunk in response.content.iter_any():
+                    body.extend(chunk)
+            except ClientPayloadError:
+                if not expect_failure:
+                    raise
+            else:
+                assert not expect_failure, "the failed generation ended with a clean HTTP EOF"
+            return response.status, dict(response.headers), bytes(body)
 
     return asyncio.run(run())
 
@@ -857,6 +925,105 @@ def test_finished_stream_keeps_its_receipt_and_drops_the_training_block(tmp_path
         assert "training" not in recorded
         assert recorded["stream_delivery"]["complete"] is True
         assert "error" not in recorded["stream_delivery"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("finish_reason", ["stop", "abort", None])
+def test_stream_receipt_waits_for_capture_finalization(tmp_path, finish_reason) -> None:
+    handler = FinalizingStreamHandler(None if finish_reason is None else chat_stream_record(finish_reason))
+    with closing(serving_dispatcher(tmp_path)) as dispatcher:
+        answer = post_stream(dispatcher, handler, "/v1/chat/completions", expect_failure=finish_reason is None)
+        status, body = answer[0], answer[2]
+        assert status == 200
+        assert handler.exhausted
+        [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+        captured = record.payload["response"]
+        delivery = captured.get("stream_delivery", captured)
+        assert delivery["complete"] is (finish_reason == "stop")
+        assert (record.agent_record_id.encode() in body) is (finish_reason == "stop")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("frames", "capture", "failure", "stall", "error"),
+    [
+        (CHAT_STREAM_FRAMES[:1], chat_stream_record("stop"), ClientPayloadError("truncated body"), False, "truncated"),
+        (CHAT_STREAM_FRAMES, chat_stream_record("stop"), ClientPayloadError("truncated body"), False, "truncated"),
+        (
+            CHAT_STREAM_FRAMES[:1],
+            chat_stream_record("stop"),
+            RuntimeLoadMismatchError("wrong load"),
+            False,
+            "wrong load",
+        ),
+        (CHAT_STREAM_FRAMES[:1], chat_stream_record("stop"), None, True, "timed out"),
+        (CHAT_STREAM_FRAMES, None, None, False, "promised capture"),
+        (CHAT_STREAM_FRAMES[:1], chat_stream_record("stop"), None, False, "terminal event"),
+    ],
+    ids=["before-terminal", "after-terminal", "wrong-load", "deadline", "missing-capture", "missing-terminal"],
+)
+def test_failed_stream_breaks_the_client_response_without_retrying(
+    tmp_path, frames, capture, failure, stall, error
+) -> None:
+    handler = FinalizingStreamHandler(capture, failure=failure, frames=frames, stall=stall)
+    # Only the stalled stream waits for its deadline; the other failures end at once.
+    with closing(serving_dispatcher(tmp_path, inference_timeout_s=0.25 if stall else 300.0)) as dispatcher:
+        answer = post_stream(dispatcher, handler, "/v1/chat/completions", expect_failure=True)
+        status, body = answer[0], answer[2]
+        assert status == 200  # Headers were already sent; the body must fail instead.
+        assert b"[DONE]" not in body
+        assert handler.calls == 1
+        [saved] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+        assert saved.agent_record_id.encode() not in body
+        captured = saved.payload["response"]
+        delivery = captured.get("stream_delivery", captured)
+        assert delivery["complete"] is False
+        assert error in delivery["error"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "failure", [b'data: {"choices":[{"finish_reason":"abort"}]}\n\n', b"event: error\ndata: {}\n\n"]
+)
+def test_an_opaque_stream_failure_has_no_receipt_even_with_a_terminal_frame(tmp_path, failure) -> None:
+    handler = StreamRecordHandler(None, (failure, b"data: [DONE]\n\n"), record_before_terminal=False)
+    with closing(serving_dispatcher(tmp_path)) as dispatcher:
+        body = post_stream(
+            dispatcher, handler, "/v1/chat/completions", expect_failure=failure.startswith(b"event: error")
+        )[2]
+        [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+        assert record.agent_record_id.encode() not in body
+        assert record.payload["response"]["complete"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("same_chunk", [True, False])
+def test_data_after_a_terminal_frame_does_not_receive_a_success_receipt(tmp_path, same_chunk) -> None:
+    frames = (*CHAT_STREAM_FRAMES, b'event: error\ndata: {"error":"capture failed"}\n\n')
+    handler = StreamRecordHandler(
+        chat_stream_record("stop"),
+        (b"".join(frames),) if same_chunk else frames,
+        record_before_terminal=False,
+    )
+    with closing(serving_dispatcher(tmp_path)) as dispatcher:
+        body = post_stream(dispatcher, handler, "/v1/chat/completions", expect_failure=True)[2]
+        [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+        assert record.agent_record_id.encode() not in body
+        assert record.payload["response"]["stream_delivery"]["complete"] is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("same_chunk", [True, False])
+@pytest.mark.parametrize("tail", [b"data: [DO", b'event: error\ndata: {"error":"ignored tail"}\n\n'])
+def test_opaque_proxy_completion_is_independent_of_trailing_chunk_boundaries(tmp_path, same_chunk, tail) -> None:
+    terminal = b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r1"}}\n\n'
+    frames = (terminal + tail, b"NE]\n\n") if same_chunk else (terminal, tail, b"NE]\n\n")
+    handler = StreamRecordHandler(None, frames, record_before_terminal=False)
+    with closing(serving_dispatcher(tmp_path)) as dispatcher:
+        body = post_stream(dispatcher, handler, "/v1/responses")[2]
+        [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+        assert record.agent_record_id.encode() in body
+        assert record.payload["response"]["complete"] is True
 
 
 @pytest.mark.unit
