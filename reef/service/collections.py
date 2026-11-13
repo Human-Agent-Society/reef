@@ -1,8 +1,10 @@
-"""Transport-independent handling of the collection routes (RFC #1312).
+"""Transport-independent handling of the collection routes (RFC #1312) and of a scenario's benchmarks (RFC #1420).
 
 A collection names benchmarks and other collections of one owner (``reef.storage.task_collections``). A client
-stores, lists, reads and deletes the collections of an owner, and adds the tasks of one to a scenario split. No
-aiohttp types appear here. ``reef.service.routes.data`` adapts it to HTTP.
+stores, lists, reads and deletes the collections of an owner. A scenario holds benchmarks, each in one split: it then
+uses the tasks of the benchmark, and no task item changes (``DataStore.hold_benchmark``). A client holds and releases
+a benchmark, lists a scenario's holds, and holds each benchmark of a collection in one call. No aiohttp types appear
+here. ``reef.service.routes.data`` adapts it to HTTP.
 """
 
 from __future__ import annotations
@@ -10,9 +12,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.service.data import DataAccess, update_items
+from reef.service.data import DataAccess, Use, check_uses, sync_touched
 from reef.storage.data import MAX_QUERY_LIMIT, DataStore, check_owner
 from reef.storage.task_collections import CollectionNotFoundError, TaskCollection, collection_benchmarks
+from reef.storage.tasks import SPLIT_NAMES
 
 
 def benchmark_tasks(store: DataStore, owner: str, benchmarks: Sequence[str]) -> dict[str, tuple[str, ...]]:
@@ -95,32 +98,72 @@ def delete_collection(data: DataAccess, owner: str, name: str) -> dict[str, Any]
     return {"owner": owner, "name": name, "deleted": True}
 
 
-def add_to_scenario(data: DataAccess, owner: str, name: str, body: Mapping[str, Any]) -> dict[str, Any]:
-    """Add each task that the collection ``name`` of ``owner`` has now to one split of one scenario, from
-    ``{"scenario", "split"}``; return ``{owner, name, scenario, split, task_count, synced}``.
+def checked_hold(data: DataAccess, owner: str, scenario: str, split: object) -> str:
+    """``split`` when ``scenario`` of ``owner`` can hold a benchmark in it; ``ValueError`` for another value, for a
+    scenario of another owner, and for a ``train`` hold by a scenario that cannot train imported tasks."""
+    check_owner(owner)
+    if split not in SPLIT_NAMES:
+        raise ValueError(f"split is one of {', '.join(SPLIT_NAMES)}")
+    check_uses(data, owner, {scenario: [Use(False, split == "train")]})
+    return str(split)
 
-    The tasks get the metadata patch ``{"scenarios": {scenario: split}}``, at most ``MAX_QUERY_LIMIT`` in one
-    update, with the checks of ``update_items``. Raise ``CollectionNotFoundError`` for an unknown name, and
-    ``ValueError`` for a collection without tasks.
+
+def hold_benchmark(
+    data: DataAccess, owner: str, scenario: str, benchmark: str, body: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Make ``scenario`` of ``owner`` hold ``benchmark`` in the split of ``{"split"}``, then sync the scenario;
+    return ``{owner, scenario, benchmark, split, task_count, synced}``.
+
+    The scenario uses each task of the benchmark from then on, also a task that joins it later. No task item
+    changes. A hold that exists gets the split. Raise ``ValueError`` as ``checked_hold`` does.
     """
-    scenario, split = body.get("scenario"), body.get("split")
-    if body.keys() != {"scenario", "split"} or not isinstance(scenario, str) or not isinstance(split, str):
+    if body.keys() != {"split"}:
+        raise ValueError("the body holds only 'split'")
+    split = checked_hold(data, owner, scenario, body["split"])
+    hold = data.require_store().hold_benchmark(owner, scenario, benchmark, split)
+    return {"owner": owner, **hold.to_json(), "synced": sync_touched(data, owner, [scenario])}
+
+
+def release_benchmark(data: DataAccess, owner: str, scenario: str, benchmark: str) -> dict[str, Any]:
+    """End the hold of ``benchmark`` by ``scenario`` of ``owner``, then sync the scenario; return ``{owner, scenario,
+    benchmark, released, synced}``. ``released`` is False when the scenario did not hold the benchmark."""
+    released = data.require_store().release_benchmark(owner, scenario, benchmark)
+    synced = sync_touched(data, owner, [scenario]) if released else True
+    return {"owner": owner, "scenario": scenario, "benchmark": benchmark, "released": released, "synced": synced}
+
+
+def list_held_benchmarks(data: DataAccess, owner: str, scenario: str) -> dict[str, Any]:
+    """The benchmarks that ``scenario`` of ``owner`` holds, by name: ``{owner, scenario, benchmarks}``, each
+    ``{scenario, benchmark, split, task_count}``."""
+    holds = data.require_store().held_benchmarks(owner, scenario)
+    return {"owner": owner, "scenario": scenario, "benchmarks": [hold.to_json() for hold in holds]}
+
+
+def add_to_scenario(data: DataAccess, owner: str, name: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """Make one scenario hold each benchmark that the collection ``name`` of ``owner`` has now, in one split, from
+    ``{"scenario", "split"}``; return ``{owner, name, scenario, split, benchmarks, task_count, synced}``.
+
+    ``benchmarks`` is the holds, as ``list_held_benchmarks`` gives them, and ``task_count`` counts each task of
+    them once. A benchmark that joins the collection later is not held. Raise ``CollectionNotFoundError`` for an
+    unknown name, and ``ValueError`` for a collection without a benchmark and as ``checked_hold`` does.
+    """
+    scenario = body.get("scenario")
+    if body.keys() != {"scenario", "split"} or not isinstance(scenario, str) or not scenario:
         raise ValueError("the body holds only 'scenario' and 'split', two strings")
-    _, tasks = collection_tasks(data.require_store(), owner, name)
-    item_ids = list(dict.fromkeys(item_id for benchmark_ids in tasks.values() for item_id in benchmark_ids))
-    if not item_ids:
-        raise ValueError(f"the collection {name!r} has no task")
-    synced = True
-    for start in range(0, len(item_ids), MAX_QUERY_LIMIT):
-        update = {"ids": item_ids[start : start + MAX_QUERY_LIMIT], "patch": {"scenarios": {scenario: split}}}
-        synced = update_items(data, owner, update)["synced"] and synced
+    split = checked_hold(data, owner, scenario, body["split"])
+    store = data.require_store()
+    _, tasks = collection_tasks(store, owner, name)
+    if not tasks:
+        raise ValueError(f"the collection {name!r} has no benchmark")
+    holds = [store.hold_benchmark(owner, scenario, benchmark, split) for benchmark in tasks]
     return {
         "owner": owner,
         "name": name,
         "scenario": scenario,
         "split": split,
-        "task_count": len(item_ids),
-        "synced": synced,
+        "benchmarks": [hold.to_json() for hold in holds],
+        "task_count": len({item_id for item_ids in tasks.values() for item_id in item_ids}),
+        "synced": sync_touched(data, owner, [scenario]),
     }
 
 
@@ -129,7 +172,10 @@ __all__ = [
     "benchmark_tasks",
     "collection_tasks",
     "delete_collection",
+    "hold_benchmark",
     "list_collections",
+    "list_held_benchmarks",
     "read_collection",
+    "release_benchmark",
     "save_collection",
 ]

@@ -103,7 +103,7 @@ def test_a_query_pages_by_sequence_and_a_task_item_reads_without_content(tmp_pat
     served(dispatcher, check)
 
 
-def test_a_collection_names_benchmarks_and_adds_their_tasks_to_a_scenario(tmp_path: Path) -> None:
+def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
 
     def archive(*names: str) -> bytes:
@@ -169,12 +169,52 @@ def test_a_collection_names_benchmarks_and_adds_their_tasks_to_a_scenario(tmp_pa
             f"{stored}/coding/scenarios", headers=AUTH, json={"scenario": "math", "split": "eval"}
         )
         assert added.status == 200, await added.text()
-        assert (await added.json())["task_count"] == 2
+        receipt = await added.json()
+        assert (receipt["task_count"], receipt["synced"]) == (2, True)
+        assert receipt["benchmarks"] == [
+            {"scenario": "math", "benchmark": "lite", "split": "eval", "task_count": 1},
+            {"scenario": "math", "benchmark": "full", "split": "eval", "task_count": 2},
+        ]
+        # The scenario holds the benchmarks, so it uses their tasks, and no task item changed.
         used = await (await client.get(f"{base}?kind=task&scenario=math", headers=AUTH)).json()
-        assert {item["id"]: item["metadata"]["scenarios"] for item in used["items"]} == {
-            "add": {"math": "eval"},
-            "sort": {"math": "eval"},
+        assert {item["id"]: item["metadata"]["scenarios"] for item in used["items"]} == {"add": {}, "sort": {}}
+        held = "/reef/namespaces/acme/scenarios/math/benchmarks"
+        holds = await (await client.get(held, headers=AUTH)).json()
+        assert [(hold["benchmark"], hold["split"]) for hold in holds["benchmarks"]] == [
+            ("full", "eval"),
+            ("lite", "eval"),
+        ]
+        # A task in two held benchmarks is used once through each.
+        tasks = (await (await client.get("/reef/scenarios/math/tasks", headers=AUTH)).json())["tasks"]
+        assert sorted((task["name"], task["split"], task["benchmark"]) for task in tasks) == [
+            ("add", "eval", "full"),
+            ("add", "eval", "lite"),
+            ("sort", "eval", "full"),
+        ]
+
+        # A client holds and releases one benchmark; a task that joins a held benchmark joins the scenario.
+        one = await client.put(f"{held}/extra", headers=AUTH, json={"split": "eval"})
+        assert one.status == 200, await one.text()
+        assert await one.json() == {
+            "owner": "acme",
+            "scenario": "math",
+            "benchmark": "extra",
+            "split": "eval",
+            "task_count": 1,
+            "synced": True,
         }
+        joined = {"ids": ["sort"], "patch": {"benchmarks": ["full", "extra"]}}
+        assert (await client.post(f"{base}/metadata", headers=AUTH, json=joined)).status == 200
+        tasks = (await (await client.get("/reef/scenarios/math/tasks", headers=AUTH)).json())["tasks"]
+        assert [(task["name"], task["benchmark"]) for task in tasks][-1] == ("sort", "extra")
+        released = await (await client.delete(f"{held}/extra", headers=AUTH)).json()
+        assert (released["released"], released["synced"]) == (True, True)
+        assert (await (await client.delete(f"{held}/extra", headers=AUTH)).json())["released"] is False
+        tasks = (await (await client.get("/reef/scenarios/math/tasks", headers=AUTH)).json())["tasks"]
+        assert {task["benchmark"] for task in tasks} == {"full", "lite"}
+        # This recipe trains no imported task, so its scenario holds a benchmark for evaluation only.
+        for body in ({"split": "train"}, {"split": "dev"}, {"split": "eval", "more": 1}, {}):
+            assert (await client.put(f"{held}/extra", headers=AUTH, json=body)).status == 400, body
         bad_split = {"scenario": "math", "split": "dev"}
         assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json=bad_split)).status == 400
         assert (await client.post(f"{stored}/coding/scenarios", headers=AUTH, json={"scenario": "math"})).status == 400

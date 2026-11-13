@@ -17,8 +17,11 @@ from reef.service.auth import add_signed_download, signed_download_url
 from reef.service.collections import (
     add_to_scenario,
     delete_collection,
+    hold_benchmark,
     list_collections,
+    list_held_benchmarks,
     read_collection,
+    release_benchmark,
     save_collection,
 )
 from reef.service.data import (
@@ -234,6 +237,18 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         )
         return web.json_response(receipt)
 
+    async def held_benchmarks(request: web.Request) -> web.Response:
+        owner, scenario = request.match_info["owner"], request.match_info["scenario"]
+        return web.json_response(await asyncio.to_thread(list_held_benchmarks, data, owner, scenario))
+
+    async def held_benchmark(request: web.Request) -> web.Response:
+        """Hold one benchmark in a split, or end its hold, by the method."""
+        names = (request.match_info["owner"], request.match_info["scenario"], request.match_info["benchmark"])
+        if request.method == "PUT":
+            body = await read_object(request)
+            return web.json_response(await asyncio.to_thread(hold_benchmark, data, *names, body))
+        return web.json_response(await asyncio.to_thread(release_benchmark, data, *names))
+
     base = "/reef/namespaces/{owner}/data"
     transfers = "{transfer:" + "|".join(TRANSFER_KINDS) + "}"
     app.router.add_post(base, create)
@@ -255,6 +270,10 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     for method in ("PUT", "GET", "DELETE"):
         app.router.add_route(method, stored + "/{name}", collection)
     app.router.add_post(stored + "/{name}/scenarios", collection_scenarios)
+    held = "/reef/namespaces/{owner}/scenarios/{scenario}/benchmarks"
+    app.router.add_get(held, held_benchmarks)
+    for method in ("PUT", "DELETE"):
+        app.router.add_route(method, held + "/{benchmark}", held_benchmark)
 
 
 __all__ = ["download_seconds", "register_data_routes"]

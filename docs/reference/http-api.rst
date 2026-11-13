@@ -99,7 +99,13 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/namespaces/{owner}/collections/{name}``                                                                | delete one collection                             |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/collections/{name}/scenarios``                                                        | add a collection's tasks to a scenario split      |
+| ``POST /reef/namespaces/{owner}/collections/{name}/scenarios``                                                        | make a scenario hold a collection's benchmarks    |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks``                                                      | the benchmarks that a scenario holds              |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``PUT /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{benchmark}``                                          | make a scenario hold a benchmark in a split       |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{benchmark}``                                       | end a scenario's hold of a benchmark              |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                                                                 | submit feedback about one or more trajectories    |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -574,8 +580,9 @@ for the deployment (RFC #1028). An item is content and metadata:
 
 Each item belongs to one owner. The routes have the owner in the path:
 ``/reef/namespaces/{owner}/data``. ``scenarios`` maps each scenario that uses
-the item to its split, ``train`` or ``eval``. A trajectory is always
-``train``. An artifact item has no ``scenarios``: a scenario uses it by
+the item by this mark to its split, ``train`` or ``eval``. A trajectory is always
+``train``. A scenario can also use a task through a benchmark that it holds,
+with no mark on the task (`A scenario's benchmarks`_). An artifact item has no ``scenarios``: a scenario uses it by
 importing it (`Artifact items`_).
 
 The data service answers the data routes. A one-process ``reef serve`` runs
@@ -908,9 +915,12 @@ An item that leaves a scenario keeps its train counts there, so ``auto`` does
 not train it again if it comes back.
 
 ``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
-[{"name", "split", "files_digest", "trained"}]}``: the tasks that the
-scenario uses, in the order they joined it. ``trained`` is true once a
-committed task job of any trainer of the scenario trained the task.
+[{"name", "split", "benchmark", "files_digest", "trained"}]}``: the uses of
+tasks by the scenario, in the order that they began. ``benchmark`` is the held
+benchmark that gives the use, or ``null`` for the task's own mark. A task
+that the scenario uses more than once is listed once for each use. ``trained``
+is true once a committed task job of any trainer of the scenario trained the
+task.
 
 Two GET routes come before the item routes, because an item ID can hold
 ``/``. A GET of ``.../data/<id>/archive`` downloads the item ``<id>``, and a
@@ -928,8 +938,8 @@ name. Set the list when you create the tasks, or with a metadata patch:
 ``metadata={"benchmarks": ["terminal-bench"]}``. It holds distinct non-empty
 strings, so a task can be in several benchmarks. Only a task has it.
 
-A collection is a stored list of benchmarks under one name. Use it to add
-several benchmarks to a scenario in one call, and to evaluate an artifact on
+A collection is a stored list of benchmarks under one name. Use it to make a
+scenario hold several benchmarks in one call, and to evaluate an artifact on
 them (`Evaluate an artifact`_).
 
 .. code:: bash
@@ -959,13 +969,55 @@ them (`Evaluate an artifact`_).
   collection and returns ``{"owner", "name", "deleted": true}``. No task
   changes. Reef returns 400 while another collection names it.
 - ``POST /reef/namespaces/{owner}/collections/{name}/scenarios`` takes
-  ``{"scenario", "split"}``. Reef adds each task that the collection has now
-  to that split of the scenario, with the checks of a metadata patch. A task
-  that joins a benchmark later does not join the scenario. The response is
-  ``{"owner", "name", "scenario", "split", "task_count", "synced"}``. A
-  collection without tasks returns 400.
+  ``{"scenario", "split"}``. The scenario then holds each benchmark that the
+  collection has now, in that split (`A scenario's benchmarks`_). A benchmark
+  that joins the collection later is not held. The response is ``{"owner",
+  "name", "scenario", "split", "benchmarks", "task_count", "synced"}``:
+  ``benchmarks`` lists the holds, and ``task_count`` counts a task of two
+  benchmarks once. A collection without a benchmark returns 400.
 
 An unknown collection returns 404.
+
+A scenario's benchmarks
+~~~~~~~~~~~~~~~~~~~~~~~
+
+A scenario holds benchmarks, each in one split (RFC #1420). It then uses the
+tasks of the benchmark in that split. A hold writes no task, so it takes the
+same time for a benchmark of ten tasks and of ten thousand.
+
+.. code:: bash
+
+   curl -f -X PUT http://127.0.0.1:8900/reef/namespaces/my-agent/scenarios/my-agent/benchmarks/terminal-bench \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"split": "eval"}'
+
+- ``PUT /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks/{benchmark}``
+  takes ``{"split"}``, ``train`` or ``eval``. A hold that exists gets the
+  split. The response is ``{"owner", "scenario", "benchmark", "split",
+  "task_count", "synced"}``. A ``train`` hold needs a recipe that trains
+  imported tasks, as a ``train`` mark does; else Reef returns 400.
+- ``DELETE`` of the same path ends the hold: ``{"owner", "scenario",
+  "benchmark", "released", "synced"}``. ``released`` is false when the scenario
+  did not hold the benchmark.
+- ``GET /reef/namespaces/{owner}/scenarios/{scenario}/benchmarks`` returns
+  ``{"owner", "scenario", "benchmarks"}``: each hold with its ``split`` and its
+  ``task_count``, in the order of the names.
+
+The membership is live. A task that joins a held benchmark, by a create or by
+a metadata patch, joins the scenario, and a task that leaves the benchmark
+leaves it.
+
+A scenario uses a task once for each held benchmark that the task is in, and
+once more when the task's own ``scenarios`` metadata names the scenario. Reef
+compares no task lists and refuses no overlap:
+
+- A task in two held ``train`` benchmarks has two uses. A trainer reads the
+  train uses as a set of tasks, so a job holds the task once, and the task has
+  one train count.
+- A task in a ``train`` benchmark and in an ``eval`` benchmark is trained, and
+  an evaluation runs it. Keep such a task out of one of the two benchmarks
+  when the evaluation must not see trained tasks.
 
 Download an item
 ~~~~~~~~~~~~~~~~
@@ -1087,13 +1139,15 @@ the sequence ``after`` (default 0):
 
    {"scenario": "my-agent", "next": null, "samples": [
      {"sample_id": "trajectory-0001", "sequence": 1, "kind": "trajectory", "split": "train",
-      "component": null, "group": null, "train_counts": {}},
+      "component": null, "group": null, "benchmark": null, "train_counts": {}},
      {"sample_id": "my-agent.report-17:0", "sequence": 2, "kind": "trajectory", "split": "train",
-      "component": "", "group": null, "train_counts": {"": 1}}]}
+      "component": "", "group": null, "benchmark": null, "train_counts": {"": 1}}]}
 
 ``component`` is the trainer that made the sample from records (``""`` for the
 only trainer of a scenario), or ``null`` for an upload or an imported task.
-Samples that share a ``group`` train together. ``train_counts`` holds, for each
+Samples that share a ``group`` train together. ``benchmark`` is the held
+benchmark that gives a task's use, or ``null``; a task that the scenario uses
+more than once has one entry for each use. ``train_counts`` holds, for each
 trainer, the number of committed jobs that trained the sample. ``next`` is the
 ``after`` of the next page, or ``null`` after the last one.
 

@@ -119,6 +119,17 @@ def new_use(kind: str, split: str) -> Use:
     return Use(kind == "trajectory", kind == "task" and split == "train")
 
 
+def using_scenarios(store: DataStore, owner: str, metadata: Iterable[Mapping[str, Any]]) -> set[str]:
+    """The scenarios that use an item with one of ``metadata``: those of its ``scenarios``, and those that hold one
+    of its ``benchmarks`` (RFC #1420). A write of such an item syncs them."""
+    values = list(metadata)
+    scenarios = {scenario for value in values for scenario in value.get("scenarios", {})}
+    benchmarks = sorted({benchmark for value in values for benchmark in value.get("benchmarks", ())})
+    if benchmarks:
+        scenarios.update(store.holding_scenarios(owner, benchmarks))
+    return scenarios
+
+
 def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait: bool = True) -> bool:
     """Ask control to sync each scenario in ``scenarios`` with the items of ``owner``; return whether every sync
     ended, within ``SYNC_WAIT_SECONDS`` when ``wait``, or at once otherwise."""
@@ -269,8 +280,9 @@ def replace_task_item(data: DataAccess, owner: str, item_id: str, archive: Path)
             HarborTaskLoader(directory)
         except (ValueError, OSError) as exc:
             raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
-        item = data.require_store().replace_task(owner, item_id, directory)
-    synced = sync_touched(data, owner, item.scenarios)
+        store = data.require_store()
+        item = store.replace_task(owner, item_id, directory)
+    synced = sync_touched(data, owner, using_scenarios(store, owner, [item.metadata]))
     return {"owner": owner, "item": item_json(item, content=False), "synced": synced}
 
 
@@ -299,10 +311,11 @@ def create_task_directories(
             raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
     new_uses = {scenario: [new_use("task", split) for _ in directories] for scenario, split in scenarios.items()}
     check_uses(data, owner, new_uses)
-    stored = data.require_store().create(
+    store = data.require_store()
+    stored = store.create(
         owner, [NewItem(directory.name, directory, {**metadata, "kind": "task"}) for directory in directories]
     )
-    synced = sync_touched(data, owner, scenarios, wait=wait)
+    synced = sync_touched(data, owner, using_scenarios(store, owner, [metadata]) | set(scenarios), wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
@@ -397,14 +410,17 @@ def update_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
     store = data.require_store()
     current = touched_items(store, owner, ids)
     uses: dict[str, list[Use]] = {}
-    touched: set[str] = set()
+    changed: list[Mapping[str, Any]] = []
     for item in current:
-        after = patched_metadata(item.metadata, patch)["scenarios"]
-        touched.update(item.scenarios, after)
+        patched = patched_metadata(item.metadata, patch)
+        after = patched["scenarios"]
+        changed += [item.metadata, patched]
         for scenario, split in after.items():
             if item.scenarios.get(scenario) != split:
                 uses.setdefault(scenario, []).append(new_use(item.kind, split))
     check_uses(data, owner, uses)
+    # The holds are read before the write: a task that leaves a benchmark leaves the scenarios that hold it.
+    touched = using_scenarios(store, owner, changed)
     updated = store.update(owner, ids, patch)
     synced = sync_touched(data, owner, touched)
     return {"owner": owner, "items": [item_json(item, content=False) for item in updated], "synced": synced}
@@ -424,8 +440,9 @@ def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
             raise ValueError(
                 f"artifact item {item_id!r} lists an artifact of scenario {made_by!r}, which still exists"
             )
+    touched = using_scenarios(store, owner, [item.metadata])
     store.delete(owner, item_id)
-    synced = sync_touched(data, owner, item.scenarios)
+    synced = sync_touched(data, owner, touched)
     return {"owner": owner, "id": item_id, "deleted": True, "synced": synced}
 
 

@@ -26,6 +26,7 @@ from abc import abstractmethod
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from itertools import batched
 from pathlib import Path
 from threading import Event, Lock, RLock
 from typing import Any, Self
@@ -53,6 +54,8 @@ from sqlalchemy import (
     exists,
     func,
     insert,
+    inspect,
+    literal,
     literal_column,
     select,
     update,
@@ -74,17 +77,20 @@ from reef.core.trajectory_index import call_key
 from reef.storage.data import (
     JOB_DIRECTORY_TTL_SECONDS,
     MAX_QUERY_LIMIT,
+    BenchmarkHold,
     DataStore,
     ItemConflictError,
     ItemGroup,
     ItemKind,
     ItemNotFoundError,
+    ItemUse,
     NewItem,
     RecordLink,
     ScenarioArchivedError,
     StoredItem,
     check_filters,
     check_groups,
+    check_hold,
     check_owner,
     check_query,
     generation_origin,
@@ -122,6 +128,13 @@ UNUSED_SEGMENT_SECONDS = 24 * 3600
 PRUNE_PAGE_SIZE = 256
 #: The most items that one transaction of a group commit writes.
 GROUP_COMMIT_ITEMS = 200
+#: The table of the uses of items by scenarios, and the table that kept the uses before a scenario held benchmarks
+#: (RFC #1420). A store that opens a database with the earlier table copies its rows and drops it.
+USES_TABLE = "data_item_use"
+EARLIER_USES_TABLE = "data_item_scenario"
+#: The name of the lock that serializes the writes of the holds of an owner and of the benchmarks of its items. No
+#: scenario has this name.
+HOLDS_LOCK = "\x00benchmark-holds"
 
 
 def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
@@ -135,16 +148,21 @@ def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
     return cast(items.c.metadata_json, JSONB).op("->>")(literal_column("'evaluation_id'"))
 
 
-def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table]:
-    """Define ``data_item``, ``data_item_scenario``, ``data_record_node``, ``data_segment``, ``data_job_directory``,
-    ``data_scenario``, ``data_record_loss`` and ``data_collection`` in ``metadata``. ``data_collection`` has one row
+def data_tables(
+    metadata: MetaData, *, sqlite: bool
+) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table]:
+    """Define ``data_item``, ``data_item_use``, ``data_record_node``, ``data_segment``, ``data_job_directory``,
+    ``data_scenario``, ``data_record_loss``, ``data_collection`` and ``data_scenario_benchmark`` in ``metadata``.
+    ``data_scenario_benchmark`` has one row per hold of a benchmark by a scenario of an owner, with its split
+    (``DataStore.hold_benchmark``). ``data_collection`` has one row
     per ``TaskCollection`` of an owner, with its JSON. ``data_scenario`` has the current generation of each
     scenario of an owner (``DataStore.scenario_generation``). ``data_record_loss`` has the ``RecordLoss`` of each
     origin scenario of an owner whose record items ``prune_records`` deleted. ``data_job_directory`` has the key of each job data directory and the time that a job last used it.
 
-    ``sequence`` orders the items as they arrived. ``data_item_scenario`` has one row per use of an item by a
-    scenario, with its split; its own ``sequence`` orders the uses as they began, and a use whose split changes is a
-    new row (``DataStore.scenario_items``). ``content_json`` is the canonical JSON of a trajectory's or a
+    ``sequence`` orders the items as they arrived. ``data_item_use`` has one row per use of an item by a
+    scenario, with its split and its benchmark: the held benchmark that gives the use, or "" for the use of the
+    item's own ``scenarios`` metadata. Its own ``sequence`` orders the uses as they began, and a use whose split
+    changes is a new row (``DataStore.scenario_items``). ``content_json`` is the canonical JSON of a trajectory's or a
     record's content, and NULL for a task. ``message_field`` names the message list of a record payload that the
     item's trajectory node keeps (``call_shape``); the content then holds an empty payload. It is NULL for an
     item without one. ``request_type`` is a record's request type, from its content, and NULL for another kind.
@@ -183,8 +201,8 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         # SQLite reuses the largest rowid after a delete without it; other dialects ignore the option.
         sqlite_autoincrement=sqlite,
     )
-    scenarios = Table(
-        "data_item_scenario",
+    uses = Table(
+        USES_TABLE,
         metadata,
         (
             Column("sequence", Integer, primary_key=True)
@@ -194,10 +212,21 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("owner", Text, nullable=False),
         Column("item_id", Text, nullable=False),
         Column("scenario", Text, nullable=False),
+        Column("benchmark", Text, nullable=False),
         Column("split", String(8), nullable=False),
-        UniqueConstraint("owner", "item_id", "scenario"),
-        Index("data_item_scenario_by_scenario", "owner", "scenario", "sequence"),
+        UniqueConstraint("owner", "item_id", "scenario", "benchmark"),
+        Index("data_item_use_by_scenario", "owner", "scenario", "sequence"),
         sqlite_autoincrement=sqlite,
+    )
+    holds = Table(
+        "data_scenario_benchmark",
+        metadata,
+        Column("owner", Text, nullable=False),
+        Column("scenario", Text, nullable=False),
+        Column("benchmark", Text, nullable=False),
+        Column("split", String(8), nullable=False),
+        PrimaryKeyConstraint("owner", "scenario", "benchmark"),
+        Index("data_scenario_benchmark_by_benchmark", "owner", "benchmark"),
     )
     nodes = trajectory_node_table(metadata, "data_record_node", Column("owner", Text, primary_key=True), segments=True)
     segments = Table(
@@ -251,7 +280,7 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("collection_json", Text, nullable=False),
         PrimaryKeyConstraint("owner", "name"),
     )
-    return items, scenarios, nodes, segments, job_directories, generations, losses, collections
+    return items, uses, nodes, segments, job_directories, generations, losses, collections, holds
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -301,7 +330,7 @@ class SQLDataStore(DataStore):
 
     def __init__(
         self,
-        tables: tuple[Table, Table, Table, Table, Table, Table, Table, Table],
+        tables: tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table],
         task_files: TaskFileStore,
         segments: SegmentStore | None,
         job_directories: SegmentStore | None = None,
@@ -309,13 +338,14 @@ class SQLDataStore(DataStore):
     ) -> None:
         (
             self.items_table,
-            self.scenarios_table,
+            self.uses_table,
             self.nodes_table,
             self.segment_table,
             self.job_directory_table,
             self.generations_table,
             self.losses_table,
             self.collections_table,
+            self.holds_table,
         ) = tables
         self.task_files = task_files
         self.segments = segments
@@ -514,22 +544,81 @@ class SQLDataStore(DataStore):
             statement = statement.order_by(self.items_table.c.item_id).with_for_update()
         return {row["item_id"]: row for row in connection.execute(statement).mappings()}
 
-    def write_scenarios(self, connection: Connection, owner: str, scenarios: Mapping[str, Mapping[str, str]]) -> None:
-        """Make the uses of each item ID in ``scenarios`` match its scenarios: an unchanged use keeps its row and
-        sequence, and a new use or a new split gets a new row. At most three statements read and write the uses."""
-        uses = self.scenarios_table
-        current: dict[str, dict[str, str]] = {item_id: {} for item_id in scenarios}
+    def adopt_earlier_uses(self, connection: Connection) -> None:
+        """Move the rows of ``EARLIER_USES_TABLE`` into the uses table, in their order, and drop the earlier table.
+        A store calls it when it made its tables. It does nothing for a database without the earlier table.
+
+        The earlier table had one use for each item and scenario, of the item's own ``scenarios`` metadata. The
+        sequences are new, and their order is the earlier one, so a trainer reads its samples in the same order.
+        """
+        uses = self.uses_table
+        if not inspect(connection).has_table(EARLIER_USES_TABLE, schema=uses.schema):
+            return
+        earlier = Table(
+            EARLIER_USES_TABLE,
+            MetaData(schema=uses.schema),
+            Column("sequence", BigInteger),
+            Column("owner", Text),
+            Column("item_id", Text),
+            Column("scenario", Text),
+            Column("split", String(8)),
+        )
+        rows = select(earlier.c.owner, earlier.c.item_id, earlier.c.scenario, literal(""), earlier.c.split)
+        connection.execute(
+            insert(uses).from_select(
+                ["owner", "item_id", "scenario", "benchmark", "split"], rows.order_by(earlier.c.sequence)
+            )
+        )
+        earlier.drop(connection)
+
+    def holds_of(self, connection: Connection, owner: str, benchmarks: Iterable[str]) -> dict[str, dict[str, str]]:
+        """The holds of each benchmark of ``benchmarks`` by the scenarios of ``owner``: benchmark, scenario, split."""
+        names = sorted(set(benchmarks))
+        found: dict[str, dict[str, str]] = {}
+        if not names:
+            return found
+        holds = self.holds_table
         for row in connection.execute(
-            select(uses.c.item_id, uses.c.scenario, uses.c.split).where(
-                uses.c.owner == owner, uses.c.item_id.in_(list(scenarios))
+            select(holds.c.benchmark, holds.c.scenario, holds.c.split).where(
+                holds.c.owner == owner, holds.c.benchmark.in_(names)
             )
         ):
-            current[row.item_id][row.scenario] = row.split
+            found.setdefault(row.benchmark, {})[row.scenario] = row.split
+        return found
+
+    def write_uses(
+        self,
+        connection: Connection,
+        owner: str,
+        metadata: Mapping[str, Mapping[str, Any]],
+        holds: Mapping[str, Mapping[str, str]] | None,
+    ) -> None:
+        """Make the uses of each item ID in ``metadata`` those that its metadata gives: one for each scenario of its
+        ``scenarios``, and one for each hold in ``holds`` (``holds_of``) of a benchmark of its ``benchmarks``. With
+        None for ``holds``, the write leaves the uses that holds give: the caller did not change the benchmarks of
+        the items, and does not hold ``HOLDS_LOCK``. An unchanged use keeps its row and sequence, and a new use or a
+        new split gets a new row. At most three statements read and write the uses."""
+        uses = self.uses_table
+        wanted: dict[str, dict[tuple[str, str], str]] = {}
+        for item_id, value in metadata.items():
+            wanted[item_id] = {(scenario, ""): split for scenario, split in value["scenarios"].items()}
+            if holds is not None:
+                for benchmark in value.get("benchmarks", ()):
+                    for scenario, split in holds.get(benchmark, {}).items():
+                        wanted[item_id][(scenario, benchmark)] = split
+        current: dict[str, dict[tuple[str, str], str]] = {item_id: {} for item_id in metadata}
+        own = () if holds is not None else (uses.c.benchmark == "",)
+        for row in connection.execute(
+            select(uses.c.item_id, uses.c.scenario, uses.c.benchmark, uses.c.split).where(
+                uses.c.owner == owner, uses.c.item_id.in_(list(metadata)), *own
+            )
+        ):
+            current[row.item_id][(row.scenario, row.benchmark)] = row.split
         ended = [
-            {"row_item_id": item_id, "row_scenario": scenario}
-            for item_id, wanted in scenarios.items()
-            for scenario, split in current[item_id].items()
-            if wanted.get(scenario) != split
+            {"row_item_id": item_id, "row_scenario": scenario, "row_benchmark": benchmark}
+            for item_id, kept in wanted.items()
+            for (scenario, benchmark), split in current[item_id].items()
+            if kept.get((scenario, benchmark)) != split
         ]
         if ended:
             connection.execute(
@@ -537,17 +626,38 @@ class SQLDataStore(DataStore):
                     uses.c.owner == owner,
                     uses.c.item_id == bindparam("row_item_id"),
                     uses.c.scenario == bindparam("row_scenario"),
+                    uses.c.benchmark == bindparam("row_benchmark"),
                 ),
                 ended,
             )
         begun = [
-            {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
-            for item_id, wanted in scenarios.items()
-            for scenario, split in wanted.items()
-            if current[item_id].get(scenario) != split
+            {"owner": owner, "item_id": item_id, "scenario": scenario, "benchmark": benchmark, "split": split}
+            for item_id, kept in wanted.items()
+            for (scenario, benchmark), split in kept.items()
+            if current[item_id].get((scenario, benchmark)) != split
         ]
         if begun:
             connection.execute(insert(uses), begun)
+
+    def lock_uses(
+        self, connection: Connection, owner: str, metadata: Iterable[Mapping[str, Any]]
+    ) -> dict[str, dict[str, str]]:
+        """Take the locks of a write of items with ``metadata``, and return the holds of their benchmarks
+        (``holds_of``).
+
+        A write of an item with benchmarks takes ``HOLDS_LOCK`` first, so that no hold of one of them begins or ends
+        until the write commits. It then locks, in one call, the scenarios of the items (``scenarios_of``) and the
+        scenarios that hold their benchmarks: each gets a use, and a use gets its sequence under the scenario's lock.
+        """
+        values = list(metadata)
+        benchmarks = {benchmark for value in values for benchmark in value.get("benchmarks", ())}
+        holds: dict[str, dict[str, str]] = {}
+        if benchmarks:
+            self.lock_scenarios(connection, owner, [HOLDS_LOCK])
+            holds = self.holds_of(connection, owner, benchmarks)
+        holding = {scenario for scenarios in holds.values() for scenario in scenarios}
+        self.lock_scenarios(connection, owner, scenarios_of(values) | holding)
+        return holds
 
     def create(self, owner: str, items: Sequence[NewItem], *, generation: str | None = None) -> tuple[StoredItem, ...]:
         prepared = prepared_items(owner, items, self.task_files)
@@ -676,7 +786,7 @@ class SQLDataStore(DataStore):
             for item_id, call in pending.calls.items():
                 calls.setdefault(item_id, call)
         with self.transaction() as connection:
-            self.lock_scenarios(connection, owner, scenarios_of(metadata for _, metadata, _ in prepared))
+            holds = self.lock_uses(connection, owner, [metadata for _, metadata, _ in prepared])
             # The archive ends a generation under the same lock, so no write of an ended generation commits.
             checked = {pending.generation for pending in batch if pending.generation is not None}
             current = {origin: self.current_generation(connection, owner, origin) for origin, _ in checked}
@@ -685,13 +795,7 @@ class SQLDataStore(DataStore):
                     raise ScenarioArchivedError(f"generation {generation!r} of {origin!r} is no longer current")
             sequences = self.write_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
-            uses = [
-                {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
-                for item_id in sequences
-                for scenario, split in metadata_of[item_id]["scenarios"].items()
-            ]
-            if uses:
-                connection.execute(self.scenarios_table.insert().values(uses))
+            self.write_uses(connection, owner, {item_id: metadata_of[item_id] for item_id in sequences}, holds)
             self.trajectory_nodes(owner).append_many(
                 connection,
                 [
@@ -879,7 +983,7 @@ class SQLDataStore(DataStore):
         """The condition that ``scenario`` uses the item of the row of ``items``, or none without a scenario."""
         if scenario is None:
             return ()
-        uses = self.scenarios_table
+        uses = self.uses_table
         return (exists().where(uses.c.owner == owner, uses.c.item_id == items.c.item_id, uses.c.scenario == scenario),)
 
     def scenario_items(
@@ -892,11 +996,16 @@ class SQLDataStore(DataStore):
         limit: int = MAX_QUERY_LIMIT,
         content: bool = True,
         excluding_origin: str | None = None,
-    ) -> tuple[tuple[int, StoredItem], ...]:
+    ) -> tuple[ItemUse, ...]:
         check_query(owner, None, scenario, after, limit)
-        items, uses = self.items_table, self.scenarios_table
+        items, uses = self.items_table, self.uses_table
         statement = (
-            select(items, uses.c.sequence.label("use_sequence"))
+            select(
+                items,
+                uses.c.sequence.label("use_sequence"),
+                uses.c.split.label("use_split"),
+                uses.c.benchmark.label("use_benchmark"),
+            )
             .join(uses, (uses.c.owner == items.c.owner) & (uses.c.item_id == items.c.item_id))
             .where(
                 uses.c.owner == owner, uses.c.scenario == scenario, uses.c.sequence > after, items.c.kind.in_(kinds)
@@ -909,11 +1018,112 @@ class SQLDataStore(DataStore):
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement).mappings().all()
             stored = self.stored_items(connection, owner, found, content=content)
-        return tuple((int(row["use_sequence"]), item) for row, item in zip(found, stored, strict=True))
+        return tuple(
+            ItemUse(int(row["use_sequence"]), item, row["use_split"], row["use_benchmark"] or None)
+            for row, item in zip(found, stored, strict=True)
+        )
+
+    def item_splits(self, owner: str, scenario: str, item_ids: Sequence[str]) -> dict[str, frozenset[str]]:
+        check_owner(owner)
+        uses = self.uses_table
+        found: dict[str, set[str]] = {}
+        with self.transaction(read_only=True) as connection:
+            for batch in batched(dict.fromkeys(item_ids), MAX_QUERY_LIMIT):
+                statement = select(uses.c.item_id, uses.c.split).where(
+                    uses.c.owner == owner, uses.c.scenario == scenario, uses.c.item_id.in_(batch)
+                )
+                for row in connection.execute(statement):
+                    found.setdefault(row.item_id, set()).add(row.split)
+        return {item_id: frozenset(splits) for item_id, splits in found.items()}
+
+    def benchmark_count(self, connection: Connection, owner: str, benchmark: str) -> int:
+        """The number of task items of ``owner`` whose ``benchmarks`` has ``benchmark``."""
+        items = self.items_table
+        statement = select(func.count()).where(
+            items.c.owner == owner, items.c.kind == "task", self.in_benchmark(benchmark)
+        )
+        return int(connection.execute(statement).scalar_one())
+
+    def hold_benchmark(self, owner: str, scenario: str, benchmark: str, split: str) -> BenchmarkHold:
+        check_hold(owner, scenario, benchmark, split)
+        items, uses, holds = self.items_table, self.uses_table, self.holds_table
+        with self.transaction() as connection:
+            # No item joins or leaves the benchmark until this commits, and each new use gets its sequence under the
+            # scenario's lock (RFC #1219).
+            self.lock_scenarios(connection, owner, [HOLDS_LOCK])
+            self.lock_scenarios(connection, owner, [scenario])
+            where = (holds.c.owner == owner, holds.c.scenario == scenario, holds.c.benchmark == benchmark)
+            held = connection.execute(select(holds.c.split).where(*where)).scalar_one_or_none()
+            if held != split:
+                if held is None:
+                    connection.execute(
+                        insert(holds).values(owner=owner, scenario=scenario, benchmark=benchmark, split=split)
+                    )
+                else:
+                    connection.execute(update(holds).where(*where).values(split=split))
+                    connection.execute(
+                        delete(uses).where(
+                            uses.c.owner == owner, uses.c.scenario == scenario, uses.c.benchmark == benchmark
+                        )
+                    )
+                # One statement writes the use of each member, in the order of the items.
+                members = (
+                    select(
+                        literal(owner),
+                        items.c.item_id,
+                        literal(scenario),
+                        literal(benchmark),
+                        literal(split),
+                    )
+                    .where(items.c.owner == owner, items.c.kind == "task", self.in_benchmark(benchmark))
+                    .order_by(items.c.sequence)
+                )
+                connection.execute(
+                    insert(uses).from_select(["owner", "item_id", "scenario", "benchmark", "split"], members)
+                )
+            return BenchmarkHold(scenario, benchmark, split, self.benchmark_count(connection, owner, benchmark))
+
+    def release_benchmark(self, owner: str, scenario: str, benchmark: str) -> bool:
+        check_hold(owner, scenario, benchmark)
+        uses, holds = self.uses_table, self.holds_table
+        with self.transaction() as connection:
+            self.lock_scenarios(connection, owner, [HOLDS_LOCK])
+            self.lock_scenarios(connection, owner, [scenario])
+            ended = connection.execute(
+                delete(holds).where(
+                    holds.c.owner == owner, holds.c.scenario == scenario, holds.c.benchmark == benchmark
+                )
+            ).rowcount
+            connection.execute(
+                delete(uses).where(uses.c.owner == owner, uses.c.scenario == scenario, uses.c.benchmark == benchmark)
+            )
+            return ended > 0
+
+    def held_benchmarks(self, owner: str, scenario: str) -> tuple[BenchmarkHold, ...]:
+        check_owner(owner)
+        holds = self.holds_table
+        statement = (
+            select(holds.c.benchmark, holds.c.split)
+            .where(holds.c.owner == owner, holds.c.scenario == scenario)
+            .order_by(holds.c.benchmark)
+        )
+        with self.transaction(read_only=True) as connection:
+            return tuple(
+                BenchmarkHold(
+                    scenario, row.benchmark, row.split, self.benchmark_count(connection, owner, row.benchmark)
+                )
+                for row in connection.execute(statement).all()
+            )
+
+    def holding_scenarios(self, owner: str, benchmarks: Sequence[str]) -> tuple[str, ...]:
+        check_owner(owner)
+        with self.transaction(read_only=True) as connection:
+            holds = self.holds_of(connection, owner, benchmarks)
+        return tuple(sorted({scenario for scenarios in holds.values() for scenario in scenarios}))
 
     def scenarios_with_records(self, owner: str) -> tuple[str, ...]:
         check_owner(owner)
-        items, uses = self.items_table, self.scenarios_table
+        items, uses = self.items_table, self.uses_table
         statement = (
             select(uses.c.scenario)
             .join(items, (uses.c.owner == items.c.owner) & (uses.c.item_id == items.c.item_id))
@@ -926,7 +1136,7 @@ class SQLDataStore(DataStore):
 
     def last_use_sequence(self, owner: str, scenario: str) -> int:
         check_owner(owner)
-        uses = self.scenarios_table
+        uses = self.uses_table
         statement = select(func.max(uses.c.sequence)).where(uses.c.owner == owner, uses.c.scenario == scenario)
         with self.transaction(read_only=True) as connection:
             return int(connection.execute(statement).scalar() or 0)
@@ -937,7 +1147,21 @@ class SQLDataStore(DataStore):
         with self.transaction() as connection:
             # A new use gets its sequence here, so that a reader's cursor of use sequences misses none (RFC #1219).
             scenarios = patch.get("scenarios") if isinstance(patch, Mapping) else None
-            self.lock_scenarios(connection, owner, scenarios if isinstance(scenarios, Mapping) else ())
+            marked = set(scenarios) if isinstance(scenarios, Mapping) else set()
+            holds: dict[str, dict[str, str]] | None = None
+            if isinstance(patch, Mapping) and "benchmarks" in patch:
+                # The uses that the holds give change with the benchmarks. Under ``HOLDS_LOCK`` no other write
+                # changes a benchmark of these items or a hold, so the unlocked read below names the scenarios to
+                # lock, and one call locks them all.
+                self.lock_scenarios(connection, owner, [HOLDS_LOCK])
+                before = self.rows(connection, owner, unique_ids)
+                named = patch["benchmarks"] if isinstance(patch["benchmarks"], list) else []
+                benchmarks = {name for name in named if isinstance(name, str)}
+                for row in before.values():
+                    benchmarks.update(json.loads(row["metadata_json"]).get("benchmarks", ()))
+                holds = self.holds_of(connection, owner, benchmarks)
+                marked.update(scenario for held in holds.values() for scenario in held)
+            self.lock_scenarios(connection, owner, marked)
             # A patch merges into the whole metadata, so a concurrent patch must read after this one commits.
             existing = self.rows(connection, owner, unique_ids, lock=True)
             missing = [item_id for item_id in unique_ids if item_id not in existing]
@@ -957,9 +1181,7 @@ class SQLDataStore(DataStore):
                     for item_id, metadata in patched.items()
                 ],
             )
-            self.write_scenarios(
-                connection, owner, {item_id: metadata["scenarios"] for item_id, metadata in patched.items()}
-            )
+            self.write_uses(connection, owner, patched, holds)
             return tuple(
                 StoredItem(existing[item_id]["sequence"], owner, item_id, metadata, existing[item_id]["digest"])
                 for item_id, metadata in patched.items()
@@ -1039,7 +1261,7 @@ class SQLDataStore(DataStore):
     def evict_records(self, owner: str, rows: Sequence[tuple[RowMapping, int]]) -> int:
         """Delete the record items of ``owner`` in ``rows``, each with the bytes that deleting it frees, and add them
         to the losses of their origins. Return the number that it deleted: another writer can delete one first."""
-        items, uses, losses = self.items_table, self.scenarios_table, self.losses_table
+        items, uses, losses = self.items_table, self.uses_table, self.losses_table
         metadata = {row["item_id"]: json.loads(row["metadata_json"]) for row, _ in rows}
         with self.transaction() as connection:
             self.lock_scenarios(connection, owner, scenarios_of(metadata.values()))
@@ -1113,25 +1335,33 @@ class SQLDataStore(DataStore):
 
     def delete_scenario(self, owner: str, scenario: str) -> int:
         check_owner(owner)
-        items, uses = self.items_table, self.scenarios_table
+        items, uses = self.items_table, self.uses_table
         with self.transaction() as connection:
+            # No write of an item's benchmarks gives the scenario a use while its holds end.
+            self.lock_scenarios(connection, owner, [HOLDS_LOCK])
             self.lock_scenarios(connection, owner, [scenario])
             generations = self.generations_table
             connection.execute(
                 delete(generations).where(generations.c.owner == owner, generations.c.scenario == scenario)
             )
+            holds = self.holds_table
+            connection.execute(delete(holds).where(holds.c.owner == owner, holds.c.scenario == scenario))
             # The rows stay locked, so that a concurrent patch of another scenario reads after this one commits.
             rows = connection.execute(
                 select(items.c.item_id, items.c.metadata_json)
                 .where(
                     items.c.owner == owner,
                     exists().where(
-                        uses.c.owner == owner, uses.c.item_id == items.c.item_id, uses.c.scenario == scenario
+                        uses.c.owner == owner,
+                        uses.c.item_id == items.c.item_id,
+                        uses.c.scenario == scenario,
+                        uses.c.benchmark == "",
                     ),
                 )
                 .order_by(items.c.item_id)
                 .with_for_update(of=items)
             ).all()
+            connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.scenario == scenario))
             if not rows:
                 return 0
             values = []
@@ -1145,7 +1375,6 @@ class SQLDataStore(DataStore):
                 .values(metadata_json=bindparam("metadata_json")),
                 values,
             )
-            connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.scenario == scenario))
             return len(rows)
 
     def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem:
@@ -1155,23 +1384,32 @@ class SQLDataStore(DataStore):
             if row is None:
                 raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
             metadata = json.loads(row["metadata_json"])
-            # The lock orders this write with the other writes of the item's scenarios, as an update does.
-            self.lock_scenarios(connection, owner, scenarios_of([metadata]))
+            # The locks order this write with the other writes of the item's scenarios, as an update does.
+            self.lock_uses(connection, owner, [metadata])
             row = self.rows(connection, owner, [item_id], lock=True)[item_id]
             stored = StoredItem(row["sequence"], owner, item_id, metadata, row["digest"])
             digest = replaced_task_digest(owner, stored, directory, self.task_files)
             if digest == stored.digest:
                 return stored
-            items, uses = self.items_table, self.scenarios_table
+            items, uses = self.items_table, self.uses_table
             connection.execute(
                 update(items).where(items.c.owner == owner, items.c.item_id == item_id).values(digest=digest)
             )
             # Each use begins again with a new sequence, so that a trainer that pages by use sequence reads the task.
-            connection.execute(delete(uses).where(uses.c.owner == owner, uses.c.item_id == item_id))
+            where = (uses.c.owner == owner, uses.c.item_id == item_id)
             begun = [
-                {"owner": owner, "item_id": item_id, "scenario": scenario, "split": split}
-                for scenario, split in metadata["scenarios"].items()
+                {
+                    "owner": owner,
+                    "item_id": item_id,
+                    "scenario": use.scenario,
+                    "benchmark": use.benchmark,
+                    "split": use.split,
+                }
+                for use in connection.execute(
+                    select(uses.c.scenario, uses.c.benchmark, uses.c.split).where(*where).order_by(uses.c.sequence)
+                )
             ]
+            connection.execute(delete(uses).where(*where))
             if begun:
                 connection.execute(insert(uses), begun)
             return replace(stored, digest=digest)
@@ -1182,11 +1420,9 @@ class SQLDataStore(DataStore):
             row = self.rows(connection, owner, [item_id]).get(item_id)
             if row is None:
                 return False
-            self.lock_scenarios(connection, owner, scenarios_of([json.loads(row["metadata_json"])]))
+            self.lock_uses(connection, owner, [json.loads(row["metadata_json"])])
             connection.execute(
-                delete(self.scenarios_table).where(
-                    self.scenarios_table.c.owner == owner, self.scenarios_table.c.item_id == item_id
-                )
+                delete(self.uses_table).where(self.uses_table.c.owner == owner, self.uses_table.c.item_id == item_id)
             )
             connection.execute(
                 delete(self.items_table).where(
@@ -1480,6 +1716,7 @@ class SQLiteDataStore(SQLDataStore):
             # Serialize the table creation of concurrent openers.
             self.connection.exec_driver_sql("BEGIN IMMEDIATE")
             metadata.create_all(self.connection)
+            self.adopt_earlier_uses(self.connection)
 
     @classmethod
     def from_config(
@@ -1581,6 +1818,7 @@ class PostgresDataStore(SQLDataStore):
             connection.execute(select(func.pg_advisory_xact_lock(key)))
             connection.execute(CreateSchema(schema, if_not_exists=True))
             metadata.create_all(connection)
+            self.adopt_earlier_uses(connection)
 
     @classmethod
     def from_config(

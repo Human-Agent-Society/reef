@@ -25,6 +25,7 @@ from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.data import (
+    BenchmarkHold,
     ItemConflictError,
     ItemNotFoundError,
     MemoryDataStore,
@@ -224,13 +225,16 @@ def test_a_scenario_reads_its_items_in_the_order_that_their_uses_began(store, tm
     def used(after=0):
         return [
             (item.item_id, sequence)
-            for sequence, item in store.scenario_items("acme", "coding", kinds=("trajectory", "task"), after=after)
+            for sequence, item in (
+                (use.sequence, use.item)
+                for use in store.scenario_items("acme", "coding", kinds=("trajectory", "task"), after=after)
+            )
         ]
 
     first = used()
     assert [item_id for item_id, _ in first] == ["t1", "t3"]
     assert store.scenario_items("acme", "coding", kinds=("task",)) == ()
-    assert store.scenario_items("acme", "coding", kinds=("trajectory",))[0][1].content == ATIF
+    assert store.scenario_items("acme", "coding", kinds=("trajectory",))[0].item.content == ATIF
     # An older item that joins later is read after the others; a metadata change keeps a use's sequence.
     store.update("acme", ["t2"], {"scenarios": {"coding": "train"}})
     store.update("acme", ["t1"], {"label": "week 43"})
@@ -285,7 +289,7 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
         (directory / "instruction.md").write_text(text)
     (item,) = store.create("acme", [NewItem("fix-bug", first, {"kind": "task", "scenarios": {"coding": "train"}})])
     old_path = store.task_path(store.read("acme", "fix-bug"))
-    ((used_before, _),) = store.scenario_items("acme", "coding", kinds=("task",))
+    used_before = store.scenario_items("acme", "coding", kinds=("task",))[0].sequence
 
     replaced = store.replace_task("acme", "fix-bug", second)
     assert (replaced.sequence, replaced.metadata, replaced.digest) == (
@@ -297,12 +301,12 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
     # A reader that opened the old files can go on, and a trainer reads the task again after its cursor.
     assert (old_path / "instruction.md").read_text() == "Fix the bug.\n"
     assert [
-        found.item_id for _, found in store.scenario_items("acme", "coding", kinds=("task",), after=used_before)
+        use.item.item_id for use in store.scenario_items("acme", "coding", kinds=("task",), after=used_before)
     ] == ["fix-bug"]
     # The same files again change nothing, not even the use.
-    ((used_after, _),) = store.scenario_items("acme", "coding", kinds=("task",))
+    (used_after,) = [use.sequence for use in store.scenario_items("acme", "coding", kinds=("task",))]
     assert store.replace_task("acme", "fix-bug", second) == replaced
-    assert store.scenario_items("acme", "coding", kinds=("task",))[0][0] == used_after
+    assert store.scenario_items("acme", "coding", kinds=("task",))[0].sequence == used_after
 
     with pytest.raises(ItemNotFoundError):
         store.replace_task("acme", "missing", second)
@@ -993,7 +997,7 @@ def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_da
     assert [item.item_id for item in found] == ids
     assert all(item.scenarios == {} for item in found)
     assert [item.item_id for item in store.query("acme", scenario="coding")] == ["coding/call-1", "coding/call-2"]
-    assert [item.item_id for _, item in store.scenario_items("acme", "coding", kinds=("record",))] == [
+    assert [use.item.item_id for use in store.scenario_items("acme", "coding", kinds=("record",))] == [
         "coding/call-1",
         "coding/call-2",
     ]
@@ -1099,3 +1103,124 @@ def test_the_metadata_of_an_evaluation_call_is_checked(store, change, message):
         store.create("acme", [NewItem(plain.item_id, plain.content, {**plain.metadata, "evaluation_id": "e1"})])
     explicit = {**plain.metadata, "origin": {**plain.metadata["origin"], "source": "inference"}}
     assert store.create("acme", [NewItem(plain.item_id, plain.content, explicit)])[0].inserted
+
+
+def benchmark_task(tmp_path, name: str, *benchmarks: str, **metadata) -> NewItem:
+    """The task item ``name`` in ``benchmarks``, with a directory of one file."""
+    directory = tmp_path / "tasks" / name
+    directory.mkdir(parents=True)
+    (directory / "instruction.md").write_text(f"Do {name}.\n")
+    return NewItem(name, directory, {"kind": "task", "benchmarks": list(benchmarks), **metadata})
+
+
+def uses_of(store, scenario: str, after: int = 0) -> list[tuple[str, str, str | None]]:
+    """Each use by ``scenario`` of a task of acme after ``after``, in use order: item, split, benchmark."""
+    uses = store.scenario_items("acme", scenario, kinds=("task",), after=after, content=False)
+    assert [use.sequence for use in uses] == sorted({use.sequence for use in uses}), "each use has its own sequence"
+    return [(use.item.item_id, use.split, use.benchmark) for use in uses]
+
+
+def test_a_scenario_that_holds_a_benchmark_uses_its_tasks_without_a_write_to_them(store, tmp_path):
+    store.create("acme", [benchmark_task(tmp_path, "add", "math"), benchmark_task(tmp_path, "sub", "math", "old")])
+    store.create("acme", [benchmark_task(tmp_path, "sort", "lists")])
+    before = {item.item_id: item.metadata for item in store.query("acme", kind="task")}
+
+    assert store.hold_benchmark("acme", "coding", "math", "train") == BenchmarkHold("coding", "math", "train", 2)
+
+    assert uses_of(store, "coding") == [("add", "train", "math"), ("sub", "train", "math")]
+    assert {item.item_id: item.metadata for item in store.query("acme", kind="task")} == before
+    assert [item.item_id for item in store.query("acme", scenario="coding")] == ["add", "sub"]
+    assert store.item_splits("acme", "coding", ["add", "sort", "none"]) == {"add": frozenset({"train"})}
+    assert store.held_benchmarks("acme", "coding") == (BenchmarkHold("coding", "math", "train", 2),)
+    assert store.held_benchmarks("acme", "other") == () and uses_of(store, "other") == []
+    assert store.holding_scenarios("acme", ["math", "lists"]) == ("coding",)
+    # The same hold again changes nothing, and another owner's scenario holds nothing of acme.
+    last = store.last_use_sequence("acme", "coding")
+    store.hold_benchmark("acme", "coding", "math", "train")
+    assert store.last_use_sequence("acme", "coding") == last
+    assert store.hold_benchmark("other", "coding", "math", "train").task_count == 0
+    for arguments in (("coding", "", "train"), ("", "math", "train"), ("coding", "math", "test")):
+        with pytest.raises(ValueError, match="a hold's"):
+            store.hold_benchmark("acme", *arguments)
+
+
+def test_a_task_has_one_use_for_its_own_mark_and_one_for_each_held_benchmark_of_it(store, tmp_path):
+    store.create("acme", [benchmark_task(tmp_path, "add", "math", "easy", scenarios={"coding": "eval"})])
+    store.hold_benchmark("acme", "coding", "math", "train")
+    store.hold_benchmark("acme", "coding", "easy", "train")
+    # A task in two held benchmarks is there twice, and it can train and be evaluated at the same time.
+    assert uses_of(store, "coding") == [("add", "eval", None), ("add", "train", "math"), ("add", "train", "easy")]
+    assert store.item_splits("acme", "coding", ["add"]) == {"add": frozenset({"train", "eval"})}
+    assert [item.item_id for item in store.query("acme", scenario="coding")] == ["add"]
+
+    # A hold that changes its split begins its uses again, after the others.
+    last = store.last_use_sequence("acme", "coding")
+    assert store.hold_benchmark("acme", "coding", "easy", "eval").split == "eval"
+    assert uses_of(store, "coding", after=last) == [("add", "eval", "easy")]
+
+    assert store.release_benchmark("acme", "coding", "math") and not store.release_benchmark("acme", "coding", "math")
+    assert uses_of(store, "coding") == [("add", "eval", None), ("add", "eval", "easy")]
+    # The end of a scenario ends its holds, so a new scenario of that name uses nothing.
+    assert store.delete_scenario("acme", "coding") == 1
+    assert uses_of(store, "coding") == [] and store.held_benchmarks("acme", "coding") == ()
+    assert store.holding_scenarios("acme", ["easy"]) == ()
+
+
+def test_a_task_that_joins_or_leaves_a_held_benchmark_joins_or_leaves_the_scenario(store, tmp_path):
+    store.create("acme", [benchmark_task(tmp_path, "add", "math"), benchmark_task(tmp_path, "sort")])
+    store.hold_benchmark("acme", "coding", "math", "train")
+    store.hold_benchmark("acme", "review", "math", "eval")
+    last = store.last_use_sequence("acme", "coding")
+
+    # A patch of the benchmarks and a new item both give the holding scenarios a use, after the earlier uses.
+    store.update("acme", ["sort"], {"benchmarks": ["math", "lists"]})
+    store.create("acme", [benchmark_task(tmp_path, "mul", "math")])
+    assert uses_of(store, "coding", after=last) == [("sort", "train", "math"), ("mul", "train", "math")]
+    assert uses_of(store, "review") == [("add", "eval", "math"), ("sort", "eval", "math"), ("mul", "eval", "math")]
+    assert store.held_benchmarks("acme", "coding")[0].task_count == 3
+
+    # A patch that leaves the benchmarks keeps the uses of the holds and their sequences.
+    kept = store.scenario_items("acme", "coding", kinds=("task",), content=False)
+    store.update("acme", ["add"], {"scenarios": {"coding": "eval"}, "note": "x"})
+    after = store.scenario_items("acme", "coding", kinds=("task",), content=False)
+    assert [(use.sequence, use.benchmark) for use in after if use.benchmark] == [
+        (use.sequence, use.benchmark) for use in kept
+    ]
+    assert ("add", "eval", None) in uses_of(store, "coding")
+
+    store.update("acme", ["add"], {"benchmarks": []})
+    assert ("add", "train", "math") not in uses_of(store, "coding")
+    assert [use[0] for use in uses_of(store, "review")] == ["sort", "mul"]
+    # A deleted item and replaced files: the uses end, or begin again.
+    last = store.last_use_sequence("acme", "coding")
+    changed = tmp_path / "changed" / "mul"
+    changed.mkdir(parents=True)
+    (changed / "instruction.md").write_text("Multiply.\n")
+    store.replace_task("acme", "mul", changed)
+    assert uses_of(store, "coding", after=last) == [("mul", "train", "math")]
+    assert store.delete("acme", "sort")
+    assert [use[0] for use in uses_of(store, "review")] == ["mul"]
+
+
+def test_a_store_adopts_the_uses_of_the_earlier_table_in_their_order(tmp_path):
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    with closing(task_files), closing(SQLiteDataStore(tmp_path / "data", task_files)) as store:
+        store.create("acme", [trajectory("t1"), trajectory("t2"), trajectory("t3")])
+        with store.transaction() as connection:
+            # A database of a store before RFC #1420: the uses are in data_item_scenario.
+            connection.exec_driver_sql(
+                "CREATE TABLE data_item_scenario (sequence INTEGER PRIMARY KEY, owner TEXT, item_id TEXT,"
+                " scenario TEXT, split VARCHAR(8))"
+            )
+            connection.exec_driver_sql(
+                "INSERT INTO data_item_scenario (sequence, owner, item_id, scenario, split) VALUES"
+                " (7, 'acme', 't3', 'coding', 'train'), (9, 'acme', 't1', 'coding', 'train')"
+            )
+    with closing(SQLiteDataStore(tmp_path / "data", task_files)) as store:
+        uses = store.scenario_items("acme", "coding", kinds=("trajectory",), content=False)
+        assert [(use.item.item_id, use.split, use.benchmark) for use in uses] == [
+            ("t3", "train", None),
+            ("t1", "train", None),
+        ]
+        with store.transaction(read_only=True) as connection:
+            assert not sqlalchemy.inspect(connection).has_table("data_item_scenario")
