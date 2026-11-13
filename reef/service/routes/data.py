@@ -15,10 +15,14 @@ from aiohttp import web
 
 from reef.service.auth import add_signed_download, signed_download_url
 from reef.service.collections import (
+    HOLD_ROUTES,
     add_to_scenario,
     delete_collection,
+    hold_set,
     list_collections,
+    list_holds,
     read_collection,
+    release_set,
     save_collection,
 )
 from reef.service.data import (
@@ -234,6 +238,24 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         )
         return web.json_response(receipt)
 
+    async def holds(request: web.Request) -> web.Response:
+        owner, scenario = request.match_info["owner"], request.match_info["scenario"]
+        kind = HOLD_ROUTES[request.match_info["sets"]]
+        return web.json_response(await asyncio.to_thread(list_holds, data, owner, scenario, kind))
+
+    async def hold(request: web.Request) -> web.Response:
+        """Hold one benchmark or trajectory set, or end its hold, by the method."""
+        names = (
+            request.match_info["owner"],
+            request.match_info["scenario"],
+            HOLD_ROUTES[request.match_info["sets"]],
+            request.match_info["name"],
+        )
+        if request.method == "PUT":
+            body = await read_object(request)
+            return web.json_response(await asyncio.to_thread(hold_set, data, *names, body))
+        return web.json_response(await asyncio.to_thread(release_set, data, *names))
+
     base = "/reef/namespaces/{owner}/data"
     transfers = "{transfer:" + "|".join(TRANSFER_KINDS) + "}"
     app.router.add_post(base, create)
@@ -255,6 +277,10 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     for method in ("PUT", "GET", "DELETE"):
         app.router.add_route(method, stored + "/{name}", collection)
     app.router.add_post(stored + "/{name}/scenarios", collection_scenarios)
+    held = "/reef/namespaces/{owner}/scenarios/{scenario}/{sets:" + "|".join(HOLD_ROUTES) + "}"
+    app.router.add_get(held, holds)
+    for method in ("PUT", "DELETE"):
+        app.router.add_route(method, held + "/{name}", hold)
 
 
 __all__ = ["download_seconds", "register_data_routes"]

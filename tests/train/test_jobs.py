@@ -608,3 +608,35 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_request
         "TrajectorySample",
         "TaskSample",
     ]
+
+
+def test_a_task_in_a_train_benchmark_and_an_eval_benchmark_trains_once(component, tmp_path):
+    session, samples = open_sample_store(tmp_path / "records", "math")
+    task = write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path)
+    data, owner = samples.data, samples.owner
+    data.create(owner, [NewItem("task-a", task, {"kind": "task", "benchmarks": ["suite", "more", "held"]})])
+    # The scenario uses the task three times: twice to train, and then once to evaluate.
+    for benchmark, split in (("suite", "train"), ("more", "train"), ("held", "eval")):
+        data.hold(owner, "math", "benchmark", benchmark, split)
+    trainer = Trainer.build(
+        "math",
+        session.records,
+        pipeline_factory=lambda context: TrainingPipeline(
+            context, sample2job=TrajectoryAndTaskJobData(context, None, 1)
+        ),
+        job_loop=JobLoop(component, scenario="math", data_store=data),
+        samples=samples.for_trainer(""),
+        job_parameters={"task": {"objective": "provided:Objective"}},
+        root=STUB_ROOT,
+    )
+    trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
+    (job,) = component.jobs
+    # The later eval use does not take the task from the trainer, and the job holds the task once.
+    assert [sample.metadata["task"]["name"] for sample in job.read_data().samples] == ["task-a"]
+    component.statuses[job.job_id] = JobStatus(job.job_id, "finished")
+    trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
+    # A new train use of the trained task starts no second job.
+    data.update(owner, ["task-a"], {"benchmarks": ["suite", "more", "held", "again"]})
+    data.hold(owner, "math", "benchmark", "again", "train")
+    trainer.settle_commit(trainer.prepare_commit(trainer.advance_job()))
+    assert len(component.jobs) == 1

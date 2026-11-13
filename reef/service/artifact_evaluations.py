@@ -842,10 +842,13 @@ class ArtifactEvaluations:
             selection = {**current.artifact_selection().to_dict(), request.component: request.artifact_id}
             samples = self.dispatcher.storage.sample_store(scenario, current.store)
             # The listing reads no task files: the eval split can hold many more tasks than the evaluation runs.
+            # A scenario can use a task more than once (RFC #1420): an evaluation runs it once.
             held = tuple(
-                listed.sample_id
-                for listed in (() if samples is None else samples.listed_imported_tasks())
-                if listed.split == "eval"
+                dict.fromkeys(
+                    listed.sample_id
+                    for listed in (() if samples is None else samples.listed_imported_tasks())
+                    if listed.split == "eval"
+                )
             )
         held_names = frozenset(held)
         unknown = sorted(set(request.task_names) - held_names)

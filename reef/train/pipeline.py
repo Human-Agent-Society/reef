@@ -466,14 +466,24 @@ class TrainingPipeline:
         if self.training_mode == "manual":
             return
         while stored_samples := self.store.page(after_sequence=self.store_sequence):
+            untrainable: list[str] = []
             for stored in stored_samples:
                 self.store_sequence = stored.sequence
-                self.held.pop(stored.sample_id, None)
                 if stored.train_count(self.store.trainer) > 0 or stored.sample_id in self.trained_sample_ids:
+                    self.held.pop(stored.sample_id, None)
                     continue
                 sample = self.trainable(stored)
                 if sample is not None:
                     self.held[stored.sample_id] = (stored, sample)
+                elif stored.sample_id in self.held:
+                    untrainable.append(stored.sample_id)
+            if untrainable:
+                # A scenario can use one item more than once (RFC #1420). A use that does not train ends the held
+                # sample only when no use of the item trains now.
+                trains = {stored.sample_id for stored in self.store.read(untrainable) if stored.split == "train"}
+                for sample_id in untrainable:
+                    if sample_id not in trains:
+                        self.held.pop(sample_id, None)
 
     def trainable(self, stored: StoredSample) -> Sample | None:
         """The sample that job data trains for ``stored``, or None when this trainer cannot train it.

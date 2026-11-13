@@ -210,10 +210,10 @@ def used_records(
     uses = data.scenario_items(
         owner, scenario, kinds=("record",), after=after_sequence, limit=limit, excluding_origin=scenario
     )
-    records = tuple(read_as(item, scenario) for _, item in uses)
+    records = tuple(read_as(use.item, scenario) for use in uses)
     if len(uses) == limit:
-        return uses[-1][0], records
-    return max(newest, uses[-1][0] if uses else after_sequence), records
+        return uses[-1].sequence, records
+    return max(newest, uses[-1].sequence if uses else after_sequence), records
 
 
 def used_record(data: DataStore, owner: str, scenario: str, record_id: str) -> AgentRecord | None:

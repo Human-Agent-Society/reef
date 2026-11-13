@@ -1014,18 +1014,27 @@ refuses that configuration.
 Upgrade from a Reef that wrote older formats
 --------------------------------------------
 
-This Reef reads only the formats that it writes: ``reef-commit/9`` commit
-records, ``reef-scenario/8`` scenario metadata, and the current tables of the
-record database, the data store and the coordination store. It does not
-upgrade a store that an older Reef wrote.
+The data store upgrades its own tables. It records their version in the
+table ``data_schema_version``. When a service opens a database of an earlier
+version, it brings the tables to the current version in one transaction,
+before it reads an item. Stop every process of the deployment before you
+start the new Reef: a process of the earlier Reef fails on the upgraded
+tables. A database of a later version stops the start with ``a later Reef
+wrote them``; Reef changes nothing then.
+
+For its other stores, this Reef reads only the formats that it writes:
+``reef-commit/9`` commit records, ``reef-scenario/8`` scenario metadata, and
+the current tables of the record database and the coordination store. It does
+not upgrade one of these that an older Reef wrote.
 
 A scenario with an older commit record or older scenario metadata does not
 load, and its error names the format. A PostgreSQL record schema of another
 version stops the start with ``unsupported PostgreSQL record schema version``.
 Reef does not change or delete older data.
 
-To move to this Reef from one that wrote older formats, use a new deployment
-directory and, for PostgreSQL, a new schema. Then create the scenarios again.
+To move to this Reef from one that wrote older formats of these stores, use a
+new deployment directory and, for PostgreSQL, a new schema. Then create the
+scenarios again.
 
 Back up a deployment
 --------------------
