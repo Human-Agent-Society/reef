@@ -691,11 +691,9 @@ def test_a_recipe_serving_fewer_components_than_registered_is_refused(
 def test_a_weights_job_commits_while_the_harness_cycle_fails(
     tmp_path: Path, dispatchers: _Dispatchers, held_cycle: type[_HeldJobData]
 ) -> None:
-    """The harness cycle fails and the failure shows; the weights job still lands. Then the harness's rows are
-    stale, since the job's checkpoint serves, so the harness stops trying them.
-
-    Each wake before then costs one attempt, and the job's commits and queue changes each wake the scenario, so
-    the count of attempts depends on how the wakes group."""
+    """The harness cycle fails and the failure shows; the weights job still lands. A harness trace never goes
+    stale, so the harness keeps its rows and tries again, but each failed cycle in a row waits longer before the
+    next one (``failed_cycle_delay_seconds``): a reload after the failure does not run the cycle again at once."""
     away = held_cycle
     away.fails = True
     training = HeldJobs(tmp_path / "checkpoints")
@@ -709,18 +707,12 @@ def test_a_weights_job_commits_while_the_harness_cycle_fails(
         lambda: "finished" in [job_event(row) for row in _scenario(dispatcher).store.history()],
         timeout_seconds=15,
     )
-    # A wake that was already due can still land after the job finishes, so the test waits for the count to hold
-    # still for a second; a harness that keeps trying never lets it.
-    assert away.attempts >= 1
-    held_since, attempts = time.monotonic(), away.attempts
-
-    def settled() -> bool:
-        nonlocal held_since, attempts
-        if away.attempts != attempts:
-            held_since, attempts = time.monotonic(), away.attempts
-        return time.monotonic() - held_since >= 1.0
-
-    assert became_true(settled)
+    # The waits grow: 2, 4, 8 seconds after the failures in a row, so three seconds see at most two more attempts.
+    # Without them, each failure reloads the scenario and the new worker fails again at once, many times a second.
+    attempts = away.attempts
+    assert attempts >= 1
+    time.sleep(3.0)
+    assert away.attempts - attempts <= 2
 
 
 @pytest.mark.unit

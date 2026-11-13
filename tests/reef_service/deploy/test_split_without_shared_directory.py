@@ -330,7 +330,7 @@ def test_a_check_that_reads_the_weights_runs_where_they_are_and_brings_no_weight
     refused checkpoint fails its job, and a refused import raises the check's ``ValueError``, as before."""
     component = SentinelWeights(tmp_path / "training" / "checkpoints")
     live = LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component))
-    recipe = CheckedPolicyRecipe(max_staleness=4)
+    recipe = CheckedPolicyRecipe(max_artifact_lag=4)
     control_directory = tmp_path / "control"
     done: list[str] = []
 
