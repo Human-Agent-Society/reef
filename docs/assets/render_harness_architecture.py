@@ -77,7 +77,7 @@ BOXES = [
     (1, "B1", COL_W, "reef", None, "Client sync", "merges onto the active selection"),
     (2, "B1", COL_W, "reef", 3, "Feedback", "a score per session"),
     (3, "B1", COL_W, "reef", 2, "Model proxy", "forwards and records"),
-    (0, "B2", WIDE, "store", None, "Releases", "every tree, in Git; the newest is the head"),
+    (0, "B2", WIDE, "store", None, "Snapshots", "every tree, in Git; the newest is the head"),
     (2, "B2", WIDE, "store", None, "Records", "raw traces: model calls and reports"),
     (4, "B2", COL_W, "store", None, "Tasks", "Harbor tasks: train · eval"),
     (3, "B3", WORKSPACE_W, "reef", None, "Workspace", "`harness/ · material/traces/ · state/"),

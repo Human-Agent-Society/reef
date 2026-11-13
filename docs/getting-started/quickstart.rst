@@ -18,7 +18,7 @@ A typical Reef workflow includes the following steps:
 5. **Evolve.** Reef potentially creates a new version of the *artifact*, which
    may become immediately effective (e.g. model evolution) or requires a pull
    from the harness to take effect (e.g. harness evolution).
-6. **Update.** Harness can view the history of served artifacts (*release
+6. **Update.** Harness can view the history of served artifacts (*snapshot
    chain*) and potentially pull a new harness tree.
 
 This workflow touches a few key concepts:
@@ -34,7 +34,7 @@ This workflow touches a few key concepts:
   recipe.
 - **artifact** - The content a snapshot selects: model weights, or a harness
   tree of rules, prompts, skills, and config. Versioned.
-- **release** - One accepted publication in a scenario. The chain of them is
+- **snapshot** - One accepted publication in a scenario. The chain of them is
   the scenario's history.
 
 We will explore these concepts in greater depth later. For now, it's time to
@@ -190,5 +190,5 @@ Choose your next step
   worked harness example, or `SAO rollout training
   <../user-guide/recipes/sao.rst>`__ for a GPU training example with results.
 - Use the `HTTP API reference <../reference/http-api.rst>`__ when connecting
-  your own agent: it covers inference headers, feedback reports, and release
+  your own agent: it covers inference headers, feedback reports, and artifact
   management.

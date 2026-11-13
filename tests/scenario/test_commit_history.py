@@ -57,7 +57,7 @@ def sample_record(
     return CommitRecord(
         scenario="math",
         commit_number=commit_number,
-        snapshot=SnapshotRef(revision=f"release:{snapshot_label}:{commit_number}", parent_revision="base"),
+        snapshot=SnapshotRef(revision=f"snapshot:{snapshot_label}:{commit_number}", parent_revision="base"),
         checkpoint=checkpoint,
         algorithm_state={"steps": commit_number},
         high_water_sequence=commit_number * 2,
@@ -94,7 +94,7 @@ def test_commit_record_round_trips_through_the_history(open_history) -> None:
     assert [record.commit_number for record in records] == [1, 2]
     first, second = records
     assert first.scenario == "math"
-    assert first.snapshot == SnapshotRef("release:w1:1", "base")
+    assert first.snapshot == SnapshotRef("snapshot:w1:1", "base")
     assert first.checkpoint is False
     assert first.algorithm_state == {"steps": 1}
     assert first.high_water_sequence == 2
@@ -164,12 +164,12 @@ def test_commit_history_tracks_the_current_training_run_position(open_history) -
     assert log.training_run_position() == (3, 1)
 
 
-def operation_record(operation: str, commit_number: int, release_id: str, **changes) -> CommitRecord:
-    """An activation or a new training start at ``commit_number`` naming ``release_id``, with ``changes`` applied."""
+def operation_record(operation: str, commit_number: int, revision: str, **changes) -> CommitRecord:
+    """An activation or a new training start at ``commit_number`` naming ``revision``, with ``changes`` applied."""
     values = {
         "scenario": "math",
         "commit_number": commit_number,
-        "snapshot": SnapshotRef(release_id, None),
+        "snapshot": SnapshotRef(revision, None),
         "checkpoint": False,
         "algorithm_state": None,
         "high_water_sequence": 0,

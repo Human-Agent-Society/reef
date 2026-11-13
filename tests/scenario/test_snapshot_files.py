@@ -54,30 +54,30 @@ def snapshot_files(scenario: Scenario) -> ScenarioArtifactFiles:
 def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_it(tmp_path: Path) -> None:
     answers = iter((MARKER, None))
     dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: next(answers))
-    releases = snapshot_files(scenario)
+    snapshots = snapshot_files(scenario)
     created = scenario.artifact_status()[COMPONENT]["active"]
     try:
         # The snapshot the scenario was created on is its root snapshot.
         assert scenario.repository.resolve(scenario.repository.start_artifact).artifact_id == created
         # Before a publish the head is the snapshot the scenario was created on, the one the catalog lists.
-        assert releases.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
-        assert releases.artifact(created, COMPONENT).files == PI_SEED.files
+        assert snapshots.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
+        assert snapshots.artifact(created, COMPONENT).files == PI_SEED.files
         run_step(scenario, "1")
         published = scenario.artifact_status()[COMPONENT]["active"]
         assert published != created
-        assert releases.head(COMPONENT) == ArtifactTextFiles(published, dict(MARKED.files))
+        assert snapshots.head(COMPONENT) == ArtifactTextFiles(published, dict(MARKED.files))
         assert run_step(scenario, "2").metrics["skipped"] == "the method left the head tree unchanged"
-        assert releases.head(COMPONENT).artifact_id == published
+        assert snapshots.head(COMPONENT).artifact_id == published
         # Every committed snapshot reads by id, the root included; an id the scenario never committed is not found.
-        assert releases.artifact(created, COMPONENT).files == PI_SEED.files
-        assert releases.artifact(published, COMPONENT).files == MARKED.files
+        assert snapshots.artifact(created, COMPONENT).files == PI_SEED.files
+        assert snapshots.artifact(published, COMPONENT).files == MARKED.files
         with pytest.raises(ArtifactNotFoundError, match="has no artifact 'nope'"):
-            releases.artifact("nope", COMPONENT)
+            snapshots.artifact("nope", COMPONENT)
     finally:
         dispatcher.close()
 
 
-def test_an_inactive_release_is_the_head_the_next_step_builds_on(tmp_path: Path) -> None:
+def test_an_inactive_artifact_is_the_head_the_next_step_builds_on(tmp_path: Path) -> None:
     trees = []
     dispatcher, scenario = harness_scenario(
         tmp_path,
@@ -102,25 +102,25 @@ def test_a_training_start_moves_the_head_and_an_activation_does_not(tmp_path: Pa
     dispatcher, scenario = harness_scenario(
         tmp_path, lambda workspace, services: MARKER, activation=PluginReference(NeverActivate, {})
     )
-    releases = snapshot_files(scenario)
+    snapshots = snapshot_files(scenario)
     created = scenario.artifact_status()[COMPONENT]["active"]
     seed_artifact_id = scenario.artifact_status()[COMPONENT]["training_start"]
     try:
         run_step(scenario, "1")
-        made = releases.head(COMPONENT).artifact_id
+        made = snapshots.head(COMPONENT).artifact_id
         assert seed_artifact_id is not None
         dispatcher.train_from("demo", seed_artifact_id)
-        assert releases.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
+        assert snapshots.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
         dispatcher.activate("demo", made)
         assert scenario.artifact_status()[COMPONENT]["active"] == made
-        assert releases.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
+        assert snapshots.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
     finally:
         dispatcher.close()
 
 
 def test_a_sync_moves_the_head_to_the_persons_tree(tmp_path: Path) -> None:
     dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: MARKER)
-    releases = snapshot_files(scenario)
+    snapshots = snapshot_files(scenario)
     person = PI_SEED.apply(TreePatch(changed_rules("person rules\n")))
     person.write(tmp_path / "person")
     try:
@@ -129,8 +129,8 @@ def test_a_sync_moves_the_head_to_the_persons_tree(tmp_path: Path) -> None:
         synced = dispatcher.sync_artifact(
             "demo", Artifact.local(tmp_path / "person"), component=COMPONENT, expected_selection=active, metrics={}
         )
-        # The synced release serves and is the training start, so the next step builds on the person's tree.
-        assert releases.head(COMPONENT) == ArtifactTextFiles(synced.artifact_id, dict(person.files))
+        # The synced artifact serves and is the training start, so the next step builds on the person's tree.
+        assert snapshots.head(COMPONENT) == ArtifactTextFiles(synced.artifact_id, dict(person.files))
         history = scenario.store.history()
         with pytest.raises(ArtifactConflictError, match="changed its active artifacts"):
             dispatcher.sync_artifact(
@@ -142,14 +142,14 @@ def test_a_sync_moves_the_head_to_the_persons_tree(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_without_a_durable_history_the_head_is_the_served_release(tmp_path: Path) -> None:
+def test_without_a_durable_history_the_head_is_the_served_artifact(tmp_path: Path) -> None:
     dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: MARKER, durable=False)
-    releases = snapshot_files(scenario)
+    snapshots = snapshot_files(scenario)
     try:
         assert not scenario.store.durable
         run_step(scenario, "1")
         served = scenario.artifact_status()[COMPONENT]["active"]
-        assert releases.head(COMPONENT) == ArtifactTextFiles(served, dict(MARKED.files))
-        assert releases.artifact(served, COMPONENT).files == MARKED.files
+        assert snapshots.head(COMPONENT) == ArtifactTextFiles(served, dict(MARKED.files))
+        assert snapshots.artifact(served, COMPONENT).files == MARKED.files
     finally:
         dispatcher.close()

@@ -127,7 +127,7 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
-def test_activating_a_held_harness_release_leaves_held_admission_closed(tmp_path: Path) -> None:
+def test_activating_a_held_harness_artifact_leaves_held_admission_closed(tmp_path: Path) -> None:
     """The activation binds the held harness to the weights that serve now, so it loads nothing."""
     runtime = StubInferenceRuntime()
     dispatcher = _dispatcher(tmp_path)
@@ -331,7 +331,7 @@ def test_a_component_whose_readers_resolve_no_reference_imports_a_copy(tmp_path:
 
 
 @pytest.mark.unit
-def test_an_import_binds_one_component_on_the_active_release_and_activates_nothing(tmp_path: Path) -> None:
+def test_an_import_binds_one_component_on_the_active_selection_and_activates_nothing(tmp_path: Path) -> None:
     runtime = StubInferenceRuntime()
     dispatcher = _dispatcher(tmp_path, _ImportingRecipe)
     imported_dir = tmp_path / "imported"
@@ -396,7 +396,7 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
 
 
 @pytest.mark.unit
-def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_release(
+def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_selection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A serve records its component selection without publishing artifacts or moving a head."""
@@ -422,8 +422,8 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         served = scenario.serve(artifact_id, HARNESS)
         assert served.artifact_id == artifact_id
         selection = scenario.served_beside()[artifact_id].selection
-        release = scenario.repository.select(selection).ref
-        assert component_files(scenario, release) == {WEIGHTS: "weights seed", HARNESS: "harness step 1"}
+        ref = scenario.repository.select(selection).ref
+        assert component_files(scenario, ref) == {WEIGHTS: "weights seed", HARNESS: "harness step 1"}
         assert scenario.current_snapshot() == active
         assert scenario.repository.checkpoint_artifact == tip
         record = scenario.store.history()[-1]

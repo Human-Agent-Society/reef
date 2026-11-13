@@ -196,7 +196,7 @@ class SlimeFacts(TrainingBackendFacts):
             )
             raise ValueError(
                 f"Slime trains the weights that it starts with, from the inputs {configured!r}, but the scenario's root "
-                f"release came from {started}; create the scenario again with this configuration"
+                f"snapshot came from {started}; create the scenario again with this configuration"
             )
 
     def check_import_start(self, artifact_dir: Path) -> None:

@@ -18,7 +18,7 @@ The core loop
 
        opt Harness recipe: pull the active selection's tree
          H->>S: GET /reef/harness for scenario
-         S-->>H: Harness tree and release
+         S-->>H: Harness tree and artifact ID
          Note over H: Agent runs on that tree
        end
        Note over H,I: Serve and record each request
@@ -26,7 +26,7 @@ The core loop
        S->>S: Freeze active selection
        S->>I: Provider-native request
        I-->>S: Provider response
-       S->>S: Validate frozen release and store record
+       S->>S: Validate frozen selection and store record
        S-->>H: Response and receipt
        H->>S: Feedback quotes the receipt
        S->>T: Eligible record
@@ -80,6 +80,6 @@ full elsewhere:
    * - Activation
      - `Activate an artifact
        <../developer-guide/write-a-recipe.rst#activate-an-artifact>`__
-   * - Release lifecycle
+   * - Snapshot lifecycle
      - `The snapshot chain
        <../advanced_topics/state-model.rst#the-snapshot-chain>`__

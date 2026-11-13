@@ -42,7 +42,7 @@ from reef.storage.records import RecordConflictError
         (ArtifactConflictError("artifact moved under you"), 409),
         (ArtifactSourceError("source unreachable"), 503),
         (ScenarioNotFoundError("no such scenario"), 404),
-        (SnapshotNotRestorableError("release has no durable bytes"), 400),
+        (SnapshotNotRestorableError("snapshot has no durable bytes"), 400),
         (CommitPendingError("a training result waits for its commit"), 409),
         (TrainingStartRefusedError("the trainer cannot start from this snapshot"), 400),
         (RecordConflictError("record id already used"), 409),

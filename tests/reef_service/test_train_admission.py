@@ -17,8 +17,8 @@ from reef.service.app import create_app
 TEXT = "add a skill that runs the tests before it answers"
 
 
-def _request(text: str = TEXT, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
-    return {"text": text, "session": session, "artifact_id": release_id}
+def _request(text: str = TEXT, session: str = "3f1c2a9d0b7e", artifact_id: str = "rel-0") -> dict:
+    return {"text": text, "session": session, "artifact_id": artifact_id}
 
 
 async def _post(client: TestClient, body: object, scenario: str = "agents"):

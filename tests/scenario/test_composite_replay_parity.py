@@ -407,12 +407,12 @@ def test_a_retry_at_a_step_a_reported_processor_discarded_stays_terminal_after_a
     assert live[1] is None and rebuilt == live
 
 
-def tttd_inference(record_id: str, release: str) -> AgentRecord:
+def tttd_inference(record_id: str, artifact_id: str) -> AgentRecord:
     return AgentRecord.create(
         scenario="agent",
         request_type=RequestType.INFERENCE,
         agent_record_id=record_id,
-        artifact_id=release,
+        artifact_id=artifact_id,
         payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
     )
 
@@ -468,7 +468,7 @@ def tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
 
 
 @pytest.mark.unit
-def test_a_tttd_step_failed_on_two_releases_stays_failed_after_a_reload(tmp_path: Path) -> None:
+def test_a_tttd_step_failed_on_two_artifacts_stays_failed_after_a_reload(tmp_path: Path) -> None:
     """A rebuilt TTTD harness reads step 0 again, reports it failed with its snapshots, and never trains a resample
     of it."""
     live = tttd_failed_step(tmp_path / "live", reload=False)

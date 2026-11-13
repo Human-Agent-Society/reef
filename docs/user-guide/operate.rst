@@ -730,7 +730,7 @@ name and a ``config`` mapping, as for a storage plugin:
      artifact-backend:
        module: my_package.artifacts:ObjectStoreArtifactBackend
        config:
-         bucket: reef-releases
+         bucket: reef-snapshots
 
 Reef calls ``from_config(config, context=...)`` to make the backend. The
 `Python artifact backend contract <../reference/python-api.rst#artifact-backends>`__

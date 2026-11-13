@@ -20,7 +20,7 @@ def committed(step: int = 1) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         commit_number=step,
-        snapshot=SnapshotRef(f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"snapshot:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         consumed_ids=frozenset({f"record-{step}"}),

@@ -226,7 +226,7 @@ def test_the_dispatcher_builds_a_scenarios_trainers_from_the_served_recipe(tmp_p
 
 
 @pytest.mark.unit
-def test_report_first_request_registers_the_scenarios_root_release(tmp_path) -> None:
+def test_report_first_request_registers_the_scenarios_root_snapshot(tmp_path) -> None:
     backend = InMemoryRepositoryBackend.factory()
     dispatcher = build_default_dispatcher(
         backend_factory=backend, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
@@ -388,7 +388,7 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
     async def upstream(request):
         received["path"] = request.path
         received["payload"] = await request.json()
-        received["release_id"] = request.headers["x-reef-artifact-id"]
+        received["artifact_id"] = request.headers["x-reef-artifact-id"]
         received["artifact_path"] = request.headers["x-reef-artifact-path"]
         return web.json_response({"provider": "ok"})
 
@@ -413,7 +413,7 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
     assert received == {
         "path": "/v1/chat/completions",
         "payload": payload,
-        "release_id": artifact.artifact_id,
+        "artifact_id": artifact.artifact_id,
         "artifact_path": str(artifact.local_path),
     }
 
@@ -430,7 +430,7 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
         async def upstream(request):
             received["path"] = request.path
             received["payload"] = await request.json()
-            received["release_id"] = request.headers["x-reef-artifact-id"]
+            received["artifact_id"] = request.headers["x-reef-artifact-id"]
             response = web.StreamResponse(
                 headers={
                     "Content-Type": "text/event-stream",
@@ -484,7 +484,7 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
                 assert received == {
                     "path": "/v1/chat/completions",
                     "payload": {**payload, "model": SERVED_MODEL},
-                    "release_id": records[0].artifact_id,
+                    "artifact_id": records[0].artifact_id,
                 }
             finally:
                 finish_upstream.set()
@@ -1066,7 +1066,7 @@ def test_default_local_artifact_root_is_cleaned_up_with_repository(tmp_path) -> 
 
 
 @pytest.mark.unit
-def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_path) -> None:
+def test_artifact_ids_are_independent_and_ignore_results_without_candidates(tmp_path) -> None:
     dispatcher = Dispatcher(
         Recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
@@ -1212,7 +1212,7 @@ def test_any_accepted_token_authenticates_and_rotation_keeps_scenarios_reachable
 
 @pytest.mark.unit
 def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
-    """``x-reef-tag-*`` reaches a processor; the service reads no value but ``release`` (see the record test).
+    """``x-reef-tag-*`` reaches a processor; the service reads no value but ``artifact`` (see the record test).
 
     The streaming path builds its own record and carries the tags as well: a streaming agent-loop call is exactly
     the one a correlating processor needs.
@@ -1250,7 +1250,7 @@ class HarnessRecipe(Recipe):
     [HarnessRecipe(), WeightRecipe()],
     ids=["harness", "weights"],
 )
-def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_runs_as_a_tag(tmp_path, recipe) -> None:
+def test_a_record_names_the_served_artifact_and_keeps_the_artifact_the_client_runs_as_a_tag(tmp_path, recipe) -> None:
     """The inference service records every call against the snapshot that served it: it reads served_models only,
     never the catalog. The snapshot that a session says it runs stays in the record's tags."""
 
@@ -1282,8 +1282,8 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
     async def run() -> list[str]:
         async with serving_client(dispatcher, backend) as client:
             await wait_for_inference(client, "chat")
-            for tag in (artifacts[1], artifacts[0], "no-such-release", None):
-                headers = {"x-reef-scenario": "chat", **({"x-reef-tag-release": tag} if tag else {})}
+            for tag in (artifacts[1], artifacts[0], "no-such-artifact", None):
+                headers = {"x-reef-scenario": "chat", **({"x-reef-tag-artifact": tag} if tag else {})}
                 response = await client.post("/v1/chat/completions", headers=headers, json={"messages": []})
                 assert response.status == 200
         store = dispatcher.storage.open("chat")
@@ -1291,11 +1291,11 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
             rows = [item for item in store.records.replay("chat") if item.request_type is RequestType.INFERENCE]
         finally:
             store.close()
-        return [(item.artifact_id, item.payload.get("metadata", {}).get("tags", {}).get("release")) for item in rows]
+        return [(item.artifact_id, item.payload.get("metadata", {}).get("tags", {}).get("artifact")) for item in rows]
 
     recorded = asyncio.run(run())
     first, middle, served = artifacts
-    assert recorded == [(served, middle), (served, first), (served, "no-such-release"), (served, None)]
+    assert recorded == [(served, middle), (served, first), (served, "no-such-artifact"), (served, None)]
 
 
 @pytest.mark.parametrize("close_dispatcher", [False, True])

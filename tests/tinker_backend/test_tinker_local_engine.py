@@ -332,7 +332,7 @@ def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(
         component.close()
 
 
-def test_a_restart_serves_a_saved_release_and_trains_from_it(tmp_path, monkeypatch, objective, downloads):
+def test_a_restart_serves_a_saved_snapshot_and_trains_from_it(tmp_path, monkeypatch, objective, downloads):
     config, _ = resolve_deployment_config(local_engine_config(tmp_path), None, tmp_path / "serve.yaml")
     component, inference, _ = build(config, monkeypatch, Engines())
     math, _ = train(component, inference, objective, "math", 0)

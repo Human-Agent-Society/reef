@@ -20,7 +20,7 @@ class Runtime:
     serves_requests = True
 
     def __init__(self) -> None:
-        self.release = "release-1"
+        self.artifact_id = "artifact-1"
         self.base_url = "http://engine:8000"
         self.stopped: list[ServedArtifact] = []
 
@@ -37,12 +37,12 @@ class Registry:
             name="math",
             runtime=runtime,
             serves=True,
-            artifact_status=lambda: {"weights": {"active": runtime.release, "training_start": None}},
+            artifact_status=lambda: {"weights": {"active": runtime.artifact_id, "training_start": None}},
             served_component=lambda: "weights",
-            serving_artifact_id=lambda: runtime.release,
-            current_snapshot=lambda: SimpleNamespace(release_id=runtime.release),
+            serving_artifact_id=lambda: runtime.artifact_id,
+            current_snapshot=lambda: SimpleNamespace(revision=runtime.artifact_id),
             artifact_selection=lambda ref=None: ArtifactSelection(
-                {"weights": runtime.release if ref is None else "older-weights"}
+                {"weights": runtime.artifact_id if ref is None else "older-weights"}
             ),
             served_beside=dict,
             served_serving_config=lambda: {"temperature": 0.6},
@@ -100,9 +100,9 @@ def test_control_queues_the_selected_artifact_without_publishing_a_ready_route()
     first = store.served_models.current_request("math")
     assert first.state == "queued" and first.started_at is None
     assert first.payload == {
-        "artifact_id": "release-1",
+        "artifact_id": "artifact-1",
         "selection": Registry(runtime).scenario.artifact_selection().to_dict(),
-        "aliases": ["release-1"],
+        "aliases": ["artifact-1"],
         "beside": {},
         "serving_config": {"temperature": 0.6},
     }
@@ -110,10 +110,10 @@ def test_control_queues_the_selected_artifact_without_publishing_a_ready_route()
     assert publisher.run_once(now=100.5)
     assert store.served_models.current_request("math").id == first.id
 
-    runtime.release = "release-2"
+    runtime.artifact_id = "artifact-2"
     assert publisher.run_once(now=101.0)
     second = store.served_models.current_request("math")
-    assert second.id != first.id and second.payload["artifact_id"] == "release-2"
+    assert second.id != first.id and second.payload["artifact_id"] == "artifact-2"
     assert store.work_queue.read(first.queue, first.id).state == "failed"
     assert store.served_models.read_scenario("math") == {}
     assert runtime.stopped == []
@@ -135,7 +135,7 @@ def test_control_queues_beside_artifacts_as_references_and_withdraws_the_current
     request = store.served_models.current_request("math")
     assert request.payload["beside"] == {
         "older-weights": {
-            "selection": registry.scenario.artifact_selection(SimpleNamespace(release_id="release-0")).to_dict(),
+            "selection": registry.scenario.artifact_selection(SimpleNamespace(revision="artifact-0")).to_dict(),
             "component": "weights",
         }
     }
@@ -198,7 +198,7 @@ def test_an_instance_whose_lease_expired_while_it_started_stops_at_its_first_rou
 def test_control_leaves_scheduled_engine_stops_to_inference() -> None:
     runtime = Runtime()
     store = coordination()
-    old = ServedArtifact("release-0", runtime.base_url, "math-release-0")
+    old = ServedArtifact("artifact-0", runtime.base_url, "math-artifact-0")
     former = store.control_lease.acquire("control-1", now=100.0)
     store.served_models.schedule_stop(ScheduledStop(old, 110.0), control_lease_number=former.number)
     lease = store.control_lease.acquire("control-2", now=131.0)
@@ -240,10 +240,10 @@ def test_control_retries_a_failed_request_after_a_delay_that_doubles_up_to_an_ho
 
     # A failed request whose payload is no longer desired is replaced at once, with no retry count.
     fail_current_request(store, now=moment)
-    runtime.release = "release-2"
+    runtime.artifact_id = "artifact-2"
     assert publisher.run_once(now=moment + 1)
     replaced = store.served_models.current_request("math")
-    assert replaced.payload["artifact_id"] == "release-2" and replaced.metadata == {}
+    assert replaced.payload["artifact_id"] == "artifact-2" and replaced.metadata == {}
 
 
 @pytest.mark.unit

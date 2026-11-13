@@ -576,11 +576,11 @@ class TrainingComponent(ABC):
 
     @abstractmethod
     def import_start(self, artifact_dir: Path) -> str:
-        """Take the published snapshot in ``release`` as the start of later jobs; return that start.
+        """Take the published snapshot in ``artifact_dir`` as the start of later jobs; return that start.
 
         Reef calls this when a trainer starts training from an artifact
         (``train-from``). The component copies what it trains
-        from into its own durable directory, since ``release`` can be
+        from into its own durable directory, since ``artifact_dir`` can be
         discarded later. Raise ``ValueError``, and change nothing, when the
         component cannot start from these weights.
         """

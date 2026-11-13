@@ -85,7 +85,7 @@ def checkpoint_sampler_path(
 class TinkerInferenceRuntime(InferenceRuntime):
     """Serve the sampler each snapshot names, on the Tinker-compatible service ``service`` (None: hosted Tinker).
 
-    ``served_weight_kind`` is ``model_adapter`` for a LoRA's releases, and ``model`` for the snapshots of
+    ``served_weight_kind`` is ``model_adapter`` for a LoRA's snapshots, and ``model`` for the snapshots of
     Spindle's full-parameter training, whose base serves the base model (``checkpoint_sampler_path``).
     Every sampler served in this process gets a runtime load ID of this
     incarnation; activating a snapshot whose sampler is not the one served
@@ -175,7 +175,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         """The model that serves ``artifact``: each call samples its own artifact.
 
-        A LoRA's release is the base model with the adapter that its manifest names. A full-parameter release is a
+        A LoRA's artifact is the base model with the adapter that its manifest names. A full-parameter artifact is a
         model of its own, which Spindle serves under its sampler path; its base is the base model.
         """
         sampler_path = self.sampler_path(artifact)
@@ -206,7 +206,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._load_count += 1
         return sampler_path, version
 
-    # -- Serving releases
+    # -- Serving artifacts
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the snapshot's sampler; a sampler other than the served one is a new serving update."""
@@ -283,7 +283,7 @@ class TinkerInferenceSettings:
     )
     timeout_s: float = config_option(300.0, help="Sampling request timeout in seconds.")
     parameterization: str = config_option(
-        "lora", help="lora: each snapshot is a LoRA's manifest; full: Spindle's full-parameter releases."
+        "lora", help="lora: each snapshot is a LoRA's manifest; full: Spindle's full-parameter snapshots."
     )
 
     def __post_init__(self) -> None:

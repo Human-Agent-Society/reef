@@ -68,9 +68,9 @@ class ComponentJobs(StubTrainingComponent):
     def unblock(self) -> None:
         """Let go of any step the test holds, so the dispatcher can close."""
 
-    def import_start(self, release: Path) -> str:
-        self.started = (release / f"{self.component}.txt").read_text(encoding="utf-8")
-        return super().import_start(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        self.started = (artifact_dir / f"{self.component}.txt").read_text(encoding="utf-8")
+        return super().import_start(artifact_dir)
 
     def step(self, job: TrainingJob) -> JobStatus:
         """The job's end: a checkpoint of the component's file, or none when the step is rejected."""

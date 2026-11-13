@@ -42,7 +42,7 @@ class UriBackend(InMemoryRepositoryBackend):
 
 
 def weights(directory: Path, content: bytes) -> Path:
-    """A full-weight artifact: the layout of the test policy's releases."""
+    """A full-weight artifact: the layout of the test policy's artifacts."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -234,7 +234,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 (root,) = [row for row in listed if row["artifact_id"] == started]
                 assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
-                # The root is the only release: no default start was written first.
+                # The root is the only snapshot: no default start was written first.
                 assert len(scenario.snapshot_queries.snapshot_rows(scenario.commit_number)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.

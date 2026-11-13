@@ -937,7 +937,7 @@ class _CheckedRecordOnlyRecipe(Recipe):
 
 
 @pytest.mark.unit
-def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_validator(tmp_path: Path) -> None:
+def test_a_recipe_serving_no_component_admits_the_whole_snapshot_through_its_validator(tmp_path: Path) -> None:
     """With no component, the check admits the snapshot as a whole: the scenario builds, and a snapshot the check
     refuses is not published."""
     dispatcher = _serve(_CheckedRecordOnlyRecipe(), tmp_path)  # type: ignore[arg-type]
@@ -1020,7 +1020,7 @@ def check_whole_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.unit
-def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(
+def test_a_commit_runs_the_snapshot_check_an_activation_of_that_snapshot_runs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The snapshot's own check runs on the composed snapshot a step publishes, as an activation of it runs it: a
@@ -1042,7 +1042,7 @@ def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(
         scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
         published = scenario.current_snapshot()
         assert published != seed
-        # The root snapshot made the creation's artifacts, under its own release ID.
+        # The root snapshot made the creation's artifacts, under its own revision.
         seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.revision)["harness"]
         assert (
             seed_harness
@@ -1090,7 +1090,7 @@ class _UnseededConfigRecipe(_ConfigRecipe):
 def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
     """A component whose recipe seeds nothing starts empty, and the other component's steps carry it as it is. An
     activation of one of those steps, or of a held one, runs only the snapshot's own check: each component was
-    admitted when its step published it, and judging the carried one would refuse releases their commits admitted."""
+    admitted when its step published it, and judging the carried one would refuse snapshots their commits admitted."""
     checks = _CountedChecks()
     composite = CompositeRecipe(
         components={
@@ -1135,7 +1135,7 @@ def test_a_component_config_that_is_not_an_object_is_refused_under_a_composite_m
 
 
 @pytest.mark.unit
-def test_composed_release_links_carried_files_and_tolerates_an_empty_component(tmp_path: Path) -> None:
+def test_composed_snapshot_links_carried_files_and_tolerates_an_empty_component(tmp_path: Path) -> None:
     weights = tmp_path / "w"
     weights.mkdir()
     (weights / "adapter.bin").write_bytes(b"\x00" * 16)

@@ -205,7 +205,7 @@ class StreamRun:
                     payload = {
                         "text": step.request_id,
                         "session": "session-1",
-                        "artifact_id": "release-1",
+                        "artifact_id": "artifact-1",
                         "samples": list(step.sample_ids),
                     }
                     self.training_requests.file(step.request_id, normalize_training_request_payload(payload))
@@ -491,10 +491,10 @@ def ordered_steps() -> list[Step]:
     ]
 
 
-def tttd_inference(step: int, group: int, rollout: int, release: str) -> AgentRecord:
+def tttd_inference(step: int, group: int, rollout: int, artifact_id: str) -> AgentRecord:
     return replace(
         inference(f"i-{step}-{group}-{rollout}"),
-        artifact_id=release,
+        artifact_id=artifact_id,
     )
 
 
@@ -518,9 +518,9 @@ def tttd_steps() -> list[Step]:
     for step, mixed in ((0, True), (1, False)):
         for group in range(2):
             for rollout in range(2):
-                release = "v2" if mixed and (group, rollout) == (1, 1) else "v1"
+                artifact_id = "v2" if mixed and (group, rollout) == (1, 1) else "v1"
                 steps += [
-                    tttd_inference(step, group, rollout, release),
+                    tttd_inference(step, group, rollout, artifact_id),
                     tttd_report(step, group, rollout, float(rollout)),
                 ]
         if step == 1:

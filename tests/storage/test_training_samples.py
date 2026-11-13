@@ -165,7 +165,7 @@ def training_commit(step: int, *consumed: str, component: str | None = None) -> 
     return CommitRecord(
         scenario="math",
         commit_number=step,
-        snapshot=SnapshotRef(f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"snapshot:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         high_water_sequence=step,

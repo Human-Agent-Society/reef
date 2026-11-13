@@ -116,8 +116,8 @@ def test_two_steps_grow_the_playbook_that_pi_serves_with_no_run(tmp_path: Path) 
         models={"ace": chat},
     )
     live = with_harness_component(recipe, ACE(ACESettings(model="ace")), score=None)
-    releases = TreeArtifacts(recipe.seed)
-    backend = build_harness_backend(recipe, live, "demo", releases)
+    artifacts = TreeArtifacts(recipe.seed)
+    backend = build_harness_backend(recipe, live, "demo", artifacts)
     # The first trace has no score and no feedback: ACE needs no correct answer.
     first = backend_step(
         backend,
@@ -130,7 +130,7 @@ def test_two_steps_grow_the_playbook_that_pi_serves_with_no_run(tmp_path: Path) 
     tree = HarnessTree.read(first.artifact.local_path)
     assert validate_tree(tree, PI).passed
     assert tree.files["rules.md"].startswith("Answer briefly.\n\n<!-- ace playbook: begin -->\n## Playbook\n")
-    releases.publish("r1", tree)
+    artifacts.publish("r1", tree)
 
     second = backend_step(
         backend, JobData("demo:2", (session("i2", "Fix the lint error.", 0.0),)), first.state, NoEvaluationPolicy()

@@ -68,7 +68,7 @@ def replica_client(tmp_path: Path, handler: InferenceHandler) -> tuple[TestClien
     number = coordination.control_lease.acquire("control-1").number
     coordination.served_models.write(
         ScenarioModel(SCENARIO, ACTIVE),
-        ServedArtifact("release-1", "http://engine.invalid", "engine-model"),
+        ServedArtifact("artifact-1", "http://engine.invalid", "engine-model"),
         control_lease_number=number,
     )
     replica = InferenceReplica(ServedModelsCache(coordination.served_models), storage, FixedEngineClients(handler))
@@ -112,7 +112,7 @@ def test_the_engine_receives_and_the_record_holds_the_body_that_the_handler_give
         (received,) = handler.received
         assert (received["temperature"], received["model"]) == (0.6, "engine-model")
         # The record keeps the client's model and the temperature that the engine used.
-        assert recorded_requests(storage) == [{**body, "temperature": 0.6, "artifact_id": "release-1"}]
+        assert recorded_requests(storage) == [{**body, "temperature": 0.6, "artifact_id": "artifact-1"}]
 
     asyncio.run(run())
 
@@ -143,6 +143,6 @@ def test_by_default_the_engine_receives_and_the_record_holds_the_clients_body(tm
             response = await post(client, body)
             assert response.status == 200
         assert handler.received == [{**body, "model": "engine-model"}]
-        assert recorded_requests(storage) == [{**body, "artifact_id": "release-1"}]
+        assert recorded_requests(storage) == [{**body, "artifact_id": "artifact-1"}]
 
     asyncio.run(run())

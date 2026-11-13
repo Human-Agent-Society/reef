@@ -49,7 +49,7 @@ def test_artifact_is_the_process_local_artifact_coordinator(tmp_path: Path) -> N
 
 
 @pytest.mark.unit
-def test_release_id_chain_owns_heads_staging_and_publication(tmp_path: Path) -> None:
+def test_snapshot_chain_owns_heads_staging_and_publication(tmp_path: Path) -> None:
     backend = InMemoryRepositoryBackend("math")
     root = backend.register(root_tree(tmp_path / "root"), metadata={})
     repository = Repository(

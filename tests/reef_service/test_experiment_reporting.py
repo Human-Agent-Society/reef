@@ -86,7 +86,7 @@ def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, mon
 @pytest.mark.parametrize("failing", [False, True])
 def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
     """A blocked ``record`` holds up nothing. ``correlation_metrics`` runs before the commit record is written,
-    under the operation lock only, so release reads still answer."""
+    under the operation lock only, so artifact reads still answer."""
     tracker = _RecordingTracker()
     # Run the cycle explicitly; sample notifications must not start competing workers.
     value, _ = _dispatcher(tmp_path, experiment_tracker=tracker, hold_local_cycles=True)

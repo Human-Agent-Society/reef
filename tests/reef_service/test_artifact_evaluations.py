@@ -86,11 +86,11 @@ class ArtifactHandler(InferenceHandler):
     """Answers every chat call, and records the artifact that it was asked to answer from."""
 
     def __init__(self) -> None:
-        self.releases: list[str] = []
+        self.artifact_ids: list[str] = []
         self.models: list[str] = []
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        self.releases.append(artifact.artifact_id)
+        self.artifact_ids.append(artifact.artifact_id)
         self.models.append(payload["model"])
         return {"choices": [{"message": {"role": "assistant", "content": "ls"}, "finish_reason": "stop"}]}
 
@@ -263,7 +263,7 @@ async def created(client: TestClient, tmp_path: Path, *names: str) -> str:
 
 
 @pytest.mark.integration
-def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_release_it_names(tmp_path: Path) -> None:
+def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_snapshot_it_names(tmp_path: Path) -> None:
     runtime = ArtifactRuntime()
     dispatcher = dispatcher_for(
         tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=runtime)
@@ -298,7 +298,7 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
                 ],
             }
             assert answer["mean_score"] == 0.5
-            assert runtime.handler.releases == [artifact_id] * 4, "every call samples the evaluated release"
+            assert runtime.handler.artifact_ids == [artifact_id] * 4, "every call samples the evaluated artifact"
             assert runtime.handler.models == [f"engine:{artifact_id}"] * 4, "every call names the engine's model"
             # Each broken rollout's sandbox does not start: it reaches no model, so all 3 of its attempts run.
             assert runtime.served == [artifact_id] * 10, "inference serves the candidate before each trial"
@@ -1068,7 +1068,7 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
         evaluation = answer["policy_evaluation"]
         assert evaluation["harness"]["base"] == "pi"
         assert evaluation["scores"] == [{"task": "add", "scores": [1.0]}]
-        assert runtime.handler.releases == [artifact_id]
+        assert runtime.handler.artifact_ids == [artifact_id]
         rendered = "".join(lab.rendered.values())
         assert "Call {model} once." in rendered, "the runner fills no placeholder in the tree's own text"
         assert "http://127.0.0.1:" in rendered, "the rendered binding names the address of the capture proxy"
@@ -1307,7 +1307,7 @@ def test_a_candidate_that_inference_cannot_serve_fails_its_rollouts_and_scores_n
             answer = await finished(client, (await response.json())["evaluation_id"])
 
         assert answer["policy_evaluation"]["scores"] == [{"task": "add", "scores": ["failed"]}]
-        assert runtime.handler.releases == [], "no trial ran"
+        assert runtime.handler.artifact_ids == [], "no trial ran"
 
     asyncio.run(run())
 
@@ -1379,7 +1379,7 @@ def test_a_changed_rollout_of_a_deleted_scenario_is_no_failure(tmp_path: Path, c
 
 
 @pytest.mark.integration
-def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_harness_is_refused(
+def test_a_runtime_that_serves_only_its_current_artifact_or_a_scenario_with_a_harness_is_refused(
     tmp_path: Path,
 ) -> None:
     async def run(dispatcher: Dispatcher, root: Path, message: str, *, harness: bool) -> None:

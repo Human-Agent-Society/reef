@@ -69,7 +69,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path):
     committed = CommitRecord(
         scenario="math",
         commit_number=1,
-        snapshot=SnapshotRef("release:1", "base"),
+        snapshot=SnapshotRef("snapshot:1", "base"),
         checkpoint=True,
         algorithm_state={"step": 1},
         consumed_ids=frozenset({"first"}),

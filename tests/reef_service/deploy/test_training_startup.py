@@ -54,7 +54,7 @@ def slime_argv(config):
 
 
 def serving_config(config, artifact_format=FULL_WEIGHTS):
-    """The serving runtime config that the HTTP service builds for Slime's releases of ``artifact_format``."""
+    """The serving runtime config that the HTTP service builds for Slime's artifacts of ``artifact_format``."""
     return serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), artifact_format)
 
 
