@@ -6,7 +6,8 @@ when a commit publishes a checkpoint as a new artifact, Reef queues its evaluati
 checks each request against the scenario and stores it in the scenario's evaluation store. It adds one
 ``evaluation_rollout`` item for each rollout to the ``evaluations`` work queue, where the evaluation service's
 workers run them (``reef.evaluation.rollout_worker``). With ``max_concurrent_rollouts``, it keeps at most that many
-rollouts that are not final in the queue, and adds the next ones as rollouts end (RFC #1276). With
+rollouts that are not final in the queue, and adds the next ones as rollouts end (RFC #1276); a retry keeps the
+same limit. With
 ``max_failed_fraction``, it stops an evaluation whose ended rollouts fail too often (RFC #1287). When every rollout of an
 evaluation is final, ``EvaluationResults`` reads the scores, stores their ``PolicyEvaluation``, and gives it to the
 scenario's activation rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No aiohttp types
@@ -98,6 +99,8 @@ ETA_WINDOW_SECONDS = 1200.0
 QUEUE_OWNER = "evaluations-queue"
 #: How many of a scenario's newest evaluations ``fail_stopped`` reads.
 MAX_STOPPED_EVALUATIONS = 1000
+#: The metadata of a rollout that a retry runs again once ``max_concurrent_rollouts`` lets it (``rollout_waits``).
+RETRY_WAIT_METADATA = "waits_for_retry"
 #: The seconds between two reads of the queue's changes when nothing changed.
 RESULT_POLL_SECONDS = 0.2
 #: How often Reef tries to activate an artifact that passed its evaluation while training results wait to commit,
@@ -176,7 +179,19 @@ def rollout_failed(item: WorkItem) -> bool:
 
 def rollout_cancelled(item: WorkItem) -> bool:
     """Whether a cancel or a stop of its evaluation ended ``item``, and not the rollout's own work."""
-    return item.state == "failed" and item.error in (CANCELLED_ERROR, FAILURES_ERROR)
+    return rollout_ended(item) and item.state == "failed" and item.error in (CANCELLED_ERROR, FAILURES_ERROR)
+
+
+def rollout_waits(item: WorkItem) -> bool:
+    """Whether ``item`` is a final rollout that a retry chose to run again, and that waits until fewer than
+    ``max_concurrent_rollouts`` rollouts of its evaluation are not final (``RETRY_WAIT_METADATA``). Its evaluation
+    runs, and the rollout counts as not ended."""
+    return item.final and item.metadata.get(RETRY_WAIT_METADATA) is True
+
+
+def rollout_ended(item: WorkItem) -> bool:
+    """Whether ``item`` is a final rollout that does not wait for a retry (``rollout_waits``)."""
+    return item.final and not rollout_waits(item)
 
 
 def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now: float) -> dict[str, JsonValue]:
@@ -193,7 +208,7 @@ def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now
     request = stored.request
 
     def _counts(rollouts: Sequence[WorkItem], task_count: int) -> dict[str, JsonValue]:
-        ended = [item for item in rollouts if item.final and not rollout_cancelled(item)]
+        ended = [item for item in rollouts if rollout_ended(item) and not rollout_cancelled(item)]
         scores = [
             RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
             for item in ended
@@ -212,7 +227,10 @@ def evaluation_progress(stored: StoredEvaluation, items: Sequence[WorkItem], now
 
     window = min(ETA_WINDOW_SECONDS, now - stored.created_at)
     recent = sum(
-        item.final and not rollout_cancelled(item) and item.ended_at is not None and item.ended_at >= now - window
+        rollout_ended(item)
+        and not rollout_cancelled(item)
+        and item.ended_at is not None
+        and item.ended_at >= now - window
         for item in items
     )
     counts = _counts(items, len(request.task_names))
@@ -398,8 +416,9 @@ class EvaluationResults:
 
     def settle(self, scenario: str, evaluation_id: str) -> None:
         """Start the evaluation once a worker took one of its rollouts; stop it when too many of its ended rollouts
-        failed (``max_failed_fraction``); add the rollouts that wait while fewer than ``max_concurrent_rollouts`` are
-        not final; end the evaluation once all of them are in the queue and final."""
+        failed (``max_failed_fraction``); while fewer than ``max_concurrent_rollouts`` rollouts are not final, queue
+        again the rollouts that wait for a retry (``rollout_waits``), then add the rollouts that wait for their first
+        run; end the evaluation once all of them are in the queue and ended."""
         with self.dispatcher.locked_scenario(scenario) as current:
             stored = current.store.evaluations.read(evaluation_id)
             if stored is None or stored.state in ("finished", "failed"):
@@ -408,7 +427,7 @@ class EvaluationResults:
             # before it would count as failed again.
             items = self.rollouts(evaluation_id, scenario)
             request = stored.request
-            ended = [item for item in items if item.final]
+            ended = [item for item in items if rollout_ended(item)]
             failed = sum(rollout_failed(item) for item in ended)
             total = len(request.task_names) * request.rollouts_per_task
             limit = request.max_failed_fraction
@@ -422,13 +441,20 @@ class EvaluationResults:
                 # lock, no settle adds a rollout to the evaluation meanwhile.
                 for item in items:
                     self.queue.cancel(EVALUATIONS_QUEUE, item.id, FAILURES_ERROR)
+                    if rollout_waits(item):
+                        self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
                 current.store.evaluations.fail(evaluation_id, error=error, finished_at=time.time())
                 return
             # The queue holds a prefix of the rollouts in task and repeat order. Each next rollout has a fixed ID, so
             # two settles at once add it once.
             waiting = len(request.task_names) * request.rollouts_per_task - len(items)
-            if waiting > 0 and request.max_concurrent_rollouts is not None:
+            retry_waiting = [item for item in items if rollout_waits(item)]
+            if (waiting > 0 or retry_waiting) and request.max_concurrent_rollouts is not None:
                 free = request.max_concurrent_rollouts - sum(not item.final for item in items)
+                for item in retry_waiting[: max(free, 0)]:
+                    self.queue.retry(EVALUATIONS_QUEUE, item.id)
+                    self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
+                free -= len(retry_waiting)
                 template = EvaluationRollout.from_item(items[0])
                 for position in range(len(items), len(items) + min(free, waiting)):
                     index, repeat = divmod(position, request.rollouts_per_task)
@@ -437,7 +463,7 @@ class EvaluationResults:
                             replace(template, task_index=index, task_name=request.task_names[index], repeat=repeat)
                         )
                     )
-            if waiting > 0 or not all(item.final for item in items):
+            if waiting > 0 or retry_waiting or not all(item.final for item in items):
                 if stored.state == "queued" and any(item.state in ("assigned", "running") for item in items):
                     current.store.evaluations.begin(evaluation_id)
                 return
@@ -631,6 +657,9 @@ class ArtifactEvaluations:
             cancelled = current.store.evaluations.fail(evaluation_id, error=CANCELLED_ERROR, finished_at=time.time())
             for item in self.results.rollouts(evaluation_id, scenario):
                 self.queue.cancel(EVALUATIONS_QUEUE, item.id, CANCELLED_ERROR)
+                if rollout_waits(item):
+                    # The rollout keeps the error of its last attempt.
+                    self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
         return cancelled
 
     def retry(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
@@ -638,8 +667,10 @@ class ArtifactEvaluations:
         and return the evaluation, which runs (RFC #1340); None when the scenario has no such evaluation.
 
         A rollout has no score when it failed, when a cancel or a stop of the evaluation ended it, or when it finished
-        with a failed score (``rollout_failed``). Each of them goes back to the queue with its earlier attempts kept.
-        The scored rollouts keep their scores, and a rollout that has not ended stays as it is.
+        with a failed score (``rollout_failed``). Each of them goes back to the queue with its earlier attempts kept,
+        while fewer than ``max_concurrent_rollouts`` rollouts are not final; the others wait (``rollout_waits``) and
+        go back as rollouts end (``EvaluationResults.settle``). The scored rollouts keep their scores, and a rollout
+        that has not ended stays as it is.
 
         An evaluation that runs goes on with those rollouts in the queue again. An evaluation that ended runs again:
         it loses its result or its error, and the rollouts that never started for ``max_concurrent_rollouts`` start
@@ -678,8 +709,15 @@ class ArtifactEvaluations:
             # An ended evaluation runs before its rollouts change, so the settle that follows each change sees it
             # running.
             retried = current.store.evaluations.reopen(evaluation_id) if ended else stored
-            for item in again:
+            limit = request.max_concurrent_rollouts
+            free = len(again) if limit is None else max(limit - sum(not item.final for item in items), 0)
+            # Under the scenario lock, a settle sees each of these rollouts either queued or marked to wait.
+            for item in again[free:]:
+                self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, True)
+            for item in again[:free]:
                 self.queue.retry(EVALUATIONS_QUEUE, item.id)
+                if rollout_waits(item):
+                    self.queue.write_metadata(EVALUATIONS_QUEUE, item.id, RETRY_WAIT_METADATA, False)
         logger.info("evaluation %s of %s runs %d rollouts again", evaluation_id, scenario, len(again))
         # With every queued rollout scored, only the rollouts that wait are left: no item changes, so settle here.
         self.results.settle_changed(scenario, evaluation_id)
@@ -941,7 +979,8 @@ class ArtifactEvaluations:
         evaluation ``evaluation_id``.
 
         ``state`` is the rollout's queue state, or ``waiting`` for a rollout that ``max_concurrent_rollouts`` keeps
-        out of the queue yet. ``started_at`` and ``ended_at`` are its work item's times.
+        out of the queue yet, also one that a retry runs again (``rollout_waits``). ``started_at`` and ``ended_at``
+        are its work item's times; a rollout that waits for a retry has no ``ended_at``, ``score`` or ``error``.
         ``score`` is the rollout's ``RolloutScore`` as JSON once it finished, else null; ``rewards`` is every reward
         of its verifier (``verifier_rewards``, RFC #1297), and null when it has none, as for a rollout that finished
         before Reef kept them; ``error`` is the reason of a failed rollout, else null. ``calls`` is the ``EvaluationCallTotals`` of the rollout's kept agent calls as JSON,
@@ -956,20 +995,26 @@ class ArtifactEvaluations:
         items = self.results.rollouts(evaluation_id, scenario)
         for item in items:
             rollout = EvaluationRollout.from_item(item)
-            finished = item.state == "finished" and item.result is not None
+            waits = rollout_waits(item)
+            finished = item.state == "finished" and item.result is not None and not waits
             views.append(
                 {
                     "task": rollout.task_name,
                     "task_index": rollout.task_index,
                     "repeat": rollout.repeat,
-                    "state": item.state,
+                    "state": "waiting" if waits else item.state,
                     "attempt_count": item.attempt_count,
                     "started_at": item.started_at,
-                    "ended_at": item.ended_at,
+                    "ended_at": None if waits else item.ended_at,
                     "score": cast(Mapping[str, object], item.result)["score"] if finished else None,
                     "rewards": cast(Mapping[str, object], item.result).get("rewards") if finished else None,
-                    # A rollout that finished with a failed score keeps its reason in its result.
-                    "error": cast(Mapping[str, object], item.result).get("error") if finished else item.error,
+                    # A rollout that finished with a failed score keeps its reason in its result. A rollout that
+                    # waits for a retry shows no result of its last attempt.
+                    "error": (
+                        None
+                        if waits
+                        else (cast(Mapping[str, object], item.result).get("error") if finished else item.error)
+                    ),
                 }
             )
         request = stored.request
