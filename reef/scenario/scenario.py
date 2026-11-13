@@ -381,7 +381,8 @@ class Scenario:
         that this instance loaded: a samples service in another process reads the activations of control without a
         reload. Before the first commit, the scenario serves the artifact that it was created with. A store without a
         durable history is the memory of one process, so the instance keeps the artifacts that it saw selected, in
-        order, with the commit number at each change. A scenario that loads no weights serves one fixed model: the
+        order, with the commit number at each change; an artifact that served before this instance saw it is not in
+        that history, so an on-policy stage finds its samples stale. A scenario that loads no weights serves one fixed model: the
         result is empty, and no data goes stale."""
         served_component = self.served_component()
         if self._binding.components.loaded_component is None or self.runtime is None or served_component is None:

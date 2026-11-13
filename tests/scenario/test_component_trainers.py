@@ -1252,10 +1252,13 @@ class NoSelectionProgress(Selection):
         return
 
 
-def on_policy_weights(dispatchers: _Dispatchers, **options: Any) -> tuple[Dispatcher, Scenario]:
-    """A dispatcher whose weights trainer is on-policy and that runs no samples service: the test makes the samples.
-    Its scenario serves, and holds no row yet."""
-    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={}))
+def on_policy_weights(
+    dispatchers: _Dispatchers, *, max_artifact_lag: int = 0, **options: Any
+) -> tuple[Dispatcher, Scenario]:
+    """A dispatcher whose weights trainer accepts ``max_artifact_lag`` (0: on-policy) and that runs no samples
+    service: the test makes the samples. Its scenario serves, and holds no row yet."""
+    config = {"max_artifact_lag": max_artifact_lag}
+    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config=config))
     dispatcher, _ = dispatchers.open(
         recipe=two_trainer_recipe(weights=weights),
         hold_local_cycles=True,
@@ -1292,12 +1295,59 @@ def test_a_rollback_to_an_artifact_judged_before_waits_for_a_new_judgment(dispat
 
 
 @pytest.mark.unit
+def test_a_stricter_staleness_rule_judges_the_stored_samples_again(dispatchers: _Dispatchers) -> None:
+    """Rows 1 and 2 are answered by A; a weights step on row 1 activates B. With a lag of 1, row 2 still trains.
+    A scenario config with a lag of 0 is a new rule at the same served commit: the samples service judges again
+    and marks row 2 stale, and no automatic job takes it before that."""
+    dispatcher, scenario = on_policy_weights(dispatchers, max_artifact_lag=1)
+    _append_records(scenario, 1, 2)
+    assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+    make_samples(scenario)
+    row_two = stage_item_id("agent", f"{WEIGHTS}:r2:0")
+    assert [stored.stale for stored in scenario.trainer_for(WEIGHTS).pipeline.store.read([row_two])] == [False]
+
+    dispatcher.set_record2sample_config("agent", {WEIGHTS: {"max_artifact_lag": 0}})
+    stricter = dispatcher.registry.require("agent")
+    pipeline = stricter.trainer_for(WEIGHTS).pipeline
+    assert not pipeline.judged(stricter.served_artifacts())
+    assert checked_commit(stricter, WEIGHTS) is None, "no job before the judgment under the new rule"
+    make_samples(stricter)
+    assert [stored.stale for stored in pipeline.store.read([row_two])] == [True]
+    assert checked_commit(stricter, WEIGHTS) is None
+
+
+@pytest.mark.unit
+def test_a_new_pipeline_judges_the_stored_samples_once_under_the_same_config(
+    dispatchers: _Dispatchers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stage whose code changed under the same class and config, as after an upgrade, judges the stored samples
+    again: a reload builds a new pipeline, which judges once whatever the stored judgments say."""
+    dispatcher, scenario = on_policy_weights(dispatchers, max_artifact_lag=1)
+    _append_records(scenario, 1, 2)
+    assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+    make_samples(scenario)
+    row_two = stage_item_id("agent", f"{WEIGHTS}:r2:0")
+    stage_class = type(scenario.trainer_for(WEIGHTS).pipeline.record2sample)
+    assert [stored.stale for stored in scenario.trainer_for(WEIGHTS).pipeline.store.read([row_two])] == [False]
+
+    monkeypatch.setattr(stage_class, "is_stale", lambda self, samples, served: True)
+    upgraded = dispatcher.registry.reload("agent")
+    pipeline = upgraded.trainer_for(WEIGHTS).pipeline
+    make_samples(upgraded)
+    assert [stored.stale for stored in pipeline.store.read([row_two])] == [True]
+    assert checked_commit(upgraded, WEIGHTS) is None
+
+
+@pytest.mark.unit
 def test_a_samples_service_in_its_own_process_judges_control_activations(dispatchers: _Dispatchers) -> None:
     """Control and a samples-only process share the storage. After a weights commit in control activates new
     weights, the samples process judges the new history without a reload, and control's next automatic job runs."""
     repository = _repository(dispatchers.tmp_path)
     _, scenario = on_policy_weights(dispatchers, backend_factory=repository)
-    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={}))
+    # The two processes read one deployment, so their stages have one config and one staleness rule.
+    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={"max_artifact_lag": 0}))
     samples_process, _ = dispatchers.open(
         recipe=two_trainer_recipe(weights=weights),
         hold_local_cycles=True,

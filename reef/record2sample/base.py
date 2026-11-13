@@ -190,16 +190,21 @@ class Record2Sample(ABC, Plugin):
 
     # ------------------------------------------------------------- staleness
 
+    #: Whether the samples of the stage can go stale. A stage whose samples do not depend on the artifact that
+    #: produced them, such as fixed SFT targets, harness traces or generated tasks, sets it to False: the samples
+    #: service then never asks ``is_stale`` and never reads the stage's stored samples to judge them.
+    goes_stale: bool = True
+
     def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
         """Whether ``samples``, the stored samples of one group that no job trained, may no longer train now that the
         scenario serves ``served``.
 
-        The samples service calls it, and marks every sample of a stale group in the store; the stage's state does not
-        change. The default is on-policy: the samples are stale when the data of one of them is of an artifact
-        other than the one that the scenario serves now, or one that it serves beside it
-        (``lags_behind(samples, served, 0)``). A task never goes stale. A stage whose samples do not depend on the
-        artifact that produced them, such as fixed SFT targets, returns False. A stage whose method accepts a bounded
-        lag passes its own bound to ``lags_behind``.
+        The samples service calls it only when ``goes_stale`` is True, and marks every sample of a stale group in the
+        store; the stage's state does not change. The default is on-policy: the samples are stale when the data of
+        one of them is of an artifact other than the one that the scenario serves now, or one that it serves beside
+        it (``lags_behind(samples, served, 0)``). A task never goes stale. A stage whose method accepts a bounded lag
+        passes its own bound to ``lags_behind``. The result may depend on the stage's config: the samples service
+        judges again when the config changes.
         """
         return lags_behind(samples, served, 0)
 
@@ -283,6 +288,8 @@ class NoSamples(Record2Sample):
     The stage reads each record and keeps nothing. The pipeline then makes no job data, and the records stay stored
     for audit.
     """
+
+    goes_stale = False
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:

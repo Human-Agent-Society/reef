@@ -16,10 +16,10 @@ weights step would leave the harness nothing to read.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, Self
 
-from reef.core.job_data import Sample, TrajectorySample
+from reef.core.job_data import TrajectorySample
 from reef.core.plugins import NoSettings
 from reef.core.trajectories import make_trajectory
 from reef.pipeline_context import PipelineContext
@@ -27,7 +27,6 @@ from reef.record2sample.assembly import reported_task
 from reef.record2sample.base import InferenceRecordSamples, SampleResult
 from reef.record2sample.reports import ReportContext, ReportSamples
 from reef.record2sample.sets import RecordSet, SingleRecordSet
-from reef.record2sample.staleness import ServedArtifacts
 
 
 class TraceSamples(ReportSamples):
@@ -41,8 +40,7 @@ class TraceSamples(ReportSamples):
     keeps this stage. It takes no config, and its samples never go stale.
     """
 
-    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
-        return False
+    goes_stale = False
 
     def make_sample(self, context: ReportContext) -> TrajectorySample:
         sample = make_trajectory(context.inferences, context.require_score(), context.report.payload.get("feedback"))
@@ -67,8 +65,7 @@ class InferenceSamples(InferenceRecordSamples):
         NoSettings.parse(config, plugin_class=cls)
         return cls()
 
-    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
-        return False
+    goes_stale = False
 
     def make_samples(self, record_set: RecordSet) -> SampleResult:
         if not isinstance(record_set, SingleRecordSet):

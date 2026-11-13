@@ -131,8 +131,8 @@ class TrainingState(ABC):
 
     Values: the train count of each sample ID and trainer, a positive int, and the IDs of the records that each
     trainer's stages consumed. Under the key ``judged:<trainer>`` (``JUDGED_KEY_PREFIX``) in place of a trainer, the
-    consumed IDs are the commit numbers, in decimal, of the served histories at which the samples service judged
-    that trainer's samples. The train count of a sample and a trainer is the number of that trainer's commits that
+    consumed IDs are ``<commit number> <rule>``: the served histories at which the samples service judged that
+    trainer's samples, and the staleness rule of each judgment. The train count of a sample and a trainer is the number of that trainer's commits that
     list the sample (``consumed_sample_id``), so only a commit changes it. A train count stays when its item leaves
     the scenario, so an item that comes back keeps it.
 
@@ -450,17 +450,23 @@ class TrainerSamples:
         for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT):
             self.store.data.update(self.store.owner, list(batch), {STALE_KEY: True})
 
-    def judged_commit(self) -> int:
+    def judged_commit(self, rule: str) -> int:
         """The newest ``ServedArtifacts.commit_number`` at which the samples service judged the samples of
-        ``trainer``, or -1 before the first judgment. The training state keeps rows only: one for each judgment, and
-        the largest one counts, so a row written twice or out of order changes nothing."""
+        ``trainer`` under the staleness rule ``rule``, or -1 before the first such judgment. The training state keeps
+        rows only, ``<commit number> <rule>``: one for each judgment, and the largest commit number of ``rule``
+        counts, so a row written twice or out of order changes nothing."""
         judged = self.store.state.consumed_record_ids(f"{JUDGED_KEY_PREFIX}{self.trainer}")
-        return max((int(commit_number) for commit_number in judged), default=-1)
+        return max(
+            (int(row.split(" ", 1)[0]) for row in judged if row.split(" ", 1)[1:] == [rule]),
+            default=-1,
+        )
 
-    def write_judged(self, commit_number: int) -> None:
+    def write_judged(self, commit_number: int, rule: str) -> None:
         """Store that the samples service judged the samples of ``trainer`` at the served history of
-        ``commit_number``."""
-        self.store.state.consume_records(f"{JUDGED_KEY_PREFIX}{self.trainer}", [str(commit_number)])
+        ``commit_number`` under the staleness rule ``rule``, a string without spaces."""
+        if " " in rule:
+            raise ValueError("a staleness rule has no spaces")
+        self.store.state.consume_records(f"{JUDGED_KEY_PREFIX}{self.trainer}", [f"{commit_number} {rule}"])
 
     def ended_record_ids(self) -> frozenset[str]:
         """The records that the stages of ``trainer`` ended (``end_records``), whether a commit names them or not."""

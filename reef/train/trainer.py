@@ -548,20 +548,26 @@ class Trainer:
                         self._pipeline.stored_sample_count - before_samples,
                     )
 
-            # The samples service judges the stored samples first, so that the samples that this step stores are
-            # judged against the same artifacts when they are stored.
-            judged = self._pipeline.mark_stale(ServedArtifacts() if served is None else served)
-            self._pipeline.selection_task = None if selection is None else selection.task_id
+            # Each write of the step checks first that the selection's worker still holds it.
+            self._pipeline.selection = selection
             try:
-                first_sequence = self.read_records(report)
-                stored = self._pipeline.produce()
+                # The samples service judges the stored samples first, so that the samples that this step stores are
+                # judged against the same artifacts when they are stored.
+                judged = self._pipeline.mark_stale(ServedArtifacts() if served is None else served)
+                self._pipeline.selection_task = None if selection is None else selection.task_id
+                try:
+                    first_sequence = self.read_records(report)
+                    stored = self._pipeline.produce()
+                finally:
+                    self._pipeline.selection_task = None
+                report()
+                self._pipeline.settle_ended_records(self.committed_record_ids)
+                self.skipped_record_ids -= self.committed_record_ids
+                if self.skipped_record_ids:
+                    self._pipeline.check_lease()
+                    self._pipeline.store.end_records(self.skipped_record_ids)
             finally:
-                self._pipeline.selection_task = None
-            report()
-            self._pipeline.settle_ended_records(self.committed_record_ids)
-            self.skipped_record_ids -= self.committed_record_ids
-            if self.skipped_record_ids:
-                self._pipeline.store.end_records(self.skipped_record_ids)
+                self._pipeline.selection = None
             due = self._pipeline.next_due()
             return ProducedSamples(
                 changed=stored or judged,

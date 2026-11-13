@@ -42,7 +42,7 @@ from typing import cast
 
 from reef.execution.jobs import JOB_LISTENER, JobListener
 from reef.execution.workers import QueueWorker
-from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
+from reef.storage.work_queue import JsonValue, WorkItem, WorkLeaseLostError, WorkQueue
 
 #: The queue of sample work.
 SAMPLES_QUEUE = "samples"
@@ -76,16 +76,27 @@ class Selection(ABC):
     def progress(self, records_read: int, samples_created: int) -> None:
         """Report the records read and the samples created so far in this attempt."""
 
+    def check_lease(self) -> None:
+        """Raise ``WorkLeaseLostError`` when the worker of this attempt no longer holds its item; the trainer calls it
+        before each write. The default holds always: no queue gives the attempt."""
+        return
+
 
 class ItemSelection(Selection):
     """The attempt of the selection ``item`` that a samples worker runs: it writes the counts so far to the item's
-    ``metadata["progress"]``, at most once in ``PROGRESS_INTERVAL_SECONDS``. The result holds the final counts."""
+    ``metadata["progress"]``, at most once in ``PROGRESS_INTERVAL_SECONDS``. The result holds the final counts.
+    ``lease_lost`` is set once the worker no longer holds the item (``LeaseExtender``)."""
 
-    def __init__(self, queue: WorkQueue, item: WorkItem) -> None:
+    def __init__(self, queue: WorkQueue, item: WorkItem, lease_lost: threading.Event | None = None) -> None:
         super().__init__(item.id)
         self.queue = queue
         self.item = item
         self.last_write = -math.inf
+        self.lease_lost = threading.Event() if lease_lost is None else lease_lost
+
+    def check_lease(self) -> None:
+        if self.lease_lost.is_set():
+            raise WorkLeaseLostError(f"the samples worker no longer holds {self.item.id!r}")
 
     def progress(self, records_read: int, samples_created: int) -> None:
         now = time.monotonic()
@@ -234,7 +245,7 @@ class SamplesWorker(QueueWorker):
             raise ValueError("a record selection names its component")
         token = JOB_LISTENER.set(SelectionRequest(self.queue, item.scenario, component))
         try:
-            produced = self.producers.produce(item.scenario, component, ItemSelection(self.queue, item))
+            produced = self.producers.produce(item.scenario, component, ItemSelection(self.queue, item, lease_lost))
         finally:
             JOB_LISTENER.reset(token)
         sequences = produced.record_sequences

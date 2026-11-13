@@ -740,8 +740,10 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     (``job_ended``), the stage saves ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results` for each task that
     a committed job trained and that has no result. When every train task of a generation has a result, the next
     job sends the generation's results to the generator. A restart sends the results that the generator did not
-    receive.
+    receive. A task never goes stale: the algorithm rolls it out with the weights that it trains.
     """
+
+    goes_stale = False
 
     def __init__(
         self,

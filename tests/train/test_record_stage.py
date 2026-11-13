@@ -36,11 +36,14 @@ from reef.record2sample import (
     SingleRecordSet,
     SkippedReport,
 )
+from reef.record2sample.service import Selection
 from reef.record2sample.staleness import ServedArtifacts
+from reef.record2sample.traces import TraceSamples
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.commits import CommitRecord
 from reef.storage.data import MAX_QUERY_LIMIT, NewItem
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
+from reef.storage.work_queue import WorkLeaseLostError
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
@@ -342,6 +345,58 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     assert not processor.record2sample.set_samples
 
 
+class LostLease(Selection):
+    """A selection whose worker lost its item once ``lost`` is True: as a worker whose lease ran out while another
+    worker took the trainer's next selection."""
+
+    def __init__(self) -> None:
+        super().__init__("selection")
+        self.lost = False
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        return
+
+    def check_lease(self) -> None:
+        if self.lost:
+            raise WorkLeaseLostError("lost")
+
+
+@pytest.mark.unit
+def test_a_samples_step_whose_worker_lost_its_lease_writes_nothing() -> None:
+    """Two workers overlap on one trainer: the first started at artifact e:1, and the second judged e:2. The first
+    must not store samples that it judged against e:1, nor a judgment, once its lease is gone."""
+    processor = threshold_pipeline(PipelineContext("s"))
+    selection = LostLease()
+    processor.selection = selection
+    processor.mark_stale(ServedArtifacts(("e:1",), commit_number=1))
+    selection.lost = True
+    processor.push(inference("i1", version="e:1"))
+    with pytest.raises(WorkLeaseLostError):
+        processor.push(report("r1", "i1"))
+    assert processor.store.page() == ()
+    with pytest.raises(WorkLeaseLostError):
+        processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=2))
+    assert processor.store.judged_commit(processor.staleness_rule) == 1
+
+
+@pytest.mark.unit
+def test_a_stage_that_never_goes_stale_is_judged_without_reading_the_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(
+        context, record2sample=TraceSamples(context), sample2job=UploadJobData(context, 1, None)
+    )
+    processor.push(inference("i1", version="e:1"))
+    processor.push(report("r1", "i1"))
+
+    def refused(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a stage that never goes stale reads no listing")
+
+    monkeypatch.setattr(SampleStore, "listing", refused)
+    assert processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=1))
+    assert processor.judged(ServedArtifacts(("e:1", "e:2"), commit_number=1))
+    assert [stored.stale for stored in processor.store.page()] == [False]
+
+
 @pytest.mark.unit
 def test_a_sample_that_the_samples_service_marks_stale_stays_stored_and_never_trains_automatically() -> None:
     processor = threshold_pipeline(PipelineContext("s"))
@@ -359,7 +414,7 @@ def test_a_sample_that_the_samples_service_marks_stale_stays_stored_and_never_tr
     ]
     assert {"r1", "i1"} <= processor.record2sample.releasable_record_ids()
     # The judgment is stored once; judging again against the same artifacts changes nothing.
-    assert processor.store.judged_commit() == 3
+    assert processor.store.judged_commit(processor.staleness_rule) == 3
     assert not processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=3))
     # A sample stored after the judgment is judged as it is stored: no reader sees it unmarked.
     processor.push(inference("i3", version="e:1"))

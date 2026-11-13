@@ -8,19 +8,18 @@ which train with every agent turn that is not copied context.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.chat_rendering import trained_turns
 from reef.core.config import config_option
-from reef.core.job_data import Sample, TrajectorySample
+from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginSettings
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import make_trajectory
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import ReportContext, ReportSamples
-from reef.record2sample.staleness import ServedArtifacts
 from reef.sample2job import DistillJobData
 
 #: ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response.
@@ -60,10 +59,12 @@ class SFTSamples(ReportSamples):
     calls, for example an imported dataset example. The training component renders the sample with the model's chat
     template; a sample longer than ``max_tokens`` does not train (``extra.reef.max_tokens``).
 
-    Each valid report trains by itself and owns its inference records. A sample never goes stale (``is_stale``):
+    Each valid report trains by itself and owns its inference records. A sample never goes stale (``goes_stale``):
     staleness concerns tokens that an older model version sampled, and an SFT target is fixed text, not sampled
     tokens.
     """
+
+    goes_stale = False
 
     def __init__(self, context: PipelineContext, settings: SFTSettings) -> None:
         super().__init__(context, exclusive_sources=True)
@@ -79,9 +80,6 @@ class SFTSamples(ReportSamples):
         environ: Mapping[str, str],
     ) -> Self:
         return cls(context, SFTSettings.parse(config, plugin_class=cls))
-
-    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
-        return False
 
     def limited(self, sample: TrajectorySample) -> TrajectorySample:
         """``sample`` with the stage's ``max_tokens``, which the training component applies, when it sets one."""
