@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import pytest
 from tests.support.harness_jobs import changed_rules, harness_recipe
@@ -42,6 +43,7 @@ from reef.execution.workers import SERVICE_COMPONENTS
 from reef.harness.tree import TreePatch
 from reef.recipe import Recipe
 from reef.recipe.composite import CompositeRecipe
+from reef.record2sample.service.worker import SAMPLES_QUEUE
 from reef.scenario.live_objects import LiveObjects
 from reef.service.request_service import RequestService
 from reef.service.scenario_files import artifact_directory
@@ -59,12 +61,22 @@ from reef.train.job_queue import (
 #: The bytes that every weight file of these tests holds, which no other file holds.
 SENTINEL = b"reef-weight-bytes-that-control-must-not-hold:" + bytes(range(256)) * 64
 MODEL = "model.safetensors"
+#: The bound of one wait, for a host that runs many tests at once. No test waits a fixed time.
+WAIT_SECONDS = 180.0
 
 
 class SentinelWeights(StubTrainingComponent):
-    """A training component whose every checkpoint holds a weight file with ``SENTINEL`` and the job's number."""
+    """A training component whose every checkpoint holds a weight file with ``SENTINEL`` and the job's number.
+    A job trains only while ``may_train`` is set, which it is unless a test clears it."""
+
+    def __init__(self, checkpoint_root: Path) -> None:
+        super().__init__(checkpoint_root)
+        self.may_train = Event()
+        self.may_train.set()
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        if not self.may_train.wait(WAIT_SECONDS):
+            raise RuntimeError("the test did not let the weights train")
         (checkpoint,) = super().train(job)
         (Path(checkpoint.path) / MODEL).write_bytes(SENTINEL + str(len(self.submitted)).encode())
         return (checkpoint,)
@@ -73,11 +85,18 @@ class SentinelWeights(StubTrainingComponent):
 def weight_bytes_in(directory: Path) -> list[str]:
     """The files under ``directory`` that hold ``SENTINEL``, as paths under it."""
     marker = SENTINEL[:64]
-    return sorted(
-        str(path.relative_to(directory))
-        for path in directory.rglob("*")
-        if path.is_file() and not path.is_symlink() and marker in path.read_bytes()
-    )
+    found = []
+    for folder, _, names in os.walk(directory):
+        for name in names:
+            path = Path(folder) / name
+            try:
+                holds = not path.is_symlink() and marker in path.read_bytes()
+            except FileNotFoundError:
+                # A service removes its temporary files while this reads the directory.
+                continue
+            if holds:
+                found.append(str(path.relative_to(directory)))
+    return sorted(found)
 
 
 def git_backends(root: Path) -> RepositoryBackendFactory:
@@ -171,10 +190,14 @@ def split(
         control.close()
 
 
-def wait_until(condition, message: str, seconds: float = 90.0) -> None:
+def wait_until(condition, message: str, state=None, seconds: float = WAIT_SECONDS) -> None:
+    """Wait until ``condition`` holds. The bound is for a host that runs many tests at once: each wait is on a
+    condition that a queue round trip between two services makes true, and nothing here waits a fixed time. A
+    failure reports ``state()``, read when the wait gave up."""
     deadline = time.monotonic() + seconds
     while not condition():
-        assert time.monotonic() < deadline, message
+        if time.monotonic() >= deadline:
+            raise AssertionError(message if state is None else f"{message}: {state()}")
         time.sleep(0.02)
 
 
@@ -186,8 +209,11 @@ def changing_rules(workspace, services) -> None:
 
 @pytest.fixture
 def real_lfs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Git and Git LFS without the user's configuration, and trainers that look at a running job often: a
+    trainer's worker polls a job every ``POLL_SECONDS``, which is 2 seconds in a deployment."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.05)
 
 
 @pytest.mark.integration
@@ -304,16 +330,33 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
     with split(tmp_path, recipe, live, (weights, evolving), inference_apart=True) as control:
         scenario = control.get_or_create_scenario("agent")
         root = dict(scenario.artifact_selection().components)
+
+        def trained(component: str) -> bool:
+            return scenario.trainer_for(component).state["finished_jobs"] >= 1
+
+        def quiet() -> bool:
+            """No sample is being made, no job or check waits or runs, and no trainer has anything to train."""
+            queues = (SAMPLES_QUEUE, CHECKS_QUEUE, JOBS_QUEUE)
+            items = [item for queue in queues for item in control.queue.items(queue, scenario="agent")]
+            trainers = [component_trainer.trainer for component_trainer in scenario.trainers]
+            return all(item.final for item in items) and not any(
+                trainer.holds_untrained_records() or trainer.needs_polling() or trainer.has_pending_commit
+                for trainer in trainers
+            )
+
+        def state() -> object:
+            return control.build_training_status(), scenario_jobs(control.queue, "agent")
+
+        # One record trains both components, and the harness trains first: the weights job waits. Without the
+        # order, the test has a race. When the weights commit activates before the harness takes its sample, the
+        # sample is of weights that the scenario no longer serves (``max_staleness`` is 0), and the pipeline
+        # drops it, so the harness never trains.
+        weights.may_train.clear()
         control.accept_record(token_inference("i1", scenario="agent", artifact_id=root["weights"]))
         control.accept_record(report("r1", "i1", scenario="agent"))
-
-        def trained(component: str, count: int = 1) -> bool:
-            return scenario.trainer_for(component).state["finished_jobs"] >= count
-
-        wait_until(
-            lambda: trained("weights") and trained("harness"),
-            f"the two components did not train: {control.build_training_status()}",
-        )
+        wait_until(lambda: trained("harness"), "the harness did not train", state)
+        weights.may_train.set()
+        wait_until(lambda: trained("weights") and quiet(), "the weights did not train", state)
         # The training service does hold the weights, so the check can find them.
         assert weight_bytes_in(tmp_path / "training") and weight_bytes_in(tmp_path / "artifacts.git")
         # The inference service is the reader of the weights: it made them local, in its own directory.
@@ -377,10 +420,13 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
         EndedWorkSweeper(control.queue, control.backend_factory, retention_seconds=1e-6).sweep()
         checked("sweep")
 
-        # A scenario that is deleted while a job runs: the job is cancelled, and nothing that it stored stays.
+        # A scenario that is deleted while a job runs or waits in the queue, also a job that its trainer submitted
+        # and has not committed yet: the job is cancelled, and nothing that it stored stays.
         control.accept_record(token_inference("i2", scenario="agent", artifact_id=root["weights"]))
         control.accept_record(report("r2", "i2", scenario="agent"))
-        wait_until(lambda: len(control.queue.items(JOBS_QUEUE, scenario="agent")) > 0, "no further job was queued")
+        wait_until(
+            lambda: len(control.queue.items(JOBS_QUEUE, scenario="agent")) > 0, "no further job was queued", state
+        )
         control.delete_scenario("agent")
         checked("delete during a job")
         wait_until(

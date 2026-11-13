@@ -217,6 +217,10 @@ class LocalTrainingWorkers:
                     # A reload replaced the scenario, or a delete removed it.
                     # The result belongs to the old instance, so the step ends without a commit. A rebuilt
                     # instance has not read these rows: look again on it.
+                    if state is InstanceState.REMOVED and result.training_job_id is not None:
+                        # The delete ended before this cycle added its job to the queue, so it cancelled none:
+                        # the job of the deleted scenario must not run.
+                        current.trainer_for(component).job_loop_required().component.cancel(result.training_job_id)
                     return state is InstanceState.REPLACED
                 try:
                     current.commit(result, component=component)

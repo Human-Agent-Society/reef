@@ -349,6 +349,8 @@ def status_from_item(item: WorkItem) -> JobStatus:
     return JobStatus(item.id, "running", checkpoints)
 
 
+#: The error of a job whose scenario was deleted.
+SCENARIO_DELETED_ERROR = "the scenario was deleted"
 #: The error of a job that a client cancelled.
 JOB_CANCELLED_ERROR = "cancelled by request"
 
@@ -441,6 +443,18 @@ def cancel_scenario_job(queue: WorkQueue, scenario: str, job_id: str) -> dict[st
         return None
     cancelled = queue.cancel(JOBS_QUEUE, job_id, JOB_CANCELLED_ERROR)
     return job_json(item if cancelled is None else cancelled)
+
+
+def cancel_scenario_jobs(queue: WorkQueue, scenario: str) -> int:
+    """Cancel every training job of ``scenario`` that has not ended, also a job that a trainer added to the queue
+    and whose submission no commit recorded yet; return how many. The delete of a scenario calls it, so that no
+    job of the scenario keeps running and stores a checkpoint or its record files after the scenario is gone."""
+    cancelled = 0
+    for item in queue.items(JOBS_QUEUE, scenario=scenario):
+        if not item.final:
+            queue.cancel(JOBS_QUEUE, item.id, SCENARIO_DELETED_ERROR)
+            cancelled += 1
+    return cancelled
 
 
 def cancel_request_jobs(queue: WorkQueue, scenario: str, request_id: str) -> dict[str, JsonValue] | None:
@@ -1005,6 +1019,7 @@ __all__ = [
     "TrainingJobWorker",
     "cancel_request_jobs",
     "cancel_scenario_job",
+    "cancel_scenario_jobs",
     "check_kind",
     "checkpoint_content",
     "discard_ended_content",

@@ -1804,6 +1804,57 @@ def test_a_weights_start_cancels_the_running_job_and_moves_the_next_jobs_start(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("deleted", ["after the cycle", "inside the cycle"])
+def test_a_job_that_was_submitted_and_not_committed_is_cancelled_when_its_scenario_is_deleted(
+    tmp_path: Path, dispatchers: _Dispatchers, deleted: str
+) -> None:
+    """A trainer adds a job to the queue before the commit that records it. A delete of the scenario in between
+    finds the job in no trainer's state: the job must still not run, or it would store a checkpoint and its
+    record files for a scenario that is gone."""
+    training = WeightsJobComponent(tmp_path / "checkpoints")
+    factory = _repository(tmp_path)
+    dispatcher, _ = dispatchers.open(
+        training=training,
+        hold_local_cycles=True,
+        backend_factory=factory,
+        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+    )
+    scenario = loaded(dispatcher, 1)
+    # The training service answers the job's check and runs no job, so the job waits in the queue.
+    checks = TrainingCheckWorker(
+        training, dispatcher.queue, dispatcher.job_directory_store, factory, worker_id="checks", poll_seconds=0.01
+    )
+    checks.start()
+    try:
+        if deleted == "after the cycle":
+            # The cycle submitted the job and stopped before its commit.
+            assert checked_commit(scenario, WEIGHTS) is not None
+            (job,) = dispatcher.queue.items(JOBS_QUEUE)
+            assert job.state == "queued" and scenario.trainer_for(WEIGHTS).state["jobs"] == []
+            dispatcher.delete_scenario("agent")
+        else:
+            # The delete ends while the cycle is about to add the job to the queue.
+            queued = scenario.trainer_for(WEIGHTS).job_loop_required().component
+            submit = queued.submit
+
+            def delete_then_submit(job: TrainingJob) -> None:
+                dispatcher.delete_scenario("agent")
+                assert dispatcher.queue.items(JOBS_QUEUE) == ()
+                submit(job)
+
+            wait_for_job_check(scenario, WEIGHTS)
+            queued.submit = delete_then_submit  # type: ignore[method-assign]
+            dispatcher.open_local_cycles()
+            dispatcher.local_workers.process_step("agent", WEIGHTS)
+            (job,) = dispatcher.queue.items(JOBS_QUEUE)
+    finally:
+        checks.stop()
+    cancelled = dispatcher.queue.read(JOBS_QUEUE, job.id)
+    assert cancelled.state == "failed" and cancelled.error in ("the scenario was deleted", "cancelled")
+    assert training.submitted == []
+
+
+@pytest.mark.unit
 def test_a_job_that_waits_for_its_check_holds_nothing_of_the_scenario(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:

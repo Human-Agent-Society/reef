@@ -67,6 +67,7 @@ from reef.train.job_queue import (
     TrainingJobWorker,
     cancel_request_jobs,
     cancel_scenario_job,
+    cancel_scenario_jobs,
     scenario_jobs,
 )
 from reef.train.manager import (
@@ -446,6 +447,9 @@ class Dispatcher(
                     # Nothing would read the job's checkpoints once its scenario is gone.
                     component_trainer.trainer.cancel_job()
                 dropped.close()
+            # A trainer adds a job to the queue before the commit that records it. Such a job is in no trainer's
+            # state, so the queue is asked: no job of the scenario runs on and stores files after the delete.
+            cancel_scenario_jobs(self.queue, scenario)
             self.local_workers.close_replaced_instances(scenario)
             # The discard can fail when the artifact store does not answer. It runs before the scenario's storage
             # and registration are archived, so the scenario is whole and a repeated delete finishes.
