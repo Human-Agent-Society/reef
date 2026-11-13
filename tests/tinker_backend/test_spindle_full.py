@@ -250,7 +250,7 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
         TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(copy))
     # The base of this component is its reference to the base revision, so it takes no base root.
     (tmp_path / "base-root").mkdir()
-    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.default_start_inputs).to_text())
+    (tmp_path / "base-root" / BASE_FILE).write_text(BaseRoot(component.facts.default_start_inputs).to_text())
     with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
         TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(tmp_path / "base-root"))
 

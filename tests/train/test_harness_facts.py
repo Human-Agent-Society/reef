@@ -73,7 +73,7 @@ def test_the_facts_of_the_settings_answer_as_the_component_of_the_same_settings(
             component.shares_scenarios,
             component.concurrent_jobs,
         )
-        assert facts.default_start_inputs == component.default_start_inputs == facts.default_start().inputs
+        assert facts.default_start_inputs == facts.default_start().inputs
         assert facts.default_start().files == dict(seed.files)
         for kind in ("trajectory", "task"):
             assert facts.parameters_schema(kind) == component.parameters_schema(kind)

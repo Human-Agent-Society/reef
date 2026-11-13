@@ -207,10 +207,6 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return self.facts.name
 
     @property
-    def default_start_inputs(self) -> Mapping[str, str]:
-        return self.facts.default_start_inputs
-
-    @property
     def artifact_format(self) -> ArtifactFormat | None:
         return self.facts.artifact_format
 

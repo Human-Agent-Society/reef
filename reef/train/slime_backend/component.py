@@ -205,11 +205,6 @@ class SlimeJobs(LocalJobComponent):
         return self.facts.artifact_format
 
     @property
-    def default_start_inputs(self) -> dict[str, str]:
-        """The configuration that decides the startup weights: the model, and with LoRA the adapter's settings."""
-        return dict(self.facts.default_start_inputs)
-
-    @property
     def base_start(self) -> str:
         """The start of the startup weights, which the workers load when they first start."""
         return str(self.base_start_dir)

@@ -55,10 +55,6 @@ class FakeComponent(TrainingComponent):
     def concurrent_jobs(self) -> bool:
         return self.runs_concurrent_jobs
 
-    @property
-    def default_start_inputs(self) -> dict[str, str]:
-        return {}
-
     def root_start(self, root: ScenarioRoot) -> str:
         return "fake:base"
 

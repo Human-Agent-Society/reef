@@ -97,7 +97,6 @@ def test_the_facts_of_a_config_answer_as_the_component_of_the_same_config(
             component.shares_scenarios,
             component.concurrent_jobs,
         )
-        assert facts.default_start_inputs == component.default_start_inputs
         default = facts.default_start()
         assert dict(default.files) == {BASE_FILE: BaseRoot(facts.default_start_inputs).to_text()}
         assert default.inputs == facts.default_start_inputs

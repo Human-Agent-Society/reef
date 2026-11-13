@@ -81,10 +81,6 @@ class StepComponent(LocalJobComponent):
     def artifact_format(self) -> ArtifactFormat:
         return ArtifactFormat("full")
 
-    @property
-    def default_start_inputs(self) -> dict[str, str]:
-        return {}
-
     def root_start(self, root: ScenarioRoot) -> str:
         return "steps:base"
 
