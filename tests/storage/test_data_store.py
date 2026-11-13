@@ -1195,6 +1195,16 @@ def test_a_task_that_joins_or_leaves_a_held_benchmark_joins_or_leaves_the_scenar
     assert uses_of(store, "coding", after=last) == [("sort", "train", "math"), ("mul", "train", "math")]
     assert uses_of(store, "review") == [("add", "eval", "math"), ("sort", "eval", "math"), ("mul", "eval", "math")]
     assert store.holds("acme", "coding")[0].item_count == 3
+    # One listing counts each held set: a task of two held benchmarks counts in each, and a set with no task has 0.
+    store.hold("acme", "coding", "benchmark", "lists", "eval")
+    store.hold("acme", "coding", "benchmark", "empty", "train")
+    assert [(hold.name, hold.split, hold.item_count) for hold in store.holds("acme", "coding")] == [
+        ("empty", "train", 0),
+        ("lists", "eval", 1),
+        ("math", "train", 3),
+    ]
+    store.release("acme", "coding", "benchmark", "lists", "eval")
+    store.release("acme", "coding", "benchmark", "empty", "train")
 
     # A patch that leaves the benchmarks keeps the uses of the holds and their sequences.
     kept = store.scenario_items("acme", "coding", kinds=("task",), content=False)
