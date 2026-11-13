@@ -474,7 +474,8 @@ sandbox where the training service runs. Only the training service reads and
 writes ``evolution.state_dir``. It copies the running step's progress into the
 step's job in the shared store, and it stores each ended step's record files in
 the artifact backend. Control reads both there for the snapshot and request
-pages. When you delete a scenario, control asks the training service to move
+pages. The record files stay as long as the scenario: Reef removes them from
+the artifact backend when you delete the scenario. When you delete a scenario, control asks the training service to move
 the scenario's directory under ``evolution.state_dir`` to ``archived/``; the
 request waits while no training service runs. Control builds no harness
 training component: it needs neither the adapter's binary nor the sandbox, and

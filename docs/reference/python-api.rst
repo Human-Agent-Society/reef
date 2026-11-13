@@ -1105,7 +1105,7 @@ A backend shares no snapshot between scenarios. It must:
   stored snapshot, or raise ``ArtifactNotFoundError``. Its ``revision`` and
   ``parent_revision`` are backend locators, separate from component IDs.
 - Keep each component entry's ``artifact_id`` in the manifests it stores.
-- Implement the four operations on stored content. Stored content is a named
+- Implement the five operations on stored content. Stored content is a named
   file tree of one scenario with no parent, no metadata and no artifact ID,
   and no head moves to it. The training service stores each checkpoint as
   content, and control commits it by name without reading a file:
@@ -1119,6 +1119,9 @@ A backend shares no snapshot between scenarios. It must:
     check that reads files calls it, and the pages that show a job's records.
   - ``discard_content(name)`` removes the content. A name that the backend
     does not hold changes nothing, and every snapshot keeps its files.
+  - ``discard_all_content()`` removes every content of the scenario. Reef
+    calls it when the scenario is deleted, so no content outlives its
+    scenario.
   - ``publish_parts(parts, *, metadata, expected_parent, advance_head)``
     stores a snapshot of files that the backend holds already, and moves the
     head as ``publish`` does. Callers use the inherited ``publish_stored``,

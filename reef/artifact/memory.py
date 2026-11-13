@@ -177,6 +177,13 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
         for path in stored:
             shutil.rmtree(path, ignore_errors=True)
 
+    def discard_all_content(self) -> None:
+        with self._storage.lock:
+            stored = [path for paths in self._storage.contents.values() for path in paths]
+            self._storage.contents.clear()
+        for path in stored:
+            shutil.rmtree(path, ignore_errors=True)
+
     def publish_parts(
         self,
         parts: Mapping[str | None, StoredFiles],

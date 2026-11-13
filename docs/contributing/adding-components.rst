@@ -310,9 +310,9 @@ snapshot-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   ``reef/artifact/``. A new storage backend implements ``RepositoryBackend``
   and is exposed through a repository backend factory. To let a deployment
   select it in ``storage.artifact_backend``, the factory also inherits
-  ``ConfigurableRepositoryBackendFactory``. Every backend implements the four
+  ``ConfigurableRepositoryBackendFactory``. Every backend implements the five
   operations on stored content (``store_content``, ``materialize_content``,
-  ``discard_content`` and ``publish_parts``): the training service stores a
+  ``discard_content``, ``discard_all_content`` and ``publish_parts``): the training service stores a
   checkpoint with them and control commits it by name. See `Artifact
   backends <../reference/python-api.rst#artifact-backends>`__.
 - Put weight loading in ``InferenceRuntime.activate_checkpoint`` under

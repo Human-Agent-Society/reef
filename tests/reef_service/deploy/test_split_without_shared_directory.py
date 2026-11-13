@@ -9,6 +9,7 @@ there is none.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import threading
 import time
@@ -126,6 +127,23 @@ def split(
         control.close()
 
 
+def stored_content_refs(tmp_path: Path) -> list[str]:
+    """The refs of the stored content that the artifact repository holds, of every scenario."""
+    return subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(tmp_path / "artifacts.git"),
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/reef/contents",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+
+
 def wait_until(condition, message: str, seconds: float = 60.0) -> None:
     deadline = time.monotonic() + seconds
     while not condition():
@@ -167,6 +185,7 @@ def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_directory_that_c
         )
     assert watch.seen == []
     assert not list((tmp_path / "control").rglob("checkpoints"))
+    assert stored_content_refs(tmp_path) == []
 
 
 @pytest.mark.integration
@@ -206,11 +225,15 @@ def test_a_harness_scenario_trains_shows_its_step_and_is_deleted_with_no_directo
         assert requests.harness_manifest(headers)["files"]
 
         assert (training_state / "demo").is_dir()
+        # The step's records are stored content, which lives as long as the scenario: the checkpoint's is gone.
+        assert len(stored_content_refs(tmp_path)) == 1
         control.delete_scenario("demo")
         wait_until(lambda: not (training_state / "demo").exists(), "the training service did not archive its state")
     assert watch.seen == []
     # The training service moved its own directory aside, and control wrote nothing where it has no state.
     assert [path.name.startswith("demo-") for path in (training_state / "archived").iterdir()] == [True]
+    # Nothing that a job of the scenario stored outlives the scenario.
+    assert stored_content_refs(tmp_path) == []
     assert sorted(path.name for path in control_state.iterdir()) == before
 
 

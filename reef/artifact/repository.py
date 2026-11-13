@@ -26,9 +26,11 @@ from reef.artifact.artifact import (
     ArtifactRepository,
     SnapshotRef,
     artifact_components,
+    content_metadata,
 )
 from reef.artifact.composite import compose_snapshot
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents
 from reef.core.plugins import Plugin
 from reef.core.snapshot import SELECTION_VIEW_PREFIX
 
@@ -98,8 +100,8 @@ class RepositoryBackend(ArtifactRepository):
     Besides its snapshots, the repository holds stored content: named file trees with no parent, no metadata and
     no artifact ID, which no head moves to. The process that has a checkpoint's files stores them
     (``store_content``), and another process commits them as a snapshot by name (``publish_stored``, whose
-    storage part a backend implements as ``publish_parts``). Content lives until ``discard_content``; a snapshot
-    made of it keeps its files after that.
+    storage part a backend implements as ``publish_parts``). Content lives until ``discard_content``, and at most
+    until the scenario is deleted (``discard_all_content``); a snapshot made of it keeps its files after that.
     """
 
     @abstractmethod
@@ -125,6 +127,14 @@ class RepositoryBackend(ArtifactRepository):
         """Remove the content ``name``; a name that the repository does not hold changes nothing.
 
         Every snapshot keeps its files. Raise ``ArtifactPublicationError`` when the content cannot be removed.
+        """
+
+    @abstractmethod
+    def discard_all_content(self) -> None:
+        """Remove every content of this scenario's repository, whatever its name. Every snapshot keeps its files.
+
+        Reef calls it when the scenario is deleted: content lives no longer than its scenario. Raise
+        ``ArtifactPublicationError`` when the content cannot be removed.
         """
 
     def publish_stored(
@@ -209,16 +219,23 @@ class RepositoryBackend(ArtifactRepository):
         return snapshots
 
     def resolve_artifact(self, artifact_id: str) -> Artifact:
-        """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path.
+        """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path,
+        and without the files of the other components of that snapshot where the backend can
+        (``materialize_component``).
 
         Raise ``ArtifactNotFoundError`` when this repository has no binding for the ID.
         """
-        snapshot = self.materialize(self.artifact_snapshot(artifact_id))
+        ref = self.artifact_snapshot(artifact_id)
+        snapshot = Artifact(ref, None, metadata=self.snapshot_metadata(ref))
         components = artifact_components(snapshot)
         if artifact_id not in components:
             raise ArtifactPublicationError(f"artifact binding does not contain {artifact_id!r}")
         component = components[artifact_id]
-        return snapshot if component is None else snapshot.component(component)
+        manifest = snapshot.components
+        if component is None or manifest is None or manifest.single:
+            return self.materialize(ref)
+        # Only the files of this artifact are made local, not the other components of its snapshot.
+        return self.materialize_component(ref, component)
 
     @abstractmethod
     def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
@@ -648,7 +665,7 @@ class Repository(ArtifactRepository):
             return local if ref.revision not in self.stored_trees else self.materialize_stored(local)
         selection = self.selections.get(ref.revision)
         if selection is not None:
-            materialized = self.select(selection)
+            materialized = self.materialize_selection(selection)
             if materialized.ref == ref:
                 return materialized
             return Artifact(ref, self, local_path=materialized.local_path, metadata=materialized.storage_metadata)
@@ -705,15 +722,21 @@ class Repository(ArtifactRepository):
     def materialize_component(self, ref: SnapshotRef, name: str) -> Artifact:
         """The component ``name`` of the snapshot ``ref``, local. A snapshot of this host is local as a whole;
         of a stored snapshot, the backend makes only the component local where it can."""
-        if ref.revision in self._local_artifacts or ref.revision in self.selections:
+        if ref.revision in self._local_artifacts:
             return self.materialize(ref).component(name)
-        return self.backend.materialize_component(ref, name)
+        selection = self.selections.get(ref.revision)
+        if selection is None:
+            return self.backend.materialize_component(ref, name)
+        if name not in selection.components:
+            raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {name!r}")
+        # A view of a selection that is not composed here: only the artifact of this component is made local.
+        return self.backend.resolve_artifact(selection.components[name])
 
     def snapshot(self, ref: SnapshotRef) -> Artifact:
         """The snapshot ``ref`` with its metadata and without its files: ``materialize`` or ``component`` of the
-        result makes local what a reader asks for. A view of a selection is local already."""
+        result makes local what a reader asks for."""
         if ref.revision in self.selections:
-            return self.materialize(ref)
+            return self.select(self.selections[ref.revision])
         return Artifact(ref, self, metadata=self.snapshot_metadata(ref))
 
     def snapshot_metadata(self, ref: SnapshotRef) -> Mapping[str, object]:
@@ -745,11 +768,43 @@ class Repository(ArtifactRepository):
         return ArtifactSelection({name: manifest.artifact_id(name, ref.revision) for name in names})
 
     def select(self, selection: ArtifactSelection) -> Artifact:
-        """Materialize existing component artifacts as a local view without publishing or moving any storage head.
+        """The view of existing component artifacts that ``selection`` names, with its manifest and no file.
 
-        The deterministic private cache key lets an operation record name the view during recovery. Its complete
-        selection must be persisted with that record; the cache key alone cannot recover its files.
+        Selecting is a metadata operation: nothing is published, no storage head moves, and no file is fetched.
+        A reader of the view makes local what it reads: ``Artifact.component`` one component
+        (``materialize_component``), and ``materialize`` the whole view. A selection of one artifact is the stored
+        snapshot of that artifact. The deterministic private cache key lets an operation record name the view
+        during recovery. Its complete selection must be persisted with that record; the cache key alone cannot
+        recover its files.
         """
+        if len(selection.components) == 1:
+            artifact_id = next(iter(selection.components.values()))
+            stored = self.backend.artifact_snapshot(artifact_id)
+            snapshot = Artifact(stored, self, metadata=self.backend.snapshot_metadata(stored))
+            manifest = snapshot.components
+            if manifest is None or manifest.single:
+                return snapshot
+            return self.backend.resolve_artifact(artifact_id).with_repository(self)
+        with self.selection_lock:
+            cache_key = f"{SELECTION_VIEW_PREFIX}{selection_digest(selection)}"
+            cached = self._local_artifacts.get(cache_key)
+            if cached is not None:
+                return cached
+            manifest = SnapshotComponents(
+                {name: self.stored_entry(artifact_id) for name, artifact_id in selection.components.items()}
+            )
+            self.selections[cache_key] = selection
+            return Artifact(SnapshotRef(cache_key, None), self, metadata={COMPONENTS_METADATA_KEY: manifest.to_dict()})
+
+    def stored_entry(self, artifact_id: str) -> ComponentEntry:
+        """The manifest entry of the stored artifact ``artifact_id``: its ID and its own metadata, read from the
+        metadata of the snapshot that binds it."""
+        stored = self.backend.artifact_snapshot(artifact_id)
+        snapshot = Artifact(stored, None, metadata=self.backend.snapshot_metadata(stored))
+        return ComponentEntry(artifact_id, content_metadata(snapshot, artifact_components(snapshot)[artifact_id]))
+
+    def materialize_selection(self, selection: ArtifactSelection) -> Artifact:
+        """The view of ``selection`` with the files of every component in one local directory, composed once."""
         if len(selection.components) == 1:
             artifact_id = next(iter(selection.components.values()))
             return self.backend.resolve_artifact(artifact_id).with_repository(self)

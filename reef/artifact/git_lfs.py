@@ -1008,6 +1008,13 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                 if self._workspace.ls_remote(ref_name) is not None:
                     raise
 
+    def discard_all_content(self) -> None:
+        """Delete every content ref of the scenario, in groups that fit on a command line."""
+        with self._workspace.lock:
+            names = sorted(self._workspace.ls_remote_prefix(self.content_ref_prefix))
+            for start in range(0, len(names), FETCH_BATCH_COMMITS):
+                self._workspace.push(*(f":{name}" for name in names[start : start + FETCH_BATCH_COMMITS]))
+
     def publish_parts(
         self,
         parts: Mapping[str | None, StoredFiles],

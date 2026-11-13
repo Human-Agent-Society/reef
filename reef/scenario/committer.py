@@ -24,8 +24,6 @@ from reef.artifact.artifact import (
     ArtifactNotFoundError,
     ArtifactPublicationError,
     SnapshotRef,
-    artifact_components,
-    content_metadata,
     training_starts_of,
     with_training_starts,
 )
@@ -412,7 +410,9 @@ class ScenarioCommitter:
             components = self._binding.components
             current_ref = self._artifacts.current
             served = Artifact(current_ref, self._artifacts.repository)
-            if components.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
+            # The active selection is read from metadata: selecting fetches no file.
+            active = self._artifacts.repository.selection(current_ref, self.component_names())
+            if active.components[selected.component] == selected.artifact_id:
                 return selected
             self.require_no_pending_commit("activate an artifact")
             target = self.snapshot_with(served, selected, snapshot)
@@ -427,7 +427,8 @@ class ScenarioCommitter:
             return selected
 
     def snapshot_with(self, active: Artifact, selected: ComponentArtifact, snapshot: Artifact) -> Artifact:
-        """A validated local view of ``active`` with one existing artifact replaced; publish nothing."""
+        """A validated view of ``active`` with one existing artifact replaced; publish nothing. The view has no
+        file until a reader asks (``Repository.select``)."""
         components = self._binding.components
         if components.single:
             components.validate(snapshot)
@@ -1150,10 +1151,7 @@ class ScenarioCommitter:
                 entries[name] = ComponentEntry(content.artifact_id, own)
                 files[name] = StoredFiles(content=content.content)
             else:
-                stored = repository.backend.artifact_snapshot(active[name])
-                snapshot = Artifact(stored, None, metadata=repository.backend.snapshot_metadata(stored))
-                carried = artifact_components(snapshot)[active[name]]
-                entries[name] = ComponentEntry(active[name], content_metadata(snapshot, carried))
+                entries[name] = repository.stored_entry(active[name])
                 files[name] = StoredFiles(artifact_id=active[name])
         staged = self._artifacts.stage_stored(
             next_commit_number,

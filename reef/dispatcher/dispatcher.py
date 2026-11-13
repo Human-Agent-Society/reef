@@ -265,6 +265,8 @@ class Dispatcher(
             # Control's tracker also writes each training job's run into the job's item, for the job listing.
             tracker = JobExperimentRecorder(tracker, self.queue)
         self.experiment_tracker = tracker
+        #: Opens the artifact store of a scenario.
+        self.backend_factory = backend_factory
         self.registry = ScenarioRegistry(
             recipe,
             backend_factory,
@@ -415,6 +417,8 @@ class Dispatcher(
         - The loaded instance closes.
         - The storage archives the records, the commits and the settings.
         - The recipe's own directories move to an ``archived`` sibling.
+        - The stored content of the scenario leaves the artifact store: the record files of its jobs, and any
+          checkpoint that no commit took (``RepositoryBackend.discard_all_content``).
         - The repository registration is archived, so the name is free again.
 
         Artifacts that other scenarios share stay.
@@ -436,6 +440,7 @@ class Dispatcher(
                     component_trainer.trainer.cancel_job()
                 dropped.close()
             self.local_workers.close_replaced_instances(scenario)
+            self.backend_factory(scenario).discard_all_content()
             archived = [*self.archive_scenario_state(scenario), *self.registry.archive_registration(scenario)]
         self.registry.forget_lock(scenario)
         return {"scenario": scenario, "archived": archived}

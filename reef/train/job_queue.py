@@ -234,7 +234,12 @@ def checkpoint_content(job_id: str, step: int) -> str:
 
 def job_records_content(job_id: str) -> str:
     """The name of the stored content that holds the record files of the job ``job_id``
-    (``TrainingComponent.job_records``)."""
+    (``TrainingComponent.job_records``).
+
+    The pages of control read a step's records by the step's row of the commit history, also after the job's
+    queue item is gone. So this content does not end with the item: it lives until its scenario is deleted, when
+    control discards all content of the scenario (``RepositoryBackend.discard_all_content``).
+    """
     return f"{job_id}:records"
 
 

@@ -64,6 +64,9 @@ class BasicBackend(RepositoryBackend):
     def discard_content(self, name: str) -> None:
         self.delegate.discard_content(name)
 
+    def discard_all_content(self) -> None:
+        self.delegate.discard_all_content()
+
     def publish_parts(
         self,
         parts: Mapping[str | None, StoredFiles],

@@ -279,3 +279,45 @@ def test_a_sync_and_an_import_of_the_harness_of_a_composite_bring_no_weight_to_c
             assert served is not None
             assert (served / WEIGHTS / MODEL).read_bytes() == weights
             assert (served / HARNESS / "AGENTS.md").read_text() == text
+
+
+@pytest.mark.integration
+def test_selecting_artifacts_of_a_composite_brings_no_weight_to_control(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An activation, a restore and a train-from select artifacts by their metadata. Control fetches no file to select; the reader of a component makes that component local, and
+    control reads the harness alone."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    training = git_backends(tmp_path, "training")("agent")
+    first, second = os.urandom(1024 * 1024), os.urandom(1024 * 1024)
+    with control(tmp_path, backends=git_backends(tmp_path, "control")) as scenario:
+        root = scenario.artifact_selection().components
+        trained = []
+        for number, weights in enumerate((first, second), start=1):
+            training.store_content(f"job-{number}:1", checkpoint(tmp_path / f"trained-{number}", {MODEL: weights}))
+            result = stored_commit(scenario, f"job-{number}:1", WEIGHTS)
+            scenario.commit(result, component=WEIGHTS)
+            trained.append(result.artifact.artifact_id)
+        training.store_content("job-3:0", checkpoint(tmp_path / "evolved", {"harness.txt": b"evolved"}))
+        scenario.commit(stored_commit(scenario, "job-3:0", HARNESS), component=HARNESS)
+        evolved = scenario.artifact_selection().components[HARNESS]
+        after_training = scenario.commit_number
+
+        # Each of these selects other artifacts than the newest snapshot binds together.
+        scenario.activate(trained[0], WEIGHTS)
+        assert scenario.artifact_selection().components == {WEIGHTS: trained[0], HARNESS: evolved}
+        scenario.activate(root[HARNESS], HARNESS)
+        assert scenario.restore(after_training) == {WEIGHTS: trained[1], HARNESS: evolved}
+        scenario.train_from(root[HARNESS], HARNESS)
+        # A reader of the harness of the selected view gets its files, and no file of the weights.
+        _, selected = scenario.resolve_artifact(evolved, HARNESS)
+        assert scenario.components.read_files(selected) == {"harness.txt": "evolved"}
+
+        assert not list((tmp_path / "control").rglob(MODEL))
+        assert not [path for path in (tmp_path / "control").rglob("lfs/objects/*/*/*") if path.is_file()]
+        # The reader of the weights, such as the inference service, makes them local from the store.
+        weights_view = git_backends(tmp_path, "inference")("agent").resolve_artifact(trained[0])
+        assert weights_view.local_path is not None
+        assert (weights_view.local_path / MODEL).read_bytes() == first
+        assert not list((tmp_path / "inference").rglob("harness.txt"))
