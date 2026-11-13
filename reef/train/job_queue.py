@@ -557,7 +557,7 @@ class JobQueueComponent(TrainingComponent):
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         return checkpoint.changed_parts
 
-    def job_progress(self, job_id: str) -> Mapping[str, Any] | None:
+    def job_progress(self, job_id: str) -> Mapping[str, JsonValue] | None:
         """The progress that the training worker last wrote into the job's item, or None."""
         item = self.queue.read(JOBS_QUEUE, job_id)
         value = None if item is None else item.metadata.get(PROGRESS_METADATA_KEY)
@@ -821,7 +821,7 @@ class TrainingJobWorker(QueueWorker):
         self.component.submit(job)
         reported = {checkpoint_from_json(entry).step for entry in item.progress}
         progress_count = len(item.progress)
-        written_progress: Mapping[str, Any] | None = None
+        written_progress: Mapping[str, JsonValue] | None = None
         stored_names = [str(name) for name in cast(list[JsonValue], item.metadata.get(STORED_CONTENT_KEY, []))]
         try:
             while True:

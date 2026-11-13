@@ -45,6 +45,7 @@ from typing import Any, Self
 from reef.core.errors import ConfigError, InternalError, ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.core.training_request import request_from_parameters
+from reef.core.values import JsonValue
 from reef.core.weight_layout import ArtifactFormat
 from reef.evaluation.harness import (
     ComparePolicy,
@@ -482,7 +483,7 @@ class HarnessTrainingComponent(LocalJobComponent):
             "error": None,
         }
 
-    def job_progress(self, job_id: str) -> Mapping[str, Any] | None:
+    def job_progress(self, job_id: str) -> Mapping[str, JsonValue] | None:
         """Where the running job stands, with the method's activity so far (``JobProgress.to_json``)."""
         backend = self.running_backends.get(job_id)
         progress = None if backend is None else backend.job_progress

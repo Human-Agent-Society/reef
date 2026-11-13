@@ -614,7 +614,7 @@ class TrainingComponent(ABC):
     def cancel(self, job_id: str) -> None:
         """Stop the job, which then reports ``failed``; nothing for an unknown or ended job."""
 
-    def job_progress(self, job_id: str) -> Mapping[str, Any] | None:
+    def job_progress(self, job_id: str) -> Mapping[str, JsonValue] | None:
         """Where the running job ``job_id`` stands now: a JSON object whose keys the component defines, or None
         for a job that does not run or a component that reports none, the default.
 
