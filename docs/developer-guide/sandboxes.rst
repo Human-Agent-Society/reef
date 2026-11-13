@@ -70,7 +70,7 @@ applies. For ``modal`` the section also selects Modal's VM runtime when the
 task has ``environment/docker-compose.yaml`` and asks for no GPU.
 
 For ``e2b`` the section also names a class through Harbor's ``import_path``
-field: ``reef.execution.sandbox.harbor_e2b.KillOnTimeoutE2BEnvironment``. This
+field: ``reef.execution.sandbox.e2b.KillOnTimeoutE2BEnvironment``. This
 is Harbor's ``E2BEnvironment`` with one more argument when it creates the
 sandbox, ``lifecycle={"on_timeout": "kill"}``. The argument asks the service to
 delete the sandbox at the end of its lifetime. Harbor's own class sends no

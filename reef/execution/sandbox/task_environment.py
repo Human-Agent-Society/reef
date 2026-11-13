@@ -47,7 +47,7 @@ SANDBOX_LIFETIME_MAX_S = 24 * 60 * 60
 #: The lifetime of the Modal sandbox of a trial whose agent has no time limit, in seconds.
 MODAL_SANDBOX_DEFAULT_S = 2 * 60 * 60
 #: The Harbor environment class of an ``e2b`` trial: Harbor's own, with its sandbox deleted at its timeout.
-HARBOR_E2B_ENVIRONMENT = "reef.execution.sandbox.harbor_e2b:KillOnTimeoutE2BEnvironment"
+HARBOR_E2B_ENVIRONMENT = "reef.execution.sandbox.e2b:KillOnTimeoutE2BEnvironment"
 
 
 class ReadinessProbe(ABC):
@@ -316,7 +316,7 @@ def environment_config(
     It is ``{"type": environment}`` for any type but ``e2b`` and ``modal``. For those two it adds:
 
     - ``import_path`` on ``e2b``: ``HARBOR_E2B_ENVIRONMENT``, Harbor's E2B environment with its sandbox deleted at its
-      timeout (:mod:`reef.execution.sandbox.harbor_e2b`). Harbor's own class leaves the timeout to the service, and a
+      timeout (:mod:`reef.execution.sandbox.e2b`). Harbor's own class leaves the timeout to the service, and a
       self-hosted service can pause the sandbox instead. Harbor makes the class of ``import_path`` and does not read
       ``type`` then. That class is an ``e2b`` environment too.
     - ``kwargs.modal_vm_runtime`` on ``modal``: True when the task has ``environment/docker-compose.yaml`` and its

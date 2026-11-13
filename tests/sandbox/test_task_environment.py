@@ -173,7 +173,7 @@ def test_an_e2b_trial_gets_reefs_class_on_harbors_template_with_the_tasks_limits
     from harbor.environments.factory import EnvironmentFactory
     from harbor.models.trial.config import EnvironmentConfig
 
-    from reef.execution.sandbox.harbor_e2b import KillOnTimeoutE2BEnvironment
+    from reef.execution.sandbox.e2b import KillOnTimeoutE2BEnvironment
 
     environments = harbor_e2b_environments(tmp_path)
     reef, harbor = environments["reef"], environments["harbor"]

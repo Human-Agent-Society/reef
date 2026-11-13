@@ -7,7 +7,7 @@ and open sessions through that interface, without knowing the sandbox kind.
 ``config`` builds the executor a deployment's ``executor`` setting selects.
 ``task_environment`` names the Harbor task environments, checks what each
 needs, and makes the environment config of a Harbor trial. For the ``e2b``
-environment type, that config names the class in ``harbor_e2b``: Harbor's E2B
+environment type, that config names a class in ``e2b``: Harbor's E2B
 task environment, which also asks the service to delete each sandbox at its
 timeout. ``remote`` owns cloud sessions, file transfer and gateway
 tunnels for any provider, and the credentials of the remote Harbor task

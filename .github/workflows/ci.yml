@@ -187,7 +187,10 @@ jobs:
       # for the CEO-Bench harness tests, the OpenTelemetry SDK for the
       # record tracing exporter; keeping them here avoids expanding
       # Reef's minimal service dependencies.
-      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp pyyaml huggingface_hub "harbor>=0.25,<0.26" "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4" "opentelemetry-sdk>=1.25" "opentelemetry-exporter-otlp-proto-http>=1.25"
+      # The E2B tests skip without the E2B SDK. Harbor's e2b extra, e2b and
+      # connectrpc are here at the bounds of Reef's own e2b extra
+      # (pyproject.toml), so those tests run.
+      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp pyyaml huggingface_hub "harbor[e2b]>=0.25,<0.26" "e2b>=2.46" "connectrpc>=0.11.1,<0.14" "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4" "opentelemetry-sdk>=1.25" "opentelemetry-exporter-otlp-proto-http>=1.25"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
@@ -205,6 +208,9 @@ jobs:
       # dependency of the Reef wheel. Production Torch remains owned by the
       # Slime image.
       - run: uv pip install --system --python python torch --index-url https://download.pytorch.org/whl/cpu
+      # A missing E2B SDK must fail here: pytest would skip the E2B tests.
+      - name: Require the E2B SDK
+        run: python -c "import connectrpc.errors, dockerfile_parse, e2b"
       # Both suites collect tests/ and use complementary markers so new tests
       # cannot be silently dropped from CI. Nothing is ignored today — what
       # genuinely needs Megatron carries its own importorskip and reports as
@@ -367,6 +373,7 @@ jobs:
               "reef-client",
               "reef-eval",
               "sqlalchemy",
+              "tenacity",
               "tomli-w",
           }
           assert core == expected_core, core
@@ -482,7 +489,14 @@ jobs:
           trap - EXIT
       # Select wheel-compatible contracts across their owner directories.
       # Stay outside the repo so the source tree cannot shadow the wheels.
-      - run: uv pip install --system --python python pytest pytest-xdist==3.8.0 "psutil>=5.9"
+      # The steps above checked the installation without extras. The E2B
+      # contracts skip without the E2B SDK, so it is installed only now, at
+      # the bounds of Reef's own e2b extra (pyproject.toml).
+      - run: uv pip install --system --python python pytest pytest-xdist==3.8.0 "psutil>=5.9" "harbor[e2b]>=0.25,<0.26" "e2b>=2.46" "connectrpc>=0.11.1,<0.14"
+      # A missing E2B SDK must fail here: pytest would skip the E2B contracts.
+      - name: Require the E2B SDK
+        run: python -c "import connectrpc.errors, dockerfile_parse, e2b"
+        working-directory: ${{ runner.temp }}
       # Exercise the repository cookbook as an external consumer of the
       # installed Reef wheel. Link recipes and test support without exposing
       # the source reef/ package on sys.path.
