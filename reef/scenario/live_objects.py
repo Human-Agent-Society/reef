@@ -15,7 +15,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
-from reef.artifact.components import ComponentSpec, ScenarioComponents
+from reef.artifact.artifact import Artifact
+from reef.artifact.components import ComponentChecks, ComponentSpec, ScenarioComponents
 from reef.artifact.repository import DefaultStart
 from reef.core.errors import ConfigError
 from reef.harness.tasks.harness_models import HarnessModels
@@ -220,6 +221,27 @@ def declared_components(recipe: Recipe, scenario: str) -> ScenarioComponents:
     return ScenarioComponents(specs)
 
 
+@dataclass(frozen=True)
+class RecipeChecks(ComponentChecks):
+    """The admission checks that ``recipe`` declares for each scenario (``declared_components``).
+
+    Values: ``recipe`` is the deployment's recipe. ``validate(scenario, component, artifact)`` runs
+    ``declared_components(recipe, scenario).validate(artifact, component)``.
+
+    Purpose: the training service gives it to each job worker, which checks every checkpoint with it before it
+    stores the checkpoint (``reef.train.job_queue.TrainingJobWorker``).
+    """
+
+    recipe: Recipe
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.recipe, Recipe):
+            raise TypeError(f"recipe must be a Recipe, got {type(self.recipe).__name__}")
+
+    def validate(self, scenario: str, component: str | None, artifact: Artifact) -> None:
+        declared_components(self.recipe, scenario).validate(artifact, component)
+
+
 def scenario_components(recipe: Recipe, live: LiveObjects, scenario: str) -> ScenarioComponents:
     """The components that every snapshot of ``scenario`` binds in this deployment.
 
@@ -332,6 +354,7 @@ def harness_served_model(recipe: Recipe, live: LiveObjects, scenario: str, compo
 
 __all__ = [
     "LiveObjects",
+    "RecipeChecks",
     "ServedEndpoint",
     "check_recipe_objects",
     "check_root_start",

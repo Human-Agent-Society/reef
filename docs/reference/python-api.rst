@@ -1216,8 +1216,8 @@ revision, each read downloads that file. The built-in recipes bind one:
   and the files must form a ``HarnessTree`` that passes ``validate_tree`` for
   the adapter: the source tree a harness artifact stores.
 
-After the layout, the snapshot's own admission check runs on what Reef stores,
-as at a training publication.
+After the layout, the component's admission check runs on what Reef stores
+(see `Scenario components <../developer-guide/components.rst#admission-checks>`__).
 
 A source reader is a subclass of ``reef.artifact.ArtifactSourceReader`` with
 two members:
@@ -2241,13 +2241,15 @@ pull, so most methods never touch this. See `Scenario components
 ``ComponentSpec``. Bare ``ScenarioComponents()`` is the complete record-only
 configuration. A snapshot of one component is flat; a snapshot of several
 components has one directory per component. At most one component has a
-weight kind, and at most one has ``files``.
+weight kind, and at most one has ``files``. The field ``validator`` of
+``ScenarioComponents`` is the snapshot's own check; a snapshot of several
+components has none, so there it stays ``AcceptAnyArtifact()``.
 
 +---------------+-----------------------------+----------------------------------------------+
 | Field         | Type                        | Contract                                     |
 +===============+=============================+==============================================+
-| ``validator`` | ``ArtifactValidator``       | admit the component before publication and   |
-|               |                             | activation; the default accepts any artifact |
+| ``validator`` | ``ArtifactValidator``       | admit an artifact of the component before it |
+|               |                             | is stored; the default accepts any artifact  |
 +---------------+-----------------------------+----------------------------------------------+
 | ``kind``      | ``ArtifactKind | None``     | the kind of every artifact of the component; |
 |               |                             | ``model`` and ``model_adapter`` load into    |

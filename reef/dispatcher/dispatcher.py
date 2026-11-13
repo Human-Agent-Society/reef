@@ -46,7 +46,13 @@ from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.factory import ItemStart, with_record2sample_configs
-from reef.scenario.live_objects import LiveObjects, check_recipe_objects, close_runtimes, scenario_components
+from reef.scenario.live_objects import (
+    LiveObjects,
+    RecipeChecks,
+    check_recipe_objects,
+    close_runtimes,
+    scenario_components,
+)
 from reef.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
@@ -228,6 +234,7 @@ class Dispatcher(
                         self.queue,
                         self.job_directory_store,
                         backend_factory,
+                        checks=RecipeChecks(recipe),
                         worker_id=instance_id(f"training-{component.name}"),
                         local_artifact_dir=local_artifact_dir,
                         slots=training_max_jobs,

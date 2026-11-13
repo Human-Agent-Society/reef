@@ -89,7 +89,18 @@ class ArtifactRepository(ABC):
 
 
 class ArtifactValidator(ABC):
-    """Artifact admission checks selected for one scenario."""
+    """An admission check of the artifacts of one component of a scenario.
+
+    ``validate(artifact)`` returns when the check admits ``artifact``, and raises ``ValueError`` or a ``ReefError``
+    that names what does not hold. ``artifact`` holds the files of one component alone, in a local directory
+    (``Artifact.local_path``); the check reads only those files and the artifact's metadata.
+
+    Purpose: a recipe binds it on ``ComponentSpec.validator`` or ``ScenarioComponents.validator``. The process that
+    holds an artifact's files for its own work runs the check once, before the artifact is stored: the training
+    service on each checkpoint of a job (``reef.train.job_queue.TrainingJobWorker``), and control on an import, a
+    sync and the artifact item that starts a scenario, whose files it copies. A stored artifact does not change, so
+    an activation, a restore, a serve and a train-from run no check, and no process fetches files to check them.
+    """
 
     @abstractmethod
     def validate(self, artifact: Artifact) -> None: ...

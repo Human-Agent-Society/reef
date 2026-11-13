@@ -217,8 +217,12 @@ def test_components_route_each_capability_to_its_component(tmp_path: Path) -> No
     assert components.files_component is not None
     assert components.read_files(first) == {"AGENTS.md": "rules"}
 
-    components.validate(first)
+    # Each component is checked alone, on its own files.
+    components.validate(weights, WEIGHTS)
+    components.validate(harness, HARNESS)
     assert validator.seen == [weights.artifact_id]
+    with pytest.raises(ValueError, match="name the component"):
+        components.validate(first)
     activate_snapshot(components, first, runtime, "agent")
     assert runtime.activated_ids == [weights.artifact_id]
 
@@ -233,6 +237,9 @@ def test_components_reject_ambiguous_component_sets() -> None:
         )
     with pytest.raises(ValueError, match="directory name"):
         ScenarioComponents(components={"a/b": ComponentSpec()})
+    # No process holds the files of a combination, so a snapshot of several components has no check of its own.
+    with pytest.raises(ValueError, match="no check of its own"):
+        ScenarioComponents(components={"a": ComponentSpec(), "b": ComponentSpec()}, validator=_RecordingValidator())
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -731,12 +738,13 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_artifact(tm
 
 
 @pytest.mark.unit
-def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, monkeypatch: Any) -> None:
-    staged_root = tmp_path / "staged"
+def test_an_activation_and_a_restore_run_no_check(tmp_path: Path, monkeypatch: Any) -> None:
+    """A stored artifact was admitted when it was stored and does not change, so selecting it checks nothing: no
+    process fetches files to check them again."""
     dispatcher = Dispatcher(
         two_component_recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
-        local_artifact_dir=staged_root,
+        local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
     )
@@ -747,19 +755,15 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
         scenario.commit(
             TrainingCommit(state={}, artifact=held, component=HARNESS, changed_kinds=HELD), component=HARNESS
         )
-        served = scenario.current_snapshot()
-        before = {path for path in staged_root.rglob("*") if path.is_dir()}
 
         def refuse(self: ArtifactValidator, artifact: Artifact) -> None:
             raise ReefError("refused by the validator")
 
-        # An activation runs the snapshot's own check, as its publication did.
         monkeypatch.setattr(AcceptAnyArtifact, "validate", refuse)
-        with pytest.raises(ReefError, match="refused by the validator"):
-            scenario.activate(held.artifact_id, HARNESS)
-        assert {path for path in staged_root.rglob("*") if path.is_dir()} == before
-        assert scenario.commit_number == 1
-        assert scenario.current_snapshot() == served
+        scenario.activate(held.artifact_id, HARNESS)
+        assert scenario.artifact_status()[HARNESS]["active"] == held.artifact_id
+        scenario.restore(0)
+        assert scenario.artifact_status()[HARNESS]["active"] != held.artifact_id
     finally:
         dispatcher.close()
 
