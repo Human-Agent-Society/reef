@@ -631,6 +631,59 @@ def test_an_evaluation_on_a_collection_runs_its_eval_tasks_and_scores_each_bench
     asyncio.run(run())
 
 
+def test_an_evaluation_with_num_samples_runs_that_many_tasks_chosen_by_their_names(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(
+        tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
+    )
+
+    async def run() -> None:
+        # No worker runs: the test reads the accepted requests only.
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort", "sum")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "rollouts_per_task": 2}
+
+            async def _accepted(settings: dict[str, object]) -> dict:
+                response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json={**body, **settings})
+                assert response.status == 202, await response.text()
+                return await response.json()
+
+            for refused in (0, -1, 1.5, True, "2"):
+                response = await client.post(
+                    "/reef/scenarios/s/evaluations", headers=AUTH, json={**body, "num_samples": refused}
+                )
+                assert response.status == 400, await response.text()
+            # By the SHA-256 digests of their names, the tasks rank sum, sort, add. The request keeps the split's order.
+            two = await _accepted({"num_samples": 2})
+            assert two["request"]["task_names"] == ["sort", "sum"]
+            rollouts = await (
+                await client.get(f"/reef/scenarios/s/evaluations/{two['evaluation_id']}/rollouts", headers=AUTH)
+            ).json()
+            assert [(view["task"], view["repeat"]) for view in rollouts["rollouts"]] == [
+                ("sort", 0),
+                ("sort", 1),
+                ("sum", 0),
+                ("sum", 1),
+            ]
+            assert (await _accepted({"num_samples": 2}))["request"]["task_names"] == ["sort", "sum"]
+            assert (await _accepted({"num_samples": 1}))["request"]["task_names"] == ["sum"]
+            assert (await _accepted({"num_samples": 5}))["request"]["task_names"] == ["add", "sort", "sum"]
+            named = await _accepted({"num_samples": 1, "task_names": ["add", "sort"]})
+            assert named["request"]["task_names"] == ["sort"]
+
+            # On a collection, the choice is among its eval tasks, and a benchmark with no chosen task is left out.
+            for item_id, benchmarks in (("add", ["lite", "full"]), ("sort", ["full"])):
+                patch = {"ids": [item_id], "patch": {"benchmarks": benchmarks}}
+                assert (await client.post("/reef/namespaces/s/data/metadata", headers=AUTH, json=patch)).status == 200
+            stored = "/reef/namespaces/s/collections/coding"
+            assert (await client.put(stored, headers=AUTH, json={"benchmarks": ["lite", "full"]})).status == 200
+            sampled = await _accepted({"num_samples": 1, "collection": "coding"})
+            assert sampled["request"]["task_names"] == ["sort"]
+            assert sampled["request"]["collection"]["benchmarks"] == [{"benchmark": "full", "task_names": ["sort"]}]
+
+    asyncio.run(run())
+
+
 def test_an_evaluation_with_a_harbor_agent_starts_without_reading_a_task_file(tmp_path: Path, monkeypatch) -> None:
     dispatcher = dispatcher_for(
         tmp_path, WeightRecipe(), trainer_builder=ComponentTrainers(), live=LiveObjects(runtime=ArtifactRuntime())
