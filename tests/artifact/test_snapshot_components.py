@@ -27,6 +27,7 @@ from reef.artifact.artifact import ArtifactValidator, SnapshotRef
 from reef.artifact.components import AcceptAnyArtifact, ComponentSpec, ScenarioComponents, TextFileTree
 from reef.artifact.composite import compose_snapshot
 from reef.artifact.repository import StoredFiles
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, SnapshotComponents, snapshot_components
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
@@ -150,6 +151,49 @@ def test_materialized_snapshots_keep_their_manifest_and_composed_staging_carries
     assert again.components == staged_manifest
     assert TextFileTree().read_files(again.component(HARNESS)) == {"AGENTS.md": "evolved"}
     assert TextFileTree().read_files(again.component(WEIGHTS)) == {"adapter_config.json": "{}"}
+
+
+@pytest.mark.unit
+def test_a_view_of_a_selection_has_no_file_until_it_is_read_and_a_discard_removes_what_a_reader_made(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    tree(root / WEIGHTS, {"adapter_config.json": "{}"})
+    tree(root / HARNESS, {"AGENTS.md": "seed"})
+    backend = InMemoryRepositoryBackend("agent", directory=tmp_path / "repository")
+    manifest = SnapshotComponents({WEIGHTS: ComponentEntry("w0"), HARNESS: ComponentEntry("h0")})
+    root_ref = backend.register(Artifact.local(root), metadata={COMPONENTS_METADATA_KEY: manifest.to_dict()})
+    backend.store_content("h1", tree(tmp_path / "h1", {"AGENTS.md": "evolved"}))
+    backend.publish_stored(
+        {WEIGHTS: StoredFiles(artifact_id="w0"), HARNESS: StoredFiles(content="h1")},
+        metadata={
+            COMPONENTS_METADATA_KEY: SnapshotComponents(
+                {WEIGHTS: ComponentEntry("w0"), HARNESS: ComponentEntry("h1")}
+            ).to_dict()
+        },
+        expected_parent=root_ref,
+        advance_head=False,
+    )
+    repository = Repository(
+        backend, root_ref, current_artifact=root_ref, checkpoint_artifact=root_ref, local_dir=tmp_path / "local"
+    )
+
+    # Selecting is a metadata operation: the view names its artifacts and has no file.
+    view = repository.select(ArtifactSelection({WEIGHTS: "w0", HARNESS: "h1"}))
+    assert view.local_path is None and not any((tmp_path / "local").rglob("*.md"))
+    assert view.components is not None and view.components.artifact_ids(view.ref.revision) == {
+        WEIGHTS: "w0",
+        HARNESS: "h1",
+    }
+    assert TextFileTree().read_files(view.component(HARNESS)) == {"AGENTS.md": "evolved"}
+    assert not any((tmp_path / "local").rglob("*.md"))
+    # A reader of the whole view, such as a check of the snapshot, composes it under the repository's directory.
+    composed = repository.materialize(view.ref)
+    assert composed is not view and (composed.local_path / HARNESS / "AGENTS.md").read_text() == "evolved"
+    # A refused selection is discarded by the view that ``select`` returned, whichever object a reader registered.
+    repository.discard(view)
+    assert not composed.local_path.exists()
+    assert view.ref.revision not in repository.selections
 
 
 @pytest.mark.unit

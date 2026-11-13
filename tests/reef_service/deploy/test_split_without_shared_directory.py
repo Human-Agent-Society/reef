@@ -1,17 +1,25 @@
 """A split deployment: control and the training service share the store, and no directory.
 
 Each test runs control as a dispatcher without the training service, and the training service as the two workers
-that it runs for a component. The training component keeps its state, its checkpoints and its work clone of the
-artifact repository under one directory, and control keeps its own under another. While control works, the test
-records every file that a control thread opens, lists, moves or removes under the training service's directory:
-there is none.
+that it runs for a component. Everything of the training service is under ``tmp_path / "training"``: the state of
+its components, its checkpoints and its clone of the artifact repository. Everything of control is under
+``tmp_path / "control"``. The artifact repository is a real Git LFS repository beside them.
+
+What the tests prove, and what they do not:
+
+- ``weight_bytes_in`` reads every file under control's directory and looks for the bytes of the weight files. It
+  finds bytes that any thread or subprocess of control wrote there, in a checkout, an LFS object or a copy. It does
+  not find a file that control only read from the training service's directory.
+- Control's ``evolution.state_dir`` is another directory than the training service's, and the tests check that
+  control wrote nothing there and still serves the step's records and progress: it has them from the store.
+- The tests do not prove that control opens no path of the training service. Both run in one process here, so no
+  check of file access can tell them apart.
 """
 
 from __future__ import annotations
 
+import os
 import subprocess
-import sys
-import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -27,54 +35,49 @@ from tests.support.runtime_stubs import VERSION_FILE, StubFacts, StubInferenceRu
 from tests.support.samples import data_storage
 
 from reef.artifact import GitLFSRepositoryBackend, RepositoryBackendFactory
+from reef.artifact.sources import DirectorySource
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.harness.tree import TreePatch
 from reef.recipe import Recipe
 from reef.recipe.composite import CompositeRecipe
 from reef.scenario.live_objects import LiveObjects
 from reef.service.request_service import RequestService
-from reef.storage.sql_coordination import memory_coordination
-from reef.train.component import TrainingComponent
-from reef.train.job_queue import CHECKS_QUEUE, TrainingCheckWorker, TrainingJobWorker, scenario_jobs
-
-#: The file operations that the audit hook sees with a path as their first argument.
-FILE_EVENTS = frozenset(
-    {"open", "os.listdir", "os.scandir", "os.mkdir", "os.remove", "os.rename", "os.rmdir", "shutil.copytree"}
-    | {"shutil.move", "shutil.rmtree", "shutil.copyfile"}
+from reef.service.scenario_files import artifact_directory
+from reef.storage.sql_coordination import open_coordination
+from reef.train.component import SavedCheckpoint, TrainingComponent, TrainingJob
+from reef.train.job_queue import (
+    CHECKS_QUEUE,
+    JOBS_QUEUE,
+    TrainingCheckWorker,
+    TrainingJobWorker,
+    discard_ended_content,
+    scenario_jobs,
 )
-#: The thread names of the training service of these tests: its two workers, its components' job threads, and the
-#: executor threads on which a harness job runs its evaluation runs.
-TRAINING_THREADS = ("reef-split-training", "reef-harness-job", "reef-stub-job", "reef-executor")
+
+#: The bytes that every weight file of these tests holds, which no other file holds.
+SENTINEL = b"reef-weight-bytes-that-control-must-not-hold:" + bytes(range(256)) * 64
+MODEL = "model.safetensors"
 
 
-class ControlFileWatch:
-    """Records the file operations under ``root`` of every thread that is no thread of the training service,
-    while ``watching`` is open. An audit hook cannot be removed, so the watch of an ended test records nothing."""
+class SentinelWeights(StubTrainingComponent):
+    """A training component whose every checkpoint holds a weight file with ``SENTINEL`` and the job's number."""
 
-    def __init__(self, root: Path) -> None:
-        self.root = str(root.resolve())
-        self.active = False
-        self.seen: list[tuple[str, str, str]] = []
-        sys.addaudithook(self.audit)
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        (checkpoint,) = super().train(job)
+        (Path(checkpoint.path) / MODEL).write_bytes(SENTINEL + str(len(self.submitted)).encode())
+        return (checkpoint,)
 
-    def audit(self, event: str, arguments: tuple[object, ...]) -> None:
-        if not self.active or event not in FILE_EVENTS or not arguments:
-            return
-        path, thread = arguments[0], threading.current_thread().name
-        if not isinstance(path, str | Path) or not str(path).startswith(self.root):
-            return
-        # A training job can start threads with no name of its own; a control thread is the test's or has a name.
-        if thread == "MainThread" or (thread.startswith("reef-") and not thread.startswith(TRAINING_THREADS)):
-            self.seen.append((event, str(path), thread))
 
-    @contextmanager
-    def watching(self) -> Iterator[None]:
-        self.active = True
-        try:
-            yield
-        finally:
-            self.active = False
+def weight_bytes_in(directory: Path) -> list[str]:
+    """The files under ``directory`` that hold ``SENTINEL``, as paths under it."""
+    marker = SENTINEL[:64]
+    return sorted(
+        str(path.relative_to(directory))
+        for path in directory.rglob("*")
+        if path.is_file() and not path.is_symlink() and marker in path.read_bytes()
+    )
 
 
 def git_backends(root: Path) -> RepositoryBackendFactory:
@@ -83,48 +86,6 @@ def git_backends(root: Path) -> RepositoryBackendFactory:
     return GitLFSRepositoryBackend.factory(
         root.parent / "artifacts.git", work_dir=root / "artifact-work", cache_dir=root / "artifact-cache"
     )
-
-
-@contextmanager
-def split(
-    tmp_path: Path, recipe: Recipe, live: LiveObjects, components: tuple[TrainingComponent, ...]
-) -> Iterator[tuple[Dispatcher, ControlFileWatch]]:
-    """Control over ``recipe`` with the facts of ``live`` and no training component, and the training service that
-    runs ``components``; the watch of the training service's directory ``tmp_path / "training"``."""
-    storage = data_storage(tmp_path / "records")
-    coordination = memory_coordination()
-    control = Dispatcher(
-        recipe,
-        git_backends(tmp_path / "control"),
-        live=replace(live, training_component=None, harness_component=None, data_store=storage.data),
-        local_artifact_dir=tmp_path / "control" / "staged",
-        scenario_storage=storage,
-        record_storage=storage.inner,
-        coordination=coordination,
-        components=frozenset(SERVICE_COMPONENTS) - {"training"},
-    )
-    training_backends = git_backends(tmp_path / "training")
-    workers = []
-    for component in components:
-        for worker_type, name in ((TrainingJobWorker, "jobs"), (TrainingCheckWorker, "checks")):
-            worker = worker_type(
-                component,
-                coordination.work_queue,
-                control.job_directory_store,
-                training_backends,
-                worker_id=f"split-training-{name}-{component.name}",
-                local_artifact_dir=tmp_path / "training" / "staged",
-                poll_seconds=0.02,
-            )
-            worker.start()
-            workers.append(worker)
-    watch = ControlFileWatch(tmp_path / "training")
-    try:
-        yield control, watch
-    finally:
-        for worker in reversed(workers):
-            worker.stop()
-        control.close()
 
 
 def stored_content_refs(tmp_path: Path) -> list[str]:
@@ -144,20 +105,100 @@ def stored_content_refs(tmp_path: Path) -> list[str]:
     ).stdout.split()
 
 
-def wait_until(condition, message: str, seconds: float = 60.0) -> None:
+@contextmanager
+def split(
+    tmp_path: Path,
+    recipe: Recipe,
+    live: LiveObjects,
+    components: tuple[TrainingComponent, ...],
+    *,
+    inference_apart: bool = False,
+) -> Iterator[Dispatcher]:
+    """Control over ``recipe`` with the facts of ``live`` and no training component, while the training service
+    runs ``components`` from the same queue. The control process also runs the other services. With
+    ``inference_apart``, the inference service is a dispatcher of its own, with its own directory
+    ``tmp_path / "inference"`` and its own runtime, so the weights that it loads are not under control's."""
+    storage = data_storage(tmp_path / "records")
+    # The work queues live beside the records, so each service opens the coordination store itself.
+    coordination = open_coordination("sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None)
+    control = Dispatcher(
+        recipe,
+        git_backends(tmp_path / "control"),
+        live=replace(live, training_component=None, harness_component=None, data_store=storage.data),
+        local_artifact_dir=tmp_path / "control" / "staged",
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        coordination=coordination,
+        components=frozenset(SERVICE_COMPONENTS) - {"training"} - ({"inference"} if inference_apart else set()),
+    )
+    inference = None
+    if inference_apart:
+        served = data_storage(tmp_path / "records")
+        inference = Dispatcher(
+            recipe,
+            git_backends(tmp_path / "inference"),
+            live=replace(live, training_component=None, harness_component=None, data_store=served.data),
+            local_artifact_dir=tmp_path / "inference" / "staged",
+            scenario_storage=served,
+            record_storage=served.inner,
+            coordination=open_coordination(
+                "sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None
+            ),
+            components=frozenset({"inference"}),
+        )
+    training_backends = git_backends(tmp_path / "training")
+    workers = []
+    for component in components:
+        for worker_type, name in ((TrainingJobWorker, "jobs"), (TrainingCheckWorker, "checks")):
+            worker = worker_type(
+                component,
+                coordination.work_queue,
+                control.job_directory_store,
+                training_backends,
+                worker_id=f"split-training-{name}-{component.name}",
+                local_artifact_dir=tmp_path / "training" / "staged",
+                poll_seconds=0.02,
+            )
+            worker.start()
+            workers.append(worker)
+    try:
+        yield control
+    finally:
+        for worker in reversed(workers):
+            worker.stop()
+        if inference is not None:
+            inference.close()
+        control.close()
+
+
+def wait_until(condition, message: str, seconds: float = 90.0) -> None:
     deadline = time.monotonic() + seconds
     while not condition():
         assert time.monotonic() < deadline, message
         time.sleep(0.02)
 
 
+def changing_rules(workspace, services) -> None:
+    """A harness method that rewrites the rules of the tree, and records a note."""
+    workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
+    workspace.write_output("added a rule", {"rules": 1})
+
+
+@pytest.fixture
+def real_lfs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+
+
 @pytest.mark.integration
-def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_directory_that_control_shares(
-    tmp_path: Path, fake_git_lfs: None
+def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_weight_byte_in_control(
+    tmp_path: Path, real_lfs: None
 ) -> None:
-    component = StubTrainingComponent(tmp_path / "training" / "checkpoints")
+    component = SentinelWeights(tmp_path / "training" / "checkpoints")
     live = LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component))
-    with split(tmp_path, TestPolicyRecipe(max_staleness=4), live, (component,)) as (control, watch), watch.watching():
+    # The inference service of this process is the reader of the weights; control's own steps are checked before
+    # anything serves, with the services that load weights left out.
+    with split(tmp_path, TestPolicyRecipe(max_staleness=4), live, (component,)) as control:
         scenario = control.get_or_create_scenario("math")
         root = scenario.serving_artifact_id()
         control.accept_record(token_inference("i1", artifact_id=root))
@@ -172,10 +213,13 @@ def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_directory_that_c
         assert status["last_training_commit"]["metrics"]["training_job"]["event"] == "finished"
         trained = scenario.artifact_status()["weights"]["active"]
         assert trained != root
-        # Control activates and reads the artifacts through the artifact store.
         control.activate("math", root)
         control.activate("math", trained)
+        control.train_from("math", root)
         _, snapshot = scenario.resolve_artifact(trained)
+        # The serving runtime of this process made the weights local, as the reader of the weights; a snapshot
+        # that the committer resolved has no file.
+        assert snapshot.local_path is None
         assert (snapshot.materialize().local_path / VERSION_FILE).read_text() == "w1"
 
         assert control.delete_scenario("math")["scenario"] == "math"
@@ -183,30 +227,25 @@ def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_directory_that_c
             lambda: all(item.final for item in control.queue.items(CHECKS_QUEUE)),
             "the training service did not answer the archive request",
         )
-    assert watch.seen == []
     assert not list((tmp_path / "control").rglob("checkpoints"))
     assert stored_content_refs(tmp_path) == []
 
 
 @pytest.mark.integration
 def test_a_harness_scenario_trains_shows_its_step_and_is_deleted_with_no_directory_that_control_shares(
-    tmp_path: Path, fake_git_lfs: None
+    tmp_path: Path, real_lfs: None
 ) -> None:
-    def method(workspace, services):
-        workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
-        workspace.write_output("added a rule", {"rules": 1})
-
     # The two services read one configuration, and each resolves ``evolution.state_dir`` on its own disk.
     for service in ("control", "training"):
         (tmp_path / service).mkdir()
-    recipe, control_live = harness_recipe(tmp_path / "control", method)
-    _, training_live = harness_recipe(tmp_path / "training", method)
+    recipe, control_live = harness_recipe(tmp_path / "control", changing_rules)
+    _, training_live = harness_recipe(tmp_path / "training", changing_rules)
     component = training_live.harness_component
     assert component is not None
     control_state = tmp_path / "control" / "harness"
     training_state = tmp_path / "training" / "harness"
     before = sorted(path.name for path in control_state.iterdir()) if control_state.is_dir() else []
-    with split(tmp_path, recipe, control_live, (component,)) as (control, watch), watch.watching():
+    with split(tmp_path, recipe, control_live, (component,)) as control:
         scenario = control.get_or_create_scenario("demo")
         for record in report_records("demo", "1"):
             control.accept_record(record)
@@ -226,57 +265,130 @@ def test_a_harness_scenario_trains_shows_its_step_and_is_deleted_with_no_directo
 
         assert (training_state / "demo").is_dir()
         # The step's records are stored content, which lives as long as the scenario: the checkpoint's is gone.
+        # They are one content for each job, and a harness step is one job.
         assert len(stored_content_refs(tmp_path)) == 1
         control.delete_scenario("demo")
         wait_until(lambda: not (training_state / "demo").exists(), "the training service did not archive its state")
-    assert watch.seen == []
     # The training service moved its own directory aside, and control wrote nothing where it has no state.
     assert [path.name.startswith("demo-") for path in (training_state / "archived").iterdir()] == [True]
+    assert sorted(path.name for path in control_state.iterdir()) == before
     # Nothing that a job of the scenario stored outlives the scenario.
     assert stored_content_refs(tmp_path) == []
-    assert sorted(path.name for path in control_state.iterdir()) == before
 
 
 @pytest.mark.integration
-def test_a_composite_scenario_trains_both_components_with_no_directory_that_control_shares(
-    tmp_path: Path, fake_git_lfs: None
+def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
+    tmp_path: Path, real_lfs: None
 ) -> None:
-    def method(workspace, services):
-        workspace.write_tree(workspace.tree().apply(TreePatch(changed_rules("marker rules\n"))))
-        workspace.write_output("added a rule", {"rules": 1})
-
+    """The inference service runs apart here, with its own directory, so every weight byte under control's
+    directory would be one that control fetched. After each operation, none is there."""
     for service in ("control", "training"):
         (tmp_path / service).mkdir()
-    harness, control_live = harness_recipe(tmp_path / "control", method)
-    _, training_live = harness_recipe(tmp_path / "training", method)
+    harness, control_live = harness_recipe(tmp_path / "control", changing_rules)
+    _, training_live = harness_recipe(tmp_path / "training", changing_rules)
     evolving = training_live.harness_component
     assert evolving is not None
-    weights = StubTrainingComponent(tmp_path / "training" / "checkpoints")
+    weights = SentinelWeights(tmp_path / "training" / "checkpoints")
     recipe = CompositeRecipe(components={"weights": TestPolicyRecipe(max_staleness=8), "harness": harness})
-    live = replace(control_live, runtime=StubInferenceRuntime(), training_facts=StubFacts(weights))
-    with split(tmp_path, recipe, live, (weights, evolving)) as (control, watch), watch.watching():
+    runtime = StubInferenceRuntime()
+    # The stub answers each call from the artifact that the call names, so it serves an artifact beside the active.
+    runtime.answers_each_artifact = True
+    live = replace(control_live, runtime=runtime, training_facts=StubFacts(weights))
+    control_directory = tmp_path / "control"
+    done: list[str] = []
+
+    def checked(operation: str) -> None:
+        assert weight_bytes_in(control_directory) == [], f"after {operation} (before it: {done})"
+        done.append(operation)
+
+    with split(tmp_path, recipe, live, (weights, evolving), inference_apart=True) as control:
         scenario = control.get_or_create_scenario("agent")
-        root = scenario.artifact_status()["weights"]["active"]
-        control.accept_record(token_inference("i1", scenario="agent", artifact_id=root))
+        root = dict(scenario.artifact_selection().components)
+        control.accept_record(token_inference("i1", scenario="agent", artifact_id=root["weights"]))
         control.accept_record(report("r1", "i1", scenario="agent"))
 
-        def trained(component: str) -> bool:
-            return scenario.trainer_for(component).state["finished_jobs"] == 1
+        def trained(component: str, count: int = 1) -> bool:
+            return scenario.trainer_for(component).state["finished_jobs"] >= count
 
         wait_until(
             lambda: trained("weights") and trained("harness"),
             f"the two components did not train: {control.build_training_status()}",
         )
+        # The training service does hold the weights, so the check can find them.
+        assert weight_bytes_in(tmp_path / "training") and weight_bytes_in(tmp_path / "artifacts.git")
+        # The inference service is the reader of the weights: it made them local, in its own directory.
+        wait_until(lambda: weight_bytes_in(tmp_path / "inference") != [], "the inference service loaded no weights")
+        checked("two training commits")
         jobs = scenario_jobs(control.queue, "agent")
         assert sorted(len(job["checkpoints"]) for job in jobs) == [1, 1]
-        # Each commit carried the other component by its artifact ID, and both artifacts are active.
         status = scenario.artifact_status()
-        assert status["weights"]["active"] != root
-        _, snapshot = scenario.resolve_artifact(status["harness"]["active"], "harness")
-        assert "marker rules" in scenario.components.read_files(snapshot)["plugin/rules.md"]
-        control.delete_scenario("agent")
-        wait_until(
-            lambda: all(item.final for item in control.queue.items(CHECKS_QUEUE)),
-            "the training services did not answer the archive requests",
+        active = {name: status[name]["active"] for name in ("weights", "harness")}
+        assert active["weights"] != root["weights"] and active["harness"] != root["harness"]
+        after_training = scenario.commit_number
+
+        headers = {"x-reef-scenario": "agent"}
+        requests = RequestService(control)
+        manifest = requests.harness_manifest(headers)
+        assert any("marker rules" in text for text in manifest["files"].values())
+        checked("harness manifest")
+        assert requests.harness_step_records(headers, 1, None)["status"] == "retained"
+        checked("step records")
+        assert (artifact_directory(control, "agent", active["harness"], "harness") / "rules.md").is_file()
+        checked("artifact files of the harness")
+        # An evaluation's rollout reads its candidate: the harness component alone.
+        _, candidate = control.candidate("agent", active["harness"], "harness")
+        assert candidate.local_path is not None and not list(candidate.local_path.rglob(MODEL))
+        checked("an evaluation candidate")
+
+        synced = requests.harness_import(
+            headers,
+            {
+                "base_artifact_id": manifest["artifact_id"],
+                "files": {
+                    path: text.replace("marker rules", "synced rules") for path, text in manifest["files"].items()
+                },
+            },
         )
-    assert watch.seen == []
+        assert synced["changed"]
+        checked("harness sync")
+        given = tmp_path / "given"
+        given.mkdir()
+        (given / "rules.md").write_text("imported rules\n")
+        imported = control.import_artifact(
+            "agent",
+            DirectorySource(given, source_version="v1", link=False),
+            "harness",
+            source={"uri": "file:///given/", "version": "v1"},
+            directory=tmp_path / "control" / "import-work",
+        )
+        checked("harness import")
+
+        control.activate("agent", root["weights"], "weights")
+        checked("activate older weights")
+        control.activate("agent", imported.artifact_id, "harness")
+        checked("activate the imported harness")
+        assert control.restore("agent", after_training) == active
+        checked("restore")
+        control.set_served("agent", {active["weights"]: 50, root["weights"]: 50}, "weights")
+        checked("serve two weights")
+        control.train_from("agent", root["weights"], "weights")
+        control.train_from("agent", active["harness"], "harness")
+        checked("train from")
+        EndedWorkSweeper(control.queue, control.backend_factory, retention_seconds=1e-6).sweep()
+        checked("sweep")
+
+        # A scenario that is deleted while a job runs: the job is cancelled, and nothing that it stored stays.
+        control.accept_record(token_inference("i2", scenario="agent", artifact_id=root["weights"]))
+        control.accept_record(report("r2", "i2", scenario="agent"))
+        wait_until(lambda: len(control.queue.items(JOBS_QUEUE, scenario="agent")) > 0, "no further job was queued")
+        control.delete_scenario("agent")
+        checked("delete during a job")
+        wait_until(
+            lambda: all(item.final for queue in (JOBS_QUEUE, CHECKS_QUEUE) for item in control.queue.items(queue)),
+            "the training services did not end the jobs and the archive requests",
+        )
+        # A worker can store a checkpoint after the delete discarded the scenario's content. Its item names it,
+        # and the sweep of the ended items discards it.
+        discard_ended_content(control.queue, control.backend_factory, ended_before=time.time() + 1, give_up_before=0.0)
+        checked("the sweep after the delete")
+    assert stored_content_refs(tmp_path) == []

@@ -415,19 +415,26 @@ class Dispatcher(
         - Its ``served_models`` rows go, so the inference service answers it 404.
         - The workers drop the scenario, and a training job it runs is cancelled.
         - The loaded instance closes.
-        - The storage archives the records, the commits and the settings.
-        - The recipe's own directories move to an ``archived`` sibling.
         - The stored content of the scenario leaves the artifact store: the record files of its jobs, and any
           checkpoint that no commit took (``RepositoryBackend.discard_all_content``).
+        - The storage archives the records, the commits and the settings.
+        - The recipe's own directories move to an ``archived`` sibling.
         - The repository registration is archived, so the name is free again.
 
         Artifacts that other scenarios share stay.
+
+        What can refuse runs first: an unknown scenario, and a repository backend that cannot archive a
+        registration (``NotImplementedError``), change nothing. The steps then run in the order above. A delete
+        that fails at the discard of the content, because the artifact store did not answer, leaves the scenario
+        with its storage and its registration: it loads again on its next use, with no running job and without
+        the content that was discarded, and the same call again finishes the delete.
         """
         if "/" in scenario or scenario in ("", ".", ".."):
             raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         with self.record_retention_lock, self.registry.lock_for(scenario):
             if not self.registry.has(scenario):
                 raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
+            self.registry.require_archivable()
             # The inference service stops answering the scenario first, so no record reaches the archived store.
             if self.publisher is not None:
                 self.publisher.withdraw(scenario)
@@ -440,6 +447,8 @@ class Dispatcher(
                     component_trainer.trainer.cancel_job()
                 dropped.close()
             self.local_workers.close_replaced_instances(scenario)
+            # The discard can fail when the artifact store does not answer. It runs before the scenario's storage
+            # and registration are archived, so the scenario is whole and a repeated delete finishes.
             self.backend_factory(scenario).discard_all_content()
             archived = [*self.archive_scenario_state(scenario), *self.registry.archive_registration(scenario)]
         self.registry.forget_lock(scenario)
@@ -1200,8 +1209,9 @@ class Dispatcher(
             runtime = current.runtime
             if runtime is None:
                 raise ReefError(f"scenario {scenario!r} has no runtime")
-            _, snapshot = current.resolve_artifact(artifact_id, component)
-            return runtime, snapshot.materialize()
+            # The candidate's own component is made local; the snapshot's other components stay in the store.
+            selected, snapshot = current.resolve_artifact(artifact_id, component)
+            return runtime, current.components.component_artifact(snapshot, selected.component).materialize()
 
     def candidate_task(self, scenario: str, task_name: str) -> Path:
         """The directory of the Harbor task ``task_name`` of ``scenario`` here (``CandidateArtifacts``)."""

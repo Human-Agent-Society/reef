@@ -452,7 +452,8 @@ class RequestService:
             # The union over the chain, not this evaluation's list: a snapshot whose request named nothing still installs an earlier extension.
             "requires": required_by(list(reversed(catalog)), artifact_id),
         }
-        components = artifact.materialize().components
+        # The snapshot carries its manifest: no file is read for it.
+        components = artifact.components
         if components is not None:
             manifest["components"] = components.artifact_ids(artifact.ref.revision)
         return manifest

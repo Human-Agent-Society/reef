@@ -99,7 +99,8 @@ class RepositoryCommitSnapshots(CommitSnapshots):
         if len(artifact_ids) == 1:
             return next(iter(artifact_ids.values()))
         if self.start_ids is None:
-            self.start_ids = frozenset(artifact_components(self.backend.materialize(self.start)))
+            start = Artifact(self.start, None, metadata=self.backend.snapshot_metadata(self.start))
+            self.start_ids = frozenset(artifact_components(start))
         made = [id_ for id_ in artifact_ids.values() if id_ not in seen and id_ not in self.start_ids]
         if not made:
             raise CommitHistoryError(f"commit {record.commit_number} made an artifact, but names no new artifact ID")
@@ -619,7 +620,7 @@ class ScenarioFactory:
                         name=name, store=store, repository=repository, components=components
                     ),
                     samples=self._storage.sample_store(name, store),
-                    root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
+                    root=ScenarioRoot(repository.snapshot(start_artifact), root_source),
                 )
             except PluginConfigError as exc:
                 raise RecipeConfigError(str(exc)) from exc

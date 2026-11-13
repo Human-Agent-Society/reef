@@ -509,6 +509,12 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
     def _list_persisted_registrations(self) -> tuple[str, ...]:
         return ()
 
+    @property
+    def archives_registrations(self) -> bool:
+        """Whether ``archive_registration`` can move a scenario's registration aside here. The default is true. A
+        caller asks before it starts to delete a scenario, so that the delete refuses before it changes anything."""
+        return True
+
     def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
         """Move the durable registration aside; nothing to do for a backend that registers in memory only."""
         return ()
@@ -963,6 +969,17 @@ class Repository(ArtifactRepository):
         return ref
 
     def discard(self, artifact: Artifact) -> None:
+        """Forget the staged snapshot or the view of a selection ``artifact``, and remove its local files.
+
+        A view of a selection is named by its revision, whatever object holds it: the view that ``select``
+        returned has no file, and a reader that made it local registered another object for the same view.
+        """
+        if artifact.ref.selection_view:
+            composed = self._local_artifacts.pop(artifact.ref.revision, None)
+            self.selections.pop(artifact.ref.revision, None)
+            if composed is not None:
+                composed.discard()
+            return
         if self._local_artifacts.get(artifact.ref.revision) is artifact:
             self._local_artifacts.pop(artifact.ref.revision, None)
             self.selections.pop(artifact.ref.revision, None)

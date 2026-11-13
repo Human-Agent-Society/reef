@@ -226,6 +226,17 @@ def payload_request(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | 
     }
 
 
+def scenario_checks_key(scenario: str) -> str:
+    """The serial key of the job checks and the archive requests of ``scenario`` in the ``training_checks`` queue.
+
+    The queue gives the items of one key to workers one at a time, in the order of their creation. So the archive
+    of a deleted scenario ends before any training service checks a job of a scenario that was created again under
+    the name, whichever instance takes each item and however late the archive is tried again: an archive never
+    moves the directory of the new scenario.
+    """
+    return f"scenario:{scenario}"
+
+
 def checkpoint_content(job_id: str, step: int) -> str:
     """The name of the stored content of the checkpoint that the job ``job_id`` saved at ``step``. It is the same
     for every attempt of the job, so a worker that stores the checkpoint again replaces the content."""
@@ -238,7 +249,9 @@ def job_records_content(job_id: str) -> str:
 
     The pages of control read a step's records by the step's row of the commit history, also after the job's
     queue item is gone. So this content does not end with the item: it lives until its scenario is deleted, when
-    control discards all content of the scenario (``RepositoryBackend.discard_all_content``).
+    control discards all content of the scenario (``RepositoryBackend.discard_all_content``). The training worker
+    stores it when the job ends, and discards it again when the job was cancelled meanwhile, so a job that ends
+    after its scenario was deleted leaves none.
     """
     return f"{job_id}:records"
 
@@ -540,7 +553,16 @@ class JobQueueComponent(TrainingComponent):
         """Ask the training service to move aside what its component keeps for the deleted ``scenario``. The
         request waits in the queue while no training service runs, and nobody reads its answer."""
         item_id = f"archive:{scenario}:{uuid.uuid4().hex}"
-        self.queue.append(NewWork(CHECKS_QUEUE, item_id, scenario, check_kind(self.name), {"check": "archive"}))
+        self.queue.append(
+            NewWork(
+                CHECKS_QUEUE,
+                item_id,
+                scenario,
+                check_kind(self.name),
+                {"check": "archive"},
+                serial_key=scenario_checks_key(scenario),
+            )
+        )
 
     def read_answer(self, item: WorkItem, subject: str) -> None:
         """Read the answer of the final check ``item`` about ``subject``: return when the component accepted, raise
@@ -561,7 +583,16 @@ class JobQueueComponent(TrainingComponent):
         item = self.queue.read(CHECKS_QUEUE, item_id)
         if item is None:
             payload: dict[str, JsonValue] = {"check": "job", "job_id": job.job_id, "job": job_payload(job)}
-            self.queue.append(NewWork(CHECKS_QUEUE, item_id, job.scenario, check_kind(self.name), payload))
+            self.queue.append(
+                NewWork(
+                    CHECKS_QUEUE,
+                    item_id,
+                    job.scenario,
+                    check_kind(self.name),
+                    payload,
+                    serial_key=scenario_checks_key(job.scenario),
+                )
+            )
             raise pending
         self.queue.write_metadata(CHECKS_QUEUE, item_id, ASKED_AT_KEY, time.time())
         if not item.final:
@@ -760,7 +791,8 @@ class TrainingJobWorker(QueueWorker):
         job's scenario, and then appends the progress entry, which names that content and the parts that the
         checkpoint changed from the start (``TrainingComponent.changed_parts``). A worker that stops after it
         stored and before it recorded leaves no progress entry: the worker that continues the job stores the same
-        name again, and when nobody continues the job, the sweep finds the name in the metadata. The worker also copies the component's
+        name again, and when nobody continues the job, the sweep finds the name in the metadata. A worker that
+        lost the job while it stored discards the content itself. The worker also copies the component's
         ``job_progress`` into the item's metadata when it changed, and it stores the job's record files
         (``job_records``) under ``job_records_content`` when the job ends. At each poll the worker
         reads the item: a job that control cancelled, or that another worker took, ends here, and the component
@@ -785,7 +817,14 @@ class TrainingJobWorker(QueueWorker):
                     job_progress = None
                     records = self.component.job_records(job.job_id)
                     if records is not None:
-                        self.backends(job.scenario).store_content(job_records_content(item.id), records)
+                        backend = self.backends(job.scenario)
+                        backend.store_content(job_records_content(item.id), records)
+                        held = self.queue.read(JOBS_QUEUE, item.id)
+                        if held is None or held.worker_id != self.worker_id or held.final:
+                            # The job was cancelled meanwhile, as the delete of its scenario does: no page reads
+                            # these records, and the delete discarded the scenario's content before this store.
+                            backend.discard_content(job_records_content(item.id))
+                            raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
                 if job_progress != written_progress:
                     value = None if job_progress is None else cast(JsonValue, dict(job_progress))
                     self.queue.write_metadata(JOBS_QUEUE, item.id, PROGRESS_METADATA_KEY, value)
@@ -812,9 +851,14 @@ class TrainingJobWorker(QueueWorker):
                         content=content,
                         changed_parts=self.component.changed_parts(job.start, checkpoint),
                     )
-                    self.queue.append_progress(
-                        JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(stored), number=progress_count
-                    )
+                    try:
+                        self.queue.append_progress(
+                            JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(stored), number=progress_count
+                        )
+                    except WorkLeaseLostError:
+                        # The job was cancelled or taken while the files were stored: nobody commits this content.
+                        self.backends(job.scenario).discard_content(content)
+                        raise
                     reported.add(checkpoint.step)
                     progress_count += 1
                 if status.state == "finished":
@@ -925,6 +969,9 @@ def discard_ended_content(
         if not item.final or item.ended_at is None or item.ended_at >= ended_before:
             continue
         names = item.metadata.get(STORED_CONTENT_KEY, [])
+        if names == []:
+            # A job that stored nothing needs no artifact store: opening one can be a clone.
+            continue
         try:
             if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
                 raise ValueError("a job's stored content is a list of names")

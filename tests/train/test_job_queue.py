@@ -563,7 +563,13 @@ def test_content_that_a_worker_stored_and_could_not_record_goes_with_the_jobs_it
     assert worker.run_once()
     item = queue.read(JOBS_QUEUE, "j1")
     assert (item.state, item.progress, item.metadata[STORED_CONTENT_KEY]) == ("failed", (), ["j1:1"])
-    assert backends("s").materialize_content("j1:1").is_dir()
+    # The worker discarded what it could not record.
+    with pytest.raises(ArtifactError):
+        backends("s").materialize_content("j1:1")
+    # A worker that stopped hard between the store and the record discards nothing: the sweep finds the name.
+    files = tmp_path / "files"
+    files.mkdir()
+    backends("s").store_content("j1:1", files)
     assert discard_ended_content(queue, backends, ended_before=item.ended_at + 1, give_up_before=0.0) == ()
     with pytest.raises(ArtifactError):
         backends("s").materialize_content("j1:1")
@@ -624,6 +630,39 @@ def test_a_job_item_stays_until_its_content_is_discarded_and_does_not_stop_the_s
     ended_at = queue.read(JOBS_QUEUE, "c").ended_at
     assert sweep(ended_at + 101) == 0 and sweep(ended_at + 201) == 1
     assert sweeper.sweep() == 0
+
+
+@pytest.mark.unit
+def test_a_job_check_of_a_scenario_waits_for_the_archive_of_the_scenario_before_it(tmp_path):
+    """An archive never moves the directory of a scenario that was created again under the name: the queue gives
+    the checks and the archives of one scenario out one at a time, in order, to whichever worker asks."""
+    queue = memory_coordination(lease_seconds=30).work_queue
+    view = JobQueueComponent(StepFacts(), queue)
+    view.archive_scenario("s")
+    # The scenario exists again, and its first job asks for its check.
+    with pytest.raises(JobCheckPendingError):
+        view.submit(job("j1"))
+    archive, check = queue.items(CHECKS_QUEUE)
+    assert archive.serial_key == check.serial_key == "scenario:s"
+    # Another training service instance asks for work while the first holds the archive: it gets no check.
+    assert queue.take(CHECKS_QUEUE, "instance-1", ["training_check:steps"]).id == archive.id
+    assert queue.take(CHECKS_QUEUE, "instance-2", ["training_check:steps"]) is None
+    queue.start(CHECKS_QUEUE, archive.id, "instance-1")
+    queue.finish(CHECKS_QUEUE, archive.id, "instance-1", {"refusal": None})
+    assert queue.take(CHECKS_QUEUE, "instance-2", ["training_check:steps"]).id == check.id
+
+
+@pytest.mark.unit
+def test_the_sweep_opens_no_artifact_store_for_a_job_that_stored_nothing(tmp_path):
+    class NoStore(RepositoryBackendFactory):
+        def __call__(self, scenario: str):
+            raise AssertionError("a job with no stored content needs no artifact store")
+
+    queue = memory_coordination(lease_seconds=30).work_queue
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))), now=0)
+    queue.cancel(JOBS_QUEUE, "j1", "cancelled")
+    ended_at = queue.read(JOBS_QUEUE, "j1").ended_at
+    assert discard_ended_content(queue, NoStore(), ended_before=ended_at + 1, give_up_before=0.0) == ()
 
 
 @pytest.mark.unit

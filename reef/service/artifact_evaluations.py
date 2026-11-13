@@ -736,8 +736,7 @@ class ArtifactEvaluations:
         if component not in kinds:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
         if artifact_id is None:
-            active = Artifact(current.current_snapshot(), current.repository)
-            artifact_id = current.components.component_artifact(active, component).artifact_id
+            artifact_id = current.artifact_selection().components[component]
         request = settings.request(artifact_id, component)
         kind = kinds[component]
         if kind is None:
@@ -749,8 +748,9 @@ class ArtifactEvaluations:
             raise ReefError(refusal or f"scenario {current.name!r} has no runtime")
         if request.harness is None:
             raise ValueError(f"component {component!r} is a {kind}: configure the harness that runs it")
-        _, snapshot = current.resolve_artifact(artifact_id, component)
-        artifact = snapshot.materialize()
+        # The evaluated component alone is made local: the snapshot's other components stay in the store.
+        selected, snapshot = current.resolve_artifact(artifact_id, component)
+        artifact = current.components.component_artifact(snapshot, selected.component).materialize()
         return request, artifact, runtime.artifact_model(artifact), runtime.api
 
     def held_collection(self, scenario: str, name: str, held: frozenset[str]) -> EvaluationCollection:

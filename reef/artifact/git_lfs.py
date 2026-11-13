@@ -1227,6 +1227,11 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
         )
         return bool(output)
 
+    @property
+    def archives_registrations(self) -> bool:
+        """Only a local bare repository can be renamed in place."""
+        return isinstance(self._repository, Path)
+
     def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
         """Rename the scenario's ref into the layout's ``archived/<scenario>/<time>`` and drop its work clone.
 

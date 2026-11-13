@@ -51,7 +51,7 @@ from tests.support.trajectories import policy_trajectory
 
 from reef.artifact import Artifact, ArtifactNotFoundError, DefaultStart, SnapshotRef
 from reef.artifact.components import ComponentSpec, ScenarioComponents, TextFileTree
-from reef.artifact.snapshot_chain import ArtifactSnapshotChain
+from reef.artifact.repository import Repository
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
@@ -1409,19 +1409,19 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
     wait_for_serving(dispatcher, "agent")
     # The serving of the weights read the creation's manifest; the test reads it as a process that has not.
     scenario.snapshot_queries.creation_components_read = False
-    original = ArtifactSnapshotChain.resolve
+    original = Repository.snapshot
     calls = {"failed": 0}
 
     reader = threading.current_thread()
 
-    def fail_once(self: ArtifactSnapshotChain, ref: SnapshotRef) -> Artifact:
-        # The serving worker resolves snapshots too; only the test's own read fails.
+    def fail_once(self: Repository, ref: SnapshotRef) -> Artifact:
+        # The serving worker reads snapshots too; only the test's own read of the manifest fails.
         if calls["failed"] == 0 and threading.current_thread() is reader:
             calls["failed"] += 1
             raise ArtifactNotFoundError("the remote is away")
         return original(self, ref)
 
-    monkeypatch.setattr(ArtifactSnapshotChain, "resolve", fail_once)
+    monkeypatch.setattr(Repository, "snapshot", fail_once)
     assert scenario.snapshot_queries.creation_components(0) is None
     # Not asked again at the same step (a page polls every few seconds; a remote read is a fetch)...
     assert scenario.snapshot_queries.creation_components(0) is None

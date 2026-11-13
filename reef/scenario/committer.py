@@ -787,7 +787,7 @@ class ScenarioCommitter:
                 None,
             )
             if start is not None:
-                self.start_trainer(component_trainer, self._artifacts.resolve(start.snapshot))
+                self.start_trainer(component_trainer, self._artifacts.repository.snapshot(start.snapshot))
 
     def training_start(self, component_trainer: ComponentTrainer, snapshot: Artifact) -> str:
         """The start of a job of ``component_trainer`` that trains from its component of ``snapshot``: the name of

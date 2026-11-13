@@ -85,7 +85,7 @@ class ScenarioSnapshots:
             if self.creation_read_failed_at == commit_number and not retry:
                 return None
             try:
-                manifest = self._artifacts.resolve(self.creation_artifact).components
+                manifest = self._artifacts.repository.snapshot(self.creation_artifact).components
             except ArtifactError:
                 self.creation_read_failed_at = commit_number
                 return None
@@ -179,7 +179,7 @@ class ScenarioSnapshots:
             if record.artifact_ids is not None:
                 known[record.snapshot.revision] = record.artifact_ids
         if not self._store.durable and self._artifacts.current.revision not in known:
-            current = self._artifacts.resolve(self._artifacts.current)
+            current = self._artifacts.repository.snapshot(self._artifacts.current)
             if current.components is not None:
                 known[current.ref.revision] = current.components.artifact_ids(current.ref.revision)
         self.manifests_read = (commit_number, current_revision, known)
@@ -190,7 +190,7 @@ class ScenarioSnapshots:
         record = active_record(self.records())
         if record is None:
             if self._artifacts.current != self.creation_artifact:
-                artifact = self._artifacts.resolve(self._artifacts.current)
+                artifact = self._artifacts.repository.snapshot(self._artifacts.current)
                 manifest = artifact.components
                 return None if manifest is None else manifest.artifact_ids(artifact.ref.revision)
             return self.creation_components(commit_number)
