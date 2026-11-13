@@ -361,6 +361,29 @@ def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
     )
 
 
+def test_executor_config_and_the_e2b_module_do_not_require_the_e2b_package() -> None:
+    # The executor config imports reef.execution.sandbox.e2b for every deployment, and that module defines a
+    # subclass of Harbor's E2B environment. A base installation has no e2b package. The modules still import, a
+    # local executor is built and the E2B settings are read; only the E2B startup check names the missing extra.
+    _assert_isolated_import(
+        "import sys\n"
+        "sys.modules['e2b'] = None\n"
+        "from reef.execution.sandbox.config import REMOTE_EXECUTORS, build_executor, remote_executor\n"
+        "from reef.execution.sandbox.e2b import E2BExecutor, KillOnTimeoutE2BEnvironment\n"
+        "from reef.execution.sandbox.process import LocalExecutor, SandboxUnavailableError\n"
+        "assert REMOTE_EXECUTORS['e2b'] is E2BExecutor and KillOnTimeoutE2BEnvironment.type() == 'e2b'\n"
+        "assert isinstance(build_executor({'executor': 'local'}), LocalExecutor)\n"
+        "executor = remote_executor('e2b', {'e2b_template': 'custom'}, {'E2B_API_KEY': 'key'})\n"
+        "assert isinstance(executor, E2BExecutor) and executor.template == 'custom'\n"
+        "try:\n"
+        "    executor.preflight()\n"
+        "except SandboxUnavailableError as error:\n"
+        "    assert 'reef-infra[e2b]' in str(error), error\n"
+        "else:\n"
+        "    raise AssertionError('the E2B startup check passed without the e2b package')\n"
+    )
+
+
 def test_slime_training_component_import_does_not_load_megatron_stack() -> None:
     _assert_isolated_import(
         "import sys, types; "

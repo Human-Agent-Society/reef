@@ -30,6 +30,7 @@ from pathlib import Path
 from reef.core.errors import InternalError
 from reef.core.tasks import HarborTask, primary_reward
 from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosedError
+from reef.execution.sandbox.task_environment import environment_config
 from reef.record2sample.generator.designer import SKILL_PATTERN, HarborReply
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
@@ -360,9 +361,35 @@ def run_harbor_agent(
     """Run ``agent`` on the task through the harbor command line in Harbor's ``environment``, and read the trial.
 
     The child runs in its own process group and inherits this process's environment, so the credentials of the
-    environment (``reef.execution.sandbox.task_environment``) reach Harbor.
+    environment (``reef.execution.sandbox.task_environment``) reach Harbor. On ``e2b``, the child gets the
+    environment class and the sandbox lifetime of an in-process trial (``environment_config``). ``-e e2b`` would
+    select Harbor's own class, so ``-e`` names the import path of the class that deletes the sandbox at its timeout,
+    and ``--ek`` gives it the lifetime. Harbor's command line makes an environment config with that import path and
+    no type. ``agent`` is an agent name with no time limit of its own, so the lifetime comes from the task's time
+    limits.
     """
-    command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", environment, "-o", str(jobs_path), "-n", "1"]
+    environment_spec = environment
+    environment_kwargs: list[str] = []
+    if environment == "e2b":
+        config = environment_config(environment, task_path)
+        environment_spec = config["import_path"]
+        for name, value in config.get("kwargs", {}).items():
+            environment_kwargs += ["--ek", f"{name}={value}"]
+    command = [
+        harbor,
+        "run",
+        "-p",
+        str(task_path),
+        "-a",
+        agent,
+        "-e",
+        environment_spec,
+        "-o",
+        str(jobs_path),
+        "-n",
+        "1",
+        *environment_kwargs,
+    ]
     scope = CURRENT_PROCESS_SCOPE.get()
     if scope is None:
         scope = ProcessScope()

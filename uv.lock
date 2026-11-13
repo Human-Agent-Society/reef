@@ -4244,6 +4244,7 @@ dependencies = [
     { name = "reef-client" },
     { name = "reef-eval" },
     { name = "sqlalchemy" },
+    { name = "tenacity" },
     { name = "tomli-w" },
 ]
 
@@ -4326,7 +4327,7 @@ requires-dist = [
     { name = "e2b", marker = "extra == 'e2b'", specifier = ">=2.46" },
     { name = "e2b", marker = "extra == 'slime'" },
     { name = "harbor", specifier = ">=0.24,<0.26" },
-    { name = "harbor", extras = ["e2b"], marker = "extra == 'e2b'" },
+    { name = "harbor", extras = ["e2b"], marker = "extra == 'e2b'", specifier = ">=0.25,<0.26" },
     { name = "harbor", extras = ["modal"], marker = "extra == 'modal'" },
     { name = "httpx", extras = ["http2"], marker = "extra == 'slime'" },
     { name = "huggingface-hub" },
@@ -4363,6 +4364,7 @@ requires-dist = [
     { name = "sglang-router", marker = "extra == 'sglang'", specifier = ">=0.3.2" },
     { name = "sglang-router", marker = "extra == 'slime'", specifier = ">=0.3.2" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
+    { name = "tenacity", specifier = ">=9.1.2" },
     { name = "tensorboard", marker = "extra == 'slime'" },
     { name = "tinker", marker = "extra == 'tinker'", specifier = "==0.38.0" },
     { name = "tinker-cookbook", marker = "extra == 'tinker'", specifier = "==0.6.0" },

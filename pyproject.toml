@@ -31,6 +31,7 @@ dependencies = [
     "reef-client>=0.4.0",
     "reef-eval>=0.1.1",
     "sqlalchemy>=2.0,<3",
+    "tenacity>=9.1.2",  # Harbor's retry policy in the E2B environment subclass.
     "tomli-w",
 ]
 
@@ -49,8 +50,10 @@ postgres = ["psycopg[binary]>=3.1,<4"]
 # Reads s3:// sources of an artifact import (storage.artifact_sources).
 s3 = ["boto3"]
 # Cloud sandboxes for evaluation rollouts and the Reefine agent: E2B, and Modal. Harbor's extra of each
-# environment adds what its sandbox needs to build a task's image (dockerfile-parse).
-e2b = ["harbor[e2b]", "e2b>=2.46", "connectrpc>=0.11.1,<0.14"]
+# environment adds what its sandbox needs to build a task's image (dockerfile-parse). The e2b extra needs Harbor
+# 0.25: KillOnTimeoutE2BEnvironment in reef.execution.sandbox.e2b repeats the sandbox creation of that version's
+# E2B environment, and Harbor 0.24 lacks an attribute that it reads (_sandbox_timeout).
+e2b = ["harbor[e2b]>=0.25,<0.26", "e2b>=2.46", "connectrpc>=0.11.1,<0.14"]
 modal = ["harbor[modal]", "modal>=1.6"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
