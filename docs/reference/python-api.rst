@@ -2526,10 +2526,6 @@ loop:
        files that an engine loads, such as Tinker's manifests. The serving
        assembly configures the engines from it and refuses a serving runtime
        that cannot load it.
-   * - ``default_start_inputs``
-     - The ``inputs`` of the backend's default start, equal to the facts'.
-       The component writes no default start:
-       ``TrainingBackendFacts.default_start()`` does, from the configuration.
    * - ``root_start(root)``
      - The start of the first job of a trainer without committed state, a
        non-empty string. ``root`` is a ``ScenarioRoot``: the trainer's

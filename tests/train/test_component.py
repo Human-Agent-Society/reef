@@ -230,7 +230,7 @@ def test_the_layout_asks_the_component_for_what_the_facts_leave_to_the_service(t
 @pytest.mark.parametrize("artifact_format", [ArtifactFormat("full"), ArtifactFormat("adapter", 8, ("q_proj",))])
 def test_a_base_root_is_admitted_exactly_for_the_default_start_that_it_names(tmp_path, artifact_format):
     component = StubTrainingComponent(artifact_format=artifact_format)
-    assert component.default_start_inputs == {"model": "stub"}
+    assert StubFacts(component).default_start_inputs == {"model": "stub"}
     (tmp_path / BASE_FILE).write_text(BaseRoot({"model": "stub"}).to_text())
     StubFacts(component).check_artifact(DirectoryFiles(tmp_path))
     (tmp_path / BASE_FILE).write_text(BaseRoot({"model": "stub", "lora_rank": "8"}).to_text())
@@ -261,6 +261,7 @@ def test_every_factory_states_its_facts_and_stating_them_builds_no_component(tmp
     with pytest.raises(TypeError, match="abstract"):
         NoFacts()
     assert not hasattr(TrainingComponent, "default_start")
+    assert not hasattr(TrainingComponent, "default_start_inputs")
     marker = tmp_path / "built"
     facts = training_backend_facts({"type": LOCAL_FACTORY, "marker": str(marker)}, model_path="m", environ={})
     assert isinstance(facts, TrainingBackendFacts) and facts.default_start().inputs == facts.default_start_inputs
