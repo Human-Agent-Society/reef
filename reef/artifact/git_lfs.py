@@ -510,7 +510,13 @@ class _GitWorkspace:
     def writing_objects(self) -> Iterator[None]:
         """Hold the objects lock of a local repository shared, for a write that makes a ref reference LFS objects:
         a push that uploads them, or a commit of trees that another ref holds. ``reclaim_objects`` holds the lock
-        exclusive, so it never sees the objects of such a write before its ref. A remote repository has no lock."""
+        exclusive, so it never sees the objects of such a write before its ref. A remote repository has no lock.
+
+        The lock is ``fcntl.flock`` on ``OBJECTS_LOCK_FILE``: it excludes threads of one process and processes of
+        one host on any local filesystem, and processes of several hosts on a Linux NFS mount (such as Amazon EFS),
+        where Linux emulates ``flock`` with NFS byte-range locks. On another shared filesystem (SMB, a FUSE mount
+        of object storage) it does not reach other hosts, so a local repository must not be shared between hosts
+        there. ``fcntl.lockf`` would reach NFS too, but it does not exclude threads of one process."""
         if self.local_repository is None:
             yield
             return
@@ -1423,6 +1429,18 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             shutil.rmtree(work_dir, ignore_errors=True)
             archived.append(str(work_dir))
         return tuple(archived)
+
+    def has_archived_registration(self, scenario: str) -> bool:
+        """Whether the repository holds an archived ref of ``scenario`` (``RefLayout.archived``), which
+        ``archive_registration`` writes before it deletes the scenario's ref, and nothing deletes."""
+        if isinstance(self._repository, Path) and not self._repository.exists():
+            return False
+        encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
+        output = GitClient(self._work_dir / ".registration-check", self._git_config).run(
+            ("git", "ls-remote", str(self._repository), self._refs.archived(encoded, "*")),
+            source_error=True,
+        )
+        return bool(output)
 
     def _list_persisted_registrations(self) -> tuple[str, ...]:
         if isinstance(self._repository, Path) and not self._repository.exists():

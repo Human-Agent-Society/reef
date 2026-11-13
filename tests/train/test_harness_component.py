@@ -214,9 +214,9 @@ def test_the_component_reports_the_running_jobs_progress_and_the_ended_jobs_reco
     records = component.job_records("one")
     assert records is not None and records.is_dir()
     assert records.parent.name == "steps"
-    # A deleted scenario's directory moves aside, so the records of a new scenario of the name start empty.
+    # A deleted scenario's directory moves aside, under its ID, which no later scenario uses.
     scenario_dir = records.parent.parent.parent
     component.archive_scenario(scenario_dir.name)
     assert not scenario_dir.exists() and component.job_records("one") is None
     (archived,) = (scenario_dir.parent / "archived").iterdir()
-    assert archived.name.startswith(f"{scenario_dir.name}-")
+    assert archived.name == scenario_dir.name

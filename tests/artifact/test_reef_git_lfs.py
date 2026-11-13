@@ -1260,3 +1260,20 @@ def test_a_reclamation_during_a_store_keeps_the_objects_whose_ref_is_not_pushed_
     removed = control.reclaim_content(())
     assert removed == (() if bytes_of != "new bytes" else (hashlib.sha256(old_weights).hexdigest(),))
     assert (control.materialize_content("job:new") / "model.safetensors").read_bytes() == new_weights
+
+
+@pytest.mark.integration
+def test_an_archived_scenario_id_stays_known_to_every_later_process(tmp_path: Path, fake_git_lfs: None) -> None:
+    """The archived ref records a deleted scenario's ID, so a factory of another process refuses to reuse it."""
+    remote = tmp_path / "artifacts.git"
+
+    def factory(name: str) -> GitLFSRepositoryBackendFactory:
+        return GitLFSRepositoryBackend.factory(remote, work_dir=tmp_path / name, cache_dir=tmp_path / f"{name}-cache")
+
+    control = factory("control")
+    control("math").register(root_tree(tmp_path / "root", {"rules.md": "x"}), metadata={})
+    assert not control.has_archived_registration("math")
+    control.archive_registration("math")
+    later = factory("later")
+    assert later.has_archived_registration("math") and not later.has_registration("math")
+    assert not later.has_archived_registration("code")

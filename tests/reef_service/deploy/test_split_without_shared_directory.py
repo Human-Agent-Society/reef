@@ -454,7 +454,7 @@ def test_a_harness_scenario_trains_shows_its_step_and_is_deleted_with_no_directo
         control.delete_scenario("demo")
         wait_until(lambda: not (training_state / "demo").exists(), "the training service did not archive its state")
     # The training service moved its own directory aside, and control wrote nothing where it has no state.
-    assert [path.name.startswith("demo-") for path in (training_state / "archived").iterdir()] == [True]
+    assert [path.name for path in (training_state / "archived").iterdir()] == ["demo"]
     assert sorted(path.name for path in control_state.iterdir()) == before
     # Nothing that a job of the scenario stored outlives the scenario.
     assert stored_content_refs(tmp_path) == []

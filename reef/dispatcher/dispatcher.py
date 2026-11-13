@@ -419,7 +419,8 @@ class Dispatcher(
           checkpoint that no commit took (``RepositoryBackend.discard_all_content``).
         - The storage archives the records, the commits and the settings.
         - The recipe's own directories move to an ``archived`` sibling.
-        - The repository registration is archived, so the name is free again.
+        - The repository registration is archived. The archive also records that the scenario ID is never used
+          again (``CachedRepositoryBackendFactory.has_archived_registration``).
 
         Artifacts that other scenarios share stay.
 

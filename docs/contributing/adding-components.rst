@@ -315,7 +315,11 @@ snapshot-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   ``ConfigurableRepositoryBackendFactory``. Every backend implements the five
   operations on stored content (``store_content``, ``materialize_content``,
   ``discard_content``, ``discard_all_content`` and ``publish_parts``): the training service stores a
-  checkpoint with them and control commits it by name. See `Artifact
+  checkpoint with them and control commits it by name. A factory that
+  inherits ``CachedRepositoryBackendFactory`` implements
+  ``has_archived_registration(scenario)``: true exactly when a delete
+  archived the scenario in any process that shares the store, and never false
+  again after that, because a deleted scenario's ID is never used again. See `Artifact
   backends <../reference/python-api.rst#artifact-backends>`__.
 - Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
   ``reef/inference/``, and client-pull delivery in a

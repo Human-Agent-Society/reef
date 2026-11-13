@@ -11,6 +11,7 @@ from typing import Any, Self
 import pytest
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core.errors import ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
@@ -257,11 +258,8 @@ def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(
         assert factory.events.index(("close", "math")) < factory.events.index(("archive", "math"))
         assert dispatcher.prune_record_archives(retention) == 1
         code.records.append(trace("survivor", "code"))
-        replacement = dispatcher.get_or_create_scenario("math")
-        assert replacement is not None
-        assert replacement is not math
-        assert replacement.records.count("math") == 0
-        assert replacement.store.history() == ()
+        with pytest.raises(ScenarioDeletedError):
+            dispatcher.get_or_create_scenario("math")
         assert dispatcher.read_record("code", "survivor") is not None
     finally:
         dispatcher.close()

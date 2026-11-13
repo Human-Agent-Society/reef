@@ -24,6 +24,7 @@ from tests.support.serving import Engines
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, SnapshotRef
+from reef.core.errors import ScenarioDeletedError
 from reef.core.served_models import ScheduledStop, ServedArtifact
 from reef.dispatcher import Dispatcher, serving
 from reef.dispatcher.serving import ServingWorker
@@ -343,35 +344,25 @@ def test_slow_start_reports_its_result_without_blocking_control(startup, fails, 
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("recreate", [False, True])
-def test_deleted_or_recreated_scenario_rejects_the_old_startup_result(startup, recreate):
+def test_a_deleted_scenario_rejects_the_old_startup_result_and_its_id_is_not_created_again(startup):
     control, worker, runtime, inference_app = startup
 
     async def run() -> None:
         async with TestClient(TestServer(inference_app)) as client:
             control.create_scenario("math")
-            first = control.coordination.served_models.current_request("math")
             work = asyncio.create_task(asyncio.to_thread(worker.run_once))
             try:
                 assert await asyncio.to_thread(runtime.entered.wait, 2)
                 await asyncio.wait_for(asyncio.to_thread(control.delete_scenario, "math"), 2)
                 assert (await client.get(STATUS)).status == 404
-                if recreate:
+                with pytest.raises(ScenarioDeletedError):
                     control.create_scenario("math")
-                    current = control.coordination.served_models.current_request("math")
-                    assert current.id != first.id
-                    assert (await (await client.get(STATUS)).json())["state"] == "pending"
             finally:
                 runtime.release.set()
                 assert await asyncio.wait_for(work, 5)
 
             assert control.coordination.served_models.read_scenario("math") == {}
-            if recreate:
-                assert (await (await client.get(STATUS)).json())["state"] == "pending"
-                assert await asyncio.to_thread(worker.run_once)
-                assert (await (await client.get(STATUS)).json())["state"] == "ready"
-            else:
-                assert (await client.get(STATUS)).status == 404
+            assert (await client.get(STATUS)).status == 404
 
     asyncio.run(run())
 

@@ -24,6 +24,7 @@ from reef.artifact.artifact import (
 from reef.artifact.components import ScenarioComponents
 from reef.artifact.composite import compose_snapshot
 from reef.artifact.repository import (
+    CachedRepositoryBackendFactory,
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
@@ -34,7 +35,7 @@ from reef.artifact.repository import (
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, SnapshotComponents, snapshot_components
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, ScenarioDeletedError
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, shared_report_type
 from reef.core.snapshot import SELECTION_VIEW_PREFIX, ItemIdentity, RootSource
@@ -393,7 +394,9 @@ class ScenarioFactory:
         """Recover the scenario ``scenario``, or create it when the backend has no registration of it.
 
         A new scenario gets its own root snapshot (``register``): the artifact item ``start``, or the recipe's
-        default start when ``start`` is ``None``. An existing scenario ignores ``start``.
+        default start when ``start`` is ``None``. An existing scenario ignores ``start``. A scenario ID whose
+        scenario was deleted is never registered again: ``ScenarioDeletedError``
+        (``CachedRepositoryBackendFactory.has_archived_registration``).
         """
         backend = self._backend_factory(scenario)
         if self._storage.durable and not isinstance(backend, StagedSnapshotRepositoryBackend):
@@ -404,6 +407,12 @@ class ScenarioFactory:
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
         components = scenario_components(self._recipe, self.live, scenario)
         if registration is None:
+            if isinstance(self._backend_factory, CachedRepositoryBackendFactory) and (
+                self._backend_factory.has_archived_registration(scenario)
+            ):
+                raise ScenarioDeletedError(
+                    f"scenario {scenario!r} was deleted, and its ID is not used again; create a scenario with a new ID"
+                )
             self.register(scenario, backend, components, start)
             # register() is the atomic registration point. Another caller may have won it, so always rebuild from
             # the durable registration instead of assuming this creation attempt won.

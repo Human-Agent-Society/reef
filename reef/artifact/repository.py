@@ -490,15 +490,25 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
     def archive_registration(self, scenario: str) -> tuple[str, ...]:
         """Forget the scenario's backend and move its durable registration aside; what was archived, by name.
 
-        After this the factory answers ``has_registration`` false and
-        ``list_registrations`` without the name, so a later create under the
-        same name registers a new root snapshot. Content-addressed storage
+        After this the factory answers ``has_registration`` false,
+        ``list_registrations`` without the name, and ``has_archived_registration`` true, so
+        no later create registers the ID again. Content-addressed storage
         the scenario shared with others stays.
         """
         with self._lock:
             self._backends.pop(scenario, None)
             self._registration_misses.pop(scenario, None)
         return self._archive_persisted_registration(scenario)
+
+    @abstractmethod
+    def has_archived_registration(self, scenario: str) -> bool:
+        """True exactly when ``archive_registration(scenario)`` has completed in any process that shares this
+        store, and never False again after that.
+
+        A deleted scenario's ID is never used again: the scenario factory refuses to register a scenario for which
+        this is true (``ScenarioDeletedError``). A backend whose store lives in one process answers for that
+        process; a durable backend reads its archive, so that every process refuses the ID.
+        """
 
     @abstractmethod
     def _build_backend(self, scenario: str) -> RepositoryBackend: ...

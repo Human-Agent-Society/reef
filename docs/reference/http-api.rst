@@ -1990,13 +1990,15 @@ Deleting a scenario
 -------------------
 
 ``DELETE /reef/scenarios/{scenario}`` removes the scenario from the running
-service and frees its name. Nothing is destroyed: the record store and commit
+service. Nothing is destroyed: the record store and commit
 log move under ``<agent_record_dir>/archived/``, the recipe's own directories
 (a harness scenario's history and step records) move under an
 ``archived/`` sibling, and the
 scenario's ref in the artifact repository is renamed into
 ``refs/reef/archived/``, so every snapshot it published stays reachable. A
-later create of the same name writes a new root snapshot. A local step in flight for the scenario ends without a
+scenario ID is never used again after its delete: a create with the ID, and a
+record that would create the scenario implicitly, answer 409. A new scenario
+needs a new ID. A local step in flight for the scenario ends without a
 commit. Only a local artifact repository can be archived; a remote one
 answers 501.
 
