@@ -52,7 +52,7 @@ def serving_engine_config(
     the engine's native options; Reef adds the ones its serving needs, and
     SGLang's ``router-*`` options configure the router (``router-port`` binds
     the first one). An
-    ``adapter`` release format enables the engine's adapter table, of
+    ``adapter`` artifact format enables the engine's adapter table, of
     ``adapter_capacity`` adapters. ``prefix_sharing`` selects the retracting
     pause, which clears the prefix cache before each load, so the engines
     keep their prefix cache where that is safe (the engine's settings decide;

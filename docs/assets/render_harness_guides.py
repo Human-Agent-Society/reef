@@ -328,7 +328,7 @@ def harness_tutorial_overview(theme: str, fonts) -> str:
     o.append(card(p, left, rows[0], TUTORIAL_BOX, "machine", "Your agent", "with your own settings, rules and skills"))
     o.append(card(p, left, rows[1], TUTORIAL_BOX, "machine", "reef-client", "installs and syncs Reef's version"))
     o.append(card(p, right, rows[0], TUTORIAL_BOX, "reef", "Method", "proposes a new version"))
-    o.append(card(p, right, rows[1], TUTORIAL_BOX, "store", "Releases", "every version, in Git"))
+    o.append(card(p, right, rows[1], TUTORIAL_BOX, "store", "Snapshots", "every version, in Git"))
     start, end = left + TUTORIAL_BOX + 16, right - 16
     center, middle = (start + end) // 2, (top + zone_bottom) // 2
     o.append(path(p, [(start, middle - 12), (end, middle - 12)]))

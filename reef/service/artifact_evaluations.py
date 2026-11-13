@@ -736,8 +736,7 @@ class ArtifactEvaluations:
         if component not in kinds:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
         if artifact_id is None:
-            active = Artifact(current.current_snapshot(), current.repository)
-            artifact_id = current.components.component_artifact(active, component).artifact_id
+            artifact_id = current.artifact_selection().components[component]
         request = settings.request(artifact_id, component)
         kind = kinds[component]
         if kind is None:
@@ -749,8 +748,9 @@ class ArtifactEvaluations:
             raise ReefError(refusal or f"scenario {current.name!r} has no runtime")
         if request.harness is None:
             raise ValueError(f"component {component!r} is a {kind}: configure the harness that runs it")
-        _, snapshot = current.resolve_artifact(artifact_id, component)
-        artifact = snapshot.materialize()
+        # The evaluated component alone is made local: the snapshot's other components stay in the store.
+        selected, snapshot = current.resolve_artifact(artifact_id, component)
+        artifact = current.components.component_artifact(snapshot, selected.component).materialize()
         return request, artifact, runtime.artifact_model(artifact), runtime.api
 
     def held_collection(self, scenario: str, name: str, held: frozenset[str]) -> EvaluationCollection:
@@ -842,10 +842,13 @@ class ArtifactEvaluations:
             selection = {**current.artifact_selection().to_dict(), request.component: request.artifact_id}
             samples = self.dispatcher.storage.sample_store(scenario, current.store)
             # The listing reads no task files: the eval split can hold many more tasks than the evaluation runs.
+            # A scenario can use a task more than once (RFC #1420): an evaluation runs it once.
             held = tuple(
-                listed.sample_id
-                for listed in (() if samples is None else samples.listed_imported_tasks())
-                if listed.split == "eval"
+                dict.fromkeys(
+                    listed.sample_id
+                    for listed in (() if samples is None else samples.listed_imported_tasks())
+                    if listed.split == "eval"
+                )
             )
         held_names = frozenset(held)
         unknown = sorted(set(request.task_names) - held_names)
@@ -861,6 +864,19 @@ class ArtifactEvaluations:
             names = request.task_names or held
         if not names:
             raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
+        sampled = settings.sampled_task_names(names)
+        if collection is not None and len(sampled) < len(names):
+            # The stored collection names the tasks that run: a benchmark with no sampled task is left out.
+            sampled_names = frozenset(sampled)
+            collection = replace(
+                collection,
+                benchmarks=tuple(
+                    (benchmark, kept)
+                    for benchmark, task_names in collection.benchmarks
+                    if (kept := tuple(name for name in task_names if name in sampled_names))
+                ),
+            )
+        names = sampled
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
         if item is None:

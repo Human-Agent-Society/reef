@@ -40,7 +40,7 @@ def commit(step: int = 1, *, scenario: str = "math") -> CommitRecord:
     return CommitRecord(
         scenario=scenario,
         commit_number=step,
-        snapshot=SnapshotRef(f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"snapshot:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         high_water_sequence=step,

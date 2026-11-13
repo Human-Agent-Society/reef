@@ -23,7 +23,8 @@ def artifact_directory(dispatcher: Dispatcher, scenario: str, artifact_id: str, 
     """
     with dispatcher.locked_scenario(scenario) as current:
         selected, snapshot = current.resolve_artifact(artifact_id, component)
-        view = current.components.component_artifact(snapshot.materialize(), selected.component).materialize()
+        # Only the component of the artifact is made local, not the other components of its snapshot.
+        view = current.components.component_artifact(snapshot, selected.component).materialize()
     if view.local_path is None:
         raise ValueError(f"artifact {artifact_id!r} of {scenario!r} has no local files")
     return view.local_path

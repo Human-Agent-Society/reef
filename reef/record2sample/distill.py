@@ -97,7 +97,7 @@ class DistillSamples(ReportSamples):
     """
 
     def __init__(self, context: PipelineContext, settings: DistillSamplesSettings) -> None:
-        super().__init__(context, exclusive_sources=True, max_staleness=settings.max_staleness)
+        super().__init__(context, exclusive_sources=True)
         self.assembly = SampleAssembly(settings)
         self.max_teacher_tokens = settings.max_teacher_tokens
 

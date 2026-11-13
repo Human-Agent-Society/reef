@@ -38,7 +38,7 @@ CHAT = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 
 
 @pytest.mark.unit
-def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from_the_active_release(
+def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from_the_active_artifact(
     tmp_path,
 ) -> None:
     async def run() -> None:
@@ -370,7 +370,7 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_second_served_artifact(tmp_path) -> None:
+def test_a_runtime_that_answers_only_from_its_loaded_artifact_refuses_a_second_served_artifact(tmp_path) -> None:
     value, _, _ = dispatcher(tmp_path)
     train(value, 1)
     active, older = value.get_or_create_scenario("math").artifacts()

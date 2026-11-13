@@ -349,10 +349,10 @@ The extension points those packages expose are in `Python API
   concrete training stack in its own ``reef/train/<integration>/`` subtree.
   ``reef/train/slime_backend/`` trains weights.
 - Is it part of harness evolution? Each part has one owner. Data,
-  evaluation and release are Reef's, shared with weight training; evolve and
+  evaluation and publication are Reef's, shared with weight training; evolve and
   sync are the harness's own. ``reef/harness/tree/`` holds the tree that
   every part reads, and ``reef/train/harness_backend/backend.py`` runs one
-  job through evolve, evaluation and release. ``component.py`` is the
+  job through evolve, evaluation and publication. ``component.py`` is the
   ``harness`` training component: it runs each job in
   the training service, and keeps the harness state after each job in the
   job's outcome.
@@ -374,7 +374,7 @@ The extension points those packages expose are in `Python API
     ``decide``). ``reef/evaluation/harness/evaluator.py`` scores trees by
     running tasks, with the history as the score cache, and ``policy.py``
     decides.
-  - Release: the harness backend turns a selected tree into the job's
+  - Publication: the harness backend turns a selected tree into the job's
     snapshot, and the harness component names the parts that it changes from
     the job's start (``TrainingComponent.changed_parts``, which the job loop
     puts in ``changed_kinds``). The scenario

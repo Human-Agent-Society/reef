@@ -40,8 +40,10 @@ class TrainingCommit:
     ``state`` is the trainer state the commit records, a mapping, or ``None``
     for a commit outside a training step that keeps the current state; a
     training step's result needs a mapping (``Trainer.prepare_commit``
-    refuses ``None``). ``metrics`` is a mapping. ``artifact`` holds the bytes to publish, or ``None`` for a
-    commit that publishes nothing, such as a job submission or a job's end.
+    refuses ``None``). ``metrics`` is a mapping. ``artifact`` names the files to publish, or is ``None`` for a
+    commit that publishes nothing, such as a job submission or a job's end. The checkpoint of a training job is an
+    artifact of stored content (``Artifact.stored``), which the committer publishes by name; a tree that the
+    committing process holds is an artifact with a local path.
     ``training_job_id`` names the training job the commit is about, if any. ``train_from`` is the ID of the artifact
     that the job's request named as its start, or ``None``: with it, ``artifact`` does not become the trainer's
     training start (``JobLoop.publish``). Only a commit that publishes an artifact has it.

@@ -141,9 +141,9 @@ def test_different_scenarios_do_not_share_a_creation_lock(monkeypatch) -> None:
     load_or_create = dispatcher.registry._scenario_factory.load_or_create
     entered = Barrier(2)
 
-    def load_or_create_together(scenario, release_id):
+    def load_or_create_together(scenario, start):
         entered.wait(timeout=2)
-        return load_or_create(scenario, release_id)
+        return load_or_create(scenario, start)
 
     monkeypatch.setattr(dispatcher.registry._scenario_factory, "load_or_create", load_or_create_together)
 

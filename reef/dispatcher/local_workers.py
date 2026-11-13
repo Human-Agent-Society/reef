@@ -6,12 +6,17 @@ read of a job's checkpoints). Then it commits under that lock. A
 worker whose trainer has a training job or a pipeline background job (such
 as a judge call) running looks again every ``POLL_SECONDS``, since a job's
 checkpoints and a judgment arrive without a new record.
+A cycle that fails waits before the next one, longer after each failure in a
+row (``failed_cycle_delay_seconds``); a cycle that ends without an error
+clears the wait. A reload after a failure starts a new worker, which keeps the
+wait, so a cycle that always fails does not run again at once.
 The workers also close the instances that a reload replaced.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -27,6 +32,18 @@ logger = logging.getLogger(__name__)
 
 #: How soon a worker whose trainer has a training job or a pipeline background job running looks again.
 POLL_SECONDS = 2.0
+#: How long a worker waits after the first failed cycle in a row; each further failure doubles the wait.
+FIRST_RETRY_SECONDS = 2.0
+#: The longest wait after failed cycles.
+MAX_RETRY_SECONDS = 60.0
+
+
+def failed_cycle_delay_seconds(failures: int) -> float:
+    """The wait after ``failures`` failed cycles in a row, a positive int: ``FIRST_RETRY_SECONDS`` doubled for each
+    failure after the first, at most ``MAX_RETRY_SECONDS``."""
+    if failures < 1:
+        raise ValueError(f"failures must be a positive int, got {failures!r}")
+    return min(MAX_RETRY_SECONDS, FIRST_RETRY_SECONDS * 2 ** min(failures - 1, 16))
 
 
 @dataclass(frozen=True)
@@ -67,6 +84,9 @@ class LocalTrainingWorkers:
         self.closed = Event()
         self.workers: dict[tuple[str, str | None], LocalBackendWorker] = {}
         self.scenarios: dict[str, ScenarioCycles] = {}
+        #: For each worker key whose cycles failed in a row: the count of failures, and the monotonic time before
+        #: which its next cycle does not run. A cycle that ends without an error removes the key.
+        self.failed_cycles: dict[tuple[str, str | None], tuple[int, float]] = {}
 
     # -- Worker lifetime -------------------------------------------------
 
@@ -111,14 +131,29 @@ class LocalTrainingWorkers:
         """Unregister workers without joining them under the registry lock."""
         with self.lock:
             workers = [self.workers.pop(key) for key in tuple(self.workers) if key[0] == scenario]
+            for key in [key for key in self.failed_cycles if key[0] == scenario]:
+                self.failed_cycles.pop(key)
         for worker in workers:
             worker.ready.set()
+
+    def retry_wait_seconds(self, scenario: str, component: str | None) -> float:
+        """How long the worker of ``scenario`` and ``component`` still waits after failed cycles; 0 when none."""
+        with self.lock:
+            failed = self.failed_cycles.get((scenario, component))
+        return 0.0 if failed is None else max(0.0, failed[1] - time.monotonic())
 
     def wait(self, scenario: str, component: str | None, ready: Event) -> bool:
         current = self.registry.get_optional(scenario)
         trainer = None if current is None else current.trainer_for(component)
         polling = trainer is not None and trainer.needs_polling()
-        ready.wait(timeout=POLL_SECONDS if polling else None)
+        timeout = POLL_SECONDS if polling else None
+        retry = self.retry_wait_seconds(scenario, component)
+        if retry > 0:
+            # A wake during the wait after failed cycles does not run a cycle sooner; only the close of the workers
+            # ends the wait early. Then one cycle runs.
+            self.closed.wait(timeout=retry)
+            ready.set()
+        ready.wait(timeout=timeout)
         ready.clear()
         with self.lock:
             # A worker for a reloaded instance with the same key replaces this worker. Then this worker stops.
@@ -160,12 +195,19 @@ class LocalTrainingWorkers:
             self.errors.record(scenario, error_text(exc), local_error_source(component))
 
     def drain(self, scenario: str, component: str | None) -> None:
+        key = (scenario, component)
         try:
             while self.cycles_run() and self.process_step(scenario, component):
                 pass
         except Exception as exc:
             logger.exception("local backend failed to commit for scenario %r", scenario)
             self.record_cycle_error(scenario, component, error_text(exc))
+            with self.lock:
+                failures = self.failed_cycles.get(key, (0, 0.0))[0] + 1
+                self.failed_cycles[key] = (failures, time.monotonic() + failed_cycle_delay_seconds(failures))
+            return
+        with self.lock:
+            self.failed_cycles.pop(key, None)
 
     def record_cycle_error(self, scenario: str, component: str | None, error: str) -> None:
         """Record a local cycle's failure, unless the scenario was deleted under it: nothing would ever clear that."""
@@ -217,6 +259,10 @@ class LocalTrainingWorkers:
                     # A reload replaced the scenario, or a delete removed it.
                     # The result belongs to the old instance, so the step ends without a commit. A rebuilt
                     # instance has not read these rows: look again on it.
+                    if state is InstanceState.REMOVED and result.training_job_id is not None:
+                        # The delete ended before this cycle added its job to the queue, so it cancelled none:
+                        # the job of the deleted scenario must not run.
+                        current.trainer_for(component).job_loop_required().component.cancel(result.training_job_id)
                     return state is InstanceState.REPLACED
                 try:
                     current.commit(result, component=component)

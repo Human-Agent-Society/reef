@@ -92,10 +92,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     data; an intermediate checkpoint (``save_interval``) carries the state of
     the job's start, since the objective computes its state for the whole data.
 
-    Every process that uses the component reads and writes ``config.state_dir``; only the process that runs the
-    jobs holds its lock (``start_jobs``). A split deployment gives control and the training service one directory.
+    Only the training service builds the component, so only it reads and writes ``config.state_dir``, and the
+    process that runs the jobs holds its lock (``start_jobs``). No other service reads the directory: the
+    training worker stores each checkpoint in the artifact store.
     ``config.state_dir`` holds ``base/`` (the base start), ``imported/<digest>/`` (starts taken from
-    releases) and ``jobs/`` (see ``LocalJobComponent``). ``base/`` holds the files of the backend's default start
+    snapshots) and ``jobs/`` (see ``LocalJobComponent``). ``base/`` holds the files of the backend's default start
     (``facts.default_start()``), which ``base_start`` writes without a call to the service: a job from it starts a
     new model of the base model (``FreshStart``). The constructor writes nothing. A saved checkpoint is
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
@@ -193,7 +194,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         self._client.check_remote(self.validated(TinkerCheckpoint.from_dict(manifest)))
 
     def import_manifest(self, artifact_dir: Path) -> str:
-        """Take the manifest in ``release`` as a start: copy it into ``imported/<digest>/``; return that directory."""
+        """Take the manifest in ``artifact_dir`` as a start: copy it into ``imported/<digest>/``; return that directory."""
         checkpoint = self.facts.checkpoint_in(artifact_dir)
         digest = hashlib.sha256(json.dumps(checkpoint.to_dict(), sort_keys=True).encode()).hexdigest()
         imported = self._root / "imported" / digest

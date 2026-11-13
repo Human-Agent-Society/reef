@@ -256,14 +256,9 @@ def test_a_loopback_service_starts_without_a_token(host):
     assemble_provider_services(provider_config(host=host))
 
 
-def _unused_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-@pytest.mark.integration
-def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tmp_path):
+@pytest.fixture
+def provider_service(tmp_path):
+    """Yield the URL of a ``reef serve`` process, the requests that its local provider gets, and its log path."""
     requests = []
 
     class Provider(BaseHTTPRequestHandler):
@@ -292,13 +287,16 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
     env = {key: value for key, value in os.environ.items() if not key.startswith("REEF_")}
     env["PYTHONPATH"] = os.pathsep.join((str(tmp_path), str(Path(reef.__file__).resolve().parents[1])))
     env["REEF_UPSTREAM_API_KEY"] = "test-upstream-key"
-    port = _unused_port()
-    base_url = f"http://127.0.0.1:{port}"
     provider = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     thread = threading.Thread(target=provider.serve_forever, daemon=True)
     thread.start()
     log_path = tmp_path / "launch.log"
     try:
+        # The provider holds its port now, so the system cannot choose that port for Reef.
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        base_url = f"http://127.0.0.1:{port}"
         with log_path.open("w") as log:
             process = subprocess.Popen(
                 [
@@ -331,39 +329,7 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
                     except (OSError, URLError):
                         assert time.monotonic() < deadline, log_path.read_text()
                         time.sleep(0.1)
-                headers = {
-                    "Content-Type": "application/json",
-                    "Authorization": "Bearer test-token",
-                    "x-reef-scenario": "demo",
-                }
-                # An inference call never creates a scenario: create it first.
-                with urlopen(
-                    Request(f"{base_url}/reef/scenarios", json.dumps({"name": "demo"}).encode(), headers), timeout=15
-                ) as response:
-                    assert response.status == 201
-                deadline = time.monotonic() + 15
-                while True:
-                    with urlopen(
-                        Request(f"{base_url}/reef/scenarios/demo/inference/status", headers=headers), timeout=1
-                    ) as response:
-                        status = json.load(response)
-                    if status["state"] == "ready":
-                        break
-                    assert status["state"] in ("pending", "starting"), status
-                    assert time.monotonic() < deadline, log_path.read_text()
-                    time.sleep(0.01)
-                payload = {"model": "demo", "messages": [{"role": "user", "content": "hello"}], "temperature": 0.3}
-                with urlopen(
-                    Request(f"{base_url}/v1/chat/completions", json.dumps(payload).encode(), headers), timeout=15
-                ) as response:
-                    receipt = response.headers["x-reef-agent-record-id"]
-                    assert json.load(response)["choices"][0]["message"]["content"] == "hello"
-                assert requests == [("/v1/chat/completions", "Bearer test-upstream-key", payload)]
-                report = {"score": 1.0, "references": [receipt]}
-                with urlopen(
-                    Request(f"{base_url}/reef/report", json.dumps(report).encode(), headers), timeout=15
-                ) as response:
-                    assert json.load(response)["scenario"] == "demo"
+                yield base_url, requests, log_path
             finally:
                 process.send_signal(signal.SIGTERM)
                 try:
@@ -380,3 +346,67 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
     assert "test-upstream-key" not in log_path.read_text()
     with socket.socket() as sock:
         assert sock.connect_ex(("127.0.0.1", port)) != 0
+
+
+@pytest.mark.integration
+def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(provider_service):
+    base_url, requests, log_path = provider_service
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer test-token",
+        "x-reef-scenario": "demo",
+    }
+    # An inference call never creates a scenario: create it first.
+    with urlopen(
+        Request(f"{base_url}/reef/scenarios", json.dumps({"name": "demo"}).encode(), headers), timeout=15
+    ) as response:
+        assert response.status == 201
+    deadline = time.monotonic() + 15
+    while True:
+        with urlopen(
+            Request(f"{base_url}/reef/scenarios/demo/inference/status", headers=headers), timeout=1
+        ) as response:
+            status = json.load(response)
+        if status["state"] == "ready":
+            break
+        assert status["state"] in ("pending", "starting"), status
+        assert time.monotonic() < deadline, log_path.read_text()
+        time.sleep(0.01)
+    payload = {"model": "demo", "messages": [{"role": "user", "content": "hello"}], "temperature": 0.3}
+    with urlopen(
+        Request(f"{base_url}/v1/chat/completions", json.dumps(payload).encode(), headers), timeout=15
+    ) as response:
+        receipt = response.headers["x-reef-agent-record-id"]
+        assert json.load(response)["choices"][0]["message"]["content"] == "hello"
+    assert requests == [("/v1/chat/completions", "Bearer test-upstream-key", payload)]
+    report = {"score": 1.0, "references": [receipt]}
+    with urlopen(Request(f"{base_url}/reef/report", json.dumps(report).encode(), headers), timeout=15) as response:
+        assert json.load(response)["scenario"] == "demo"
+
+
+@pytest.mark.integration
+def test_readme_client_example_runs_twice_on_one_service(provider_service):
+    pytest.importorskip("httpx", reason="the README example uses httpx")
+    base_url, requests, log_path = provider_service
+    root = Path(__file__).resolve().parents[3]
+    env = {**os.environ, "REEF_TOKEN": "test-token", "MODEL_PATH": "demo"}
+    # The second run repeats the scenario creation of the first run.
+    for name in ("README.md", "README.zh.md"):
+        blocks = re.findall(r"^```python\n(.*?)^```$", (root / name).read_text(encoding="utf-8"), re.M | re.S)
+        assert len(blocks) == 1 and blocks[0].count("http://127.0.0.1:8900") == 1, name
+        run = subprocess.run(
+            [sys.executable, "-c", blocks[0].replace("http://127.0.0.1:8900", base_url)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert run.returncode == 0, f"{name}\n{run.stderr}\n{log_path.read_text()}"
+    forwarded = [(path, key, payload["model"]) for path, key, payload in requests]
+    assert forwarded == [("/v1/chat/completions", "Bearer test-upstream-key", "demo")] * 2
+    headers = {"Authorization": "Bearer test-token"}
+    with urlopen(Request(f"{base_url}/reef/scenarios/hello-reef/records", headers=headers), timeout=15) as response:
+        records = json.load(response)["records"]
+    receipts = [record["agent_record_id"] for record in records if record["request_type"] == "inference"]
+    reports = [(record["score"], record["references"]) for record in records if record["request_type"] == "report"]
+    assert len(receipts) == 2 and reports == [(0.0, [receipt]) for receipt in receipts]

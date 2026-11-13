@@ -43,8 +43,8 @@ MARKER = TreePatch(changed_rules("marker rules\n"))
 PLAIN = TreePatch(changed_rules("plain rules\n"))
 
 
-def train_request(text: str = TEXT, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
-    return {"text": text, "session": session, "artifact_id": release_id}
+def train_request(text: str = TEXT, session: str = "3f1c2a9d0b7e", artifact_id: str = "rel-0") -> dict:
+    return {"text": text, "session": session, "artifact_id": artifact_id}
 
 
 async def post_request(client: TestClient, body: object, scenario: str = "agents"):
@@ -111,7 +111,7 @@ def test_a_request_needs_a_request_mode_and_commits_through_the_train_route(tmp_
         try:
             response = await client.post("/reef/scenarios/agents/update", json={"training_mode": "manual"})
             assert response.status == 200
-            response = await post_request(client, train_request("run tests first", release_id="rel-3"))
+            response = await post_request(client, train_request("run tests first", artifact_id="rel-3"))
             assert response.status == 200, await response.text()
             (row,) = await committed(scenario, 1)
             request = row["metrics"]["training_request"]
@@ -451,7 +451,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
 ) -> None:
     """The backend's dict wins, since it carries what the method added; a step the backend skipped before it
     merged the list gets the request as accepted, requires included."""
-    payload = {"text": "text me", "session": "session-1", "artifact_id": "release-1", "requires": REQUIRES}
+    payload = {"text": "text me", "session": "session-1", "artifact_id": "artifact-1", "requires": REQUIRES}
     merged = [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}]
 
     def adding(workspace, services):
@@ -484,7 +484,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
             records.close()
 
 
-def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) -> None:
+def test_the_manifest_carries_the_addressed_artifacts_requires(tmp_path: Path) -> None:
     """The seed's root snapshot requires nothing; the snapshot a request with two items published carries them;
     the manifest of each carries that snapshot's own list."""
 
@@ -595,7 +595,7 @@ def test_a_chain_union_past_one_requests_cap_is_still_the_manifests_requires(tmp
         dispatcher.close()
 
 
-def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
+def test_an_activated_artifact_needs_what_it_named(tmp_path: Path) -> None:
     """Under the never activation rule a snapshot waits for a person to activate it; the activation serves that
     snapshot itself, so the served head lists what the snapshot named and serves its tree."""
     # The seed holds defaultTools; the snapshot's setting leaves the built-in tools on.

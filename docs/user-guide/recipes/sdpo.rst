@@ -102,8 +102,9 @@ The deployment's top-level ``pipeline`` section configures the two stages.
 Each stage reads only its own ``config``. The sample-to-job stage reads the
 values it needs from the record-to-sample stage:
 
-- ``record2sample`` (``SDPOSamples``) sets the staleness limit, the grid, and
-  the teacher's windows. ``SDPOJobData`` reads the grid and the
+- ``record2sample`` (``SDPOSamples``) sets the grid and the teacher's windows.
+  It is on-policy: a sample of an artifact that no longer serves does not
+  train. ``SDPOJobData`` reads the grid and the
   teacher settings from it.
 - ``sample2job`` (``SDPOJobData``) sets the job size and what the teacher reads.
 
@@ -114,7 +115,6 @@ values it needs from the record-to-sample stage:
    pipeline:
      record2sample:
        config:
-         max_staleness: 0
          groups_per_step: 32
          rollouts_per_group: 8
          max_teacher_tokens: 18944
@@ -166,9 +166,6 @@ in ``pipeline``.
 
    ``pipeline.sample2job.config.environment_feedback_only_without_solution`` : true
        use the feedback only when no correct sibling exists.
-
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 ``SDPOSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and

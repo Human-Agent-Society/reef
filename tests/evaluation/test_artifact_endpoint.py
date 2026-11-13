@@ -104,24 +104,24 @@ class StartedElsewhereRuntime(Runtime):
 
 @pytest.mark.unit
 def test_a_call_reaches_an_engine_that_another_process_started_with_the_engines_values() -> None:
-    release = Artifact(
+    artifact = Artifact(
         SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"
     )
     runtime = StartedElsewhereRuntime()
     served = ServedArtifact("artifact:r7", "https://engine.invalid", "engine-model")
-    with ArtifactEndpoint(runtime, release, served) as endpoint:
+    with ArtifactEndpoint(runtime, artifact, served) as endpoint:
         chat = {"model": "from-the-agent", "messages": [{"role": "user", "content": "ok"}]}
         assert call(endpoint.url, "/v1/chat/completions", chat) == (200, {"artifact_id": "artifact:r7"})
     assert runtime.engine.bodies == [{**chat, "model": "engine-model", "temperature": 0.2}]
 
 
 @pytest.mark.unit
-def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_to_a_status() -> None:
-    release = Artifact(
+def test_the_endpoint_answers_every_call_from_its_artifact_and_maps_each_failure_to_a_status() -> None:
+    artifact = Artifact(
         SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"
     )
     runtime = Runtime(any_artifact=True)
-    with ArtifactEndpoint(runtime, release) as endpoint:
+    with ArtifactEndpoint(runtime, artifact) as endpoint:
         chat = {"messages": [{"role": "user", "content": "ok"}]}
         assert call(endpoint.url, "/v1/chat/completions", chat) == (
             200,
@@ -136,8 +136,8 @@ def test_the_endpoint_answers_every_call_from_its_release_and_maps_each_failure_
         runtime.close_admission()
         assert call(endpoint.url, "/v1/chat/completions", chat)[0] == 503
     elsewhere = ServedArtifact("artifact:r7", "http://elsewhere.invalid", "m")
-    with ArtifactEndpoint(Runtime(any_artifact=True), release, elsewhere) as endpoint:
+    with ArtifactEndpoint(Runtime(any_artifact=True), artifact, elsewhere) as endpoint:
         status, body = call(endpoint.url, "/v1/chat/completions", {"messages": [{"content": "ok"}]})
         assert status == 502 and "no handler" in body["error"]["message"]
     with pytest.raises(ValueError, match="serves only its current artifact"):
-        ArtifactEndpoint(Runtime(any_artifact=False), release)
+        ArtifactEndpoint(Runtime(any_artifact=False), artifact)

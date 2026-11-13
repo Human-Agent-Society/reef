@@ -61,7 +61,7 @@ SOCKET_NAME = "serve.sock"
 #: The directory under ``native/`` that holds one rendered directory per mount; only the current one stays.
 MOUNTS_DIR = "mounts"
 #: The snapshot file the serve process writes at the tree root: the snapshot it mounted, so a restart resumes it.
-HARNESS_RELEASE_FILE = ".reef-harness-release"
+HARNESS_SNAPSHOT_FILE = ".reef-harness-release"
 #: The directory beside the snapshot file that holds the mounted artifact's source tree.
 SOURCE_DIR = "source"
 FOLLOW_MODES = ("head", "pinned")
@@ -131,7 +131,7 @@ def tree_of(manifest: Mapping[str, Any]) -> HarnessTree:
 def read_artifact_info(dest: Path) -> dict[str, Any]:
     """The snapshot file beside the tree, or an empty record when there is none or it is unreadable."""
     try:
-        record = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
+        record = json.loads((dest / HARNESS_SNAPSHOT_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
     return dict(record) if isinstance(record, Mapping) else {}
@@ -304,7 +304,7 @@ class Server(ServeState, ArtifactUpdateListener):
         reef_url: str | None = None,
         turn_timeout_s: float = DEFAULT_TURN_TIMEOUT_S,
         token: str | None = None,
-        release_timeout_s: float = 30.0,
+        artifact_timeout_s: float = 30.0,
     ) -> None:
         if follow not in FOLLOW_MODES:
             raise ServeError(f"--follow must be one of {', '.join(FOLLOW_MODES)}, not {follow!r}")
@@ -331,7 +331,7 @@ class Server(ServeState, ArtifactUpdateListener):
             token if token is not None else (os.environ.get("REEF_TOKEN") or self._installed_binding.api_key or None)
         )
         self.binding: ModelBinding = self._installed_binding
-        self._client = ArtifactClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
+        self._client = ArtifactClient(self.reef_url, self.token, scenario, timeout_s=artifact_timeout_s)
         #: The served artifact's source tree, and the tree the current host runs: the served one, or a trial's.
         self._tree = HarnessTree({})
         self._artifact_id: str | None = None
@@ -650,7 +650,7 @@ class Server(ServeState, ArtifactUpdateListener):
             "parent_artifact_id": manifest.get("parent_artifact_id"),
             "installed_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
-        (self.dest / HARNESS_RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        (self.dest / HARNESS_SNAPSHOT_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 
     def try_patch(self, patch: TreePatch, try_id: str) -> dict[str, Any]:
         """Mount the served tree with ``patch`` applied for the rest of the open turn; the snapshot file stays."""

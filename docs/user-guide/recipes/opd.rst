@@ -59,9 +59,9 @@ Configuration
 -------------
 
 Select ``recipes.opd.recipe:OPDRecipe``. The stage settings go in the deployment's top-level
-``pipeline`` section. ``pipeline.record2sample.config.max_staleness`` defaults
-to zero: wait for each published update before sampling the next job's
-responses. ``job_samples`` is the responses of one job, and
+``pipeline`` section. The stage is on-policy: a response of an artifact that no
+longer serves does not train, so wait for each published update before sampling
+the next job's responses. ``job_samples`` is the responses of one job, and
 Slime's ``--global-batch-size`` is the responses of one optimizer step:
 
 .. code:: yaml

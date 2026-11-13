@@ -76,11 +76,10 @@ def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_store
         (item,) = dispatcher.data_store.query("s", kind="record")
         assert item.scenarios == {"s": "train"}
 
-        # Deleting the origin releases its record items too, so a new scenario with its name reads none of them.
+        # Deleting the origin releases its record items too: no scenario reads them.
         dispatcher.delete_scenario("s")
         (item,) = dispatcher.data_store.query("s", kind="record")
         assert item.scenarios == {}
-        dispatcher.get_or_create_scenario("s")
         assert dispatcher.data_store.query("s", scenario="s") == ()
     finally:
         dispatcher.close()

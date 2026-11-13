@@ -248,7 +248,7 @@ The integration reproduces:
   The ratio is computed against the old-policy log-probabilities that the
   actor computes with the weights of the job's start, not against the
   engine's log-probabilities: Slime refuses `--use-rollout-logprobs`. With
-  `max_staleness: 0` the two policies are the same weights; above 0 the ratio
+  `max_artifact_lag: 0` the two policies are the same weights; above 0 the ratio
   does not measure the gap to the weights that sampled the rollout;
 - sampling at `temperature=1.0, top_p=1.0`, a constant policy learning rate
   of `1e-6`, and no entropy bonus.
@@ -350,7 +350,7 @@ Both objectives used the paper’s settings where applicable:
 | Value estimation | Monte-Carlo targets; length-adaptive lambda with alpha 1.5 |
 | Regularization and sampling | No entropy bonus or KL term; temperature 1.0; top-p 1.0; dropout off, with the earlier bug fixed upstream |
 | Batch size | 128 rollouts per optimizer step |
-| SAO collection | One rollout per prompt, group size 1; 256 rollouts in flight; maximum staleness 4 |
+| SAO collection | One rollout per prompt, group size 1; 256 rollouts in flight; maximum artifact lag 4 |
 | GRPO(+DIS) control | 16 prompts × 8 rollouts; group-relative advantages; one training step per 16 complete groups |
 | Training window | 32,768 generated tokens; `seq-length` 36,864 |
 | Topology | Actor tensor-parallel 8 with `SAO_TRAIN_NODES=4`; critic on the actor GPUs; serving engines tensor-parallel 4 |

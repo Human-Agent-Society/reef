@@ -187,7 +187,7 @@ def test_an_unknown_version_is_a_404_naming_it_and_the_install_route_is_gone(tmp
 
 
 @pytest.mark.unit
-def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) -> None:
+def test_artifact_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) -> None:
     evaluation_started = Event()
     finish_evaluation = Event()
 

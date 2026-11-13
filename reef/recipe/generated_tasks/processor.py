@@ -49,7 +49,7 @@ from typing import Any, Self
 from reef.core import AgentRecord
 from reef.core.config import config_option
 from reef.core.job_data import JobOutcome, TaskSample
-from reef.core.plugins import PluginConfigError
+from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflictError, extend_split_by_source
 from reef.core.values import is_whole_number
@@ -79,7 +79,7 @@ from reef.recipe.generated_tasks.results import (
     rollout_results,
     save_rollout_result,
 )
-from reef.record2sample import Record2Sample, Record2SampleSettings, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.generator.client import Generator, HttpGenerator
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.record2sample.reports import report_score
@@ -457,7 +457,7 @@ class SourceSessionGrouping(ReportGrouping):
 
 
 @dataclass(frozen=True)
-class GeneratedTaskSettings(Record2SampleSettings):
+class GeneratedTaskSettings(PluginSettings):
     """The config of ``GeneratedTaskSamples``: the rounds, their pace, the source sessions, and the generations.
 
     Values:
@@ -472,7 +472,6 @@ class GeneratedTaskSettings(Record2SampleSettings):
     * ``pool_capacity`` is a non-negative int; 0 trains each train task once, and above 0 each one trains again until
       a review retires it, with ``refill_tasks`` 1. The ``review_*`` values are those of ``PoolReviewRule``; with
       ``pool_capacity`` 0 they keep their defaults.
-    * ``max_staleness`` is as in ``Record2SampleSettings``.
 
     The constructor refuses other values.
     Purpose: ``GeneratedTaskSamples.from_config`` parses it from ``pipeline.record2sample.config``, and
@@ -527,7 +526,6 @@ class GeneratedTaskSettings(Record2SampleSettings):
     )
 
     def __post_init__(self) -> None:
-        super().__post_init__()
         if self.jobs_per_round < 0:
             raise ValueError("jobs_per_round must be non-negative")
         if self.refill_tasks < 1:
@@ -910,7 +908,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     (``job_ended``), the stage saves ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results` for each task that
     a committed job trained and that has no result. When every train task of a generation has a result, the next
     job sends the generation's results to the generator. A restart sends the results that the generator did not
-    receive.
+    receive. A task never goes stale: the algorithm rolls it out with the weights that it trains.
 
     **Training pool.** Without one, each train task trains once. With ``pool_capacity`` above 0, the stage has one
     (``GeneratedTaskSettings.training_pool``). Then a round is due only while fewer train tasks than its capacity are
@@ -925,6 +923,8 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     they train, and the stage does not save their rewards in that job.
     """
 
+    goes_stale = False
+
     def __init__(
         self,
         context: PipelineContext,
@@ -935,7 +935,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         worker: BackgroundJobWorker | None = None,
     ) -> None:
         self.source_grouping = SourceSessionGrouping(source_tag_of(settings.source_tag))
-        super().__init__(context, self.source_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
+        super().__init__(context, self.source_grouping, exclusive_sources=True)
         self.jobs_per_round = settings.jobs_per_round
         self.sources_per_round = settings.source_records_per_round
         self.refill_tasks = settings.refill_tasks

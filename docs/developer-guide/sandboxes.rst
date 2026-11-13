@@ -27,6 +27,9 @@ them:
   for each need: the Docker daemon; the E2B key, the e2b package and
   dockerfile-parse; or the two Modal token variables and the modal package.
   ``checked_task_environment`` refuses any other name.
+  ``environment_config(environment, task_path, agent)`` returns the
+  ``environment`` section of a Harbor trial config for the selected type. The
+  next section describes what it adds for ``e2b`` and ``modal``.
 
 Every other caller uses these interfaces.
 
@@ -45,8 +48,50 @@ The generator service's checks (``harbor run -e`` children) and runs
 an environment by name and read its needs from ``reef.execution.sandbox.task_environment``.
 Checks share local process management with the executors through
 ``reef.execution.processes.ProcessScope``; their command arguments and scoring
-remain in the generator. The Terminus harness layers the two: an executor
-launches its runner, which then drives a Harbor task environment.
+remain in the generator.
+
+Select a Harbor environment by name: ``docker``, ``e2b`` or ``modal``. Use
+``e2b`` for a self-hosted service that implements E2B's API, such as AgentENV.
+Configure its endpoints in the rollout process, as described under
+``rollout.environment`` in the `configuration reference
+<../reference/configuration.rst>`__.
+
+``environment_config(environment, task_path, agent)`` turns the selected type
+into the ``environment`` section of a Harbor trial config. For ``docker`` the
+section holds the type alone. For ``e2b`` and ``modal`` it also holds the
+sandbox's lifetime, ``sandbox_timeout_secs``: the sum of the task's build,
+agent and verifier time limits, plus one hour, at most one day. ``agent`` is
+the trial's Harbor agent config, or ``None``. A nonzero ``override_timeout_sec``
+in it replaces the task's agent time limit, and an
+``override_setup_timeout_sec`` adds to the sum. When the agent has no time
+limit, the sum does not apply. For ``modal`` the section then holds a lifetime
+of two hours. For ``e2b`` it holds no lifetime, and Harbor's default of one day
+applies. For ``modal`` the section also selects Modal's VM runtime when the
+task has ``environment/docker-compose.yaml`` and asks for no GPU.
+
+For ``e2b`` the section also names a class through Harbor's ``import_path``
+field: ``reef.execution.sandbox.e2b.KillOnTimeoutE2BEnvironment``. This
+is Harbor's ``E2BEnvironment`` with one more argument when it creates the
+sandbox, ``lifecycle={"on_timeout": "kill"}``. The argument asks the service to
+delete the sandbox at the end of its lifetime. Harbor's own class sends no
+such argument, so a self-hosted service can pause the sandbox instead.
+
+Two callers apply the config. ``reef.harness.harbor.rollouts.TaskRolloutRunner``
+gives it to each in-process trial and to each environment build. That covers
+the generator's runs, the evaluation rollouts and the training rollouts. A
+generator check on ``e2b`` gives it to its child as
+``harbor run -e <import path>``, with ``--ek sandbox_timeout_secs=<seconds>``
+when the section holds a lifetime. A check passes no agent config, so only the
+task's time limits count. A check on ``docker`` or ``modal`` runs
+``harbor run -e <type>`` without the config.
+
+Other Harbor runs get Harbor's own ``E2BEnvironment`` for ``e2b``. One is a
+``harbor run -e e2b`` that Reef does not start. Another is the ``terminus``
+adapter of the Meta-Harness Terminal-Bench campaign. That adapter layers an
+executor and a task environment: an executor launches its runner, which then
+drives a Harbor task environment with the type alone. The caller decides this,
+not the agent: ``TaskRolloutRunner`` runs Harbor's ``terminus-2`` agent by
+default, and its trials get the config.
 
 Shared execution control
 ------------------------

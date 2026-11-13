@@ -3,7 +3,7 @@
 Issue #3's Done-when asks the bundle for score-over-time, the best artifact,
 model/skill versions, token/cost accounting, and enough metadata to replay
 the run. All of it derives from two artifacts this example already produces:
-the call journal (per-call: agent, commit, release id, token usage)
+the call journal (per-call: agent, commit, artifact ID, token usage)
 and the sequence of finalized attempt reports (per-attempt: score, status,
 parent links). The builder is pure — inputs in, JSON-serializable dict out — so
 it runs after the fact on any journal+reports pair, including one recovered

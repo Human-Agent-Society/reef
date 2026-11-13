@@ -74,10 +74,7 @@ declares its keys as a frozen settings dataclass that inherits
 ``reef.core.config.config_option``). Its ``from_config`` parses the config
 with ``Settings.parse(config, plugin_class=cls)`` and gives the settings
 object to the constructor; the stage never reads a raw mapping. A stage
-without config parses with ``NoSettings``, which refuses any key. A
-record-to-sample stage that holds units parses ``Record2SampleSettings`` or a
-settings class that extends it, and gives its ``max_staleness`` to
-``Record2Sample.__init__`` (see `Staleness <#staleness>`__). Reading the
+without config parses with ``NoSettings``, which refuses any key. Reading the
 deployment checks the stage classes; a bad config fails when the first
 scenario builds its pipeline. The default record-to-sample stage,
 ``NoSamples``, makes no sample, so the pipeline makes no job data.
@@ -280,8 +277,8 @@ that the scenario uses (``TrainingPipeline.auto_entries``):
 2. It keeps the samples of one kind, trajectory or task: the kind of the first
    sample. A kind that the recipe gives no job parameters does not count; such
    samples train only for a request that gives them.
-3. It leaves out each stale sample that the trainer made from records (see
-   `Staleness <#staleness>`__), and every other sample of its group. An
+3. It leaves out each sample that the samples service marked stale (see
+   `Staleness <#staleness>`__). The mark covers every sample of a group. An
    uploaded trajectory is never stale.
 4. It takes the first ``buffer_size`` samples that remain, and the rest of
    each group that those samples touch.
@@ -429,7 +426,7 @@ The record-to-sample stage
 
 Besides the record sets and their samples (see `Record sets and their units
 <#record-sets-and-their-units>`__), the stage owns the record lifecycle and
-the staleness check. It places reports in their groups, and it ends units and
+the staleness rule. It places reports in their groups, and it ends units and
 records that can no longer train.
 
 A record that the stage ends, for example a report in a taken slot, appears
@@ -439,66 +436,76 @@ before that commit reads the record again, so the stage makes the same decision
 again. The default bookkeeping keeps ended records until their release; a stage
 with its own record lifecycle overrides the lifecycle methods.
 
-Only the samples service feeds a stage. Control asks only ``is_stale`` and
-``uploaded_sample``, so these methods must depend only on their arguments and
-the stage's config.
+Only the samples service feeds a stage and asks it which samples are stale.
+Control asks only ``uploaded_sample``, so that method must depend only on its
+argument and the stage's config.
 
 Staleness
 ~~~~~~~~~
 
-Every record-to-sample stage runs the staleness check. No other part of Reef
-checks which artifact produced training data. The limit is the stage's setting
-``max_staleness`` (``Record2SampleSettings``), set in
-``pipeline.record2sample.config``:
-
-.. code:: yaml
-
-   pipeline:
-     record2sample:
-       config:
-         max_staleness: 2
-
-``max_staleness`` is a non-negative int, and its default is 0. With 0, only
-data of the artifact that the scenario serves trains. A negative value fails
-the pipeline build. A stage settings class with more keys extends
-``Record2SampleSettings``, so each stage takes the key next to its own keys.
-The check has these steps:
+The samples service alone decides whether a stored sample may still train.
+No other part of Reef checks which artifact produced training data. The stage
+gives the rule (``Record2Sample.is_stale(samples, served)``); it has no config
+key of its own unless its method defines a bound. The check has these steps:
 
 1. The inference service writes the ``artifact_id`` of the artifact that
    answered into each inference record. The sample keeps each record's
    payload in ``extra.reef.records``, and ``TrajectorySample.artifact_id``
    reads the ``artifact_id`` of its last call. A task rollout of a training
    component names its artifact in ``training.artifact_id`` instead.
-2. When the scenario reserves job data, it gives the pipeline the artifacts
-   that it served, oldest first. The commit history holds them, so a reload or
-   a restart keeps them.
-3. Each time the pipeline selects the next automatic job, it asks the stage
-   whether each sample that the trainer made from records has data more than
-   ``max_staleness`` artifacts behind the current artifact
-   (``Record2Sample.is_stale(samples, served_artifact_ids)``). The job leaves out a stale sample and
-   every other sample of its group. The sample stays in the store untrained.
+2. In each step, the samples service reads the artifacts that the scenario
+   served from the newest commit history in the store (``ServedArtifacts``):
+   the served component's artifact of the creation and of each activating
+   commit, oldest first, the artifacts that the scenario serves beside its
+   active selection, and the number of the newest commit that changed them.
+   A samples service in another process reads control's commits without a
+   reload. Every commit asks for a step, so an activation reaches the samples
+   service at once.
+3. When that commit number is newer than the last one it judged at, it asks
+   the stage about each group of the trainer's stored samples that no job
+   trained and that carry no mark (``TrainingPipeline.mark_stale``), reading
+   them in pages. It marks every sample of a stale group in the store (item
+   metadata ``stale``), and stores the commit number as judged. It judges the
+   samples that it stores later in the step as it writes them.
+4. Control's automatic jobs leave a marked sample out. An automatic job waits
+   until the samples service judged at the commit number of what the scenario
+   serves now. A commit number never recurs, so a rollback to an artifact that
+   served before waits for a new judgment too.
+
+A stale sample stays in the store, with its mark, and is never judged again: an
+artifact that serves again does not make its samples fresh. The records that
+made it stay consumed, so a restart rebuilds the same decision. A training
+request can still name it: the client chose it.
+
+The rule of each built-in stage:
+
+* The default is on-policy (``lags_behind(samples, served, 0)``): a sample is
+  stale when its data is of an artifact other than the one that the scenario
+  serves now, or one that it serves beside it. A sample whose record names no
+  artifact is stale. A task never goes stale: the algorithm rolls it out with
+  the weights that it trains. The report, judging, trajectory, distillation,
+  OPD, SDPO, SDFT, TTTD, Coral and OpenClaw-RL stages use the default.
+* ``SFTSamples`` never finds a sample stale, because an SFT target is fixed
+  text, not sampled tokens.
+* ``TraceSamples`` and ``InferenceSamples`` never find a trace stale. A harness
+  proposer reads what the served system did and computes no ratio against the
+  weights that sampled it. In a composite, a weights step does not take the
+  harness's samples away.
+* ``SAOSamples`` accepts a lag of ``max_artifact_lag`` artifacts, SAO's own
+  setting (default 0), because SAO updates asynchronously.
 
 The lag counts only the artifacts that this scenario served. A publication of
-another scenario on a shared engine does not age the data. An ``artifact_id``
-names the same weights in every process and after an engine restart. These
-rules also apply:
-
-* A sample whose record names no artifact is stale.
-* A sample from an artifact that the stage did not see is stale. A rebuilt
-  trainer knows only the artifacts that it sees after the rebuild.
-* A scenario that has no runtime, or no component of a weight kind for the
-  runtime to load, has no staleness check: no data is stale.
-* Until the scenario first gives the stage a served artifact, no data is
-  stale.
+another scenario on a shared engine does not age the data. Before the first
+commit, the scenario serves the artifact that it was created with. A scenario
+that has no runtime, or no component of a weight kind for the runtime to load,
+has no served artifacts: no data is stale. A scenario store without a durable
+history (an in-memory store, which only tests use) keeps the artifacts that the
+process saw selected, so its samples service and control share that memory.
 
 Reef's check is the only staleness filter that Reef runs. A training
 framework can have its own off-policy limit. Such a limit goes in that
 backend's ``training.options``, not in the record-to-sample stage. No
 built-in backend has one now.
-
-Two stages do not take ``max_staleness``. ``NoSamples`` holds no unit.
-``SFTSamples`` never finds a sample stale (its ``is_stale`` returns False),
-because an SFT target is fixed text, not sampled tokens. Both refuse the key.
 
 Built-in stages
 ~~~~~~~~~~~~~~~
@@ -541,7 +548,8 @@ serving returns none. ``SampleAssembly.build`` makes a report's sample:
 The training component renders each sample with the model's chat template
 (``reef.core.chat_rendering``). It computes the log probabilities that its
 objective needs with the weights of the job's start, the current weights.
-They are exact when ``max_staleness`` is 0 and an approximation above it.
+They are exact for an on-policy stage and an approximation for a stage that
+accepts a lag.
 A stage can add what the component renders with:
 
 - ``extra.reef.teacher``: the teacher request of a distillation sample. The
@@ -648,10 +656,9 @@ not a reason to discard the report.
 A reported-feedback recipe writes:
 
 - a ``ReportSamples`` subclass as its record-to-sample stage. Its constructor
-  takes the recipe's ``ReportGrouping`` (below), ``exclusive_sources``, and
-  ``max_staleness``: ``ReportSamples(context, grouping=None, *,
-  exclusive_sources=False, max_staleness=0)``. With no grouping, every valid
-  report trains by itself.
+  takes the recipe's ``ReportGrouping`` (below) and ``exclusive_sources``:
+  ``ReportSamples(context, grouping=None, *, exclusive_sources=False)``. With
+  no grouping, every valid report trains by itself.
 - ``make_sample(context) -> Sample`` on that subclass, when the default does
   not fit. The default, as in ``TrajectorySamples``, makes the report's
   trajectories one ATIF trajectory sample with the report's score. ``context.inferences`` holds the calls of the
@@ -706,8 +713,8 @@ A computed-feedback recipe writes a ``RecordJudging``: correlation in
 ``observe(record, now, stage)`` with the stage's ``dispatch``, ``track``,
 ``tracked_record``, and ``retire`` operations, ``async judge``, and ``expire``
 for tracked records that time out. The recipe's record-to-sample stage is a
-``JudgedSamples`` subclass, ``JudgedSamples(judging, worker, *,
-max_staleness=0)``, with the judging and the worker that runs ``judge``. It
+``JudgedSamples`` subclass, ``JudgedSamples(judging, worker)``, with the
+judging and the worker that runs ``judge``. It
 implements ``make_sample(record, judgment)``, which returns one sample or
 ``None`` for a record that cannot train. Its ``Sample2Job`` supplies
 ``make_job_data``. When a judgment arrives, the stage forms a judged set and

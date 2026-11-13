@@ -124,6 +124,11 @@ class TinkerFacts(TrainingBackendFacts):
             base.check_inputs(self.default_start_inputs)
         return base
 
+    @property
+    def start_files(self) -> tuple[str, ...]:
+        """The base root's file and the checkpoint's manifest: a Tinker checkpoint holds no weights."""
+        return (BASE_FILE, MANIFEST)
+
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.check_import_start(root.local_directory())
 
@@ -237,6 +242,11 @@ class SpindleFullFacts(TrainingBackendFacts):
         if revision is not None and revision != self.base:
             raise ValueError(f"the {self.name} training component starts only from its base {self.base.uri}")
 
+    @property
+    def start_files(self) -> tuple[str, ...]:
+        """The checkpoint's manifest and the reference to the weights' revision: never the weights."""
+        return (MANIFEST, REFERENCE_FILE)
+
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.check_import_start(root.local_directory())
 
@@ -251,7 +261,7 @@ class SpindleFullFacts(TrainingBackendFacts):
             return {"files": files.checksum()}
         manifest = self.validated(manifest_of(files)).to_dict()
         if REFERENCE_FILE not in files.paths():
-            raise ValueError(f"a {self.name} release holds {REFERENCE_FILE} beside its manifest")
+            raise ValueError(f"a {self.name} snapshot holds {REFERENCE_FILE} beside its manifest")
         revision = HuggingFaceRevision.from_dict(json.loads(files.read_bytes(REFERENCE_FILE)))
         return {"manifest": manifest, "weights": revision.to_dict()}
 

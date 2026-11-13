@@ -20,6 +20,7 @@ from reef.artifact.artifact import SnapshotRef
 from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.recipe import Recipe
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.data_service import DataWorker, copy_scenario_artifacts, data_jobs
@@ -42,7 +43,7 @@ class UriBackend(InMemoryRepositoryBackend):
 
 
 def weights(directory: Path, content: bytes) -> Path:
-    """A full-weight artifact: the layout of the test policy's releases."""
+    """A full-weight artifact: the layout of the test policy's artifacts."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -234,7 +235,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 (root,) = [row for row in listed if row["artifact_id"] == started]
                 assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
-                # The root is the only release: no default start was written first.
+                # The root is the only snapshot: no default start was written first.
                 assert len(scenario.snapshot_queries.snapshot_rows(scenario.commit_number)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
@@ -296,8 +297,9 @@ def test_a_new_owner_gets_the_artifact_items_that_a_copy_made_for_the_default_ow
 
 
 def test_an_artifact_item_without_a_source_uri_is_listed_but_not_imported(tmp_path: Path) -> None:
-    # The in-memory repository names no URI, so its artifacts are in the library without a source_uri.
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    # The in-memory repository names no URI, so its artifacts are in the library without a source_uri. A recipe
+    # that only reads records serves no component, so the artifact has no kind.
+    dispatcher = dispatcher_for(tmp_path, Recipe())
 
     async def run() -> None:
         async with client_of(dispatcher, tmp_path) as client:

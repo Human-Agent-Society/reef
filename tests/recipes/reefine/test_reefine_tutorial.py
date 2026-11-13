@@ -175,7 +175,7 @@ def test_the_demo_requests_are_the_fenced_text_and_pass_the_request_screens(run_
 def test_the_driver_reads_results_and_patches_as_the_page_does(run_module) -> None:
     patch = {"rules.md": None, "extensions/speak.ts": "export default function (pi) {}", "notes.txt": "x"}
     parts = {"rules.md": "rules", "extensions/speak.ts": "extension"}
-    base = {"release_id": "rel-1", "artifact_id": "rel-1", "active": False, "activated": True, "checkpoint": False}
+    base = {"artifact_id": "rel-1", "active": False, "activated": True, "checkpoint": False}
     inactive = {
         **base,
         "checkpoint": True,
@@ -267,12 +267,12 @@ def test_install_renders_the_source_tree_for_pi_with_a_binding_at_this_reef(run_
     models = json.loads((rendered / "models.json").read_text())
     assert run_module.SERVICE_URL in models["providers"]["reef"]["baseUrl"]
     assert models["providers"]["reef"]["headers"] == {"x-reef-scenario": run_module.SCENARIO}
-    record = json.loads((tmp_path / "harness" / run_module.RELEASE_FILE).read_text())
+    record = json.loads((tmp_path / "harness" / run_module.SNAPSHOT_FILE).read_text())
     assert record["artifact_id"] == "r1" and "plugin/rules.md" in record["files"]
     assert "release_id" not in record
     assert run_module.installed_artifact() == "r1"
     # An older install names no artifact: it reads as nothing installed, and the next install replaces it.
-    (tmp_path / "harness" / run_module.RELEASE_FILE).write_text(json.dumps({"release_id": "storage:old"}))
+    (tmp_path / "harness" / run_module.SNAPSHOT_FILE).write_text(json.dumps({"release_id": "storage:old"}))
     assert run_module.installed_artifact() is None
     monkeypatch.delenv("REEF_DEMO_PHONE", raising=False)
     manifest["requires"] = [{"name": "REEF_DEMO_PHONE", "kind": "env", "prompt": "The phone number to text"}]

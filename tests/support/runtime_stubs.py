@@ -99,6 +99,11 @@ class StubTrainingComponent(TrainingComponent):
         """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
         return self.base_start
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        """The stub's checks read no file of a start; a subclass whose checks read some names them."""
+        return ()
+
     def check_import_start(self, artifact_dir: Path) -> None:
         """Raise ``ValueError`` for a snapshot that the stub cannot start from; the stub's facts ask it too. A stub
         starts from every snapshot."""
@@ -265,7 +270,8 @@ class StubInferenceRuntime(InferenceRuntime):
         return self.served_model_name(scenario) or None
 
     def serve(self, artifact: Artifact) -> str:
-        path = artifact.local_path
+        # A runtime makes local the artifact that it loads, as the engines of ``reef.inference.serving`` do.
+        path = artifact.materialize().local_path if artifact.repository is not None else artifact.local_path
         marker = None if path is None else Path(path) / VERSION_FILE
         version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.revision
         self.served = version
@@ -312,6 +318,10 @@ class StubFacts(TrainingBackendFacts):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.component.parameters_schema(kind)
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        return self.component.start_files
+
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.component.root_start(root)
 
@@ -337,6 +347,12 @@ def live_objects(
         ),
         data_store=data_store,
     )
+
+
+def harness_live_objects(component: StubTrainingComponent, *, data_store: DataStore | None = None) -> LiveObjects:
+    """The live objects of a test deployment that evolves a harness: ``component`` as the harness training
+    component, and its facts (``StubFacts``). The deployment has no runtime."""
+    return LiveObjects(harness_component=component, harness_facts=StubFacts(component), data_store=data_store)
 
 
 def job_sized_stages(

@@ -24,4 +24,6 @@ HERE = Path(__file__).resolve().parent
 lab = Lab(HERE / "work" / "lab")
 agent = {"name": "harness:HarborAgent", "model_name": MODEL}
 row = asyncio.run(lab.run(str(HERE / "harbor"), agent))
+if error := row.tags.get("error"):
+    raise RuntimeError(f"Harbor trial failed: {error}")
 print(f"rollout reward: {row.rewards}")

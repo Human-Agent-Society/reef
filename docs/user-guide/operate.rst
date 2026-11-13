@@ -345,7 +345,7 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its history and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its history and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, which also records that the scenario ID is never used again. Deleting a weight-training scenario cancels its running training job.
 
 Run the services in separate processes
 --------------------------------------
@@ -451,22 +451,35 @@ component:
   backend when it takes the job. Give the training service the same
   ``storage.artifact-backend`` access as control, and its own
   ``storage.artifact-cache-dir``.
+* The training service stores the files of each saved checkpoint in the
+  artifact backend, and control commits them by name. Control reads no
+  directory of the training service and holds none of a checkpoint's bytes, so
+  the two share no volume for checkpoints. The training service therefore
+  needs write access to the artifact backend. An artifact import and a
+  harness sync are composed in the artifact backend too, and control reads
+  one component of a snapshot at a time, so the weights of a scenario with
+  several components do not pass through control. A checkpoint that no commit
+  took, such as one of a cancelled job, leaves the artifact backend when
+  control deletes the job's ended item
+  (``storage.work-retention-s``, 7 days by default).
 * An artifact import for ``tinker`` or ``spindle_full`` looks the checkpoint up
   on the backend's service. The training service does that, so such an import
   needs a running training service. It answers ``503`` when the training
   service gives no answer within 60 seconds.
 
-Control still publishes each checkpoint from the path that the training service
-reports, so both must reach the checkpoint directories.
-
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
 coding agent and the evaluation runs. Install the adapter's binary and the
-sandbox where the training service runs. The training service writes the step
-records and the running step's progress under ``evolution.state_dir``. Control
-reads them for the snapshot and request pages, so both must reach that
-directory, as they reach the artifact backend. Control builds no harness
-training component: it needs neither the adapter's binary nor the sandbox.
+sandbox where the training service runs. Only the training service reads and
+writes ``evolution.state_dir``. It copies the running step's progress into the
+step's job in the shared store, and it stores each ended step's record files in
+the artifact backend. Control reads both there for the snapshot and request
+pages. The record files stay as long as the scenario: Reef removes them from
+the artifact backend when you delete the scenario. When you delete a scenario, control asks the training service to move
+the scenario's directory under ``evolution.state_dir`` to ``archived/``; the
+request waits while no training service runs. Control builds no harness
+training component: it needs neither the adapter's binary nor the sandbox, and
+it shares no directory with the training service.
 
 .. _Harness clients:
 
@@ -730,7 +743,7 @@ name and a ``config`` mapping, as for a storage plugin:
      artifact-backend:
        module: my_package.artifacts:ObjectStoreArtifactBackend
        config:
-         bucket: reef-releases
+         bucket: reef-snapshots
 
 Reef calls ``from_config(config, context=...)`` to make the backend. The
 `Python artifact backend contract <../reference/python-api.rst#artifact-backends>`__
@@ -769,6 +782,41 @@ each snapshot to the Hub as it publishes it:
   appears in no URL, file or log. Keep the repository private unless you mean
   to publish what Reef trains.
 - Archiving a deleted scenario's ref works with a local repository only.
+
+The training service stores each checkpoint in the repository before a
+commit takes it. Reef discards a checkpoint after its commit, when the sweep
+deletes its ended job, and when its scenario is deleted. What happens to its
+Git LFS objects depends on where the repository is:
+
+- A local repository, named by a path or a ``file://`` URL: the discard
+  deletes the ref only. Control's sweep of ended work, once an hour, removes
+  each LFS object that no ref references any more. The delete of a scenario
+  does the same at once. Snapshots, pending snapshots and archived scenarios
+  keep their objects. A materialized file is a link to its object. So the
+  sweep removes a cache entry of discarded content one sweep later, because
+  another service that shares the cache directory can still read it. The
+  training service's clone drops its links when the store's push ends.
+  The removal scans the refs without the lock, so stores and publishes do not
+  wait for the scan. When a store or publish starts during the scan, the sweep
+  removes nothing, and the next sweep removes what it left. The processes
+  coordinate with ``flock`` on the file ``reef-objects.lock`` in the
+  repository, and count their writes in ``reef-objects.writes``, which grows
+  by one byte for each write. This is safe when every process that writes the
+  repository runs on one host, on any local filesystem. It is also safe across
+  hosts on a Linux NFS mount, such as Amazon EFS, because Linux emulates
+  ``flock`` there with NFS byte-range locks. On other shared filesystems, such
+  as SMB or a FUSE mount of object storage, the lock does not reach other
+  hosts: do not share a local repository between hosts there. Reef does not
+  detect the filesystem.
+- A remote Git server or the Hugging Face Hub: the objects stay on the remote
+  after Reef deletes the ref. Reef's clone in the work directory also keeps a
+  copy of each object that it uploaded. To free the remote's space, stop every
+  Reef service that writes the repository, and then remove the objects that no
+  ref references with the server's own tools. On the Hub,
+  ``HfApi.list_lfs_files`` and ``HfApi.permanently_delete_lfs_files`` of
+  ``huggingface_hub`` do this. Reef does not remove them itself, because a store
+  on another host can upload an object before it pushes the ref that
+  references it.
 
 Choose the task file store
 --------------------------
@@ -1014,18 +1062,27 @@ refuses that configuration.
 Upgrade from a Reef that wrote older formats
 --------------------------------------------
 
-This Reef reads only the formats that it writes: ``reef-commit/9`` commit
-records, ``reef-scenario/8`` scenario metadata, and the current tables of the
-record database, the data store and the coordination store. It does not
-upgrade a store that an older Reef wrote.
+The data store upgrades its own tables. It records their version in the
+table ``data_schema_version``. When a service opens a database of an earlier
+version, it brings the tables to the current version in one transaction,
+before it reads an item. Stop every process of the deployment before you
+start the new Reef: a process of the earlier Reef fails on the upgraded
+tables. A database of a later version stops the start with ``a later Reef
+wrote them``; Reef changes nothing then.
+
+For its other stores, this Reef reads only the formats that it writes:
+``reef-commit/9`` commit records, ``reef-scenario/8`` scenario metadata, and
+the current tables of the record database and the coordination store. It does
+not upgrade one of these that an older Reef wrote.
 
 A scenario with an older commit record or older scenario metadata does not
 load, and its error names the format. A PostgreSQL record schema of another
 version stops the start with ``unsupported PostgreSQL record schema version``.
 Reef does not change or delete older data.
 
-To move to this Reef from one that wrote older formats, use a new deployment
-directory and, for PostgreSQL, a new schema. Then create the scenarios again.
+To move to this Reef from one that wrote older formats of these stores, use a
+new deployment directory and, for PostgreSQL, a new schema. Then create the
+scenarios again.
 
 Back up a deployment
 --------------------

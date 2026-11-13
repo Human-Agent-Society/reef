@@ -22,7 +22,6 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
-from reef.recipe.deployment import harness_state_dir
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import build_recipe
 from reef.scenario.live_objects import LiveObjects, harness_models
@@ -120,9 +119,8 @@ def steps_done(scenario: Scenario) -> int:
 
 def search_history(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> History:
     """The search history that the harness training component keeps for the scenario, as its last step left it."""
-    root = harness_state_dir(recipe, scenario.name, scenario.components.files_component or "harness")
-    if root is None:
-        raise TypeError("the example's scenario evolves a harness")
+    # The example runs every service in one process, so it reads the component's own directory.
+    root = recipe.evolution.component_state_dir(scenario.name, scenario.components.files_component or "harness")
     return History.open(root / HISTORY_DIR)
 
 

@@ -352,7 +352,7 @@ def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_com
         commit=CommitRecord(
             scenario="offline",
             commit_number=1,
-            snapshot=SnapshotRef("release:1", "base"),
+            snapshot=SnapshotRef("snapshot:1", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=0,

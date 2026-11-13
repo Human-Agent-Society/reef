@@ -131,6 +131,10 @@ Implementation
   ``schedule.py``, ``signals.py``) and share none. Write each
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
+  It is a local directory of the process that runs the component. The training
+  worker stores its files in the artifact backend, and control commits them by
+  name, so no other service reads the directory. Do not change it after the
+  component reports the checkpoint.
 - Implement ``import_start`` to load a published snapshot as the start of the
   next job. The training service calls it when it takes a job whose start
   names a snapshot, so the same snapshot must give the same start again.
@@ -170,7 +174,9 @@ Implementation
   - ``parameters_schema(kind)``: the JSON Schema of a job's parameters.
   - ``check_root_start(root)`` and ``check_import_start(artifact_dir)``: raise
     ``ValueError`` exactly when the component's ``root_start`` and
-    ``import_start`` raise, with the same message. They write nothing.
+    ``import_start`` raise, with the same message. They write nothing, and
+    they read only the files that ``start_files`` names (``None``: the whole
+    component). Control makes only those files local.
   - ``check_artifact(files)``: check an import's files. The default checks
     ``artifact_format`` and returns ``None``. Override it when the snapshots
     have another layout. Return a JSON object when something must also
@@ -300,13 +306,21 @@ Add a component or artifact type
 Artifacts own immutable bytes and snapshot heads. A recipe's components own
 admission, import layouts, kinds and client file trees. Runtimes own loading.
 Read `Scenario components <../developer-guide/components.rst>`__ and the
-release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
+snapshot-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 
 - Put storage, materialization, or version identity behavior in
   ``reef/artifact/``. A new storage backend implements ``RepositoryBackend``
   and is exposed through a repository backend factory. To let a deployment
   select it in ``storage.artifact_backend``, the factory also inherits
-  ``ConfigurableRepositoryBackendFactory``.
+  ``ConfigurableRepositoryBackendFactory``. Every backend implements the five
+  operations on stored content (``store_content``, ``materialize_content``,
+  ``discard_content``, ``discard_all_content`` and ``publish_parts``): the training service stores a
+  checkpoint with them and control commits it by name. A factory that
+  inherits ``CachedRepositoryBackendFactory`` implements
+  ``has_archived_registration(scenario)``: true exactly when a delete
+  archived the scenario in any process that shares the store, and never false
+  again after that, because a deleted scenario's ID is never used again. See `Artifact
+  backends <../reference/python-api.rst#artifact-backends>`__.
 - Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
   ``reef/inference/``, and client-pull delivery in a
   ``FileTree`` (``reef/artifact/components.py``). Reef does not change a model

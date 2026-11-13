@@ -84,7 +84,6 @@ from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
 from reef.inference.interfaces import InferenceRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
-from reef.recipe.deployment import harness_state_dir, scenario_state_dirs
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.recipe.registry import recipe_class_for
@@ -342,11 +341,9 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
         runtime=runtime(),
     )
     state = tmp_path.resolve() / "state"
-    # The paths come from the ``evolution`` settings alone; the recipe names them for the delete and the pages.
+    # The paths come from the ``evolution`` settings alone. Only the training component reads them.
     assert built.evolution.scenario_state_dir("demo") == state / "demo"
     assert built.evolution.component_state_dir("demo", "harness") == state / "demo" / "harness"
-    assert scenario_state_dirs(built, "demo") == (state / "demo",)
-    assert harness_state_dir(built, "demo", "harness") == state / "demo" / "harness"
     records = memory_records("demo")
     for scenario in ("demo", "other"):
         trainer = recipe_trainer(built, live, scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
@@ -360,7 +357,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
 # -- the seed ------------------------------------------------------------------------------------
 
 
-def test_the_seed_is_a_directory_whose_tree_is_the_root_release(tmp_path: Path) -> None:
+def test_the_seed_is_a_directory_whose_tree_is_the_root_snapshot(tmp_path: Path) -> None:
     seed = tmp_path / "seed"
     PI_SEED.write(seed)
     built, _ = from_config(evolution_config(seed=str(seed)))
@@ -1211,7 +1208,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
 
         started = dispatcher.train_from("start", first["artifact_id"])
         assert (started.artifact_id, started.component) == (first["artifact_id"], first["component"])
-        # What serves stays the second release.
+        # What serves stays the second snapshot.
         assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
         record = scenario.store.history()[-1]
         assert (record.operation, scenario.repository.resolve(record.snapshot).artifact_id) == (
@@ -1228,7 +1225,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         assert scenario is not None
         assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
         # The next step evolves the first snapshot's tree: r3 joins r1, and r2 is not there. It publishes on the
-        # chain tip, the second release.
+        # chain tip, the second snapshot.
         result = run_step(scenario, "3")
         assert result.artifact is not None
         newest = last_made(scenario)
@@ -1346,11 +1343,12 @@ def test_a_publish_keeps_the_source_tree_and_the_jobs_tree_is_the_next_start(tmp
         assert scenario is not None
         report_once(scenario, "1")
         result = drive_job(scenario)
+        # The commit names the stored content of the job's tree, and control holds none of its files.
         assert result.artifact is not None
-        source = result.artifact.local_path
+        assert result.artifact.content is not None and result.artifact.local_path is None
         # The job's kept tree outlives the commit: the next job starts from it.
-        assert source is not None and source.is_dir()
-        assert scenario.trainer.state["start"] == str(source)
+        source = Path(scenario.trainer.state["start"])
+        assert source.is_dir() and (source / "rules.md").read_text() == "marker rules\n"
         committed = scenario.repository.resolve(scenario.current_snapshot())
         assert (committed.local_path / "rules.md").read_text() == "marker rules\n"
     finally:

@@ -26,6 +26,7 @@ from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
 from reef.core.tasks import HarborTask, read_harbor_task
 from reef.execution.sandbox.task_environment import (
+    HARBOR_E2B_ENVIRONMENT,
     HARBOR_E2B_NAMES,
     DockerProbe,
     EnvironmentVariableProbe,
@@ -470,9 +471,10 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
     )
     harbor.chmod(0o755)
     with pytest.raises(OracleUnavailableError, match="harbor run -a oracle exited 2"):
-        HarborChecks(harbor=str(harbor), environment="e2b").oracle(tmp_path / "tasks" / "t")
+        HarborChecks(harbor=str(harbor), environment="e2b").oracle(task_directory(tmp_path / "tasks" / "t"))
     harbor_arguments = json.loads(arguments_path.read_text())
-    assert harbor_arguments[harbor_arguments.index("-e") + 1] == "e2b"
+    # On e2b, ``-e`` names Reef's E2B class, which deletes the sandbox at its timeout.
+    assert harbor_arguments[harbor_arguments.index("-e") + 1] == HARBOR_E2B_ENVIRONMENT
     assert HarborChecks().environment == "docker"
     environments: list[str] = []
     build_environments: list[object] = []
@@ -496,13 +498,22 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
         "tags": {},
     }
     task_path = task_directory(tmp_path / "t")
+    agent = {"name": "pi", "override_timeout_sec": 7200}
     for generator_rollouts in (
         ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path),
         ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b"),
+        ReefGeneratorRollouts(reef_url="http://127.0.0.1:9", work_dir=tmp_path, environment="e2b", agent=agent),
     ):
         asyncio.run(generator_rollouts.run_rollouts(task_path, **rollout_arguments))  # type: ignore[arg-type]
-    assert environments == ["docker", "docker", "e2b", "e2b"]
-    assert build_environments == [{"type": "e2b"}], "Docker builds one image at a time, so it gets no build first"
+    assert environments == ["docker", "docker", "e2b", "e2b", "e2b", "e2b"]
+    # Docker builds one image at a time, so it gets no build first. The task names no time limit. So only the agent
+    # with a time limit of its own gives the sandbox a lifetime: Harbor's build and verifier defaults, the agent's
+    # limit and an hour.
+    e2b_config = {"type": "e2b", "import_path": HARBOR_E2B_ENVIRONMENT}
+    assert build_environments == [
+        e2b_config,
+        {**e2b_config, "kwargs": {"sandbox_timeout_secs": 600 + 7200 + 600 + 3600}},
+    ]
     assert HarborChecks(environment="e2b").environment == "e2b"
     # An environment the generator cannot probe is refused.
     for environment in ("", "podman"):
@@ -826,7 +837,7 @@ def source_records() -> tuple[AgentRecord, ...]:
             request_type=RequestType.INFERENCE,
             payload={"messages": [{"role": "user", "content": "Recover the service port from its state file."}]},
             created_at=123.0,
-            artifact_id="release",
+            artifact_id="artifact-1",
         ),
         AgentRecord.create(
             agent_record_id="original-report",

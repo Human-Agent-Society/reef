@@ -93,6 +93,10 @@ service`_). The component contract is:
 
 Each ``SavedCheckpoint`` has a ``path`` (what a later job starts from) and a
 ``artifact_path`` (the weights that serving loads, without training state).
+Both are local directories of the training service. The training worker stores
+the files of ``artifact_path`` in the artifact backend as stored content, and
+records the content's name in the job's item. Control commits the checkpoint by
+that name: it reads no directory of the training service.
 
 A weight trainer has one training component, and it drives the component
 through ``reef.train.jobs.JobLoop``:
@@ -178,12 +182,20 @@ members are:
    (``hf-reference.json``).
 ``parameters_schema(kind)``
    The JSON Schema of a job's parameters, or ``None``.
+``start_files``
+   The paths of the only files of a start that the next two checks read,
+   such as ``("base.json", "tinker-checkpoint.json")``; ``None`` when they
+   read the whole component, as the harness checks read its tree. Control
+   makes only these files local before it calls them, so a check fetches no
+   weight file.
 ``check_root_start(root)``
    Raise ``ValueError`` for a scenario root that the component's
-   ``root_start`` refuses. It reads the root's files and writes nothing.
+   ``root_start`` refuses. It reads the root's ``start_files`` and writes
+   nothing.
 ``check_import_start(artifact_dir)``
    Raise ``ValueError`` for a published snapshot that the component's
-   ``import_start`` refuses. It writes nothing. Control calls it for a
+   ``import_start`` refuses. It reads the ``start_files`` in
+   ``artifact_dir`` and writes nothing. Control calls it for a
    ``train-from`` and for a request's ``train_from``.
 ``check_artifact(files)``
    Check the files of an import against the layout of the backend's

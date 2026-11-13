@@ -1,4 +1,4 @@
-"""Release listing, activation and new training start tests (RFC #965)."""
+"""Artifact listing, activation and new training start tests (RFC #965)."""
 
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ def test_the_status_names_each_components_active_artifact_and_training_start(tmp
 
 
 @pytest.mark.unit
-def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) -> None:
+def test_activate_serves_an_existing_artifact_and_writes_no_new_one(tmp_path) -> None:
     value, runtime, _ = dispatcher(tmp_path)
     train(value, 1)
     train(value, 2)
@@ -258,7 +258,7 @@ def test_activation_and_training_start_survive_a_restart(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_a_lost_activation_record_leaves_the_release_the_log_names(tmp_path) -> None:
+def test_a_lost_activation_record_leaves_the_artifact_the_log_names(tmp_path) -> None:
     value, _, backend_factory = dispatcher(tmp_path)
     train(value, 1)
     train(value, 2)
@@ -288,7 +288,7 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     train(value, 1)
     train(value, 2)
     creation, target = value.list_artifacts("math")[:-3:-1]
-    # The creation is the scenario's root snapshot, whose artifact_id is its release_id.
+    # The creation is the scenario's root snapshot, whose artifact_id is its revision.
     created, target_version = creation["artifact_id"], target["artifact_id"]
 
     value.activate("math", target_version)
@@ -420,7 +420,7 @@ def test_served_and_train_from_http_api(tmp_path, monkeypatch) -> None:
             other = await client.post("/reef/scenarios/math/update", json={**served, "component": "other"})
             assert other.status == 400
 
-            def refuse(release):
+            def refuse(artifact_dir):
                 raise ValueError("these weights cannot train")
 
             monkeypatch.setattr(runtime, "check_import_start", refuse)
@@ -512,7 +512,12 @@ def test_commit_preserves_experiment_metadata_and_isolates_tracker_failures(
         # The job's submission, its checkpoint and its end each report one event.
         assert [event.metrics for event in tracker.events] == [commit.metrics for commit in commits]
         assert [event.training_job_id for event in tracker.events] == [job.job_id] * 3
-        assert [event.checkpoint_path for event in tracker.events] == [None, str(runtime.checkpoint_root / "1"), None]
+        # Only the checkpoint's commit names a snapshot for a tracker that uploads checkpoints.
+        assert [None if event.checkpoint is None else event.checkpoint.ref for event in tracker.events] == [
+            None,
+            commits[1].snapshot,
+            None,
+        ]
         for event in tracker.events:
             assert event.context.backend == "stub"
             assert event.context.backend_config == {

@@ -130,7 +130,7 @@ class Recipe:
         them.
 
         Each ``ComponentSpec`` gives the component's kind, the admission check
-        run before it is published or restored, its import layout and the
+        run before an artifact of it is stored, its import layout and the
         files a client pulls. The default declares none: the scenario records
         traffic only. Most recipes ignore ``scenario``. The value is a function
         of the recipe's configuration fields alone; the deployment's components are

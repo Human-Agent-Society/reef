@@ -4,7 +4,10 @@ Control builds no training component. ``JobQueueComponent`` is the component tha
 holds the backend's facts (``TrainingBackendFacts``) and the work queue: it answers from the facts, adds each
 ``TrainingJob`` to the ``jobs`` queue, and reads the job's ``JobStatus`` back from the queue item.
 ``TrainingJobWorker`` runs in the training service: it takes the jobs of its component, has the component run each
-one, copies each saved checkpoint into the item's progress, and ends the item with the job.
+one, stores the files of each saved checkpoint in the artifact store, records the checkpoint in the item's
+progress, and ends the item with the job. It runs the admission check of the job's component on each checkpoint
+before it stores it (``ComponentChecks``), so no other process fetches a checkpoint to check it; a refused
+checkpoint fails its job.
 
 What only the component can answer, control asks through the ``training_checks`` queue, and
 ``TrainingCheckWorker`` answers in the training service. An item of that queue:
@@ -12,10 +15,12 @@ What only the component can answer, control asks through the ``training_checks``
 - ``kind`` is ``training_check:<component name>``;
 - ``payload`` is ``{"check": "job", "job_id", "job"}``, where ``job`` is a ``job_payload``, for
   ``TrainingComponent.check_job``; or ``{"check": "artifact", "names"}`` for
-  ``TrainingComponent.check_remote_artifact``;
+  ``TrainingComponent.check_remote_artifact``; or ``{"check": "archive"}`` for
+  ``TrainingComponent.archive_scenario`` of the item's scenario, which control adds when it deletes the scenario
+  and whose answer nobody reads;
 - ``result`` is ``{"refusal": <message>}`` when the component raised ``ValueError``, else ``{"refusal": null}``;
-- ``id`` is ``job:<job ID>`` for a job check, so control finds the check of a job in the queue, and
-  ``artifact:<random>`` for an artifact check;
+- ``id`` is ``job:<job ID>`` for a job check, so control finds the check of a job in the queue,
+  ``artifact:<random>`` for an artifact check, and ``archive:<scenario>:<random>`` for an archive;
 - ``metadata["asked_at"]`` is the time in seconds when control last asked for the answer, and
   ``metadata["answer_read"]`` is true once control read it.
 
@@ -34,15 +39,29 @@ A jobs-queue item:
 - ``scenario`` is the job's scenario; the item has no ``serial_key``, so a free worker takes it at once;
 - ``payload`` is the job (``job_payload``): its backend, start, parameters, component and previous job, the reference of its job data
   directory (``JobDataRef.to_dict``), and the summary of its training request for the job listing;
-- each ``progress`` entry is one ``SavedCheckpoint``, in step order, with the parts that it changed
-  (``TrainingComponent.changed_parts``);
+- each ``progress`` entry is one ``SavedCheckpoint``, in step order, with the name of its stored content and the
+  parts that it changed (``TrainingComponent.changed_parts``);
 - ``result`` is ``{"state": "finished", "metrics": {...}}``;
+- ``metadata["progress"]`` is what the component reports about the running job
+  (``TrainingComponent.job_progress``), or None; the training worker writes it whenever it changes;
 - ``metadata["experiment"]``, when present, is the ``ExperimentRun`` that records the job, as ``to_dict`` gives
   it. Control writes it (``JobExperimentRecorder``) when its experiment tracker records a commit of the job, so the
   job listing of any service reads it from the item.
 
-A checkpoint's ``path`` and ``artifact_path`` are paths of the training service. In the one-process layout they
-are local; a split deployment gives control and the training service one volume for them.
+A checkpoint's ``path`` is a path of the training service, which only the component reads. Control reads no
+file of a checkpoint: the training worker stores the files of the checkpoint's ``artifact_path`` as content of the
+scenario's artifact store (``RepositoryBackend.store_content``) under ``checkpoint_content``, and control commits
+that content by name (``JobLoop.publish``). Before it stores a checkpoint, the worker writes the content's name
+into the item's ``metadata["stored_content"]``, so the item names all content of its job, also content that no
+progress entry names because the worker stopped or lost the job in between. The committer discards the content of
+a checkpoint once its commit is recorded, and control's sweep discards every named content of an ended job before
+it deletes the job's item (``discard_ended_content``), so content that no commit names lives at most the work
+retention longer than its job.
+
+Control reads no other file of the training service either. The files that record how a job ran
+(``TrainingComponent.job_records``) are stored content too, under ``job_records_content``, which the worker
+stores when the job ends and which stays for the pages of control. A scenario's own directories of a component
+are moved aside by the training service, when control asks (``archive``).
 
 The job's data is not in the item. Control writes it as a job data directory in the data store
 (``reef.storage.job_data``) before it adds the item, and the training worker opens the directory from the data
@@ -62,9 +81,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from reef.artifact.artifact import Artifact, ArtifactError
-from reef.artifact.repository import Repository, RepositoryBackendFactory
+from reef.artifact.components import ComponentChecks
+from reef.artifact.repository import RegistrationAwareRepositoryBackendFactory, Repository, RepositoryBackendFactory
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.errors import InternalError
+from reef.core.errors import InternalError, ReefError
 from reef.core.weight_layout import ArtifactFormat
 from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.observability.base import (
@@ -104,6 +124,11 @@ ANSWER_READ_KEY = "answer_read"
 UNASKED_CHECK_SECONDS = 600.0
 #: The error of a check that control stopped asking for.
 UNASKED_CHECK_ERROR = "no trainer asked for this check any more"
+#: The key of a job item's ``metadata`` that holds the names of the content that the training worker stored, or
+#: was about to store, for the job's checkpoints: a list of strings.
+STORED_CONTENT_KEY = "stored_content"
+#: The key of a job item's ``metadata`` that holds the running job's progress, as its component reports it.
+PROGRESS_METADATA_KEY = "progress"
 #: The key of a job item's ``metadata`` that holds the experiment run that records the job.
 EXPERIMENT_METADATA_KEY = "experiment"
 
@@ -204,13 +229,46 @@ def payload_request(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue] | 
     }
 
 
+def scenario_checks_key(scenario: str) -> str:
+    """The serial key of the job checks and the archive requests of ``scenario`` in the ``training_checks`` queue.
+
+    The queue gives the items of one key to workers one at a time, in the order of their creation. So the archive
+    of a deleted scenario ends before any training service checks a job of a scenario that was created again under
+    the name, whichever instance takes each item and however late the archive is tried again: an archive never
+    moves the directory of the new scenario.
+    """
+    return f"scenario:{scenario}"
+
+
+def checkpoint_content(job_id: str, step: int) -> str:
+    """The name of the stored content of the checkpoint that the job ``job_id`` saved at ``step``. It is the same
+    for every attempt of the job, so a worker that stores the checkpoint again replaces the content."""
+    return f"{job_id}:{step}"
+
+
+def job_records_content(job_id: str) -> str:
+    """The name of the stored content that holds the record files of the job ``job_id``
+    (``TrainingComponent.job_records``).
+
+    The pages of control read a step's records by the step's row of the commit history, also after the job's
+    queue item is gone. So this content does not end with the item: it lives until its scenario is deleted, when
+    control discards all content of the scenario (``RepositoryBackend.discard_all_content``). The training worker
+    stores it when the job ends, and discards it again when the job was cancelled meanwhile, so a job that ends
+    after its scenario was deleted leaves none.
+    """
+    return f"{job_id}:records"
+
+
 def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:
-    """``checkpoint`` as a progress entry: ``{step, path, artifact_path, metrics, changed_parts}``, with the
-    changed parts as a sorted list."""
+    """``checkpoint``, whose files the training service stored, as a progress entry:
+    ``{step, path, content, metrics, changed_parts}``, with the changed parts as a sorted list. Raise
+    ``ValueError`` for a checkpoint with no ``content``."""
+    if checkpoint.content is None:
+        raise ValueError("a progress entry holds a checkpoint whose files are stored content")
     return {
         "step": checkpoint.step,
         "path": checkpoint.path,
-        "artifact_path": checkpoint.artifact_path,
+        "content": checkpoint.content,
         "metrics": cast(JsonValue, dict(checkpoint.metrics)),
         "changed_parts": cast(JsonValue, sorted(checkpoint.changed_parts)),
     }
@@ -227,9 +285,10 @@ def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
     return SavedCheckpoint(
         step,
         json_text(entry.get("path"), "a checkpoint's path"),
-        json_text(entry.get("artifact_path"), "a checkpoint's artifact_path"),
+        None,
         json_object(entry.get("metrics"), "a checkpoint's metrics"),
         frozenset(cast(list[str], parts)),
+        json_text(entry.get("content"), "a checkpoint's content"),
     )
 
 
@@ -293,6 +352,8 @@ def status_from_item(item: WorkItem) -> JobStatus:
     return JobStatus(item.id, "running", checkpoints)
 
 
+#: The error of a job whose scenario was deleted.
+SCENARIO_DELETED_ERROR = "the scenario was deleted"
 #: The error of a job that a client cancelled.
 JOB_CANCELLED_ERROR = "cancelled by request"
 
@@ -305,7 +366,8 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
 
     - ``id``, ``state``, ``attempt_count`` and ``error``: the item's fields (``WorkItem``).
     - ``checkpoints``: the saved checkpoints that the job reported, in step order, each as ``checkpoint_json``
-      gives it, with its ``changed_parts``.
+      gives it, with its ``changed_parts``. A progress entry that another release of Reef wrote in another form
+      is left out: such a job reads as failed (``JobQueueComponent.status``).
     - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job finished, else None.
     - ``parameters``: the job's parameters, a JSON object: the recipe's parameters for the kind of the job's
       samples, with the request's parameters merged in. They hold the training ``method`` and the
@@ -332,7 +394,7 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
         "id": item.id,
         "state": item.state,
         "attempt_count": item.attempt_count,
-        "checkpoints": [dict(progress) for progress in item.progress],
+        "checkpoints": [checkpoint_json(checkpoint) for checkpoint in listed_checkpoints(item)],
         "result": None if item.result is None else dict(item.result),
         "error": item.error,
         "parameters": dict(json_object(payload.get("parameters"), "a job's parameters")),
@@ -349,6 +411,17 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
             else cast(JsonValue, ExperimentRun.from_dict(json_object(experiment, "a job's experiment")).to_dict())
         ),
     }
+
+
+def listed_checkpoints(item: WorkItem) -> list[SavedCheckpoint]:
+    """The checkpoints of the progress entries of ``item`` that have the current form."""
+    checkpoints = []
+    for entry in item.progress:
+        try:
+            checkpoints.append(checkpoint_from_json(entry))
+        except ValueError:
+            continue
+    return checkpoints
 
 
 def utc_time(seconds: float) -> str:
@@ -375,6 +448,18 @@ def cancel_scenario_job(queue: WorkQueue, scenario: str, job_id: str) -> dict[st
     return job_json(item if cancelled is None else cancelled)
 
 
+def cancel_scenario_jobs(queue: WorkQueue, scenario: str) -> int:
+    """Cancel every training job of ``scenario`` that has not ended, also a job that a trainer added to the queue
+    and whose submission no commit recorded yet; return how many. The delete of a scenario calls it, so that no
+    job of the scenario keeps running and stores a checkpoint or its record files after the scenario is gone."""
+    cancelled = 0
+    for item in queue.items(JOBS_QUEUE, scenario=scenario):
+        if not item.final:
+            queue.cancel(JOBS_QUEUE, item.id, SCENARIO_DELETED_ERROR)
+            cancelled += 1
+    return cancelled
+
+
 def cancel_request_jobs(queue: WorkQueue, scenario: str, request_id: str) -> dict[str, JsonValue] | None:
     """Cancel each training job of ``scenario`` that trains the request ``request_id``, as ``cancel_scenario_job``
     does; return the newest of them after the cancel, or None when the request has no job."""
@@ -398,8 +483,9 @@ class JobQueueComponent(TrainingComponent):
 
     - ``name``, ``artifact_format``, ``shares_scenarios``, ``concurrent_jobs`` and ``parameters_schema`` are the
       facts' members, which equal the component's.
-    - ``root_start(root)`` raises as ``component.root_start(root)`` does (``facts.check_root_start``). Otherwise it
-      returns the name of the root snapshot, ``SnapshotStart(revision, root.source).to_text()``.
+    - ``start_files`` is ``facts.start_files``. ``root_start(root)`` raises as ``component.root_start(root)`` does
+      (``facts.check_root_start`` of ``root`` with ``files`` set to ``start_files``, so only those files are made
+      local). Otherwise it returns the name of the root snapshot, ``SnapshotStart(revision, root.source).to_text()``.
       ``snapshot_start(artifact)`` raises as ``component.snapshot_start(artifact)`` does
       (``facts.check_import_start``), else returns ``SnapshotStart(revision).to_text()``. The training service
       makes the component's start of the snapshot when it takes a job that names it (``resolved_job``).
@@ -453,8 +539,12 @@ class JobQueueComponent(TrainingComponent):
     def parameters_schema(self, kind: JobDataKind) -> dict[str, Any] | None:
         return self.facts.parameters_schema(kind)
 
+    @property
+    def start_files(self) -> tuple[str, ...] | None:
+        return self.facts.start_files
+
     def root_start(self, root: ScenarioRoot) -> str:
-        self.facts.check_root_start(root)
+        self.facts.check_root_start(replace(root, files=self.facts.start_files))
         return SnapshotStart(root.artifact.ref.revision, root.source).to_text()
 
     def snapshot_start(self, artifact: Artifact) -> str:
@@ -475,6 +565,27 @@ class JobQueueComponent(TrainingComponent):
     def changed_parts(self, start: str, checkpoint: SavedCheckpoint) -> frozenset[str]:
         return checkpoint.changed_parts
 
+    def job_progress(self, job_id: str) -> Mapping[str, JsonValue] | None:
+        """The progress that the training worker last wrote into the job's item, or None."""
+        item = self.queue.read(JOBS_QUEUE, job_id)
+        value = None if item is None else item.metadata.get(PROGRESS_METADATA_KEY)
+        return None if value is None else json_object(value, "a job's progress")
+
+    def archive_scenario(self, scenario: str) -> None:
+        """Ask the training service to move aside what its component keeps for the deleted ``scenario``. The
+        request waits in the queue while no training service runs, and nobody reads its answer."""
+        item_id = f"archive:{scenario}:{uuid.uuid4().hex}"
+        self.queue.append(
+            NewWork(
+                CHECKS_QUEUE,
+                item_id,
+                scenario,
+                check_kind(self.name),
+                {"check": "archive"},
+                serial_key=scenario_checks_key(scenario),
+            )
+        )
+
     def read_answer(self, item: WorkItem, subject: str) -> None:
         """Read the answer of the final check ``item`` about ``subject``: return when the component accepted, raise
         ``ValueError`` with its message when it refused, and ``RuntimeError`` when the check did not run."""
@@ -494,7 +605,16 @@ class JobQueueComponent(TrainingComponent):
         item = self.queue.read(CHECKS_QUEUE, item_id)
         if item is None:
             payload: dict[str, JsonValue] = {"check": "job", "job_id": job.job_id, "job": job_payload(job)}
-            self.queue.append(NewWork(CHECKS_QUEUE, item_id, job.scenario, check_kind(self.name), payload))
+            self.queue.append(
+                NewWork(
+                    CHECKS_QUEUE,
+                    item_id,
+                    job.scenario,
+                    check_kind(self.name),
+                    payload,
+                    serial_key=scenario_checks_key(job.scenario),
+                )
+            )
             raise pending
         self.queue.write_metadata(CHECKS_QUEUE, item_id, ASKED_AT_KEY, time.time())
         if not item.final:
@@ -638,15 +758,18 @@ class TrainingJobWorker(QueueWorker):
     """One worker of the training service: it takes the jobs of one component from the jobs queue and runs them.
 
     Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``data_store`` is the data store,
-    which keeps the data directory of each job; ``backends`` opens the artifact store of a scenario, for a job
-    whose start names a snapshot, and ``local_artifact_dir`` is where such a snapshot is made local
-    (``resolved_job``); None opens no store, and such a job fails. ``poll_seconds`` is also the wait between two
-    looks at a running job; ``slots`` is the number of jobs that the worker runs at the same time.
+    which keeps the data directory of each job; ``backends`` opens the artifact store of a scenario, where the
+    worker stores the files of each checkpoint and reads the snapshot that a job's start names;
+    ``checks`` are the admission checks of the scenarios' components; ``local_artifact_dir`` is where such a
+    snapshot is made local (``resolved_job``). ``poll_seconds`` is also
+    the wait between two looks at a running job; ``slots`` is the number of jobs that the worker runs at the same
+    time.
 
     Purpose: the training service starts one per training component (``start``); ``stop`` stops taking jobs and
     closes the component, which the worker owns. Each job runs to its end on this worker unless the worker loses
     the lease; then the component cancels its local run, and the worker that takes the job next continues it from
-    the job's checkpoints. A job that the component reports failed fails for good.
+    the job's checkpoints. A job that the component reports failed fails for good. A job whose scenario was
+    deleted does not run on (``refuses_deleted_scenario``).
     """
 
     def __init__(
@@ -654,8 +777,9 @@ class TrainingJobWorker(QueueWorker):
         component: TrainingComponent,
         queue: WorkQueue,
         data_store: DataStore,
-        backends: RepositoryBackendFactory | None,
+        backends: RepositoryBackendFactory,
         *,
+        checks: ComponentChecks,
         worker_id: str,
         local_artifact_dir: Path | None = None,
         poll_seconds: float = 0.5,
@@ -663,12 +787,15 @@ class TrainingJobWorker(QueueWorker):
     ) -> None:
         if isinstance(component, JobQueueComponent):
             raise TypeError("a training worker runs jobs on the component itself, not on a jobs-queue component")
+        if not isinstance(checks, ComponentChecks):
+            raise TypeError(f"checks must be ComponentChecks, got {type(checks).__name__}")
         super().__init__(
             queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds, slots=slots
         )
         self.component = component
         self.data_store = data_store
         self.backends = backends
+        self.checks = checks
         self.local_artifact_dir = local_artifact_dir
 
     def start(self) -> None:
@@ -684,32 +811,90 @@ class TrainingJobWorker(QueueWorker):
         self.component.close()
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
-        """Run the job of ``item`` on the component and mirror its checkpoints, by step, into the item's progress.
+        """Run the job of ``item`` on the component, and store and record its checkpoints, by step.
 
-        The component gets the job with its own start (``resolved_job``), and each mirrored checkpoint carries
-        the parts that it changed from that start (``TrainingComponent.changed_parts``). At each poll the worker
+        The component gets the job with its own start (``resolved_job``). For each checkpoint that the item does
+        not hold yet, the worker first runs the admission check of the job's component on the checkpoint's
+        ``artifact_path`` (``ComponentChecks.validate``). A refusal (``ValueError`` or ``ReefError``) cancels the
+        component's run, the worker stores the job's record files, and the job fails for good with the refusal's
+        message; the job's earlier checkpoints stay recorded. Then the worker writes the name of its content (``checkpoint_content``) into the item's
+        metadata, then stores the files of its ``artifact_path`` under that name in the artifact store of the
+        job's scenario, and then appends the progress entry, which names that content and the parts that the
+        checkpoint changed from the start (``TrainingComponent.changed_parts``). A worker that stops after it
+        stored and before it recorded leaves no progress entry: the worker that continues the job stores the same
+        name again, and when nobody continues the job, the sweep finds the name in the metadata. A worker that
+        lost the job while it stored discards the content itself. The worker also copies the component's
+        ``job_progress`` into the item's metadata when it changed, and it stores the job's record files
+        (``job_records``) under ``job_records_content`` when the job ends. At each poll the worker
         reads the item: a job that control cancelled, or that another worker took, ends here, and the component
         cancels its local run. A worker that continues a job reports only the checkpoints
         whose step the item does not hold yet. When the worker stops, the job goes back to the queue, so another
         worker continues it at once: the component keeps running it, and that worker's ``submit`` continues from
-        the job's latest checkpoint.
+        the job's latest checkpoint. Before the component gets the job, and after each store, the worker checks
+        that the job's scenario still exists (``refuses_deleted_scenario``).
         """
+        stored_names = [str(name) for name in cast(list[JsonValue], item.metadata.get(STORED_CONTENT_KEY, []))]
+        if self.refuses_deleted_scenario(item):
+            raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
         job = resolved_job(
             self.component, job_from_item(item, self.data_store), self.backends, self.local_artifact_dir
         )
         self.component.submit(job)
         reported = {checkpoint_from_json(entry).step for entry in item.progress}
         progress_count = len(item.progress)
+        written_progress: Mapping[str, JsonValue] | None = None
         try:
             while True:
+                job_progress = self.component.job_progress(job.job_id)
                 status = self.component.status(job.job_id)
+                if status.state != "running":
+                    job_progress = None
+                    self.store_records(item, job)
+                if job_progress != written_progress:
+                    value = None if job_progress is None else cast(JsonValue, dict(job_progress))
+                    self.queue.write_metadata(JOBS_QUEUE, item.id, PROGRESS_METADATA_KEY, value)
+                    written_progress = job_progress
                 for checkpoint in status.checkpoints:
                     if checkpoint.step in reported:
                         continue
-                    changed = replace(checkpoint, changed_parts=self.component.changed_parts(job.start, checkpoint))
-                    self.queue.append_progress(
-                        JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(changed), number=progress_count
+                    if checkpoint.artifact_path is None:
+                        raise InternalError(
+                            f"the {self.component.name} training component reported a checkpoint with no directory"
+                        )
+                    try:
+                        self.checks.validate(job.scenario, job.component, Path(checkpoint.artifact_path))
+                    except (ValueError, ReefError) as exc:
+                        self.component.cancel(job.job_id)
+                        # A person reads the records of a refused job first.
+                        self.store_records(item, job)
+                        raise ItemFailedError(
+                            f"the scenario's check refused checkpoint {checkpoint.step} of job {job.job_id}: {exc}"
+                        ) from exc
+                    content = checkpoint_content(item.id, checkpoint.step)
+                    if content not in stored_names:
+                        stored_names.append(content)
+                        named = self.queue.write_metadata(
+                            JOBS_QUEUE, item.id, STORED_CONTENT_KEY, cast(JsonValue, list(stored_names))
+                        )
+                        if named is None:
+                            raise WorkLeaseLostError(f"job {item.id} left the queue")
+                    self.backends(job.scenario).store_content(content, Path(checkpoint.artifact_path))
+                    if self.refuses_deleted_scenario(item):
+                        raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
+                    stored = replace(
+                        checkpoint,
+                        artifact_path=None,
+                        content=content,
+                        changed_parts=self.component.changed_parts(job.start, checkpoint),
                     )
+                    try:
+                        self.queue.append_progress(
+                            JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(stored), number=progress_count
+                        )
+                    except WorkLeaseLostError:
+                        # The job was cancelled or taken while the files were stored: nobody commits this content.
+                        self.backends(job.scenario).discard_content(content)
+                        raise
                     reported.add(checkpoint.step)
                     progress_count += 1
                 if status.state == "finished":
@@ -731,6 +916,49 @@ class TrainingJobWorker(QueueWorker):
             self.component.cancel(item.id)
             raise
 
+    def store_records(self, item: WorkItem, job: TrainingJob) -> None:
+        """Store the record files of the ended ``job`` of ``item`` (``TrainingComponent.job_records``) as the content
+        ``job_records_content(item.id)``; nothing when the component kept none. Raise ``WorkLeaseLostError``, and
+        discard what it stored, when the job was cancelled or taken meanwhile, or when its scenario was deleted
+        (``refuses_deleted_scenario``)."""
+        records = self.component.job_records(job.job_id)
+        if records is None:
+            return
+        backend = self.backends(job.scenario)
+        backend.store_content(job_records_content(item.id), records)
+        if self.refuses_deleted_scenario(item):
+            raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
+        held = self.queue.read(JOBS_QUEUE, item.id)
+        if held is None or held.worker_id != self.worker_id or held.final:
+            # The job was cancelled meanwhile, as the delete of its scenario does: no page reads these records, and
+            # the delete discarded the scenario's content before this store.
+            backend.discard_content(job_records_content(item.id))
+            raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
+
+    def refuses_deleted_scenario(self, item: WorkItem) -> bool:
+        """Whether the scenario of the job ``item`` has no registration in the artifact store
+        (``RegistrationAwareRepositoryBackendFactory.has_registration``, which builds no backend for a scenario
+        that this process has not opened; else ``RepositoryBackend.metadata`` is None). Then the worker cancels the
+        item and discards every content of the scenario with one call (``RepositoryBackend.discard_all_content``):
+        the checkpoints that the item names, the job's record files, and any other content that a job stored after
+        the delete.
+
+        The delete of a scenario cancels the jobs that it finds in the queue, and a trainer whose cycle added a job
+        after that look cancels it when the cycle returns. When the trainer's process stops in between, the job
+        stays queued. The delete archives the registration last, so the worker that takes such a job, or stores
+        for it after the delete, finds no registration: the job does not run on, and its content does not stay.
+        """
+        if isinstance(self.backends, RegistrationAwareRepositoryBackendFactory):
+            registered = self.backends.has_registration(item.scenario)
+        else:
+            registered = self.backends(item.scenario).metadata() is not None
+        if registered:
+            return False
+        logger.warning("training worker %s cancels job %s: its scenario was deleted", self.worker_id, item.id)
+        self.queue.cancel(JOBS_QUEUE, item.id, SCENARIO_DELETED_ERROR)
+        self.backends(item.scenario).discard_all_content()
+        return True
+
 
 class TrainingCheckWorker(QueueWorker):
     """The worker of the training service that answers control's checks with one component.
@@ -740,8 +968,9 @@ class TrainingCheckWorker(QueueWorker):
 
     ``run_item`` answers ``{"refusal": None}`` when the component accepted and ``{"refusal": message}`` when it
     raised ``ValueError(message)``: ``check_job`` of the job with its own start (``resolved_job``) for a ``job``
-    check, ``check_remote_artifact`` for an ``artifact`` check. A payload that is neither fails the item. So does
-    a check that control last asked for more than ``UNASKED_CHECK_SECONDS`` ago (``metadata["asked_at"]``, else the
+    check, ``check_remote_artifact`` for an ``artifact`` check. An ``archive`` runs ``archive_scenario`` of the
+    item's scenario and answers ``{"refusal": None}``, however old it is. Any other payload fails the item. So does
+    a job or artifact check that control last asked for more than ``UNASKED_CHECK_SECONDS`` ago (``metadata["asked_at"]``, else the
     item's ``created_at``), with ``UNASKED_CHECK_ERROR``: nobody waits for it, so it imports no start.
 
     Purpose: the training service starts one beside each ``TrainingJobWorker``. It has no job slot, so a check is
@@ -771,10 +1000,14 @@ class TrainingCheckWorker(QueueWorker):
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         payload = item.payload
+        check = payload.get("check")
+        if check == "archive":
+            # Nobody waits for this answer, and the request stays valid however long the service was down.
+            self.component.archive_scenario(item.scenario)
+            return {"refusal": None}
         asked_at = item.metadata.get(ASKED_AT_KEY, item.created_at)
         if isinstance(asked_at, int | float) and time.time() - asked_at > UNASKED_CHECK_SECONDS:
             raise ItemFailedError(UNASKED_CHECK_ERROR)
-        check = payload.get("check")
         if check == "job":
             job = job_from_payload(
                 json_text(payload.get("job_id"), "a job check's job_id"),
@@ -793,8 +1026,45 @@ class TrainingCheckWorker(QueueWorker):
             except ValueError as exc:
                 return {"refusal": str(exc)}
         else:
-            raise ItemFailedError(f"a training check is of a job or of an artifact, not {check!r}")
+            raise ItemFailedError(f"a training check is of a job, of an artifact or an archive, not {check!r}")
         return {"refusal": None}
+
+
+def discard_ended_content(
+    queue: WorkQueue, backends: RepositoryBackendFactory, *, ended_before: float, give_up_before: float
+) -> tuple[str, ...]:
+    """Discard the stored content of every checkpoint of the job items that ended before ``ended_before``
+    (seconds), and return the IDs of those items that must stay because their content could not be discarded.
+
+    These are the items that ``WorkQueue.delete_final`` deletes next. The names are those that the training worker
+    wrote into the item before it stored each checkpoint (``STORED_CONTENT_KEY``), so the content of a checkpoint
+    that no commit took, or that no progress entry names, goes with its item. Discarding content that a commit
+    discarded already changes nothing. A failure of one item, whatever it raises, is logged and leaves the other
+    items alone. Such an item stays for the next sweep, unless it ended before ``give_up_before``: then it goes,
+    and the log names the content that stays in the artifact store.
+    """
+    kept: list[str] = []
+    for item in queue.items(JOBS_QUEUE):
+        if not item.final or item.ended_at is None or item.ended_at >= ended_before:
+            continue
+        names = item.metadata.get(STORED_CONTENT_KEY, [])
+        if names == []:
+            # A job that stored nothing needs no artifact store: opening one can be a clone.
+            continue
+        try:
+            if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+                raise ValueError("a job's stored content is a list of names")
+            backend = backends(item.scenario)
+            for name in names:
+                backend.discard_content(cast(str, name))
+        except Exception:
+            # A sweep reads every scenario's backend, also a plugin's: one failure must not stop the others.
+            if item.ended_at < give_up_before:
+                logger.exception("gave up on the stored checkpoints %s of job %s; they stay stored", names, item.id)
+            else:
+                logger.exception("could not discard the stored checkpoints of job %s; the next sweep tries", item.id)
+                kept.append(item.id)
+    return tuple(kept)
 
 
 __all__ = [
@@ -804,6 +1074,8 @@ __all__ = [
     "EXPERIMENT_METADATA_KEY",
     "JOBS_QUEUE",
     "JOB_CANCELLED_ERROR",
+    "PROGRESS_METADATA_KEY",
+    "STORED_CONTENT_KEY",
     "UNASKED_CHECK_ERROR",
     "UNASKED_CHECK_SECONDS",
     "JobExperimentRecorder",
@@ -812,12 +1084,16 @@ __all__ = [
     "TrainingJobWorker",
     "cancel_request_jobs",
     "cancel_scenario_job",
+    "cancel_scenario_jobs",
     "check_kind",
+    "checkpoint_content",
+    "discard_ended_content",
     "job_from_item",
     "job_from_payload",
     "job_json",
     "job_kind",
     "job_payload",
+    "job_records_content",
     "request_summary",
     "resolved_job",
     "scenario_jobs",

@@ -548,7 +548,7 @@ def test_native_evaluate_reads_the_last_assistant_message_with_content(native_ev
 # -- the replay page ------------------------------------------------------------------------------
 
 
-def session_events(session: str, release: str, stages, tool: str | None = None) -> list[dict]:
+def session_events(session: str, artifact_id: str, stages, tool: str | None = None) -> list[dict]:
     events = [
         {
             "type": "session",
@@ -556,7 +556,7 @@ def session_events(session: str, release: str, stages, tool: str | None = None) 
             "time": 1000,
             "data": {
                 "session": session,
-                "artifact_id": release,
+                "artifact_id": artifact_id,
                 "model": "m",
                 "tools": ["read_file"],
                 "agent": "root",
@@ -654,8 +654,8 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         },
     }
     write_commits(work / "agent-record", commit)
-    for name, release, tool in (("s1", "r1", "harness_try"), ("s2", "r2", None)):
-        events = session_events(name, release, ["think"], tool)
+    for name, artifact_id, tool in (("s1", "r1", "harness_try"), ("s2", "r2", None)):
+        events = session_events(name, artifact_id, ["think"], tool)
         (native / "sessions" / name / "session.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
     mounts = (
         {"type": "harness/mount", "seq": 0, "time": 999, "data": {"artifact_id": "r1", "source": "boot"}},
@@ -664,11 +664,11 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     (native / "sessions" / "serve.jsonl").write_text("".join(json.dumps(event) + "\n" for event in mounts))
 
     data = replay.collect(work)
-    assert [(release["commit_number"], release["kind"], release["artifact_id"]) for release in data["releases"]] == [
+    assert [(row["commit_number"], row["kind"], row["artifact_id"]) for row in data["snapshots"]] == [
         (0, "seed", "seed"),
         (1, "published", "r2"),
     ]
-    seed_snapshot, published = data["releases"]
+    seed_snapshot, published = data["snapshots"]
     # The native run's seed is the native seed directory; a published snapshot is it with the step's patch applied.
     assert seed_snapshot["files"] == dict(NATIVE_SEED.files) == data["seed_files"]
     assert published["files"] == {**NATIVE_SEED.files, "rules.md": "one line\n"}
@@ -701,7 +701,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     # A step that rewrote a seed file names it as updated.
     graph = {**commit, "metrics": {**commit["metrics"], "patch": {"native/graphs/main.json": "{}\n"}}}
     write_commits(work / "agent-record", graph)
-    assert replay.collect(work)["releases"][1]["diff"] == {
+    assert replay.collect(work)["snapshots"][1]["diff"] == {
         "added": [],
         "updated": ["native/graphs/main.json"],
         "removed": [],
@@ -719,21 +719,19 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     }
     write_commits(work / "agent-record", commit, activation)
     with_activation = replay.collect(work)
-    assert [
-        (release["kind"], release["commit_number"], release["artifact_id"]) for release in with_activation["releases"]
-    ] == [
+    assert [(row["kind"], row["commit_number"], row["artifact_id"]) for row in with_activation["snapshots"]] == [
         ("seed", 0, "seed"),
         ("published", 1, "r2"),
         ("activate", 2, "r1"),
     ]
-    assert with_activation["releases"][2]["result"] is None
-    assert with_activation["releases"][2]["files"] == with_activation["releases"][0]["files"]
-    assert with_activation["releases"][2]["files"] != with_activation["releases"][1]["files"]
+    assert with_activation["snapshots"][2]["result"] is None
+    assert with_activation["snapshots"][2]["files"] == with_activation["snapshots"][0]["files"]
+    assert with_activation["snapshots"][2]["files"] != with_activation["snapshots"][1]["files"]
 
     # An empty work directory still renders a page: the pi variant's seed alone.
     empty = replay.collect(tmp_path / "nothing")
-    assert [release["kind"] for release in empty["releases"]] == ["seed"]
-    assert empty["releases"][0]["files"] == dict(PI_SEED.files) == empty["seed_files"]
+    assert [row["kind"] for row in empty["snapshots"]] == ["seed"]
+    assert empty["snapshots"][0]["files"] == dict(PI_SEED.files) == empty["seed_files"]
     assert empty["sessions"] == [] and empty["process"] == []
     assert '<script id="data" type="application/json">' in replay.render(empty)
 
@@ -772,9 +770,9 @@ def test_replay_uses_component_ids_from_current_commits_and_native_events(
     (sessions / "serve.jsonl").write_text(json.dumps(poll) + "\n")
 
     data = replay.collect(tmp_path)
-    assert [row["artifact_id"] for row in data["releases"]] == ["seed", "artifact:new", "artifact:seed"]
-    assert data["releases"][1]["files"]["rules.md"] == "updated\n"
-    assert data["releases"][2]["files"] == data["seed_files"]
+    assert [row["artifact_id"] for row in data["snapshots"]] == ["seed", "artifact:new", "artifact:seed"]
+    assert data["snapshots"][1]["files"]["rules.md"] == "updated\n"
+    assert data["snapshots"][2]["files"] == data["seed_files"]
     assert data["sessions"][0]["artifact_id"] == "artifact:new"
     assert data["sessions"][0]["events"] == [event]
     assert data["process"] == [poll]

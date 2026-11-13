@@ -59,7 +59,7 @@ class OpenClawRLSamples(JudgedSamples):
             worker = BackgroundJobWorker(
                 self.openclawrl_judging, thread_name="openclawrl-judging", concurrency=settings.prm_concurrency
             )
-        super().__init__(self.openclawrl_judging, worker, max_staleness=settings.max_staleness)
+        super().__init__(self.openclawrl_judging, worker)
 
     @classmethod
     def from_config(
