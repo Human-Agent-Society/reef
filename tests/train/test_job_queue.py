@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -15,7 +17,13 @@ from tests.support.job_data import job_data_ref
 from tests.support.training_deployment import LocalFacts
 from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import Artifact, ArtifactError, InMemoryRepositoryBackend, RepositoryBackendFactory
+from reef.artifact import (
+    Artifact,
+    ArtifactError,
+    GitLFSRepositoryBackend,
+    InMemoryRepositoryBackend,
+    RepositoryBackendFactory,
+)
 from reef.artifact.components import ComponentChecks
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import InternalError
@@ -48,6 +56,7 @@ from reef.train.job_queue import (
     CHECKS_QUEUE,
     JOB_CANCELLED_ERROR,
     JOBS_QUEUE,
+    SCENARIO_DELETED_ERROR,
     STORED_CONTENT_KEY,
     UNASKED_CHECK_ERROR,
     UNASKED_CHECK_SECONDS,
@@ -185,12 +194,22 @@ def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
     raise AssertionError(f"the job never reached {state}")
 
 
+def registered_backends(directory: Path) -> RepositoryBackendFactory:
+    """In-memory artifact stores under ``directory`` in which the jobs' scenario ``s`` exists: the training worker
+    runs no job of a scenario that has no registration."""
+    backends = InMemoryRepositoryBackend.factory(directory=directory)
+    root = directory.with_name(f"{directory.name}-root")
+    root.mkdir()
+    backends("s").register(Artifact.local(root), metadata={})
+    return backends
+
+
 @pytest.fixture
 def worked(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
     data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
-    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    backends = registered_backends(tmp_path / "artifacts")
     worker = TrainingJobWorker(
         component, queue, data_store, backends, checks=ACCEPT_ALL, worker_id="training-1", poll_seconds=0.02
     )
@@ -434,7 +453,7 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
         component,
         queue,
         MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files")),
-        InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts"),
+        registered_backends(tmp_path / "artifacts"),
         checks=ACCEPT_ALL,
         worker_id="training-1",
         poll_seconds=0.02,
@@ -454,7 +473,7 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     first = SavedCheckpoint(1, "/old/step-1", None, {"loss": 1.0}, content="j1:1")
     queue.append_progress(JOBS_QUEUE, "j1", "training-0", checkpoint_json(first), number=0)
     # It had stored step 2 as well, and stopped before it recorded that checkpoint.
-    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    backends = registered_backends(tmp_path / "artifacts")
     unfinished = tmp_path / "unfinished"
     unfinished.mkdir()
     (unfinished / "weights.txt").write_text("half written")
@@ -515,7 +534,7 @@ def test_the_worker_checks_each_checkpoint_before_it_stores_it_and_a_refusal_fai
     fetches a checkpoint to check it. A refused checkpoint is not stored, and its job fails for good with the
     check's message; the job's earlier checkpoint stays recorded, and so do the job's record files."""
     queue = memory_coordination(lease_seconds=30).work_queue
-    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    backends = registered_backends(tmp_path / "artifacts")
     queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(replace(job("j1"), component="w"))))
     checks = RefuseSecondStep()
     # The job still runs when its second checkpoint is refused, so it has not stored its records yet.
@@ -552,7 +571,7 @@ def test_control_reads_a_jobs_progress_and_records_from_the_store_and_asks_for_a
     component = StepComponent(tmp_path / "jobs")
     component.progress["j1"] = {"phase": "proposing"}
     data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
-    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    backends = registered_backends(tmp_path / "artifacts")
     view = JobQueueComponent(StepFacts(), queue)
     seen: list[Mapping[str, Any] | None] = []
     status = component.status
@@ -605,6 +624,58 @@ def test_the_sweep_discards_the_stored_checkpoints_of_an_ended_job_that_no_commi
             backend.materialize_content(name)
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize("deleted", ["before the worker takes the job", "while the worker stores"])
+def test_a_job_of_a_deleted_scenario_does_not_run_on_and_leaves_no_content(
+    deleted: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The delete of a scenario cancels the jobs that it finds in the queue, and the cycle that added a job after
+    that look cancels it when it returns. Here the cycle's process stopped in between, so the job stays queued
+    after the delete. The worker finds no registration of the scenario, when it takes the job or after it stored
+    for a delete that ended meanwhile: it cancels the job, which records nothing, and discards what it stored."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    remote = tmp_path / "artifacts.git"
+    control = GitLFSRepositoryBackend.factory(remote, work_dir=tmp_path / "control", cache_dir=tmp_path / "c-cache")
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.json").write_text("{}")
+    control("s").register(Artifact.local(root), metadata={})
+
+    class DeletedWhileStoring(GitLFSRepositoryBackend):
+        """The delete ends while the worker stores the job's first content."""
+
+        def store_content(self, name: str, directory: Path) -> None:
+            super().store_content(name, directory)
+            if control.has_registration("s"):
+                control.archive_registration("s")
+
+    backend_type = GitLFSRepositoryBackend if deleted.startswith("before") else DeletedWhileStoring
+    backends = backend_type.factory(remote, work_dir=tmp_path / "training", cache_dir=tmp_path / "t-cache")
+    queue = memory_coordination(lease_seconds=30).work_queue
+    component = StepComponent(tmp_path / "jobs")
+    data_store = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
+    queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
+    if deleted.startswith("before"):
+        control.archive_registration("s")
+    worker = TrainingJobWorker(
+        component, queue, data_store, backends, checks=ACCEPT_ALL, worker_id="training-1", poll_seconds=0.02
+    )
+    assert worker.run_once()
+
+    item = queue.read(JOBS_QUEUE, "j1")
+    assert (item.state, item.error, item.progress) == ("failed", SCENARIO_DELETED_ERROR, ())
+    assert (
+        "/contents/"
+        not in subprocess.run(["git", "--git-dir", str(remote), "show-ref"], capture_output=True, text=True).stdout
+    )
+    if deleted.startswith("before"):
+        # The component never got the job.
+        with pytest.raises(KeyError):
+            component.status("j1")
+    worker.stop()
+
+
 class LosingQueue:
     """The work queue of a worker that loses its job between the store of a checkpoint and its record."""
 
@@ -624,7 +695,7 @@ def test_content_that_a_worker_stored_and_could_not_record_goes_with_the_jobs_it
     """The item names the content before the worker stores it, so the sweep finds content that no progress entry
     names: of a job that was cancelled while the worker stored its checkpoint."""
     queue = memory_coordination(lease_seconds=30).work_queue
-    backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    backends = registered_backends(tmp_path / "artifacts")
     queue.append(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1"))))
     worker = TrainingJobWorker(
         StepComponent(tmp_path / "jobs"),
@@ -668,7 +739,7 @@ class FailingBackends(RepositoryBackendFactory):
 @pytest.mark.unit
 def test_a_job_item_stays_until_its_content_is_discarded_and_does_not_stop_the_sweep_of_the_others(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
-    stores = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    stores = registered_backends(tmp_path / "artifacts")
     backends = FailingBackends(stores)
     files = tmp_path / "files"
     files.mkdir()
@@ -705,6 +776,39 @@ def test_a_job_item_stays_until_its_content_is_discarded_and_does_not_stop_the_s
     ended_at = queue.read(JOBS_QUEUE, "c").ended_at
     assert sweep(ended_at + 101) == 0 and sweep(ended_at + 201) == 1
     assert sweeper.sweep() == 0
+
+
+class UnansweringQueue:
+    """The work queue of a sweep whose store fails when it deletes the ended items."""
+
+    def __init__(self, queue) -> None:
+        self.queue = queue
+
+    def __getattr__(self, name: str):
+        return getattr(self.queue, name)
+
+    def delete_final(self, *, finished_before, keep):
+        raise ConnectionError("the store did not answer")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("store", ["answers", "fails"])
+def test_each_sweep_frees_the_storage_of_discarded_content(store, tmp_path):
+    """A discard deletes only the content's name; control's sweep frees its files, also when the items stay."""
+    reclaimed = []
+
+    class ReclaimingBackends(FailingBackends):
+        def reclaim_discarded(self) -> None:
+            reclaimed.append(True)
+
+    queue = memory_coordination(lease_seconds=30).work_queue
+    sweeper = EndedWorkSweeper(
+        queue if store == "answers" else UnansweringQueue(queue),
+        ReclaimingBackends(registered_backends(tmp_path / "artifacts")),
+        retention_seconds=100.0,
+    )
+    assert sweeper.sweep() == 0
+    assert reclaimed == [True]
 
 
 @pytest.mark.unit

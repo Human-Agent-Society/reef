@@ -345,7 +345,7 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its history and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its history and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, which also records that the scenario ID is never used again. Deleting a weight-training scenario cancels its running training job.
 
 Run the services in separate processes
 --------------------------------------
@@ -782,6 +782,41 @@ each snapshot to the Hub as it publishes it:
   appears in no URL, file or log. Keep the repository private unless you mean
   to publish what Reef trains.
 - Archiving a deleted scenario's ref works with a local repository only.
+
+The training service stores each checkpoint in the repository before a
+commit takes it. Reef discards a checkpoint after its commit, when the sweep
+deletes its ended job, and when its scenario is deleted. What happens to its
+Git LFS objects depends on where the repository is:
+
+- A local repository, named by a path or a ``file://`` URL: the discard
+  deletes the ref only. Control's sweep of ended work, once an hour, removes
+  each LFS object that no ref references any more. The delete of a scenario
+  does the same at once. Snapshots, pending snapshots and archived scenarios
+  keep their objects. A materialized file is a link to its object. So the
+  sweep removes a cache entry of discarded content one sweep later, because
+  another service that shares the cache directory can still read it. The
+  training service's clone drops its links when the store's push ends.
+  The removal scans the refs without the lock, so stores and publishes do not
+  wait for the scan. When a store or publish starts during the scan, the sweep
+  removes nothing, and the next sweep removes what it left. The processes
+  coordinate with ``flock`` on the file ``reef-objects.lock`` in the
+  repository, and count their writes in ``reef-objects.writes``, which grows
+  by one byte for each write. This is safe when every process that writes the
+  repository runs on one host, on any local filesystem. It is also safe across
+  hosts on a Linux NFS mount, such as Amazon EFS, because Linux emulates
+  ``flock`` there with NFS byte-range locks. On other shared filesystems, such
+  as SMB or a FUSE mount of object storage, the lock does not reach other
+  hosts: do not share a local repository between hosts there. Reef does not
+  detect the filesystem.
+- A remote Git server or the Hugging Face Hub: the objects stay on the remote
+  after Reef deletes the ref. Reef's clone in the work directory also keeps a
+  copy of each object that it uploaded. To free the remote's space, stop every
+  Reef service that writes the repository, and then remove the objects that no
+  ref references with the server's own tools. On the Hub,
+  ``HfApi.list_lfs_files`` and ``HfApi.permanently_delete_lfs_files`` of
+  ``huggingface_hub`` do this. Reef does not remove them itself, because a store
+  on another host can upload an object before it pushes the ref that
+  references it.
 
 Choose the task file store
 --------------------------

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -18,7 +19,7 @@ from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTra
 from tests.support.training_deployment import LocalFacts, LocalServingFactory, facts_component_factory
 from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.sources import ArtifactSources, DirectorySource
 from reef.core.job_data import JobData
@@ -116,7 +117,21 @@ def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> 
 def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    config = replace(settings(tmp_path), task_file_dir=str(tmp_path / "task-files"))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    # The training service runs no job of a scenario that has no registration in the shared artifact store.
+    config = replace(
+        settings(tmp_path),
+        task_file_dir=str(tmp_path / "task-files"),
+        artifact_backend="git_lfs",
+        artifact_repository=str(tmp_path / "artifacts.git"),
+    )
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "config.json").write_text("{}")
+    assembly.build_artifact_backend(replace(config, artifact_work_dir=str(tmp_path / "control-work")))(
+        "math"
+    ).register(Artifact.local(root), metadata={})
     component = StubTrainingComponent(tmp_path / "checkpoints")
     deployment = (Recipe(), LiveObjects(training_component=component, training_facts=StubFacts(component)))
     monkeypatch.setattr(assembly, "_load_deployment", lambda selected, settings, environ, runs_training: deployment)

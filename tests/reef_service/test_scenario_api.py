@@ -14,6 +14,7 @@ from reef.artifact import (
     InMemoryRepositoryBackend,
 )
 from reef.core import ScenarioNotFoundError
+from reef.core.errors import ScenarioDeletedError
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.recipe import Recipe
 from reef.scenario.admission import ScenarioLimits
@@ -100,12 +101,11 @@ def test_scenario_contract_raises_for_unknown_scenario(tmp_path) -> None:
         _dispatcher(tmp_path).scenario_contract("nope")
 
 
-def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
-    """A deleted scenario leaves the registry and the listing, its lock slot goes, and the name creates fresh."""
+def test_a_deleted_scenario_leaves_the_registry_and_its_id_is_never_created_again(tmp_path) -> None:
+    """A deleted scenario leaves the registry and the listing, and its lock slot goes. Its ID is not used again: an
+    explicit creation and an implicit one, as an incoming record makes, are refused."""
     value = _dispatcher(tmp_path)
-    created = value.get_or_create_scenario("delivery")
-    assert created is not None
-    first_snapshot = created.repository.require_current_artifact().revision
+    assert value.get_or_create_scenario("delivery") is not None
 
     result = value.delete_scenario("delivery")
 
@@ -115,10 +115,12 @@ def test_delete_scenario_forgets_it_and_frees_the_name(tmp_path) -> None:
     assert value.get_or_create_scenario("delivery", allow_implicit_creation=False) is None
     with pytest.raises(ScenarioNotFoundError):
         value.delete_scenario("delivery")
-    # The name is free: a new scenario under it starts from the base, not the dropped chain.
-    again = value.get_or_create_scenario("delivery")
-    assert again is not None and again is not created
-    assert again.repository.require_current_artifact().revision == first_snapshot or again.commit_number == 0
+    with pytest.raises(ScenarioDeletedError, match="create a scenario with a new ID"):
+        value.get_or_create_scenario("delivery", allow_implicit_creation=True)
+    with pytest.raises(ScenarioDeletedError):
+        value.create_scenario("delivery")
+    assert not value.has_scenario("delivery")
+    assert value.create_scenario("delivery-2")[1]
 
 
 class FailingDiscard(InMemoryRepositoryBackend):
@@ -223,6 +225,8 @@ def test_delete_scenario_over_http() -> None:
             assert await (await client.get("/reef/scenarios")).json() == {"scenarios": []}
             assert (await client.delete("/reef/scenarios/delivery")).status == 404
             assert (await client.get("/reef/scenarios/delivery/artifacts")).status == 404
+            again = await client.post("/reef/scenarios", json={"name": "delivery"})
+            assert again.status == 409 and "was deleted" in await again.text()
         finally:
             await client.close()
 

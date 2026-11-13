@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import replace
@@ -500,13 +499,12 @@ class HarnessTrainingComponent(LocalJobComponent):
 
     def archive_scenario(self, scenario: str) -> None:
         """Close the backends of ``scenario`` and move its directory of history and job records to
-        ``archived/<scenario>-<time>`` beside it, so that a scenario of that name can be deleted twice."""
+        ``archived/<scenario>`` beside it. A scenario ID is deleted once and never used again."""
         for key in [key for key in self.backends if key[0] == scenario]:
             self.backends.pop(key).close()
         directory = self.settings.evolution.scenario_state_dir(scenario)
         if directory.exists():
-            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-            destination = directory.parent / "archived" / f"{directory.name}-{stamp}-{uuid.uuid4().hex[:8]}"
+            destination = directory.parent / "archived" / directory.name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(directory), str(destination))
 

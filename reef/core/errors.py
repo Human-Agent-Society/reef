@@ -29,6 +29,11 @@ class ScenarioNotFoundError(ReefError):
     """The scenario does not exist and the caller may not create it implicitly."""
 
 
+class ScenarioDeletedError(ReefError):
+    """The scenario ID belonged to a scenario that was deleted. A scenario ID is never used again after its delete,
+    so a new scenario needs a new ID."""
+
+
 class ScenarioLimitReachedError(ReefError):
     """The service holds its maximum number of registered scenarios. It refuses a new scenario."""
 

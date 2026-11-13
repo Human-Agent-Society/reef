@@ -130,6 +130,9 @@ def test_repository_factory_caches_registration_misses() -> None:
             self.probes += 1
             return False
 
+        def has_archived_registration(self, scenario: str) -> bool:
+            return False
+
     factory = RegistrationProbeFactory()
 
     assert not factory.has_registration("missing")

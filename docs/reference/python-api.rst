@@ -782,8 +782,8 @@ reconciliation. See `Commit ordering
 provide distributed leases or authorize multiple active training writers.
 
 The storage service exposes ``durable``, ``open(scenario)``, ``archive(scenario)``,
-and ``close()``. Archive retires that scenario's stored state so its name can be
-reused. Custom backends implement those operations instead
+and ``close()``. Archive retires that scenario's stored state. A scenario ID is
+not used again after its delete. Custom backends implement those operations instead
 of exposing local file paths. ``from_config`` takes the deployment's data store,
 which keeps each scenario's records as record items. Each opened session belongs to its scenario and
 closes after its trainer, including on construction or recovery failure. The
@@ -1119,6 +1119,10 @@ A backend shares no snapshot between scenarios. It must:
   - ``discard_all_content()`` removes every content of the scenario. Reef
     calls it when the scenario is deleted, so no content outlives its
     scenario.
+
+  A discard can delete only the content's name and leave its files. Then
+  the factory frees them in ``reclaim_discarded()``, which control's sweep of
+  ended work calls once per sweep. The default frees nothing.
   - ``publish_parts(parts, *, metadata, expected_parent, advance_head)``
     stores a snapshot of files that the backend holds already, and moves the
     head as ``publish`` does. Callers use the inherited ``publish_stored``,
@@ -1158,7 +1162,12 @@ that the backend supports:
      - ``list_registrations()``: list the stored scenarios. The service
        loads them when it starts.
    * - ``CachedRepositoryBackendFactory``
-     - Both capabilities, and one cached backend for each scenario.
+     - Both capabilities, and one cached backend for each scenario. A
+       subclass must implement ``has_archived_registration(scenario)``: True
+       exactly when ``archive_registration(scenario)`` has completed in any
+       process that shares the store, and never False again after that. Reef
+       refuses to create a scenario for which it is true, because a deleted
+       scenario's ID is never used again.
    * - ``StagedSnapshotRepositoryBackend``
      - The backend side: ``publish(advance_head=False)`` stores a snapshot
        without moving the head, and ``commit_snapshot`` moves the head

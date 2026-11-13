@@ -419,7 +419,8 @@ class Dispatcher(
           checkpoint that no commit took (``RepositoryBackend.discard_all_content``).
         - The storage archives the records, the commits and the settings.
         - The recipe's own directories move to an ``archived`` sibling.
-        - The repository registration is archived, so the name is free again.
+        - The repository registration is archived. The archive also records that the scenario ID is never used
+          again (``CachedRepositoryBackendFactory.has_archived_registration``).
 
         Artifacts that other scenarios share stay.
 
@@ -447,7 +448,10 @@ class Dispatcher(
                     component_trainer.trainer.cancel_job()
                 dropped.close()
             # A trainer adds a job to the queue before the commit that records it. Such a job is in no trainer's
-            # state, so the queue is asked: no job of the scenario runs on and stores files after the delete.
+            # state, so the queue is asked: no job of the scenario runs on and stores files after the delete. A job
+            # that a cycle adds after this look, and that the cycle cannot cancel because its process stopped, is
+            # cancelled by the training worker, which finds the registration archived below
+            # (``TrainingJobWorker.refuses_deleted_scenario``).
             cancel_scenario_jobs(self.queue, scenario)
             self.local_workers.close_replaced_instances(scenario)
             # The discard can fail when the artifact store does not answer. It runs before the scenario's storage
