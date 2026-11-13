@@ -22,9 +22,10 @@ from tests.support.harness_service import backend_step
 
 from reef.core.errors import ConfigError
 from reef.core.plugins import PluginConfigError
+from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.execution.sandbox.modal import ModalExecutor
-from reef.execution.sandbox.process import BwrapExecutor, LocalExecutor, SandboxUnavailableError
+from reef.execution.sandbox.process import LocalExecutor, SandboxUnavailableError
 from reef.execution.sandbox.remote import deployment_owner
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.tasks.model_binding import ModelBinding

@@ -26,7 +26,8 @@ from tests.support.harness_jobs import (
 from tests.support.harness_service import backend_step
 
 from reef.execution.executor.config import ExecutorSettings
-from reef.execution.sandbox.process import BwrapExecutor, LocalExecutor, ProgramExecutor, SandboxUnavailableError
+from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxUnavailableError
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import (
     DEFAULT_PREFIX_ROOT,

@@ -14,9 +14,9 @@ import pytest
 
 import reef
 from reef.core.errors import ReefError
+from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.config import build_executor, host_sandbox
 from reef.execution.sandbox.process import (
-    BwrapExecutor,
     LocalExecutor,
     ProgramLaunchError,
     ProgramTimeoutError,
@@ -127,7 +127,7 @@ def test_build_executor_rejects_an_unknown_kind() -> None:
 
 def test_sandbox_preflight_fails_fast_without_bubblewrap(monkeypatch) -> None:
     monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: None)
     with pytest.raises(SandboxUnavailableError, match="bubblewrap"):
         BwrapExecutor().preflight()
     with pytest.raises(ReefError, match="bubblewrap"):
@@ -142,12 +142,12 @@ def _probe_result(monkeypatch, returncode: int, stderr: str = "") -> list[list[s
         seen.append(list(argv))
         return subprocess.CompletedProcess(argv, returncode, "", stderr)
 
-    monkeypatch.setattr("reef.execution.sandbox.process.subprocess.run", run)
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.subprocess.run", run)
     return seen
 
 
 def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
     seen = _probe_result(monkeypatch, 1, "bwrap: No permissions to create a new namespace\n")
     with pytest.raises(SandboxUnavailableError, match=r"cannot nest a bubblewrap jail.*No permissions"):
         BwrapExecutor().preflight()
@@ -168,14 +168,14 @@ def test_sandbox_preflight_proves_the_host_can_nest_a_jail(monkeypatch) -> None:
     def refuse(argv, **kwargs):
         raise OSError("boom")
 
-    monkeypatch.setattr("reef.execution.sandbox.process.subprocess.run", refuse)
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.subprocess.run", refuse)
     with pytest.raises(SandboxUnavailableError, match="cannot nest a bubblewrap jail on this host: boom"):
         BwrapExecutor().preflight()
 
 
 def test_sandbox_argv_isolates_the_filesystem_env_and_network(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
-    monkeypatch.setattr("reef.execution.sandbox.process.os.environ", {"PATH": "/usr/bin"})
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.os.environ", {"PATH": "/usr/bin"})
     root = tmp_path / "root"
     workspace = root / "workspace"
     workspace.mkdir(parents=True)
@@ -203,7 +203,7 @@ def test_sandbox_opens_the_workspace_and_runtime_state_but_rebinds_inputs_read_o
     monkeypatch, tmp_path: Path
 ) -> None:
     """A read-only input stays read-only inside a writable directory, the workspace too, as a remote jail keeps it."""
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
     root = tmp_path / "root"
     workspace = root / "workspace"
     material = workspace / "material"
@@ -233,7 +233,7 @@ def test_sandbox_opens_the_workspace_and_runtime_state_but_rebinds_inputs_read_o
 
 
 def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     sandbox = BwrapExecutor(egress_hosts=("127.0.0.1:8000",))
@@ -243,7 +243,7 @@ def test_sandbox_shares_the_network_when_egress_is_allowlisted(monkeypatch, tmp_
 
 def test_build_executor_reads_sandbox_limits(monkeypatch) -> None:
     monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: "/usr/bin/bwrap")
     _probe_result(monkeypatch, 0)
     executor = build_executor(
         {

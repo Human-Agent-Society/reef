@@ -295,7 +295,8 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
     from harbor.utils.import_path import import_class
     from reef_terminus import runner
 
-    from reef.execution.sandbox.process import ISOLATION_ENV, BwrapExecutor, ProcessOutcome
+    from reef.execution.sandbox.bwrap import BwrapExecutor
+    from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()
     proposed = HarnessTree({**SEED.files, "extensions/agent.py": code})

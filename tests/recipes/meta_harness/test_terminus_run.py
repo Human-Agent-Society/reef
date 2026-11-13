@@ -24,7 +24,8 @@ from pathlib import Path
 import pytest
 from reef_terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV, trial_record
 
-from reef.execution.sandbox.process import BwrapExecutor, ProcessOutcome, ProgramExecutor, ProgramLaunchError
+from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding

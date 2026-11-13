@@ -32,7 +32,7 @@ from tests.support.harness_render import (
 from tests.support.trajectories import recorded_trajectory
 
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
-from reef.execution.sandbox.process import BwrapExecutor
+from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.runners.native import (

@@ -23,8 +23,9 @@ from recipes.beta.reefine.agent_gateway import ReefineGateway
 from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider, MultimodalSettings
 from recipes.beta.reefine.trial import trial_script
 from reef.core.training_request import TrainingRequest
+from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.e2b import E2BSession
-from reef.execution.sandbox.process import BwrapExecutor, LocalExecutor, ProcessOutcome, ProgramTimeoutError
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramTimeoutError
 from reef.execution.sandbox.remote import pack
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import reply_tool_calls, tool_summary

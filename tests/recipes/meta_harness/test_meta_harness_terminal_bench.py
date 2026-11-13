@@ -13,7 +13,7 @@ import pytest
 from tests.support.git_lfs import fake_git_lfs
 from tests.support.harness_jobs import rebuilt_recipe
 
-from reef.execution.sandbox.process import BwrapExecutor
+from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.harness import TaskResult
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree

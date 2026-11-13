@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 from tests.support.harness_render import native_tool
 
-from reef.execution.sandbox.process import BwrapExecutor, SandboxUnavailableError
+from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.process import SandboxUnavailableError
 from reef.harness.runners.native import LoadError, ToolModule, ToolRunner, _invoke, _ModuleRun, load_tools
 from reef.harness.runners.native.enforce import (
     CHILD,
