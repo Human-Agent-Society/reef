@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Self
 
 import pytest
@@ -30,10 +29,9 @@ STAGE = f"{__name__}:WindowSamples"
 
 @dataclass(frozen=True)
 class StateSettings(PluginSettings):
-    """``window``, a non-negative int, and ``state_root``, a directory or empty."""
+    """``window``, a non-negative int."""
 
     window: int = config_option(0, help="A number that the stage keeps.")
-    state_root: str = config_option("", help="The directory under which the stage keeps each scenario's state.")
 
     def __post_init__(self) -> None:
         if self.window < 0:
@@ -41,7 +39,7 @@ class StateSettings(PluginSettings):
 
 
 class WindowSamples(Record2Sample):
-    """A stage that keeps its ``window`` and keeps each scenario's state under ``state_root``. It makes no sample."""
+    """A stage that keeps its ``window``. It makes no sample."""
 
     def __init__(self, window: int) -> None:
         super().__init__()
@@ -50,11 +48,6 @@ class WindowSamples(Record2Sample):
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
         return cls(StateSettings.parse(config, plugin_class=cls).window)
-
-    @classmethod
-    def scenario_state_dirs(cls, config: Mapping[str, Any], scenario: str) -> tuple[Path, ...]:
-        root = StateSettings.parse(config, plugin_class=cls).state_root
-        return (Path(root) / scenario,) if root else ()
 
     def push(self, record: AgentRecord) -> None:
         return
@@ -131,14 +124,3 @@ def test_a_samples_process_loads_the_scenario_again_when_control_changed_its_con
     LocalSampleProducers(dispatcher.registry, None).produce("s", "records", NoProgress("selection-1"))
 
     assert window(dispatcher) == 2
-
-
-def test_deleting_a_scenario_archives_the_state_that_its_own_config_names(dispatcher, tmp_path):
-    state = tmp_path / "scenario-state"
-    dispatcher.set_record2sample_config("s", {"records": {"state_root": str(state)}})
-    (state / "s").mkdir(parents=True)
-
-    dispatcher.delete_scenario("s")
-
-    assert not (state / "s").exists()
-    assert [path.name.startswith("s-") for path in (state / "archived").iterdir()] == [True]

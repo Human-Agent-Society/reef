@@ -9,7 +9,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
 from typing import Any, Self
 
 from reef.core.errors import inference_incomplete
@@ -107,11 +106,6 @@ class Record2Sample(ABC, Plugin):
         ``environ`` holds the environment the deployment was read with.
         """
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
-
-    @classmethod
-    def scenario_state_dirs(cls, config: Mapping[str, Any], scenario: str) -> tuple[Path, ...]:
-        """The directories under which a stage built from ``config`` keeps a scenario's state, for archiving."""
-        return ()
 
     def __init__(self) -> None:
         #: The record set units that became ready since the last ``take_ready_units``, by unit ID.

@@ -8,8 +8,6 @@ so no recipe class answers for another recipe. The questions that also need a li
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from reef.recipe.base import Recipe
 from reef.recipe.composite import component_recipes
 from reef.recipe.harness import HarnessEvolutionRecipe
@@ -37,19 +35,4 @@ def harness_adapter(recipe: Recipe) -> str | None:
     return None if harness is None else harness[1].evolution.adapter
 
 
-def scenario_state_dirs(recipe: Recipe, scenario: str) -> tuple[Path, ...]:
-    """The directories of the record-to-sample stages that belong to ``scenario`` alone, which the dispatcher
-    archives when the scenario is deleted: what the stage config of each recipe of the deployment names
-    (``PipelineSettings.scenario_state_dirs``), in the order of ``component_recipes``.
-
-    A harness recipe keeps the scenario's history and job records in a directory of the training service. That
-    service moves it aside itself (``TrainingComponent.archive_scenario``), so it is not listed here.
-    """
-    directories: list[Path] = []
-    for _, child in component_recipes(recipe):
-        if not isinstance(child, HarnessEvolutionRecipe):
-            directories.extend(child.stages().scenario_state_dirs(scenario))
-    return tuple(directories)
-
-
-__all__ = ["harness_adapter", "harness_recipe", "scenario_state_dirs"]
+__all__ = ["harness_adapter", "harness_recipe"]

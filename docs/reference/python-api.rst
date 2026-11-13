@@ -430,9 +430,6 @@ deployment from its configuration alone:
      - the adapter that ``GET /reef/harness`` renders the harness artifacts
        for (``evolution.adapter`` of the harness recipe), or ``None``; the
        scenario list names it for every scenario
-   * - ``reef.recipe.deployment.scenario_state_dirs(recipe, scenario)``
-     - the directories of the record-to-sample stages that a scenario delete
-       archives; a training service archives its own
    * - ``reef.scenario.factory.scenario_report_type(recipe)``
      - the report contract that ingress checks: the one that the recipes
        share, or a contract that a report meets when any recipe's parses it
@@ -1474,9 +1471,9 @@ fails when the first scenario builds its pipeline. A sample-to-job stage that
 needs the record-to-sample stage as a specific class checks it with
 ``isinstance`` and raises ``PluginConfigError`` otherwise. A value that both
 stages need belongs to the record-to-sample stage; the sample-to-job stage
-reads it from the stage object that it receives. A ``Record2Sample`` that keeps
-per-scenario state also implements ``scenario_state_dirs(config, scenario)``,
-so a scenario delete archives it. Reef owns replay, retention, deduplication, pending job data,
+reads it from the stage object that it receives. A ``Record2Sample`` keeps its
+state in memory and in the store, not in a directory of its own, so a scenario
+delete archives nothing for it. Reef owns replay, retention, deduplication, pending job data,
 and exactly-once consumption; the method implements only the hooks below.
 They run synchronously on the trainer thread, so they must not block on
 network or model latency. Reports must reference existing inference records

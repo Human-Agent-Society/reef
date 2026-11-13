@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -41,18 +40,11 @@ from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorker
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.recipe.deployment import scenario_state_dirs
 from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
-from reef.scenario.factory import ItemStart, with_record2sample_configs
-from reef.scenario.live_objects import (
-    LiveObjects,
-    RecipeChecks,
-    check_recipe_objects,
-    close_runtimes,
-    scenario_components,
-)
+from reef.scenario.factory import ItemStart
+from reef.scenario.live_objects import LiveObjects, RecipeChecks, check_recipe_objects, close_runtimes
 from reef.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
@@ -594,23 +586,11 @@ class Dispatcher(
                 self.unload_if_idle(name)
 
     def archive_scenario_state(self, scenario: str) -> list[str]:
-        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be
-        deleted twice, and ask each training service to do the same with what its component keeps for the scenario
-        (``JobQueueComponent.archive_scenario``): this process moves no directory of a training service."""
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
-        configs = self.storage.read_settings(scenario).record2sample_config
-        recipe = with_record2sample_configs(
-            self.recipe, scenario_components(self.recipe, self.live, scenario), configs
-        )
-        directories = scenario_state_dirs(recipe, scenario)
+        """Move the scenario's storage under an ``archived`` sibling (``ScenarioRegistry.archive_store``), and ask
+        each training service to do the same with what its component keeps for the scenario
+        (``JobQueueComponent.archive_scenario``). This process moves no directory of another service, and no
+        record-to-sample stage keeps a directory of its own."""
         moved = list(self.registry.archive_store(scenario))
-        for directory in directories:
-            if directory.exists():
-                destination = directory.parent / "archived" / f"{directory.name}-{stamp}"
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(directory), str(destination))
-                moved.append(str(destination))
         for component in self.live.job_components():
             component.archive_scenario(scenario)
         return moved
