@@ -26,7 +26,8 @@ async def _post(client: TestClient, body: object, scenario: str = "agents"):
 
 
 def manual_recipe(tmp_path: Path, method, **overrides):
-    return replace(harness_recipe(tmp_path, method, **overrides), training_mode="manual")
+    recipe, live = harness_recipe(tmp_path, method, **overrides)
+    return replace(recipe, training_mode="manual"), live
 
 
 def blocking_method():
@@ -42,7 +43,7 @@ def blocking_method():
 
 def test_the_route_screens_the_text_and_stores_nothing_for_a_refusal(tmp_path: Path) -> None:
     method, entered, release = blocking_method()
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
+    dispatcher = harness_dispatcher(tmp_path, *manual_recipe(tmp_path, method))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")
@@ -88,7 +89,7 @@ def test_the_route_screens_the_text_and_stores_nothing_for_a_refusal(tmp_path: P
 
 
 def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, lambda workspace, services: None))
+    dispatcher = harness_dispatcher(tmp_path, *manual_recipe(tmp_path, lambda workspace, services: None))
 
     async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher)))
@@ -114,7 +115,7 @@ def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
 
 def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumption(tmp_path: Path) -> None:
     method, entered, release = blocking_method()
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method, job_samples=3))
+    dispatcher = harness_dispatcher(tmp_path, *manual_recipe(tmp_path, method, job_samples=3))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")

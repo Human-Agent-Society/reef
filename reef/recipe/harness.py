@@ -46,16 +46,13 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.sync import HARNESS_COMPONENT, HarnessFiles
-from reef.harness.tasks.harness_models import HarnessModels
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, validate_tree
-from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
+from reef.recipe.base import Recipe
 from reef.recipe.config_fields import ConfigReader, reader_field, section_field
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
-from reef.storage.data import DataStore
-from reef.train.component import TrainingComponent
 from reef.train.harness_backend.settings import EvolutionSettings, HarnessSettings, configured_tasks
 from reef.train.pipeline import PipelineSettings, PipelineSpec
 
@@ -177,20 +174,16 @@ class HarnessEvolutionRecipe(Recipe):
     ``model_name`` is ``model.path``, the served model's name when the
     runtime names none. The recipe builds no method, scorer, executor or
     agent: ``HarnessTrainingComponent`` builds them from ``harness_settings``.
-    The model under test is the deployment's inference runtime
-    (``harness_models``).
-    ``served_endpoint`` is where this Reef answers inference, ``None`` when
-    the runs call the runtime's own endpoint.
-    ``harness_component`` holds the training component that runs the jobs,
-    ``None`` until the service gives the recipe one
-    (``reef.service.assembly.with_harness_components``), then the jobs
-    queue's view of it (``with_job_components``). The recipe never builds it.
-    ``runtime``, ``served_endpoint`` and ``harness_component`` stay on the
-    recipe until RFC #1390 step 7 gives each to its owner.
-    Purpose: a deployment names it as its recipe; the service builds it once
+    The recipe holds no runtime, no served endpoint and no training
+    component: the process holds them (``reef.scenario.live_objects.LiveObjects``).
+    The model under test is that runtime
+    (``reef.scenario.live_objects.harness_models``), and the service builds
+    the training component that runs the jobs
+    (``reef.service.assembly.with_harness_components``).
+    Purpose: a deployment names it as its recipe; the service loads it once
     from the deployment config, and the scenario factory's trainer builder
-    makes each scenario's trainer, which submits each job to
-    ``harness_component``.
+    makes each scenario's trainer, which submits each job to the process's
+    harness component.
     """
 
     evolution: EvolutionSettings = section_field(
@@ -204,12 +197,9 @@ class HarnessEvolutionRecipe(Recipe):
     model_metadata: Mapping[str, ModelMetadata] = reader_field(NamedModelMetadata(), default_factory=dict)
     worker_executor: ExecutorSettings = reader_field(RunWorkers(), default_factory=ExecutorSettings)
     model_name: str | None = reader_field(ServedModelName(), default=None)
-    #: Where this Reef answers inference: evaluation runs sample the snapshot it serves through it.
-    served_endpoint: ServedEndpoint | None = None
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
     name: str = field(default="harness_evolution", kw_only=True)
-    harness_component: TrainingComponent | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -246,16 +236,6 @@ class HarnessEvolutionRecipe(Recipe):
         # A task manifest is read now, so a deployment with an unreadable one refuses to start.
         self.configured_tasks()
 
-    def job_components(self) -> tuple[TrainingComponent, ...]:
-        """The harness component, which runs this recipe's jobs."""
-        return () if self.harness_component is None else (self.harness_component,)
-
-    def with_job_components(
-        self, components: Mapping[str, TrainingComponent], data_store: DataStore
-    ) -> HarnessEvolutionRecipe:
-        check_job_components(self, components)
-        return replace(self, harness_component=next(iter(components.values())), data_store=data_store)
-
     def runs_offline(self) -> bool:
         """Whether the jobs roll out the imported train tasks (``TrainTaskJobData``)."""
         return issubclass(self.stages().sample2job.plugin_class, TrainTaskJobData)
@@ -269,25 +249,6 @@ class HarnessEvolutionRecipe(Recipe):
             seed=self.seed,
             worker_executor=self.worker_executor,
             runs_offline=self.runs_offline(),
-        )
-
-    def harness_models(self) -> HarnessModels:
-        """The models of the deployment's runs: the recipe's runtime as the model under test, behind
-        ``served_endpoint`` when the recipe has one, and the named models.
-
-        The recipe holds the runtime and the served endpoint until RFC #1390 step 7; their owner makes this value
-        then.
-        """
-        endpoint = self.served_endpoint
-        return HarnessModels(
-            runtime=self.runtime,
-            adapter=self.evolution.adapter,
-            model_name=self.model_name,
-            model_metadata=self.model_metadata,
-            named=self.models,
-            service_url=None if endpoint is None else endpoint.url,
-            service_token=None if endpoint is None else endpoint.token,
-            service_component=None if endpoint is None else endpoint.component,
         )
 
     def task_directories(self, descriptor: AdapterDescriptor) -> bool:
@@ -320,16 +281,9 @@ class HarnessEvolutionRecipe(Recipe):
         config = {**sample2job.config, "evaluation_split": True}
         return replace(stages, sample2job=replace(sample2job, config=config))
 
-    @property
-    def harness_adapter(self) -> str | None:
-        """``evolution.adapter``."""
-        return self.evolution.adapter
-
-    def with_served_endpoint(self, endpoint: ServedEndpoint) -> HarnessEvolutionRecipe:
-        return replace(self, served_endpoint=endpoint)
-
     def activation_rule(self, reference: PluginReference | None = None) -> ActivationRule:
-        """The rule ``Recipe.activation_rule`` names, with the adapter's parts checked.
+        """The rule ``Recipe.activation_rule`` names, with the adapter's parts checked. It reads the recipe's
+        configuration and the adapter's descriptor, and no live object.
 
         Under ``always``, every name in ``review_kinds`` must be a part of the adapter's tree, and a change to a
         part with ``review: true`` also waits for a person. ``RecipeConfigError`` for a name the tree does not have.
@@ -361,21 +315,6 @@ class HarnessEvolutionRecipe(Recipe):
         tree's checksum.
         """
         return DefaultStart(files=dict(self.seed.files), inputs={"seed": self.seed.checksum()})
-
-    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
-        """The scenario's history and job records: what a delete archives beside the record store."""
-        return (self.evolution.scenario_state_dir(scenario),)
-
-    def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
-        """The served model as ``scenario``'s runs call it (``HarnessModels.served``); ``RecipeConfigError`` when
-        the recipe has no inference runtime."""
-        try:
-            return self.harness_models().served(scenario)
-        except ConfigError as exc:
-            raise RecipeConfigError(str(exc)) from exc
-
-    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
-        return self.evolution.component_state_dir(scenario, component)
 
 
 __all__ = ["HarnessEvolutionRecipe", "HarnessLayout"]

@@ -60,9 +60,8 @@ The starting artifacts come from one of two sources:
 
 - The deployment's default start, when the create request names no artifact item. Reef writes it from the configuration:
 
-  - The ``slime`` backend with full weights writes the model that ``inference.model-path`` names. Each scenario's starting artifact holds a full copy of the model's files, about 2 bytes per parameter in bf16. A Git LFS remote stores each file once.
-  - The ``slime`` backend with LoRA writes an adapter whose weights are zero. It serves the model unchanged.
-  - The ``tinker`` backend writes the checkpoint of its untrained adapter, which stays on the Tinker service.
+  - The ``slime`` and ``tinker`` backends write a base root: one file, ``base.json``, which names the base model and the settings of its adapter. The starting artifact holds no weight file. Serving it serves the base model, and training from it starts at the base model.
+  - The ``spindle_full`` backend writes a reference to the base revision on Hugging Face.
   - A harness recipe writes the files of its seed tree: ``evolution.seed``, else the recipe's own seed. Without a seed, the starting artifact is empty.
   - A recipe of several components writes each component's default start under its name.
 - An artifact item of the scenario's owner (`Choose a scenario's start`_).
@@ -70,6 +69,10 @@ The starting artifacts come from one of two sources:
 The creation row's ``source`` is ``{"kind": "default", "inputs": {...}}``, with the configuration values that decide the default start, such as the model and the seed's checksum. For an item, it is ``{"kind": "item", "item": ..., "uri": ..., "version": ...}``, as an import records it.
 
 A new trainer starts its first job from its starting artifact. A train-from or the trainer's own training step changes the start later (`Train from an artifact`_). Activate that artifact to serve it again, or train from it to start training again from it; the ``slime`` backend refuses train-from, as it refuses every artifact.
+
+Control writes the default start from the training backend's configuration. It asks no training component and calls no training service for it. With ``tinker``, the first job from a base root makes a new LoRA from ``training.options.seed``, so every such job begins with equal weights. With ``seed: null``, the service chooses the initial adapter. The training service then saves one untrained adapter in its ``state-dir`` when the first such job runs, and every such job starts from it.
+
+A scenario that an earlier Reef created keeps its starting artifact: a copy of the model, an adapter whose weights are zero, or the checkpoint of an untrained adapter. Reef serves it and trains from it as before.
 
 A change of the configuration does not change an existing scenario. It keeps its stored starting artifacts, and a new scenario gets the new default start. A start that no longer fits the configuration fails only its own scenario: the runtime refuses to activate it, or the training component refuses to start from it, with that component's message. The ``slime`` backend trains only the weights that its workers load from ``inference.model-path``. It refuses to create a scenario from an artifact item. A scenario whose starting artifact came from other inputs does not load, and the error names both inputs. Reef refuses a scenario that an earlier Reef stored with a shared base snapshot (``reef-scenario/4`` metadata). Create such a scenario again.
 
@@ -407,13 +410,42 @@ on its command line. A process keeps its working copy of the artifact
 repository there, and two processes in one working copy break each other's
 fetches.
 
+**Training dependencies.** Only the training service builds a training
+component. Every other service, control too, reads what it needs about the
+backend from the config (`Facts without a component
+<../developer-guide/executors.rst#facts-without-a-component>`__). With
+``slime``, only the training service's environment needs Slime, Megatron, Ray,
+PyTorch and Transformers. With ``tinker`` or ``spindle_full``, only the
+training service needs the backend's API key and its ``state-dir``. A training
+backend plugin follows the same rule.
+
+Control asks the training service through the shared store when it needs the
+component:
+
+* Before a training job enters the queue, the training service checks it. A
+  job waits, with no sample consumed, while the training service is down.
+  ``/reef/status`` shows no running job for it until the check is answered.
+* A new trainer and a ``train-from`` name the snapshot that the next job
+  starts from. The training service reads that snapshot from the artifact
+  backend when it takes the job. Give the training service the same
+  ``storage.artifact-backend`` access as control, and its own
+  ``storage.artifact-cache-dir``.
+* An artifact import for ``tinker`` or ``spindle_full`` looks the checkpoint up
+  on the backend's service. The training service does that, so such an import
+  needs a running training service. It answers ``503`` when the training
+  service gives no answer within 60 seconds.
+
+Control still publishes each checkpoint from the path that the training service
+reports, so both must reach the checkpoint directories.
+
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
 coding agent and the evaluation runs. Install the adapter's binary and the
 sandbox where the training service runs. The training service writes the step
 records and the running step's progress under ``evolution.state_dir``. Control
 reads them for the snapshot and request pages, so both must reach that
-directory, as they reach the artifact backend.
+directory, as they reach the artifact backend. Control builds no harness
+training component: it needs neither the adapter's binary nor the sandbox.
 
 .. _Harness clients:
 

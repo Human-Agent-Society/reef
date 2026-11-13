@@ -155,7 +155,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
         trainset_size=len(TRAIN),
     )
     validation = tuple(example["input"] for example in VAL)
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path,
         GEPA(settings, ReefFeedback()),
         seed=HarnessTree({"rules.md": SEED_TEXT}),
@@ -163,9 +163,9 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
         tasks=validation,
         binary=str(binary),
     )
-    recipe = rebuilt_recipe(recipe, models={"reflection": Reflector("http://model.test", "reflection")})
+    recipe, live = rebuilt_recipe(recipe, live, models={"reflection": Reflector("http://model.test", "reflection")})
     releases = TreeArtifacts(recipe.seed)
-    backend = build_harness_backend(recipe, "fidelity", releases)
+    backend = build_harness_backend(recipe, live, "fidelity", releases)
     policy = ComparePolicy(backend, statistic="mean")
 
     def committed_archive(state: dict[str, Any], text: str) -> Archive:

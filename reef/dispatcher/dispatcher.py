@@ -40,11 +40,13 @@ from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorkers
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.recipe.base import Recipe, close_runtimes
+from reef.recipe.base import Recipe
+from reef.recipe.deployment import scenario_state_dirs
 from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
-from reef.scenario.factory import ItemStart
+from reef.scenario.factory import ItemStart, with_record2sample_configs
+from reef.scenario.live_objects import LiveObjects, check_recipe_objects, close_runtimes, scenario_components
 from reef.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
@@ -61,6 +63,7 @@ from reef.storage.work_queue import FINAL_STATES, WorkItem
 from reef.train.job_queue import (
     JobExperimentRecorder,
     JobQueueComponent,
+    TrainingCheckWorker,
     TrainingJobWorker,
     cancel_request_jobs,
     cancel_scenario_job,
@@ -108,7 +111,8 @@ class Dispatcher(
     (``shared_by_training_scenarios``). :class:`ScenarioRegistry` refuses any
     other weight-training scenario. Each trainer that trains runs on its own
     worker thread (:class:`LocalTrainingWorkers`).
-    The dispatcher owns the runtimes of its recipe and closes them after all scenarios.
+    The dispatcher owns the runtime and the job components of its ``live`` objects and closes them after all
+    scenarios.
     It unloads an idle scenario (see :meth:`scenario_is_idle`) after
     ``scenario_idle_unload_seconds``. It also unloads one when scenario
     admission needs a load slot.
@@ -123,12 +127,12 @@ class Dispatcher(
         recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
+        live: LiveObjects | None = None,
         local_artifact_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
         record_storage: ScenarioStorage | None = None,
-        data_store: DataStore | None = None,
         hold_local_cycles: bool = False,
         scenario_idle_unload_seconds: float | None = None,
         scenario_admission: ScenarioAdmission | None = None,
@@ -141,7 +145,12 @@ class Dispatcher(
         training_manager: TrainingManager | None = None,
         trainer_builder: TrainerBuilder | None = None,
     ) -> None:
-        """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
+        """``live``: the runtime, the job components, the data store and the served endpoint that this process
+        built for ``recipe`` (``LiveObjects``); None is a process with none of them, which fits a recipe that only
+        reads records. The dispatcher owns them. Raise ``RecipeConfigError`` when ``recipe`` needs an object that
+        ``live`` does not have (``check_recipe_objects``).
+
+        ``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
         answer while the dispatcher starts.
 
@@ -170,8 +179,12 @@ class Dispatcher(
         The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
         the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
 
-        The recipe's training component gets its jobs through the jobs queue: the dispatcher gives the trainers a
-        ``JobQueueComponent`` over it and, with ``training``, runs a ``TrainingJobWorker`` on it.
+        Each training backend whose facts ``live`` holds gets its jobs through the jobs queue: the dispatcher gives
+        the trainers a ``JobQueueComponent`` of the facts. ``live`` holds a backend's component only in a process
+        that runs ``training``; the dispatcher then runs a ``TrainingJobWorker`` and a ``TrainingCheckWorker`` on
+        it, and nothing else reads the component. ``self.live`` is the value that the trainers see: the jobs
+        queue's views, and the store of the job data directories. A process that runs every service takes the same
+        path as control of a split deployment.
 
         ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
         constructor first waits for the control lease, while another control instance holds it; then the
@@ -179,7 +192,7 @@ class Dispatcher(
         add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads
         each scenario on demand and leaves the jobs to control.
 
-        ``data_store``: the deployment's data store (RFC #1028). Each scenario's records are record items in it
+        ``live.data_store``: the deployment's data store (RFC #1028). Each scenario's records are record items in it
         (``ItemRecordStore``). Control runs the ``data_sync`` items that the data service adds after its writes
         (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
         which owns the task file store that the data store shares.
@@ -202,45 +215,65 @@ class Dispatcher(
         # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
         # training service runs one worker for each of them.
         #: The store of the job data directories of the training jobs.
+        live = LiveObjects() if live is None else live
+        check_recipe_objects(recipe, live)
+        data_store = live.data_store
         self.job_directory_store: DataStore = (
             MemoryDataStore(LocalTaskFileStore()) if data_store is None else data_store
         )
-        job_components = recipe.job_components()
-        if job_components:
-            if self.services.runs_training:
-                for component in job_components:
-                    self.workers.add(
-                        TrainingJobWorker(
-                            component,
-                            self.queue,
-                            self.job_directory_store,
-                            worker_id=instance_id(f"training-{component.name}"),
-                            slots=training_max_jobs,
-                        )
+        #: The components that the process built. Its training workers run their jobs and close them; a process
+        #: that runs no training service should hold none, and the dispatcher closes those that it holds.
+        self.job_components = live.job_components()
+        if self.services.runs_training:
+            for component in self.job_components:
+                self.workers.add(
+                    TrainingJobWorker(
+                        component,
+                        self.queue,
+                        self.job_directory_store,
+                        backend_factory,
+                        worker_id=instance_id(f"training-{component.name}"),
+                        local_artifact_dir=local_artifact_dir,
+                        slots=training_max_jobs,
                     )
-            recipe = recipe.with_job_components(
-                {
-                    component.name: JobQueueComponent(
-                        component, self.queue, owns_component=not self.services.runs_training
+                )
+                self.workers.add(
+                    TrainingCheckWorker(
+                        component,
+                        self.queue,
+                        self.job_directory_store,
+                        backend_factory,
+                        worker_id=instance_id(f"training-check-{component.name}"),
+                        local_artifact_dir=local_artifact_dir,
                     )
-                    for component in job_components
-                },
-                self.job_directory_store,
-            )
-        #: The deployment's recipe; its trainers submit to the jobs queue.
+                )
+        #: The deployment's recipe: configuration only.
         self.recipe = recipe
+        #: The live objects as the trainers see them: each component is the jobs queue's view of the backend whose
+        #: facts the process holds, and the data store is the store of the job data directories.
+        self.live = replace(
+            live,
+            training_component=(
+                None if live.training_facts is None else JobQueueComponent(live.training_facts, self.queue)
+            ),
+            harness_component=(
+                None if live.harness_facts is None else JobQueueComponent(live.harness_facts, self.queue)
+            ),
+            data_store=self.job_directory_store,
+        )
         self.storage = scenario_storage
         self.record_storage = scenario_storage if record_storage is None else record_storage
         self.data_store = data_store
         self.record_retention_lock = Lock()
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
-        if recipe.job_components() and not isinstance(tracker, NullExperimentTracker):
+        if self.live.job_components() and not isinstance(tracker, NullExperimentTracker):
             # Control's tracker also writes each training job's run into the job's item, for the job listing.
             tracker = JobExperimentRecorder(tracker, self.queue)
         self.experiment_tracker = tracker
         self.registry = ScenarioRegistry(
             recipe,
             backend_factory,
+            live=self.live,
             local_artifact_dir=local_artifact_dir,
             scenario_storage=scenario_storage,
             allow_implicit_creation=allow_implicit_creation,
@@ -267,7 +300,7 @@ class Dispatcher(
                 if control_lease is None
                 else control_lease
             )
-            runtime = recipe.runtime
+            runtime = self.live.runtime
             request_timeout_seconds = 300.0 if runtime is None else runtime.inference_timeout_s
             publisher = ServedModelsPublisher(
                 self.registry,
@@ -287,10 +320,11 @@ class Dispatcher(
                 self.workers.add(TrainingManagerWorker(training_manager, self))
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
-        if self.services.runs_inference and recipe.runtime is not None and recipe.runtime.serves_requests:
+        if self.services.runs_inference and self.live.runtime is not None and self.live.runtime.serves_requests:
             self.workers.add(
                 ServingWorker(
                     recipe,
+                    self.live,
                     backend_factory,
                     coordination,
                     worker_id=instance_id("inference-startup"),
@@ -305,7 +339,7 @@ class Dispatcher(
                     worker_id=instance_id("samples"),
                 )
             )
-        self.training_status = TrainingStatus(recipe, self.registry, self.errors)
+        self.training_status = TrainingStatus(recipe, self.live, self.registry, self.errors)
         if self.services.runs_control and isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self.background_threads.preload_thread = Thread(
                 target=self.preload_scenarios,
@@ -543,8 +577,10 @@ class Dispatcher(
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
         configs = self.storage.read_settings(scenario).record2sample_config
-        recipe = self.recipe.for_record2sample_configs(self.recipe.build_components(scenario), configs)
-        directories = recipe.scenario_state_dirs(scenario)
+        recipe = with_record2sample_configs(
+            self.recipe, scenario_components(self.recipe, self.live, scenario), configs
+        )
+        directories = scenario_state_dirs(recipe, scenario)
         moved = list(self.registry.archive_store(scenario))
         for directory in directories:
             if directory.exists():
@@ -1298,7 +1334,7 @@ class Dispatcher(
             self.storage.close()
         except BaseException as exc:
             errors.append(exc)
-        errors.extend(close_runtimes(self.recipe.job_components(), self.recipe.runtime))
+        errors.extend(close_runtimes(() if self.services.runs_training else self.job_components, self.live.runtime))
         # Send the experiment events that are still queued before the tracker closes.
         self.registry.experiment_reports.close()
         try:

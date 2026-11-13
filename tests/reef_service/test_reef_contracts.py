@@ -11,7 +11,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
-from tests.support.runtime_stubs import StubInferenceRuntime, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, live_objects
 
 from reef.artifact import (
     Artifact,
@@ -31,6 +31,7 @@ from reef.inference.http import HttpInferenceHandler
 from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.recipe import Recipe
 from reef.record2sample.service import SAMPLES_QUEUE
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -76,12 +77,9 @@ def weight_dispatcher(tmp_path, *, training: bool = False):
     """A dispatcher of weight scenarios that a stub runtime serves; ``training`` gives them a training component.
     The commit history is durable, so a commit's activation queues a serving request."""
     return Dispatcher(
-        (
-            WeightRecipe(**runtime_bindings(runtime=serving_runtime()))
-            if training
-            else WeightRecipe(runtime=serving_runtime())
-        ),
+        WeightRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(runtime=serving_runtime()) if training else LiveObjects(runtime=serving_runtime()),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -99,8 +97,9 @@ def serving_dispatcher(tmp_path) -> Dispatcher:
     """A dispatcher of the record-only recipe whose runtime serves the created scenario "chat"; a /v1 call answers
     only for a scenario that exists. A commit's activation queues a serving request."""
     dispatcher = Dispatcher(
-        Recipe(runtime=serving_runtime()),
+        Recipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=serving_runtime()),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -600,8 +599,9 @@ def test_published_candidate_is_used_after_inference_startup(tmp_path) -> None:
 
     repository_backend = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = Dispatcher(
-        Recipe(runtime=serving_runtime()),
+        Recipe(),
         repository_backend,
+        live=LiveObjects(runtime=serving_runtime()),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
     )
@@ -1080,7 +1080,7 @@ class HarnessRecipe(Recipe):
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "recipe",
-    [HarnessRecipe(runtime=serving_runtime()), WeightRecipe(runtime=serving_runtime())],
+    [HarnessRecipe(), WeightRecipe()],
     ids=["harness", "weights"],
 )
 def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_runs_as_a_tag(tmp_path, recipe) -> None:
@@ -1093,6 +1093,7 @@ def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_run
     dispatcher = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=LiveObjects(runtime=serving_runtime()),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

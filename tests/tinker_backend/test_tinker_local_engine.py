@@ -10,6 +10,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
+from tests.support.config_helpers import connect_training_objects
 from tests.support.job_data import job_data_ref
 from tests.support.runtime_stubs import RunningEngines
 
@@ -20,7 +21,6 @@ from reef.inference.interfaces import InferenceBackend, InferenceHandler
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.inference.residency import adapter_name
 from reef.inference.serving import AdapterServingRuntime
-from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -28,7 +28,7 @@ from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import local_model_required
 from reef.tinker.weights import TinkerSamplerWeights
 from reef.train.component import TrainingJob, job_id_for
-from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
+from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.component import TinkerTrainingComponent
 from reef.train.tinker_backend.launch import TinkerDeployment
 from reef.train.tinker_backend.objectives import TinkerObjective, register_objective, unregister_objective
@@ -227,7 +227,7 @@ def build(config, monkeypatch, engines):
         return runtime
 
     monkeypatch.setattr(RemoteServingRuntimeFactory, "__call__", serve)
-    component, inference = connect_training_component(
+    component, inference = connect_training_objects(
         service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", default_parameters={}
     )
     # The test runs the jobs in this process, as the training service does.
@@ -323,11 +323,9 @@ def test_the_factory_builds_the_component_and_serves_each_scenarios_adapter(
         assert inference.serving_adapter_runtime_load_id("code") == code != served
         assert inference.serving_adapter_runtime_load_id("math") == served
         train(component, inference, objective, "math", 2, start=math.path)
-        assert [checkpoint.state_path for checkpoint in component._client.calls] == [
-            "tinker://base/state",
-            "tinker://base/state",
-            "tinker://update-1/state",
-        ]
+        # Each scenario's first job trains a new LoRA of the model; the third continues math's checkpoint.
+        starts = component._client.calls
+        assert starts[:2] == [FreshStart("Qwen/Qwen3-8B")] * 2 and starts[2].state_path == "tinker://update-1/state"
     finally:
         inference.shutdown()
         component.close()
@@ -398,7 +396,7 @@ def test_engines_serve_tinker_adapters_only_on_an_engine_that_loads_them(tmp_pat
     raw["inference"]["num-gpus"] = 1
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     with pytest.raises(RuntimeConfigError, match="vllm serves full weights only"):
-        connect_training_component(
+        connect_training_objects(
             service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", default_parameters={}
         )
 

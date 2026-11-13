@@ -44,6 +44,8 @@ HARBOR_VERIFIER_TIMEOUT_S = 600
 SANDBOX_LIFETIME_MARGIN_S = 3600
 #: Harbor's default lifetime of an E2B and of a Modal sandbox, in seconds; a lifetime Reef computes is never longer.
 SANDBOX_LIFETIME_MAX_S = 24 * 60 * 60
+#: The lifetime of the Modal sandbox of a trial whose agent has no time limit, in seconds.
+MODAL_SANDBOX_DEFAULT_S = 2 * 60 * 60
 #: The Harbor environment class of an ``e2b`` trial: Harbor's own, with its sandbox deleted at its timeout.
 HARBOR_E2B_ENVIRONMENT = "reef.execution.sandbox.harbor_e2b:KillOnTimeoutE2BEnvironment"
 
@@ -288,7 +290,8 @@ class HarborEnvironmentConfig(TypedDict):
     Values: ``type`` is the Harbor environment type that the caller selected. ``import_path`` is present if and only
     if ``type`` is ``e2b``, and then it is ``HARBOR_E2B_ENVIRONMENT``. ``kwargs`` is present if and only if it is not
     empty. Its keys are ``sandbox_timeout_secs``, on ``e2b`` and ``modal``, an integer number of seconds at most
-    ``SANDBOX_LIFETIME_MAX_S``; and ``modal_vm_runtime``, on ``modal`` only, True.
+    ``SANDBOX_LIFETIME_MAX_S``; and ``modal_vm_runtime``, on ``modal`` only, True. A ``modal`` value always has
+    ``sandbox_timeout_secs``. An ``e2b`` value has it if and only if the trial's agent has a time limit.
     Purpose: ``environment_config`` makes one, and two callers read it. The task rollout runner gives the whole value
     to an in-process Harbor trial as its environment config, through reef-eval's overrides. Harbor then makes the
     class of ``import_path`` when the value has one, and the class of ``type`` otherwise. The generator's check reads
@@ -326,7 +329,9 @@ def environment_config(
       is the sum of the task's build time limit, ``agent["override_setup_timeout_sec"]`` when the agent config sets
       it, the agent's time limit and the task's verifier time limit, plus ``SANDBOX_LIFETIME_MARGIN_S``. Harbor stops
       the sandbox when the trial ends. This lifetime ends the sandbox of a trial whose process was killed, which no
-      one stops. A trial whose agent has no time limit keeps Harbor's default.
+      one stops.
+    - When the agent has no time limit, no other time limit counts. On ``modal``, ``kwargs.sandbox_timeout_secs`` is
+      ``MODAL_SANDBOX_DEFAULT_S``. On ``e2b``, the config holds no lifetime, and the sandbox keeps Harbor's default.
 
     The lifetime has two limits. First, it is at most ``SANDBOX_LIFETIME_MAX_S``, Harbor's default. A trial whose time
     limits add up to more than that loses its sandbox at one day, as it does with Harbor's default. Second, the
@@ -364,7 +369,11 @@ def environment_config(
         kwargs["modal_vm_runtime"] = True
     # Harbor 0.25.0 (``Trial._compute_agent_timeout_sec``): the override, or the task's limit; None is no limit.
     agent_timeout_seconds = agent_limits.override_timeout_sec or task.get("agent", {}).get("timeout_sec")
-    if agent_timeout_seconds is not None:
+    if agent_timeout_seconds is None:
+        # E2B sets no lifetime here, so its sandbox keeps Harbor's default.
+        if environment == "modal":
+            kwargs["sandbox_timeout_secs"] = MODAL_SANDBOX_DEFAULT_S
+    else:
         trial_seconds = (
             task_environment.get("build_timeout_sec", HARBOR_BUILD_TIMEOUT_S)
             # Without a setup time limit of the agent config, the margin covers Harbor's default.
@@ -389,6 +398,7 @@ __all__ = [
     "HARBOR_E2B_NAMES",
     "HARBOR_TASK_ENVIRONMENTS",
     "HARBOR_VERIFIER_TIMEOUT_S",
+    "MODAL_SANDBOX_DEFAULT_S",
     "PROBED_TASK_ENVIRONMENTS",
     "SANDBOX_LIFETIME_MARGIN_S",
     "SANDBOX_LIFETIME_MAX_S",

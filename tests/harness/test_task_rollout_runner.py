@@ -35,8 +35,11 @@ from reef.harness.harbor.rollouts import (
     task_identity,
 )
 
-#: The Harbor environment config of an ``e2b`` trial of a task with no agent time limit.
+#: The Harbor environment config of an ``e2b`` trial of a task with no agent time limit: no lifetime, so the sandbox
+#: keeps Harbor's default.
 E2B_CONFIG = {"type": "e2b", "import_path": HARBOR_E2B_ENVIRONMENT}
+#: The same for a ``modal`` trial: a lifetime of two hours.
+MODAL_CONFIG = {"type": "modal", "kwargs": {"sandbox_timeout_secs": 2 * 60 * 60}}
 
 
 class StandInReef:
@@ -437,9 +440,9 @@ def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: Sta
 @pytest.mark.parametrize(
     ("environment", "has_compose", "gpu_count", "config"),
     [
-        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True}}),
-        ("modal", False, 0, {"type": "modal"}),
-        ("modal", True, 1, {"type": "modal"}),
+        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True, "sandbox_timeout_secs": 7200}}),
+        ("modal", False, 0, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
+        ("modal", True, 1, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
         ("e2b", True, 0, E2B_CONFIG),
     ],
     ids=["modal-compose", "modal-dockerfile", "modal-compose-gpu", "e2b-compose"],
@@ -475,9 +478,10 @@ def test_only_a_modal_compose_task_with_no_gpu_runs_on_the_vm_runtime(
 )
 def test_a_cloud_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, task_toml: str, kwargs) -> None:
     (tmp_path / "task.toml").write_text(task_toml)
+    # With no agent time limit (None), each provider has its own default: two hours on Modal, Harbor's on E2B.
     lifetime = {} if kwargs is None else {"kwargs": kwargs}
-    assert environment_config("modal", tmp_path) == {"type": "modal", **lifetime}
-    # E2B gets the same lifetime, and Reef's class, which deletes the sandbox at that time.
+    assert environment_config("modal", tmp_path) == {**MODAL_CONFIG, **lifetime}
+    # E2B gets the same lifetime from an agent time limit, and Reef's class, which deletes the sandbox at that time.
     assert environment_config("e2b", tmp_path) == {**E2B_CONFIG, **lifetime}
     assert environment_config("docker", tmp_path) == {"type": "docker"}
 
@@ -494,6 +498,8 @@ def test_a_cloud_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, t
         ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": float("inf")}, 86400),
         ("[agent]\ntimeout_sec = 900\n", {}, 600 + 900 + 600 + 3600),
         ("", {"override_setup_timeout_sec": 1800}, None),
+        ("", {"override_timeout_sec": 0}, None),
+        ("", {"override_timeout_sec": None}, None),
         ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": "7200"}, 600 + 7200 + 600 + 3600),
         ("[agent]\ntimeout_sec = 900\n", {"override_setup_timeout_sec": "1800"}, 600 + 1800 + 900 + 600 + 3600),
     ],
@@ -506,6 +512,8 @@ def test_a_cloud_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, t
         "infinite",
         "no-override",
         "no-agent-limit",
+        "no-task-limit-zero",
+        "no-task-limit-none",
         "numeric-string",
         "setup-numeric-string",
     ],
@@ -518,7 +526,8 @@ def test_a_cloud_sandbox_lives_for_the_time_limits_of_the_runners_agent(
     Harbor's trial runs the agent for its ``override_timeout_sec``, or for the task's limit when that is None or 0,
     and sets it up for its ``override_setup_timeout_sec`` (harbor 0.25.0, ``Trial._compute_agent_timeout_sec`` and
     ``Trial._compute_agent_setup_timeout_sec``). Harbor's ``AgentConfig`` reads a numeric string as a number, so the
-    lifetime counts it, and the trial still gets the caller's own value.
+    lifetime counts it, and the trial still gets the caller's own value. When neither the task nor the agent config
+    gives the agent a time limit (None), each provider has its own default, and a setup time limit does not count.
     """
     task_path = tmp_path / "tasks" / "t"
     task_path.mkdir(parents=True)
@@ -527,7 +536,7 @@ def test_a_cloud_sandbox_lives_for_the_time_limits_of_the_runners_agent(
     agent = {**DEFAULT_AGENT, **agent_limits}
     running = runner(reef, tmp_path, lab, concurrency=2, environment=environment, agent=agent)
     running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task_path))] * 2)
-    config: dict[str, object] = dict(E2B_CONFIG) if environment == "e2b" else {"type": environment}
+    config: dict[str, object] = dict(E2B_CONFIG if environment == "e2b" else MODAL_CONFIG)
     if lifetime_seconds is not None:
         config["kwargs"] = {"sandbox_timeout_secs": lifetime_seconds}
     assert [build["overrides"] for build in lab.builds] == [{"environment": config}]

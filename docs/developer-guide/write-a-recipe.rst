@@ -92,10 +92,11 @@ A weight recipe is four pieces plus the class that binds them.
 alongside this page. Its ``recipe.py`` and ``processor.py``
 total fewer than 200 lines; the ``slime/`` package holds its objective and its loss family.
 
-Every weight recipe takes a ``training_component`` as its first positional
-argument and an inference ``runtime`` as a keyword argument. Reef builds both
-from the deployment config and passes them in. The training component runs
-the recipe's jobs; the runtime serves the weights that Reef publishes.
+A recipe is configuration: it has no training component and no inference
+runtime. Reef builds both from the deployment config, and the process that
+runs a service holds them (``reef.scenario.live_objects.LiveObjects``). The
+training component runs the recipe's jobs; the runtime serves the weights
+that Reef publishes.
 
 Configure it
 ~~~~~~~~~~~~
@@ -390,8 +391,9 @@ serving of a deployment that sets no ``inference.serving`` and no engine
 setting.
 
 The ``TrainingComponentFactory`` that the config's ``type`` names returns the
-``TrainingComponent`` alone. It runs in the HTTP service's process; Reef
-passes it to the recipe as ``training_component``. The backend does not build
+``TrainingComponent`` alone. It runs in the HTTP service's process, which
+holds it beside the recipe (``LiveObjects.training_component``); the recipe
+does not hold it. The backend does not build
 serving: the ``inference`` section selects it, and the component's
 ``artifact_format`` tells the serving runtime what each snapshot holds.
 The factory's ``facts(config, model_path, environ)`` states the backend's
@@ -409,7 +411,8 @@ one job at a time in a worker thread, and it resumes unfinished jobs after a
 restart. A subclass implements these methods:
 
 * ``check_job(job)`` raises ``ValueError`` for a job the component cannot
-  train. ``submit`` then records nothing.
+  train. ``submit`` then records nothing. The training service also calls it
+  before control adds the job to the queue.
 * ``run(job, directory)`` trains the job to its end, records each checkpoint
   with ``save_checkpoint``, and returns the job's metrics. A resumed job finds
   its earlier checkpoints with ``saved(directory)``. An exception ends the job

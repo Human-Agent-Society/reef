@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
 from tests.support.records import memory_records
-from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent, live_objects
 from tests.support.trainers import recipe_trainer
 from tests.support.trajectories import policy_trajectory
 
@@ -124,10 +124,10 @@ def task(name: str) -> JobData:
 
 @pytest.mark.unit
 def test_a_single_method_recipe_trains_every_job_with_its_default_objective() -> None:
-    recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=ONE_SAMPLE_JOBS)
+    recipe = StagedRecipe(pipeline_stages=ONE_SAMPLE_JOBS)
     sft = {"objective": "sft"}
     assert recipe.parameters_by_kind() == {"trajectory": sft, "task": sft}
-    trainer = recipe_trainer(recipe, "scenario", memory_records("scenario"), root=STUB_ROOT)
+    trainer = recipe_trainer(recipe, live_objects(), "scenario", memory_records("scenario"), root=STUB_ROOT)
     stage = trainer.pipeline.sample2job
     assert stage.job_parameters(batch("b")) == stage.job_parameters(task("t")) == sft
     assert stage.experiment_config() == {"job_parameters": {"trajectory": sft, "task": sft}}
@@ -146,7 +146,8 @@ def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default
 
     component = StubTrainingComponent()
     trainer = recipe_trainer(
-        SupervisedThenPolicy(**runtime_bindings(component), pipeline_stages=ONE_SAMPLE_JOBS),
+        SupervisedThenPolicy(pipeline_stages=ONE_SAMPLE_JOBS),
+        live_objects(component),
         "scenario",
         memory_records("scenario"),
         root=STUB_ROOT,

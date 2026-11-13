@@ -6,15 +6,16 @@ import asyncio
 
 import pytest
 from aiohttp import web
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
 
 from reef.artifact import GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.loading import build_named_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service import assembly
+from reef.service.assembly import load_named_recipe
 from reef.service.deploy.service_config import ServiceSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -46,13 +47,14 @@ def owned_pair(events: list[str]) -> tuple[OwnedComponent, OwnedRuntime]:
     return OwnedComponent(events), OwnedRuntime(events)
 
 
-def dispatcher_for(recipe: Recipe, tmp_path) -> Dispatcher:
+def dispatcher_for(recipe: Recipe, live: LiveObjects, tmp_path) -> Dispatcher:
     """Exercise dispatcher ownership without the inference worker's separate runtime lifecycle."""
     initial = tmp_path / "initial"
     initial.mkdir()
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
         components=frozenset({"control", "training"}),
@@ -62,7 +64,11 @@ def dispatcher_for(recipe: Recipe, tmp_path) -> Dispatcher:
 def test_dispatcher_closes_the_component_and_runtime_after_all_scenarios_but_not_on_reload(tmp_path):
     events: list[str] = []
     component, runtime = owned_pair(events)
-    dispatcher = dispatcher_for(Recipe(runtime=runtime, training_component=component), tmp_path)
+    dispatcher = dispatcher_for(
+        Recipe(),
+        LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
+        tmp_path,
+    )
     dispatcher.get_or_create_scenario("math")
     dispatcher.get_or_create_scenario("code")
     dispatcher.registry.reload("math")
@@ -90,7 +96,11 @@ def test_dispatcher_closes_the_component_and_runtime_after_all_scenarios_but_not
 def test_dispatcher_releases_the_runtime_when_scenario_teardown_fails(tmp_path):
     events: list[str] = []
     component, runtime = owned_pair(events)
-    dispatcher = dispatcher_for(Recipe(runtime=runtime, training_component=component), tmp_path)
+    dispatcher = dispatcher_for(
+        Recipe(),
+        LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
+        tmp_path,
+    )
     scenario = dispatcher.get_or_create_scenario("math")
     original_close = scenario.close
 
@@ -127,8 +137,8 @@ def test_a_named_recipe_takes_its_configured_runtime_and_an_invalid_one_releases
     (tmp_path / "valid.yaml").write_text(
         "recipe:\n  implementation: recipe\n  runtime:\n    type: injected\ninference:\n  upstream-model: test-model\n"
     )
-    recipe = build_named_recipe("valid", config_directory=tmp_path, environ={}, runtime_registry=registry)
-    assert (recipe.training_component, recipe.runtime) == (None, runtimes[0])
+    _, runtime = load_named_recipe("valid", config_directory=tmp_path, environ={}, runtime_registry=registry)
+    assert runtime == runtimes[0]
     assert events == []
     (tmp_path / "invalid.yaml").write_text(
         """recipe:
@@ -142,14 +152,14 @@ inference:
 """
     )
     with pytest.raises(RecipeConfigError, match="training_mode must be"):
-        build_named_recipe("invalid", config_directory=tmp_path, environ={}, runtime_registry=registry)
+        load_named_recipe("invalid", config_directory=tmp_path, environ={}, runtime_registry=registry)
     assert events == ["shutdown runtime"]
     # A recipe's runtime never trains; training.backend selects the training component.
     (tmp_path / "training.yaml").write_text(
         "recipe:\n  implementation: recipe\n  runtime:\n    type: component\ninference:\n  upstream-model: test-model\n"
     )
     with pytest.raises(TypeError, match=r"training\.backend selects training"):
-        build_named_recipe("training", config_directory=tmp_path, environ={}, runtime_registry=registry)
+        load_named_recipe("training", config_directory=tmp_path, environ={}, runtime_registry=registry)
     assert events == ["shutdown runtime"]
 
 
@@ -157,7 +167,12 @@ def test_service_app_cleanup_closes_its_owned_runtime_once(monkeypatch, tmp_path
     events: list[str] = []
     component, runtime = owned_pair(events)
     monkeypatch.setattr(
-        assembly, "_serving_recipe", lambda *args: Recipe(runtime=runtime, training_component=component)
+        assembly,
+        "_load_deployment",
+        lambda *args, **kwargs: (
+            Recipe(),
+            LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
+        ),
     )
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
 
@@ -176,7 +191,12 @@ def test_failed_service_assembly_releases_its_runtime(monkeypatch, tmp_path):
     events: list[str] = []
     component, runtime = owned_pair(events)
     monkeypatch.setattr(
-        assembly, "_serving_recipe", lambda *args: Recipe(runtime=runtime, training_component=component)
+        assembly,
+        "_load_deployment",
+        lambda *args, **kwargs: (
+            Recipe(),
+            LiveObjects(runtime=runtime, training_component=component, training_facts=StubFacts(component)),
+        ),
     )
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
     with pytest.raises(ValueError, match="training must be an object"):

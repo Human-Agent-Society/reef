@@ -10,16 +10,19 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent, dispatcher, train
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import (
+    BASE_FILE,
     REFERENCE_FILE,
     ArtifactSourceReader,
     ArtifactSources,
+    BaseRoot,
     DirectorySource,
     SourceFiles,
     directory_checksum,
+    read_base_root,
     read_reference,
 )
 from reef.artifact.artifact import training_starts_of
@@ -30,6 +33,7 @@ from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import SnapshotStart
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 
@@ -87,6 +91,28 @@ def test_a_training_artifact_names_its_training_starts(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_a_base_root_is_imported_only_into_the_deployment_whose_default_start_it_names(tmp_path) -> None:
+    value, _, _ = dispatcher(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    for name, model in (("same", "stub"), ("other", "qwen")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / BASE_FILE).write_text(BaseRoot({"model": model}).to_text())
+    imported = value.import_artifact(
+        "math", opened(tmp_path / "same"), None, source=source(tmp_path / "same"), directory=store(tmp_path)
+    )
+    row = value.list_artifacts("math")[0]
+    assert (row["operation"], row["artifact_id"]) == ("import", imported.artifact_id)
+    _, stored_artifact = scenario.resolve_artifact(imported.artifact_id)
+    assert read_base_root(stored_artifact.local_path) == BaseRoot({"model": "stub"})
+    with pytest.raises(ValueError, match="model: 'qwen', not 'stub'"):
+        value.import_artifact(
+            "math", opened(tmp_path / "other"), None, source=source(tmp_path / "other"), directory=store(tmp_path)
+        )
+    assert len(value.list_artifacts("math")) == 2
+    value.close()
+
+
+@pytest.mark.unit
 def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path) -> None:
     value, runtime, backend_factory = dispatcher(tmp_path)
     train(value, 1)
@@ -137,14 +163,16 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     activated = value.activate("math", imported.artifact_id)
     assert scenario.serving_artifact_id() == imported.artifact_id == activated.artifact_id
     value.train_from("math", imported.artifact_id)
-    assert JobLoopState.from_dict(scenario.trainer.state).start == str(runtime.imported[-1])
+    # The training start names the imported artifact's snapshot; the training service imports it for a job.
+    assert SnapshotStart.from_text(JobLoopState.from_dict(scenario.trainer.state).start) is not None
     value.close()
 
     # A restart keeps the chain tip at the last training step and lists the imports.
     component = ImportingComponent(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -159,9 +187,9 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
             "training",
             "creation",
         ]
-        # Control resumes training before inference loads the selected import.
+        # Control names the training start and imports nothing; inference loads the selected import.
         wait_for_serving(restarted)
-        assert component.restore_order == ["training", "inference"]
+        assert component.restore_order == ["inference"]
         request = restarted.coordination.served_models.current_request("math")
         assert request.payload["artifact_id"] == imported.artifact_id
     finally:

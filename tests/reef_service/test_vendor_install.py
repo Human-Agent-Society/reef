@@ -273,8 +273,8 @@ def _backend(
     def method(workspace, services):
         return TreePatch(changed_rules("marker rules\n"))
 
-    recipe = rebuilt_recipe(harness_recipe(tmp_path, method, binary=binary), **fields)
-    return build_harness_backend(recipe, "demo")
+    recipe, live = rebuilt_recipe(*harness_recipe(tmp_path, method, binary=binary), **fields)
+    return build_harness_backend(recipe, live, "demo")
 
 
 def _step(backend: HarnessBackend) -> TrainingCommit:

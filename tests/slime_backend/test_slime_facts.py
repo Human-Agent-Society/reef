@@ -11,6 +11,7 @@ from tests.slime_backend.test_slime_component import worker_args
 from tests.slime_backend.test_slime_launch import MODEL, SAO, deployment_config, settings_of
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.core.errors import RuntimeConfigError
 from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ArtifactFormat
@@ -97,6 +98,9 @@ def test_the_facts_of_a_config_answer_as_the_component_of_the_same_config(
             component.concurrent_jobs,
         )
         assert facts.default_start_inputs == component.default_start_inputs
+        default = facts.default_start()
+        assert dict(default.files) == {BASE_FILE: BaseRoot(facts.default_start_inputs).to_text()}
+        assert default.inputs == facts.default_start_inputs
         for kind in ("trajectory", "task"):
             assert facts.parameters_schema(kind) == component.parameters_schema(kind)
         answers = [

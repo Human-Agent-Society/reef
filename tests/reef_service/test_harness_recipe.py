@@ -80,14 +80,16 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.inference.http import InferenceProxyRuntime
+from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
+from reef.inference.interfaces import InferenceRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
-from reef.recipe.base import ServedEndpoint
+from reef.recipe.deployment import harness_state_dir, scenario_state_dirs
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.recipe.registry import recipe_class_for
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
+from reef.scenario.live_objects import LiveObjects, ServedEndpoint, harness_models, harness_served_model
 from reef.service.app import create_app
 from reef.service.assembly import with_harness_components
 from reef.storage.data import NewItem
@@ -111,11 +113,14 @@ RUN_RUN = "reef.evaluation.harness.runner.run_task"
 SUPPORT = "tests.support.harness_jobs"
 
 
-def from_config(settings: dict[str, Any], **options: Any) -> HarnessEvolutionRecipe:
-    """The recipe of ``settings`` with its harness training component, as the service builds the two."""
-    recipe = with_harness_components(load_recipe(HarnessEvolutionRecipe, settings, {}, **options), {})
+def from_config(
+    settings: dict[str, Any], runtime: InferenceRuntime | None = None
+) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
+    """The recipe of ``settings``, and the live objects with ``runtime`` and the recipe's harness training
+    component, as the service builds them."""
+    recipe = load_recipe(HarnessEvolutionRecipe, settings, {})
     assert isinstance(recipe, HarnessEvolutionRecipe)
-    return recipe
+    return recipe, with_harness_components(recipe, LiveObjects(runtime=runtime), {}, runs_training=True)
 
 
 def flat(scores: list[dict[str, object]]) -> list[object]:
@@ -127,8 +132,8 @@ def artifacts_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
     return ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
 
 
-def backend_of(recipe: HarnessEvolutionRecipe) -> HarnessBackend:
-    return build_harness_backend(recipe)
+def backend_of(recipe: HarnessEvolutionRecipe, live: LiveObjects) -> HarnessBackend:
+    return build_harness_backend(recipe, live)
 
 
 def step(backend: HarnessBackend, state=None, *samples) -> TrainingCommit:
@@ -157,11 +162,11 @@ def test_recipe_resolves_by_dotted_reference() -> None:
 
 
 def test_a_deployment_names_its_plugins_by_reference_or_by_module_and_config() -> None:
-    built = from_config(evolution_config())
-    component = harness_component(built)
+    built, live = from_config(evolution_config())
+    component = harness_component(live)
     assert isinstance(component.method, IdleMethod) and isinstance(component.scorer, FixedScorer)
     assert component.collector is None and built.seed == HarnessTree({}) and built.default_start().files == {}
-    collecting = from_config(
+    _, collecting = from_config(
         evolution_config(
             method={"module": f"{SUPPORT}:IdleMethod", "config": {}},
             evaluation={"collect_failures": True, "collector": f"{SUPPORT}:NoCollection"},
@@ -179,7 +184,7 @@ def test_a_deployment_names_its_plugins_by_reference_or_by_module_and_config() -
 
 
 def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
-    defaults = from_config(evolution_config())
+    defaults, _ = from_config(evolution_config())
     assert defaults.evolution == EvolutionSettings(method=f"{SUPPORT}:IdleMethod")
     assert defaults.evaluation == EvaluationSettings(tasks=("t",), scorer=f"{SUPPORT}:FixedScorer")
     evolution = {
@@ -200,7 +205,7 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
         "max_collected_tasks": 10,
         "max_collected_per_client": 0,
     }
-    built = from_config(evolution_config(evaluation=evaluation, **evolution))
+    built, _ = from_config(evolution_config(evaluation=evaluation, **evolution))
     assert built.evolution == dataclasses.replace(
         defaults.evolution,
         **evolution,
@@ -255,19 +260,19 @@ def test_the_activation_section_names_the_rule_that_decides_whether_a_kept_tree_
             built["activation"] = activation
         return built
 
-    reviewed = from_config(config({"module": "always", "config": {"review_kinds": ["extension"]}}))
+    reviewed, _ = from_config(config({"module": "always", "config": {"review_kinds": ["extension"]}}))
     rule = reviewed.activation_rule()
     assert isinstance(rule, AlwaysActivate) and rule.review_kinds == {"extension"}
-    default = from_config(config()).activation_rule()
+    default = from_config(config())[0].activation_rule()
     assert isinstance(default, AlwaysActivate) and default.review_kinds == frozenset()
-    assert isinstance(from_config(config({"module": "never"})).activation_rule(), NeverActivate)
+    assert isinstance(from_config(config({"module": "never"}))[0].activation_rule(), NeverActivate)
     with pytest.raises(RecipeConfigError, match="review_kinds must be a list"):
         from_config(config({"module": "always", "config": {"review_kinds": "rules"}}))
     # review_kinds names parts of the adapter's tree; a name the tree does not have is refused.
     with pytest.raises(
         RecipeConfigError, match=r"activation\.config\.review_kinds names plugin, not a part of the pi tree"
     ):
-        from_config(config({"module": "always", "config": {"review_kinds": ["plugin"]}})).activation_rule()
+        from_config(config({"module": "always", "config": {"review_kinds": ["plugin"]}}))[0].activation_rule()
 
 
 @pytest.mark.parametrize(
@@ -286,13 +291,13 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
     settings = evolution_config(
         evaluation=evaluation, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
     )
-    built = from_config(settings, runtime=runtime())
+    built, live = from_config(settings, runtime=runtime())
     trainer = recipe_trainer(
-        built, "demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built)
+        built, live, "demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built)
     )
     try:
         backend = job_backend(trainer)
-        selection = harness_component(built).build_policy(backend)
+        selection = harness_component(live).build_policy(backend)
         assert type(selection) is policy
         assert {name: vars(selection)[name] for name in fields} == fields
         # With no run to run, the backend holds no evaluator.
@@ -303,24 +308,24 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
 
 def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     """One win and no losses clears the plain comparison but not a margin of 1."""
-    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, evaluation={"min_margin": 1})
-    backend = backend_of(recipe)
+    recipe, live = harness_recipe(tmp_path, lambda workspace, services: MARKER, evaluation={"min_margin": 1})
+    backend = backend_of(recipe, live)
     result = backend_step(
-        backend, JobData("demo:1"), HarnessState().to_json(), harness_component(recipe).build_policy(backend)
+        backend, JobData("demo:1"), HarnessState().to_json(), harness_component(live).build_policy(backend)
     )
     assert (result.metrics["wins"], result.metrics["losses"], result.metrics["selected"]) == (1, 0, False)
     assert result.metrics["min_margin"] == 1.0
 
 
 def test_the_trainer_of_a_harness_recipe_submits_each_step_to_the_harness_component(tmp_path: Path) -> None:
-    built = harness_recipe(tmp_path, lambda workspace, services: None)
+    built, live = harness_recipe(tmp_path, lambda workspace, services: None)
     trainer = recipe_trainer(
-        built, "demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built)
+        built, live, "demo", memory_records("demo"), artifacts=artifacts_for(built), root=seed_root(built)
     )
-    # The trainer submits each step as a job of the recipe's harness component.
-    assert isinstance(trainer, Trainer) and trainer.job_loop_required().component is built.harness_component
-    assert isinstance(built.harness_component, HarnessTrainingComponent)
-    assert built.job_components() == (built.harness_component,)
+    # The trainer submits each step as a job of the deployment's harness component.
+    assert isinstance(trainer, Trainer) and trainer.job_loop_required().component is live.harness_component
+    assert isinstance(live.harness_component, HarnessTrainingComponent)
+    assert live.job_components() == (live.harness_component,)
     assert trainer.pipeline.context.report_type is ScoredRolloutReport
     trainer.close()
 
@@ -330,9 +335,9 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
 ) -> None:
     """One recipe serves many scenarios, each under its own directory; a relative state_dir is made absolute at
     build."""
-    assert from_config(evolution_config()).evolution.state_dir == ".reef/harness"
+    assert from_config(evolution_config())[0].evolution.state_dir == ".reef/harness"
     monkeypatch.chdir(tmp_path)
-    built = from_config(
+    built, live = from_config(
         evolution_config(state_dir="state", binary=str(make_pi_binary(tmp_path))),
         runtime=runtime(),
     )
@@ -340,11 +345,11 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
     # The paths come from the ``evolution`` settings alone; the recipe names them for the delete and the pages.
     assert built.evolution.scenario_state_dir("demo") == state / "demo"
     assert built.evolution.component_state_dir("demo", "harness") == state / "demo" / "harness"
-    assert built.scenario_state_dirs("demo") == (state / "demo",)
-    assert built.harness_state_dir("demo", "harness") == state / "demo" / "harness"
+    assert scenario_state_dirs(built, "demo") == (state / "demo",)
+    assert harness_state_dir(built, "demo", "harness") == state / "demo" / "harness"
     records = memory_records("demo")
     for scenario in ("demo", "other"):
-        trainer = recipe_trainer(built, scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
+        trainer = recipe_trainer(built, live, scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
         backend = job_backend(trainer)
         root = state / scenario / COMPONENT
         assert backend.history.root == root / "history" and backend.records.root == root / "steps"
@@ -358,7 +363,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
 def test_the_seed_is_a_directory_whose_tree_is_the_root_release(tmp_path: Path) -> None:
     seed = tmp_path / "seed"
     PI_SEED.write(seed)
-    built = from_config(evolution_config(seed=str(seed)))
+    built, _ = from_config(evolution_config(seed=str(seed)))
     assert built.seed == PI_SEED and built.default_start().files == dict(PI_SEED.files)
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed must be a string"):
         from_config(evolution_config(seed=["rules.md"]))
@@ -403,7 +408,9 @@ def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_pat
     manifest = {"tasks": [], "task_manifest": str(tmp_path / "split.json"), "tasks_root": str(root)}
 
     def boot(adapter: str = "pi", **evaluation: Any) -> HarnessEvolutionRecipe:
-        return from_config(evolution_config(evaluation={**manifest, **evaluation}, adapter=adapter), runtime=runtime())
+        return from_config(
+            evolution_config(evaluation={**manifest, **evaluation}, adapter=adapter), runtime=runtime()
+        )[0]
 
     assert boot().configured_tasks() == (str(root / "held-1"), str(root / "held-2"))
     assert boot().task_directories(get_adapter("pi"))
@@ -427,7 +434,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
     tmp_path: Path,
 ) -> None:
     store_settings = {"tasks": [], "imported_tasks": True}
-    built = from_config(
+    built, live = from_config(
         evolution_config(
             evaluation=store_settings, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
         ),
@@ -436,7 +443,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
     assert built.configured_tasks() == ()
     # The recipe's harness stage names the eval split in each job; without imported tasks it names none.
     assert built.stages().sample2job.config["evaluation_split"] is True
-    configured = from_config(evolution_config(binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "c")))
+    configured, _ = from_config(evolution_config(binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "c")))
     assert "evaluation_split" not in configured.stages().sample2job.config
     root = tmp_path / "tasks"
     with closing(data_storage()) as storage, closing(storage.open("s")) as session:
@@ -448,7 +455,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
             (task,) = samples.read([name])
             return task
 
-        backend = build_harness_backend(built, "s")
+        backend = build_harness_backend(built, live, "s")
         batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
         # The harness stage names the eval split as the trainer reads it when it makes the job's parameters, and the
         # step evaluates on it.
@@ -480,7 +487,7 @@ def test_offline_runs_need_task_directories_to_evaluate_on_and_a_scorer() -> Non
     """A prompt adapter's offline steps play train task directories, so its evaluation tasks are directories too."""
     offline = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskJobData"}}}
     store = {"tasks": [], "imported_tasks": True}
-    built = from_config({**evolution_config(evaluation=store), **offline}, runtime=runtime())
+    built, _ = from_config({**evolution_config(evaluation=store), **offline}, runtime=runtime())
     assert built.stages().sample2job.plugin_class is TrainTaskJobData and built.runs_offline()
     with pytest.raises(RecipeConfigError, match="the evaluation tasks must be task directories too"):
         from_config({**evolution_config(), **offline}, runtime=runtime())
@@ -507,13 +514,13 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
             built["pipeline"] = pipeline
         return built
 
-    def trainer_of(recipe: HarnessEvolutionRecipe) -> Trainer:
+    def trainer_of(recipe: HarnessEvolutionRecipe, live: LiveObjects) -> Trainer:
         return recipe_trainer(
-            recipe, "demo", memory_records("demo"), artifacts=artifacts_for(recipe), root=seed_root(recipe)
+            recipe, live, "demo", memory_records("demo"), artifacts=artifacts_for(recipe), root=seed_root(recipe)
         )
 
     records = trainer_of(
-        from_config(
+        *from_config(
             settings(
                 pipeline={
                     "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
@@ -528,12 +535,12 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
     # The stage config sets job_samples and the buffer.
     assert (records.job_samples, records.pipeline.buffer_size) == (2, 6)
 
-    reported = trainer_of(from_config(settings(), runtime=proxy))
+    reported = trainer_of(*from_config(settings(), runtime=proxy))
     stages = (reported.pipeline.record2sample, reported.pipeline.sample2job)
     assert [type(stage).__name__ for stage in stages] == ["TraceSamples", "TraceJobData"]
     # A job takes one sample by default, and the default buffer holds the data of one job.
     assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 1)
-    sized = trainer_of(from_config(settings(pipeline={"sample2job": {"config": {"job_samples": 3}}}), runtime=proxy))
+    sized = trainer_of(*from_config(settings(pipeline={"sample2job": {"config": {"job_samples": 3}}}), runtime=proxy))
     assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 3)
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
@@ -551,18 +558,18 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         ({"buffer_size": 1, "job_samples": 2}, "buffer_size 1 is smaller than job_samples 2"),
     ):
         with pytest.raises(PluginConfigError, match=message):
-            trainer_of(from_config(settings(pipeline={"sample2job": {"config": stage_config}}), runtime=proxy))
+            trainer_of(*from_config(settings(pipeline={"sample2job": {"config": stage_config}}), runtime=proxy))
     with pytest.raises(PluginConfigError, match="batch_policy"):
         trainer_of(
-            from_config(settings(pipeline={"sample2job": {"config": {"batch_policy": "records"}}}), runtime=proxy)
+            *from_config(settings(pipeline={"sample2job": {"config": {"batch_policy": "records"}}}), runtime=proxy)
         )
 
 
 def test_recipe_selects_the_run_executor(monkeypatch: pytest.MonkeyPatch) -> None:
     """evolution.executor selects the executor; local is the default, and a sandbox that cannot isolate refuses
     when the harness training component is built."""
-    assert type(harness_component(from_config(evolution_config())).executor).__name__ == "LocalExecutor"
-    local = harness_component(from_config(evolution_config(executor="local")))
+    assert type(harness_component(from_config(evolution_config())[1]).executor).__name__ == "LocalExecutor"
+    local = harness_component(from_config(evolution_config(executor="local"))[1])
     assert type(local.executor).__name__ == "LocalExecutor"
     monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
     with pytest.raises(ConfigError, match="bubblewrap"):
@@ -571,9 +578,9 @@ def test_recipe_selects_the_run_executor(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_evolution_worker_selector_is_independent_of_sandbox_selector() -> None:
     settings = {"execution": {"evolution": {"backend": "mp", "workers": 2}}, **evolution_config()}
-    recipe = from_config(settings)
+    recipe, live = from_config(settings)
     assert recipe.worker_executor == ExecutorSettings("mp", workers=2)
-    assert type(harness_component(recipe).executor).__name__ == "LocalExecutor"
+    assert type(harness_component(live).executor).__name__ == "LocalExecutor"
     settings["execution"]["evolution"]["backend"] = "uni"
     with pytest.raises(ConfigError, match="exactly one"):
         from_config(settings)
@@ -585,8 +592,8 @@ def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch) -> None
         "execution": {"evolution": {"backend": "ray", "resources": {"gpus_per_worker": 1}}},
         **evolution_config(),
     }
-    recipe = from_config(settings)
-    scorer = harness_component(recipe).scorer
+    recipe, live = from_config(settings)
+    scorer = harness_component(live).scorer
     assert scorer is not None
     selected, requirements = evaluation_selection(scorer, recipe.worker_executor)
     assert selected.settings.backend == "ray" and requirements.gpus_per_worker == 1
@@ -596,17 +603,17 @@ def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch) -> None
 
 
 def test_recipe_without_a_runtime_refuses_to_build(tmp_path: Path) -> None:
-    built = rebuilt_recipe(harness_recipe(tmp_path, lambda workspace, services: None), runtime=None)
+    built, live = rebuilt_recipe(*harness_recipe(tmp_path, lambda workspace, services: None), runtime=None)
     with pytest.raises(ConfigError, match=r"reef\.upstream_url"):
-        backend_of(built)
+        backend_of(built, live)
 
 
 def test_adapter_without_model_binding_refuses_boot(tmp_path: Path, monkeypatch) -> None:
-    built = harness_recipe(tmp_path, lambda workspace, services: None)
+    built, live = harness_recipe(tmp_path, lambda workspace, services: None)
     unbound = dataclasses.replace(get_adapter("pi"), model_binding={})
     monkeypatch.setattr("reef.train.harness_backend.facts.get_adapter", lambda name: unbound)
     with pytest.raises(ModelBindingError, match="declares no model_binding"):
-        backend_of(rebuilt_recipe(built))
+        backend_of(*rebuilt_recipe(built, live))
 
 
 def test_a_winning_step_binds_only_its_runs_records_its_context_and_names_its_kinds(
@@ -671,9 +678,12 @@ def test_the_method_receives_the_served_model_binding(tmp_path: Path) -> None:
 def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
     """Told where Reef answers inference, runs sample the snapshot the scenario serves through it."""
     config = {"model": {"path": "qwen3-8b"}, **evolution_config()}
-    recipe = load_recipe(HarnessEvolutionRecipe, config, {"REEF_UPSTREAM_URL": "http://upstream.test"})
-    assert recipe.harness_models().served().base_url == "http://upstream.test"
-    served = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900/", token="reef-local")).harness_models()
+    environ = {"REEF_UPSTREAM_URL": "http://upstream.test"}
+    recipe = load_recipe(HarnessEvolutionRecipe, config, environ)
+    live = LiveObjects(runtime=resolve_proxy_runtime(environ, None))
+    assert harness_models(recipe, live).served().base_url == "http://upstream.test"
+    endpoint = ServedEndpoint("http://127.0.0.1:8900/", token="reef-local")
+    served = harness_models(recipe, dataclasses.replace(live, served_endpoint=endpoint))
     binding = served.served("agent")
     assert binding.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
     assert binding.api_key == "reef-local" and binding.model == "qwen3-8b"
@@ -681,11 +691,15 @@ def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
     assert served.served("org/project").base_url == "http://127.0.0.1:8900/reef/scenarios/org%2Fproject/evaluation"
     assert served.served().base_url == "http://upstream.test"
     # The harness service reads the same model for the layer that a client installs.
-    assert recipe.harness_served_model("agent", "harness") == recipe.harness_models().served("agent")
+    assert harness_served_model(recipe, live, "agent", "harness") == harness_models(recipe, live).served("agent")
     # A component of a composite names itself, so its candidate's calls leave its own served hooks out.
-    component = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900", component="harness"))
+    component = harness_models(
+        recipe,
+        dataclasses.replace(live, served_endpoint=ServedEndpoint("http://127.0.0.1:8900")),
+        component="harness",
+    )
     assert (
-        component.harness_models().served("agent").base_url
+        component.served("agent").base_url
         == "http://127.0.0.1:8900/reef/scenarios/agent/components/harness/evaluation"
     )
     # Every run of the scenario binds the served model through the same route.
@@ -714,7 +728,7 @@ def test_the_cache_reuses_a_score_only_in_the_context_it_ran_in(tmp_path: Path, 
 
     def task_run(step_number: int, evaluation: dict[str, Any] | None = None, **evolution: Any):
         settings = evolution_config(evaluation=evaluation, **{**deployment, **evolution})
-        backend = backend_of(from_config(settings, runtime=runtime()))
+        backend = backend_of(*from_config(settings, runtime=runtime()))
         try:
             backend.history.add_candidate(PI_SEED, step=1, origin="seed")
             (record,) = backend.evaluator.runs(PI_SEED, ["t"], repeats=1, step=step_number)
@@ -749,10 +763,10 @@ def test_the_executor_and_run_settings_reach_the_runs_and_interleave_the_sides(t
         return run_task(descriptor, files, prompt, **kwargs)
 
     monkeypatch.setattr(RUN_RUN, spy)
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path, lambda workspace, services: MARKER, evaluation={"task_timeout_s": 5.0, "repeats": 2}
     )
-    backend = backend_of(rebuilt_recipe(recipe, executor=executor))
+    backend = backend_of(*rebuilt_recipe(recipe, live, executor=executor))
     result = step(backend)
     assert timeouts == [5.0] * 4
     assert all(received is executor for received in executors)
@@ -775,12 +789,12 @@ def test_littering_runs_are_counted_and_forbid_residue_fails_them(tmp_path: Path
         )
     )
     litterer.chmod(0o755)
-    counted = step(backend_of(harness_recipe(tmp_path, lambda workspace, services: MARKER, binary=str(litterer))))
+    counted = step(backend_of(*harness_recipe(tmp_path, lambda workspace, services: MARKER, binary=str(litterer))))
     assert counted.metrics["candidate_residue"] == 1 and counted.metrics["current_residue"] == 1
     assert counted.metrics["run_failures"] == 0
     (tmp_path / "forbidden").mkdir()
     strict = backend_of(
-        harness_recipe(
+        *harness_recipe(
             tmp_path / "forbidden",
             lambda workspace, services: MARKER,
             binary=str(litterer),
@@ -798,8 +812,10 @@ def test_littering_runs_are_counted_and_forbid_residue_fails_them(tmp_path: Path
 def test_failed_runs_are_counted_never_scored(tmp_path: Path) -> None:
     """An unlaunchable run loses its pairing but puts no -inf into the metrics, which the commit history
     writes as JSON."""
-    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, binary=str(tmp_path / "no-such-binary"))
-    result = step(backend_of(recipe))
+    recipe, live = harness_recipe(
+        tmp_path, lambda workspace, services: MARKER, binary=str(tmp_path / "no-such-binary")
+    )
+    result = step(backend_of(recipe, live))
     assert result.metrics["run_failures"] == 2  # both sides, one task
     assert result.metrics["selected"] is False  # both failed: a tie
     json.loads(json.dumps(result.metrics, allow_nan=False))
@@ -848,14 +864,14 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
         "(session/'session.jsonl').write_text('{\"type\":\"agent_end\"}\\n')\n"
     )
     binary.chmod(0o755)
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path,
         lambda workspace, services: MARKER,
         binary=str(binary),
         score=task_order_score,
         tasks=("task one", "task two"),
     )
-    backend = backend_of(rebuilt_recipe(recipe, worker_executor=ExecutorSettings(workers=4)))
+    backend = backend_of(*rebuilt_recipe(recipe, live, worker_executor=ExecutorSettings(workers=4)))
     prepared = backend.prepare_job(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
     try:
         evaluation = backend.evaluate(prepared.candidate)
@@ -868,8 +884,8 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("workers, expected", [(1, "uni"), (2, "mp")])
 def test_real_runs_run_on_the_selected_worker_backend(tmp_path, workers, expected, caplog):
-    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, tasks=("task one", "task two"))
-    backend = backend_of(rebuilt_recipe(recipe, worker_executor=ExecutorSettings(workers=workers)))
+    recipe, live = harness_recipe(tmp_path, lambda workspace, services: MARKER, tasks=("task one", "task two"))
+    backend = backend_of(*rebuilt_recipe(recipe, live, worker_executor=ExecutorSettings(workers=workers)))
     assert backend.evaluator.worker_pool.selection.settings.backend == expected
     assert backend.evaluator.worker_pool.requirements.gpus_per_worker == 0
     prepared = backend.prepare_job(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
@@ -1047,7 +1063,7 @@ def test_untrusted_text_fences_with_a_delimiter_the_text_cannot_forge() -> None:
 def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Path) -> None:
     """The held tip's metadata names what served, so a restart that lost the history serves that, not the tip."""
     patches = iter((MARKER,))
-    built = harness_recipe(
+    built, live = harness_recipe(
         tmp_path, lambda workspace, services: next(patches, None), activation=PluginReference(NeverActivate, {})
     )
     factory = harness_repository(tmp_path)
@@ -1056,6 +1072,7 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
         return Dispatcher(
             built,
             factory,
+            live=live,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(),
             hold_local_cycles=True,
@@ -1089,7 +1106,7 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
     patches = iter((MARKER,))
     dispatcher = harness_dispatcher(
         tmp_path,
-        harness_recipe(
+        *harness_recipe(
             tmp_path, lambda workspace, services: next(patches, None), activation=PluginReference(NeverActivate, {})
         ),
         hold_local_cycles=True,
@@ -1151,7 +1168,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
     def markers(task: str, result: TaskResult) -> float:
         return float(result.trajectory[-1]["rules"].count("marker"))
 
-    def recipe(*labels: str) -> HarnessEvolutionRecipe:
+    def recipe(*labels: str) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
         """Each step appends one marker line, named by the next label, to the rules of the tree it evolves."""
         remaining = iter(labels)
 
@@ -1163,10 +1180,11 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
 
         return harness_recipe(tmp_path, method, score=markers)
 
-    def open_dispatcher(built: HarnessEvolutionRecipe) -> Dispatcher:
+    def open_dispatcher(built: HarnessEvolutionRecipe, live: LiveObjects) -> Dispatcher:
         return Dispatcher(
             built,
             factory,
+            live=live,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
             hold_local_cycles=True,
@@ -1181,7 +1199,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
     first_recipe = recipe("r1", "r2")
     # One repository across the restart, as a durable backend keeps it.
     factory = harness_repository(tmp_path)
-    dispatcher = open_dispatcher(first_recipe)
+    dispatcher = open_dispatcher(*first_recipe)
     try:
         scenario = dispatcher.get_or_create_scenario("start")
         assert scenario is not None
@@ -1204,7 +1222,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         dispatcher.close()
 
     # A restart before the trainer's next commit takes the start again from the train_from record.
-    restarted = open_dispatcher(recipe("r3"))
+    restarted = open_dispatcher(*recipe("r3"))
     try:
         scenario = restarted.get_or_create_scenario("start")
         assert scenario is not None
@@ -1231,7 +1249,7 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
     def markers(task: str, result: TaskResult) -> float:
         return float(result.trajectory[-1]["rules"].count("marker"))
 
-    def recipe(*labels: str) -> HarnessEvolutionRecipe:
+    def recipe(*labels: str) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
         """Each step appends one marker line, named by the next label, to the rules of the tree it evolves."""
         remaining = iter(labels)
 
@@ -1243,10 +1261,11 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
 
         return harness_recipe(tmp_path, method, score=markers)
 
-    def open_dispatcher(built: HarnessEvolutionRecipe) -> Dispatcher:
+    def open_dispatcher(built: HarnessEvolutionRecipe, live: LiveObjects) -> Dispatcher:
         return Dispatcher(
             built,
             factory,
+            live=live,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
             hold_local_cycles=True,
@@ -1256,7 +1275,7 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
     first_recipe = recipe("r1")
     # One repository across the restart, as a durable backend keeps it.
     factory = harness_repository(tmp_path)
-    dispatcher = open_dispatcher(first_recipe)
+    dispatcher = open_dispatcher(*first_recipe)
     try:
         scenario = dispatcher.get_or_create_scenario("sync")
         assert scenario is not None
@@ -1283,7 +1302,7 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
     finally:
         dispatcher.close()
 
-    restarted = open_dispatcher(recipe("r2"))
+    restarted = open_dispatcher(*recipe("r2"))
     try:
         scenario = restarted.get_or_create_scenario("sync")
         assert scenario is not None
@@ -1320,7 +1339,7 @@ def test_changed_kinds_describe_published_bytes() -> None:
 
 def test_a_publish_keeps_the_source_tree_and_the_jobs_tree_is_the_next_start(tmp_path: Path) -> None:
     dispatcher = harness_dispatcher(
-        tmp_path, harness_recipe(tmp_path, lambda workspace, services: MARKER), hold_local_cycles=True
+        tmp_path, *harness_recipe(tmp_path, lambda workspace, services: MARKER), hold_local_cycles=True
     )
     try:
         scenario = dispatcher.get_or_create_scenario("render-cleanup")
@@ -1353,15 +1372,17 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
     key = "sk-476-DECISIVE-KEY-0123456789abcdef"
     leak = TreePatch({"config/models.json": json.dumps({"providers": {"leak": {"apiKey": key}}}) + "\n"})
     patches = iter((leak,))
-    built = harness_recipe(tmp_path, lambda workspace, services: next(patches, None))
+    built, live = harness_recipe(tmp_path, lambda workspace, services: next(patches, None))
     repository = harness_repository(tmp_path)
     agent_record_dir = tmp_path / "agent-record"
 
     def dispatcher() -> Dispatcher:
         # Each process makes its own harness component, as each service process builds its recipe.
+        recipe, rebuilt_live = rebuilt_recipe(built, live)
         return Dispatcher(
-            rebuilt_recipe(built),
+            recipe,
             repository,
+            live=rebuilt_live,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),
             hold_local_cycles=True,

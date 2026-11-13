@@ -51,7 +51,8 @@ Implementation
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
 - Override ``build_components`` only when the method's snapshots bind
-  components beyond those of the recipe it extends.
+  components beyond those of the recipe it extends. It reads the recipe's
+  configuration alone: a recipe has no runtime and no training component.
 
 Surrounding changes
 ~~~~~~~~~~~~~~~~~~~
@@ -131,8 +132,11 @@ Implementation
   ``SavedCheckpoint.artifact_path`` in a form that serving loads: a Hugging Face
   checkpoint for full weights, or a PEFT adapter in an ``adapter/`` directory.
 - Implement ``import_start`` to load a published snapshot as the start of the
-  next job. Raise ``ValueError`` when the framework cannot do this; Reef then
-  refuses a ``train-from`` for the scenario with HTTP 400.
+  next job. The training service calls it when it takes a job whose start
+  names a snapshot, so the same snapshot must give the same start again.
+  Raise ``ValueError`` when the framework cannot do this, and refuse the same
+  snapshots in ``facts.check_import_start``; Reef then refuses a
+  ``train-from`` for the scenario with HTTP 400.
 - Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
@@ -153,6 +157,41 @@ Implementation
   service SDK. Define the facts type in the integration's own package, from
   its own settings, and let the component answer the same members from a value
   of it, so the two cannot differ. Share no facts code with another backend.
+  ``facts`` is abstract: every factory defines it.
+  Only ``reef serve --component training`` builds the component. Every other
+  service reads the facts, so its environment needs neither the framework nor
+  the backend's credentials. Control reaches the component through the work
+  queue; see `Control and the training service
+  <../developer-guide/executors.rst#control-and-the-training-service>`__. The
+  facts type defines these members beside the properties:
+
+  - ``default_start()`` and ``default_start_inputs``: the root of a new
+    scenario (next item).
+  - ``parameters_schema(kind)``: the JSON Schema of a job's parameters.
+  - ``check_root_start(root)`` and ``check_import_start(artifact_dir)``: raise
+    ``ValueError`` exactly when the component's ``root_start`` and
+    ``import_start`` raise, with the same message. They write nothing.
+  - ``check_artifact(files)``: check an import's files. The default checks
+    ``artifact_format`` and returns ``None``. Override it when the snapshots
+    have another layout. Return a JSON object when something must also
+    resolve on the backend's service, and implement
+    ``TrainingComponent.check_remote_artifact(names)`` for it.
+
+  The component implements ``check_job``, which the training service runs
+  before a job enters the queue, and ``changed_parts`` when its checkpoints
+  change named parts. Return no start that begins with ``snapshot:``; Reef
+  names snapshots with that prefix.
+- State the default start in the facts, and nowhere else.
+  ``facts.default_start()`` returns the ``DefaultStart`` that a new scenario's
+  root holds: a few small text files and ``default_start_inputs``. Write no
+  weight file. A backend that trains a base model writes a base root
+  (``base.json`` with ``BaseRoot(inputs).to_text()``) or a reference to the
+  base model's commit (``hf-reference.json``). The component defines no
+  ``default_start``. It defines the ``default_start_inputs`` property, with
+  the facts' value, and its ``root_start`` (or the ``import_start`` behind it)
+  starts a job at the base model from a root that holds those files.
+  ``facts.check_root_start(root)`` refuses the same roots as
+  ``component.root_start(root)``.
   Add a test that compares the facts with the component for two configs, and
   one that builds the facts without the framework. See `Facts without a
   component <../developer-guide/executors.rst#facts-without-a-component>`__.
@@ -263,7 +302,10 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   request on its way to the engine: a client pulls the artifacts that shape
   its requests.
 - Declare the components in the owning recipe's ``build_components``; do not
-  make a component choose a method or evaluate a candidate.
+  make a component choose a method or evaluate a candidate. A fact that only
+  a runtime or a training component knows belongs in
+  ``reef.scenario.live_objects``, whose functions take the recipe and the
+  process's ``LiveObjects``.
 - Test component behavior in ``tests/artifact/test_scenario_components.py`` or
   ``tests/artifact/test_snapshot_components.py``. Test storage backends against
   the contracts in ``tests/artifact/test_reef_artifacts.py``.

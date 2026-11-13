@@ -69,8 +69,8 @@ def channel_dispatcher(
         else {}
     )
     stages["sample2job"] = {"config": {"job_samples": job_samples}}
-    recipe = rebuilt_recipe(
-        harness_recipe(
+    recipe, live = rebuilt_recipe(
+        *harness_recipe(
             tmp_path,
             lambda workspace, services: next(candidates, None),
             seed=seed,
@@ -78,7 +78,7 @@ def channel_dispatcher(
         ),
         pipeline_stages=PipelineSettings.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
     )
-    dispatcher = harness_dispatcher(tmp_path, recipe)
+    dispatcher = harness_dispatcher(tmp_path, recipe, live)
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
 
@@ -285,7 +285,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 
     async def run() -> None:
         dispatcher = channel_dispatcher(tmp_path, PATCHES)
-        backend = job_backend(dispatcher.get_or_create_scenario("delivery").trainer)
+        backend = job_backend(dispatcher.get_or_create_scenario("delivery").trainer, dispatcher=dispatcher)
         evaluate_candidate = backend.evaluate
 
         def blocked_evaluate(candidate: UpdateCandidate, **options) -> EvaluationResult:

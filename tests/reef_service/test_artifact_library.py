@@ -12,7 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_versions import ImportingComponent
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.polling import wait_until
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import live_objects
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -61,12 +61,12 @@ def cell(tmp_path: Path, name: str) -> Dispatcher:
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = SQLiteScenarioStorage(root / "records", task_files=task_files, data=data)
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
+        TestPolicyRecipe(),
         UriBackend.factory(directory=root / "repository"),
+        live=live_objects(runtime, runtime.inference, data_store=data),
         local_artifact_dir=root / "staged",
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
-        data_store=data,
         coordination=memory_coordination(),
     )
     dispatcher.workers.add(

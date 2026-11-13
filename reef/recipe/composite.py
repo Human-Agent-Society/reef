@@ -1,10 +1,15 @@
 """One scenario served and evolved by several recipes, one per snapshot component.
 
-A composite recipe binds a recipe to each component name. It declares
-each recipe's component under that component's name, its default start keeps each
-component's seed under that component's directory, and its trainers are
+A composite recipe is a mapping from component name to that component's
+recipe, and it computes nothing from the recipes. ``component_recipes`` gives
+the recipes of any deployment, and each owner of a result reads them: the
+scenario's components hold each recipe's component under its name
+(``reef.scenario.live_objects.scenario_components``), the scenario's default
+start keeps each component's seed under that component's directory
+(``reef.scenario.live_objects.default_start``), and its trainers are
 the components' trainers, run as independent workers that meet at the
-scenario's commit boundary (see ``docs/advanced_topics/state-model.rst``).
+scenario's commit boundary (``reef.scenario.factory.read_trainer_specs``; see
+``docs/advanced_topics/state-model.rst``).
 
 Configured by a dotted ``implementation`` whose config carries a
 ``components`` object. Each component has the shape of a file's ``recipe``
@@ -31,48 +36,19 @@ uses the deployment's model:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
-from functools import cached_property
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from reef.artifact.components import ComponentSpec, ScenarioComponents
-from reef.artifact.repository import DefaultStart
 from reef.core.components import validate_component_name
-from reef.core.reports import ReportBase, ReportValidationError
-from reef.harness.tasks.model_binding import ModelBinding
-from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
+from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.config import recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
-from reef.storage.data import DataStore
-from reef.train.component import ScenarioRoot, TrainingComponent, component_root
+from reef.recipe.harness import HarnessEvolutionRecipe
 
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
 RESERVED_COMPONENT_NAMES = ("train", "step", "reef", "operations")
 #: The sections a component keeps under its own ``config``; a file keeps them at its top level.
 COMPONENT_FRAMEWORK_SECTIONS = ("pipeline", "evaluation")
-
-
-class AnyComponentReport(ReportBase):
-    """A report contract a payload meets when any of ``report_types`` parses it; the refusal names each."""
-
-    report_types: ClassVar[tuple[type[ReportBase], ...]] = ()
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> ReportBase:
-        refusals = []
-        for report_type in cls.report_types:
-            try:
-                return report_type.from_dict(payload)
-            except ReportValidationError as exc:
-                refusals.append(f"{report_type.__name__}: {exc}")
-        raise ReportValidationError("no component accepts this report: " + "; ".join(refusals))
-
-
-def any_component_report(report_types: tuple[type[ReportBase], ...]) -> type[ReportBase]:
-    """The contract a payload meets when any of ``report_types`` parses it, named after them."""
-    name = "AnyOf" + "".join(item.__name__ for item in report_types)
-    return type(name, (AnyComponentReport,), {"report_types": report_types})
 
 
 def configured_training_mode(config: Mapping[str, Any]) -> str | None:
@@ -102,10 +78,29 @@ def component_recipe_config(component: str, section: Any) -> dict[str, Any]:
 
 @dataclass(frozen=True, kw_only=True)
 class CompositeRecipe(Recipe):
-    """Bind one recipe per snapshot component; the scenario runs their trainers side by side.
+    """A mapping from component name to the recipe of that component, and nothing more.
 
-    The loader makes the component recipes from the ``components`` section
-    (``reef.recipe.loading.load_composite_recipe``).
+    Values: ``components`` maps each snapshot component's name to its recipe value. The mapping meets all of
+    these conditions, which ``__post_init__`` checks; a mapping that fails one raises ``RecipeConfigError``:
+
+    - It has at least two entries.
+    - Each name is a valid component name (``reef.core.components.validate_component_name``) and is none of
+      ``RESERVED_COMPONENT_NAMES``.
+    - Each value is a ``Recipe`` and is no ``CompositeRecipe``.
+    - Each value's ``training_mode`` equals the composite's.
+    - At most one value is a ``WeightTrainingRecipe``: a snapshot loads one component into a runtime.
+    - At most one value is a ``HarnessEvolutionRecipe``: a process has one harness training component
+      (``reef.scenario.live_objects.LiveObjects.harness_component``).
+
+    The other fields are ``Recipe``'s: ``name``, ``training_mode`` and ``activation`` are the deployment's own
+    values. The composite computes nothing from its children. ``report_type``, ``build_components``,
+    ``default_start`` and ``stages`` are the inherited defaults of ``Recipe`` and say nothing about the children;
+    a reader iterates the children (``component_recipes``) and asks each one.
+
+    Purpose: the loader makes it from the ``components`` section (``reef.recipe.loading.load_composite_recipe``).
+    Each owner of a result reads the children with ``component_recipes``: the scenario's components, default start
+    and root check (``reef.scenario.live_objects``), the trainers and the report contract
+    (``reef.scenario.factory``), and the harness and state directory questions (``reef.recipe.deployment``).
     """
 
     components: Mapping[str, Recipe] = field(default_factory=dict)
@@ -138,144 +133,27 @@ class CompositeRecipe(Recipe):
             raise RecipeConfigError(
                 f"components {weight_components} all train weights; a snapshot loads one component"
             )
+        harness_components = [
+            name for name, recipe in self.components.items() if isinstance(recipe, HarnessEvolutionRecipe)
+        ]
+        if len(harness_components) > 1:
+            raise RecipeConfigError(
+                f"components {harness_components} each evolve a harness; a composite evolves one, because a process "
+                "has one harness training component"
+            )
         object.__setattr__(self, "components", dict(self.components))
 
-    def with_served_endpoint(self, endpoint: ServedEndpoint) -> CompositeRecipe:
-        # Each component's evaluation runs a candidate of that component alone: the endpoint names it.
-        return replace(
-            self,
-            components={
-                name: recipe.with_served_endpoint(replace(endpoint, component=name))
-                for name, recipe in self.components.items()
-            },
-        )
 
-    @property
-    def harness_adapter(self) -> str | None:
-        """The adapter of the component recipe that serves a harness tree; a composite serves at most one."""
-        return next((recipe.harness_adapter for recipe in self.components.values() if recipe.harness_adapter), None)
+def component_recipes(recipe: Recipe) -> tuple[tuple[str | None, Recipe], ...]:
+    """The recipes of the deployment whose recipe is ``recipe``, each with the name of its snapshot component.
 
-    def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
-        recipe = self.components.get(component)
-        return None if recipe is None else recipe.harness_served_model(scenario, component)
-
-    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
-        recipe = self.components.get(component)
-        return None if recipe is None else recipe.harness_state_dir(scenario, component)
-
-    def job_components(self) -> tuple[TrainingComponent, ...]:
-        """The job components of every component recipe, each once: the components share the composite's
-        training component. Raise ``ValueError`` when two different components share a name."""
-        found: dict[str, TrainingComponent] = {}
-        for recipe in self.components.values():
-            for component in recipe.job_components():
-                known = found.setdefault(component.name, component)
-                if known is not component:
-                    raise ValueError(f"two job components of this composite are named {component.name!r}")
-        return tuple(found.values())
-
-    def with_job_components(
-        self, components: Mapping[str, TrainingComponent], data_store: DataStore
-    ) -> CompositeRecipe:
-        check_job_components(self, components)
-        return replace(
-            self,
-            training_component=(None if self.training_component is None else components[self.training_component.name]),
-            data_store=data_store,
-            components={
-                name: recipe.with_job_components(
-                    {component.name: components[component.name] for component in recipe.job_components()}, data_store
-                )
-                for name, recipe in self.components.items()
-            },
-        )
-
-    @property
-    def report_type(self) -> type[ReportBase] | None:
-        """The report contract ingress checks: a report any component accepts; ``None`` keeps ingress open.
-
-        Each trainer parses reports with its own component's contract, so a
-        weights recipe with a strict report (a rollout addressed into a grid)
-        and a harness recipe with a plain scored one share a scenario: ingress
-        refuses only a report no component would take.
-        """
-        return self.report_contract
-
-    @cached_property
-    def report_contract(self) -> type[ReportBase] | None:
-        """The contract ``report_type`` answers, built once: the one the components share, or what any accepts."""
-        declared: list[type[ReportBase]] = []
-        for recipe in self.components.values():
-            report_type = recipe.report_type
-            if report_type is not None and report_type not in declared:
-                declared.append(report_type)
-        if not declared:
-            return None
-        if len(declared) == 1:
-            return declared[0]
-        return any_component_report(tuple(declared))
-
-    def build_components(self, scenario: str) -> ScenarioComponents:
-        """Each recipe's one component under the name the composite binds it to."""
-        specs: dict[str, ComponentSpec] = {}
-        for component, recipe in self.components.items():
-            declared = recipe.build_components(scenario)
-            if len(declared.components) > 1:
-                raise RecipeConfigError(f"component {component!r} serves several components of its own")
-            served = next(iter(declared.components.values()), ComponentSpec())
-            # A recipe's own snapshot check (a recipe serving no component admits its whole snapshot with one) admits
-            # this component here: inside the composite, the component is that recipe's snapshot.
-            checks = every_check(declared.validator, served.validator)
-            specs[component] = served if checks is served.validator else replace(served, validator=checks)
-        return ScenarioComponents(specs)
-
-    def for_record2sample_configs(
-        self, components: ScenarioComponents, configs: Mapping[str, Mapping[str, Any]]
-    ) -> CompositeRecipe:
-        """This composite with the recipe of each component that ``configs`` names given those keys over its
-        record-to-sample config (``Recipe.with_record2sample_config``)."""
-        if not configs:
-            return self
-        return replace(
-            self,
-            components={
-                component: recipe.with_record2sample_config(configs.get(component, {}))
-                for component, recipe in self.components.items()
-            },
-        )
-
-    def check_root_start(self, root: ScenarioRoot) -> None:
-        """Check every component's view of ``root`` with its recipe; propagate any ``ValueError`` refusal."""
-        for component, recipe in self.components.items():
-            recipe.check_root_start(component_root(root, component))
-
-    def default_start(self) -> DefaultStart:
-        """Each component's default start under that component's directory.
-
-        The files and the model files of a component go under its name; each input is named ``<component>.<input>``.
-        Raise ``RecipeConfigError`` when two components hold model files.
-        """
-        sources = {component: recipe.default_start() for component, recipe in self.components.items()}
-        models = [component for component, source in sources.items() if source.model_files is not None]
-        if len(models) > 1:
-            raise RecipeConfigError(f"components {models} each hold a base model; a composite trains one model")
-        return DefaultStart(
-            files={
-                f"{component}/{path}": text
-                for component, source in sources.items()
-                for path, text in source.files.items()
-            },
-            model_files=sources[models[0]].model_files if models else None,
-            model_component=models[0] if models else None,
-            inputs={
-                f"{component}.{name}": value
-                for component, source in sources.items()
-                for name, value in source.inputs.items()
-            },
-        )
-
-    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
-        return tuple(path for recipe in self.components.values() for path in recipe.scenario_state_dirs(scenario))
+    A ``CompositeRecipe`` gives one pair ``(name, child)`` for each entry of ``components``, in the mapping's
+    order. Any other recipe gives the one pair ``(None, recipe)``: the recipe binds no component name of a
+    composite. No pair holds a ``CompositeRecipe``.
+    """
+    if isinstance(recipe, CompositeRecipe):
+        return tuple(recipe.components.items())
+    return ((None, recipe),)
 
 
-__all__ = ["CompositeRecipe"]
+__all__ = ["CompositeRecipe", "component_recipes"]

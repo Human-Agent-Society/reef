@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.records import report, token_inference
-from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubTrainingComponent, live_objects
 
 from reef.artifact import Artifact, ArtifactConflictError, InMemoryRepositoryBackend, Repository, SnapshotRef
 from reef.core import AgentRecord
@@ -120,11 +120,9 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
     pairs_per_thread = 4
     thread_count = 4
     dispatcher = Dispatcher(
-        TestPolicyRecipe(
-            **runtime_bindings(component),
-            max_staleness=pairs_per_thread * thread_count,
-        ),
+        TestPolicyRecipe(max_staleness=pairs_per_thread * thread_count),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -164,8 +162,9 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     component = CountingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component), max_staleness=4),
+        TestPolicyRecipe(max_staleness=4),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),

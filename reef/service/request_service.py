@@ -24,6 +24,8 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
+from reef.recipe.deployment import harness_state_dir
+from reef.scenario.live_objects import harness_served_model
 from reef.scenario.scenario import Scenario
 from reef.scenario.snapshot_files import component_files
 from reef.service.artifact_page import before_artifact_id, build_artifact_page, build_running_step_page, result_of
@@ -239,8 +241,11 @@ class RequestService:
         manifest = self.harness_manifest_for_artifact(scenario, selected, source=form != "rendered")
         if form == "client" and service_url is not None and root is not None:
             descriptor = self.harness_descriptor(scenario)
-            served = self._dispatcher.recipe.harness_served_model(
-                scenario.name, str(scenario.components.files_component)
+            served = harness_served_model(
+                self._dispatcher.recipe,
+                self._dispatcher.live,
+                scenario.name,
+                str(scenario.components.files_component),
             )
             if served is None:
                 raise ArtifactNotFoundError(f"scenario {scenario.name!r} evolves no harness that calls a model")
@@ -379,9 +384,9 @@ class RequestService:
         return files.descriptor
 
     def harness_state_dir(self, scenario: Scenario) -> Path | None:
-        """The state directory of the harness a client pulls (``Recipe.harness_state_dir``), or None."""
+        """The state directory of the harness a client pulls (``reef.recipe.deployment.harness_state_dir``), or None."""
         component = scenario.components.files_component
-        return None if component is None else self._dispatcher.recipe.harness_state_dir(scenario.name, component)
+        return None if component is None else harness_state_dir(self._dispatcher.recipe, scenario.name, component)
 
     def step_progress(self, scenario: Scenario) -> JobProgress | None:
         """The progress of the harness step that runs now, which the training component writes; None for none."""

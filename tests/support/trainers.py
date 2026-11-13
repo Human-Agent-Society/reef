@@ -11,6 +11,7 @@ from reef.core.components import RECORDS_COMPONENT
 from reef.observability import ExperimentLogger
 from reef.recipe import Recipe
 from reef.scenario.factory import read_trainer_spec
+from reef.scenario.live_objects import LiveObjects
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -22,6 +23,7 @@ from reef.train.trainer_builder import ComponentTrainerSpecs, TrainerBuilder, Tr
 
 def recipe_trainer(
     recipe: Recipe,
+    live: LiveObjects,
     scenario: str,
     records: RecordStore,
     *,
@@ -31,9 +33,10 @@ def recipe_trainer(
     samples: TrainerSamples | None = None,
     root: ScenarioRoot | None = None,
 ) -> Trainer:
-    """The trainer that the scenario factory builds for ``recipe``, which is not a composite."""
+    """The trainer that the scenario factory builds for ``recipe``, which is not a composite, on the objects of
+    ``live``."""
     return build_trainer(
-        read_trainer_spec(recipe),
+        read_trainer_spec(recipe, live),
         scenario,
         records,
         algorithm_state=algorithm_state,

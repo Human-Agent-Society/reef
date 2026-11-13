@@ -18,7 +18,7 @@ from tests.support.trajectories import recorded_trajectory
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.train.component import JobStatus, TrainingJob
+from reef.train.component import JobStatus, TrainingArtifactLayout, TrainingJob
 from reef.train.harness_backend.backend import JobProgress
 from reef.train.harness_backend.component import (
     PROGRESS_FILE,
@@ -32,7 +32,8 @@ MARKER = TreePatch(changed_rules("marker rules\n"))
 
 
 def component_of(tmp_path: Path, method) -> HarnessTrainingComponent:
-    component = harness_recipe(tmp_path, method).harness_component
+    _, live = harness_recipe(tmp_path, method)
+    component = live.harness_component
     assert isinstance(component, HarnessTrainingComponent)
     return component
 
@@ -172,12 +173,12 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
 def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     component = component_of(tmp_path, lambda workspace, services: None)
     assert component.artifact_format is None and component.shares_scenarios
-    assert component.default_start().files == dict(PI_SEED.files)
+    assert component.facts.default_start().files == dict(PI_SEED.files)
     # An imported start is a copy of the snapshot's tree, under its checksum, without the repository's own files.
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)
     # An import's directory holds the tree alone.
-    component.check_artifact(DirectoryFiles(release))
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(release))
     (release / ".gitattributes").write_text("* filter=lfs\n")
     (release / "reef-artifact.json").write_text("{}\n")
     start = component.import_start(release)

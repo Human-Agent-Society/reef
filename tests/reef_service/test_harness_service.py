@@ -32,10 +32,11 @@ INFERENCE_URL = "http://inference.example:8902"
 
 def open_service(tmp_path: Path, repository, components: frozenset[str]) -> Dispatcher:
     """One process's dispatcher over the shared stores and ``repository``; each process builds its own recipe."""
-    recipe = harness_recipe(tmp_path, lambda workspace, services: None)
+    recipe, live = rebuilt_recipe(*harness_recipe(tmp_path, lambda workspace, services: None))
     return Dispatcher(
-        rebuilt_recipe(recipe),
+        recipe,
         repository,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
         components=components,

@@ -10,7 +10,7 @@ import time
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.served_models import ScheduledStop
@@ -74,20 +74,22 @@ class Answer(InferenceHandler):
 @pytest.fixture
 def startup(tmp_path):
     runtime = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = memory_coordination()
     storage = SQLiteScenarioStorage(tmp_path / "records")
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=storage,
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     inference = build_inference_app(coordination.served_models, storage, FixedEngineClients(Answer()), tokens=None)
     try:
@@ -239,8 +241,9 @@ def test_a_standby_recovers_completed_selections_after_the_owner_stops(startup, 
     runtime.release.set()
     assert worker.run_once()
     replacement = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "replacement"), replacement))
-    standby = ServingWorker(recipe, worker.backends, control.coordination, worker_id="standby")
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "replacement"), replacement)
+    standby = ServingWorker(recipe, live, worker.backends, control.coordination, worker_id="standby")
 
     async def run() -> None:
         async with TestClient(TestServer(inference_app)) as client:
@@ -280,8 +283,9 @@ def test_a_fresh_owner_opens_the_runtime_before_cleanup(startup, tmp_path):
     )
     worker.stop()
     replacement = PausedRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "replacement"), replacement))
-    standby = ServingWorker(recipe, worker.backends, control.coordination, worker_id="standby")
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "replacement"), replacement)
+    standby = ServingWorker(recipe, live, worker.backends, control.coordination, worker_id="standby")
     try:
         assert standby.run_once()
         assert replacement.opens == 1 and replacement.stops == [served]
@@ -330,11 +334,13 @@ def test_an_owner_retries_recovery_before_opening_its_runtime(startup, monkeypat
 @pytest.mark.unit
 def test_an_offline_training_runtime_has_no_startup_request(tmp_path):
     runtime = NullInferenceRuntime()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     coordination = memory_coordination()
     control = Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
@@ -406,19 +412,21 @@ def stoppable(tmp_path, monkeypatch, request):
     monkeypatch.setattr(serving, "REPLACED_CHECK_SECONDS", 0.05)
     runtime = StoppableRuntime(getattr(request, "param", 1))
     training = StubTrainingComponent(tmp_path / "checkpoints", shares_scenarios=True)
-    recipe = TestPolicyRecipe(**runtime_bindings(training, runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(training, runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = memory_coordination()
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     try:
         yield control, worker, runtime
@@ -530,19 +538,21 @@ def test_a_redeploy_of_a_scenario_that_serves_nothing_starts_no_engine(startup):
 def deployment(tmp_path, runtime):
     """Control and an inference worker on the record and coordination files of ``tmp_path``, as one start of the
     service has them."""
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = open_coordination("sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None)
     control = Dispatcher(
         recipe,
         backends,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=coordination,
         components=frozenset({"control"}),
         local_artifact_dir=tmp_path / "control",
     )
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     return control, worker
 

@@ -23,6 +23,7 @@ from typing import Any
 from reef_client.sse import synthesize_sse_events
 
 from reef.artifact.artifact import Artifact
+from reef.artifact.base_root import read_base_root
 from reef.artifact.sources import read_reference
 from reef.core.config import config_option
 from reef.core.errors import UpstreamStatusError
@@ -49,15 +50,26 @@ def checkpoint_sampler_path(
 ) -> str | None:
     """The sampler that a snapshot's checkpoint manifest names; ``None`` for the base model's own weights.
 
-    A LoRA's default start holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
+    A base root (``reef.artifact.base_root``) of ``base_model`` on ``service`` is the base model: a LoRA's default
+    start. A root of an older Reef holds the untrained adapter's manifest, whose sampler serves the base model's
+    outputs.
     Under full-parameter training (``full``), a snapshot without a manifest has the base model's weights: the
     component's base, a reference to the base revision, or an import of the base's files (RFC #996).
-    ``ValueError``: the snapshot is not materialized; it has no manifest and is not full-parameter, or refers to
-    another repo; or its manifest names another model or another service than ``service``.
+    ``ValueError``: the snapshot is not materialized; its base file is not readable, or names another model or
+    another service; it has no manifest and is not full-parameter, or refers to another repo; or its manifest names
+    another model or another service than ``service``.
     """
     path = artifact.materialize().local_path
     if path is None:
         raise ValueError("Tinker requires a materialized checkpoint manifest")
+    base = read_base_root(path)
+    if base is not None:
+        if base.model != base_model or base.inputs.get("service") != service:
+            raise ValueError(
+                f"the base root stands for {base.model} on {base.inputs.get('service') or 'hosted Tinker'}, "
+                f"not for {base_model} on {service or 'hosted Tinker'}"
+            )
+        return None
     if not (path / MANIFEST).exists():
         if not full:
             raise ValueError(f"artifact is missing {MANIFEST}")

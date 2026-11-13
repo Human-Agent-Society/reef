@@ -398,7 +398,7 @@ def test_a_win_that_changes_a_loop_waits_for_a_person_whatever_review_kinds_list
     part, whatever review_kinds lists."""
     loop = TreePatch(LOOP_FILE)
     skill = TreePatch({"skills/marker/SKILL.md": "# marker"})
-    recipe = harness_recipe(
+    recipe, _ = harness_recipe(
         tmp_path, lambda workspace, services: skill, adapter="native", seed=HarnessTree(NATIVE_SEED_FILES)
     )
     default = recipe.activation_rule()

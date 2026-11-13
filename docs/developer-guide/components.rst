@@ -164,8 +164,8 @@ committer carries the other forward from the previous checkpoint:
 
 The root snapshot of such a scenario keeps one directory per component
 (``weights/``, ``harness/``). ``CompositeRecipe`` (``reef.recipe.composite``)
-builds exactly this from existing flat recipes, one per component, and runs
-each one's trainer as its own worker; see `configuration
+maps each component name to an existing flat recipe. Reef builds exactly
+this from the mapping, and runs each recipe's trainer as its own worker; see `configuration
 <../reference/configuration.rst#recipe-configuration>`__ for its layout.
 
 Remote weight snapshots
@@ -178,5 +178,5 @@ ID. An inference runtime that serves immutable remote snapshots validates the
 checkpoint and binds its remote sampler. Tinker's inference runtime uses this
 to serve the authoritative artifact before the scenario serves requests. The
 training component does not read the head: the next job starts from the
-trainer's committed start, and a ``train-from`` imports the snapshot into the
-component with ``import_start``.
+trainer's committed start, and after a ``train-from`` the training service
+imports the snapshot into the component with ``import_start``.

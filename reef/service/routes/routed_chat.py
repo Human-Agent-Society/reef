@@ -10,6 +10,7 @@ from aiohttp import web
 from reef.core.errors import INFERENCE_ABORT_ERROR, inference_aborted
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.inference.interfaces import InferenceStream
+from reef.recipe.deployment import harness_adapter
 from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, SSERelay
 from reef.service.lifecycle import ADMITTED_ROUTING, REQUEST_ACCEPTANCE
 from reef.service.request_service import RequestService
@@ -125,7 +126,7 @@ def register_routed_chat(app: web.Application, *, request_service: RequestServic
             # Before the upload: a managed deployment already captured its adapter when it admitted this request.
             request.get(ADMITTED_ROUTING, request_service.routing),
             request_service.routed,
-            for_codex=request_service.dispatcher.recipe.harness_adapter == "codex",
+            for_codex=harness_adapter(request_service.dispatcher.recipe) == "codex",
         )
 
     app.router.add_post("/v1/chat/completions", chat)

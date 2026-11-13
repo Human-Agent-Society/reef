@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 from tests.support.activation_rule_plugin import ComponentRule
-from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.sao import SAORecipe
 from reef.core.activation import MadeArtifact
@@ -63,7 +62,7 @@ def test_the_recipe_carries_its_activation_rule_into_each_scenario() -> None:
     config = training_recipe_config(SAORecipe, {}, model_path="/models/student")
     config["activation"] = {"module": "never"}
     config["pipeline"] = {"sample2job": {"config": {"job_samples": 1}}}
-    recipe = load_recipe(SAORecipe, config, {}, **runtime_bindings())
+    recipe = load_recipe(SAORecipe, config, {})
     assert isinstance(recipe.activation_rule(), NeverActivate)
 
 
@@ -88,4 +87,4 @@ def test_an_invalid_activation_section_fails_the_deployment(config, match) -> No
     recipe_config = training_recipe_config(SAORecipe, {}, model_path="/models/student")
     recipe_config["activation"] = config
     with pytest.raises(RecipeConfigError, match=match):
-        load_recipe(SAORecipe, recipe_config, {}, **runtime_bindings())
+        load_recipe(SAORecipe, recipe_config, {})

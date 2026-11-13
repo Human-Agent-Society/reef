@@ -12,6 +12,7 @@ from reef.execution.executor.requirements import ExecutionRequirements
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.execution import service_executor_config
 
 
@@ -27,13 +28,9 @@ def test_generic_sizing_drives_real_recipe(workers, backend):
         },
         **evolution_config(),
     }
-    recipe = load_recipe(
-        HarnessEvolutionRecipe,
-        config,
-        {},
-        runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"),
-    )
-    scorer = configured_component(recipe).scorer
+    recipe = load_recipe(HarnessEvolutionRecipe, config, {})
+    live = LiveObjects(runtime=InferenceProxyRuntime(model_path="test", base_url="http://unused", api_key="dummy"))
+    scorer = configured_component(recipe, live).scorer
     assert scorer is not None
     selected, needs = evaluation_selection(scorer, recipe.worker_executor)
     assert selected.settings.backend == backend

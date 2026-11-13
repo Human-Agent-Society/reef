@@ -64,9 +64,10 @@ agent and verifier time limits, plus one hour, at most one day. ``agent`` is
 the trial's Harbor agent config, or ``None``. A nonzero ``override_timeout_sec``
 in it replaces the task's agent time limit, and an
 ``override_setup_timeout_sec`` adds to the sum. When the agent has no time
-limit, the section holds no lifetime, and Harbor's default of one day applies.
-For ``modal`` the section also selects Modal's VM runtime when the task has
-``environment/docker-compose.yaml`` and asks for no GPU.
+limit, the sum does not apply. For ``modal`` the section then holds a lifetime
+of two hours. For ``e2b`` it holds no lifetime, and Harbor's default of one day
+applies. For ``modal`` the section also selects Modal's VM runtime when the
+task has ``environment/docker-compose.yaml`` and asks for no GPU.
 
 For ``e2b`` the section also names a class through Harbor's ``import_path``
 field: ``reef.execution.sandbox.harbor_e2b.KillOnTimeoutE2BEnvironment``. This

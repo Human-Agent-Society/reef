@@ -21,7 +21,7 @@ __all__ = ["fake_git_lfs"]
 @pytest.fixture(params=["memory", "git"])
 def publication_case(tmp_path, request):
     chat = QueueChat(proposal_reply(SEED, IMPROVED))
-    recipe = meta_harness_recipe(tmp_path, chat)
+    recipe, live = meta_harness_recipe(tmp_path, chat)
     # A new scenario's root snapshot holds the recipe's seed, as a deployment's does.
     memory = InMemoryRepositoryBackend.factory(directory=tmp_path / "memory")
 
@@ -38,15 +38,16 @@ def publication_case(tmp_path, request):
             cache_dir=tmp_path / "cache",
         )
 
-    return recipe, factory, chat, tmp_path / "records"
+    return recipe, live, factory, chat, tmp_path / "records"
 
 
 @pytest.mark.parametrize("recovery", ["retry", "restart"])
 def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publication_case, monkeypatch, recovery):
-    recipe, factory, chat, records = publication_case
+    recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -90,10 +91,12 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
             assert len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
+    # Each process makes its own harness component, as each service process builds its recipe.
+    restarted_recipe, restarted_live = rebuilt_recipe(recipe, live)
     restarted = Dispatcher(
-        # Each process makes its own harness component, as each service process builds its recipe.
-        rebuilt_recipe(recipe),
+        restarted_recipe,
         factory(),
+        live=restarted_live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -109,10 +112,11 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
 
 
 def test_restart_repairs_artifact_head_from_successful_journal_commit(publication_case, monkeypatch):
-    recipe, factory, chat, records = publication_case
+    recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -143,10 +147,12 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         assert scenario.store.history()[-1].snapshot == committed_head
     finally:
         dispatcher.close()
+    # Each process makes its own harness component, as each service process builds its recipe.
+    restarted_recipe, restarted_live = rebuilt_recipe(recipe, live)
     restarted = Dispatcher(
-        # Each process makes its own harness component, as each service process builds its recipe.
-        rebuilt_recipe(recipe),
+        restarted_recipe,
         factory(),
+        live=restarted_live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -161,10 +167,11 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
 
 
 def test_without_a_journal_the_backend_publication_remains_the_commit(publication_case, monkeypatch):
-    recipe, factory, _, _ = publication_case
+    recipe, live, factory, _, _ = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -194,10 +201,11 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
 
 
 def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(publication_case, monkeypatch):
-    recipe, factory, chat, records = publication_case
+    recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -228,10 +236,11 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
 
 
 def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publication_case, monkeypatch):
-    recipe, factory, chat, records = publication_case
+    recipe, live, factory, chat, records = publication_case
     dispatcher = Dispatcher(
         recipe,
         factory(),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),
@@ -276,10 +285,12 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
     finally:
         dispatcher.close()
 
+    # Each process makes its own harness component, as each service process builds its recipe.
+    restarted_recipe, restarted_live = rebuilt_recipe(recipe, live)
     restarted = Dispatcher(
-        # Each process makes its own harness component, as each service process builds its recipe.
-        rebuilt_recipe(recipe),
+        restarted_recipe,
         factory(),
+        live=restarted_live,
         scenario_storage=SQLiteScenarioStorage(records),
         hold_local_cycles=True,
         coordination=memory_coordination(),

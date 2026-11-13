@@ -384,7 +384,8 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
         component.submit(job)
         status = finished(component, "job-0")
         assert status.state == "finished" and len(status.checkpoints) == 1
-        assert calls == [(("add",), "tinker://base/sampler")] and client.trained == [2]
+        # The job starts from the default start, a new LoRA, so its rollouts sample the base model.
+        assert calls == [(("add",), None)] and client.trained == [2]
         assert status.metrics["rollout_rewards"] == {"add": [1.0, 0.0]}
         # The rollouts are kept: running the job again trains them without new rollouts.
         kept = json.loads((component.job_directory("job-0") / ROLLOUTS_FILE).read_text())
@@ -525,8 +526,9 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
     finally:
         component.close()
 
-    # Two timed-out warm-up samples and the one that answered, all of one token on the start's sampler.
-    assert sampler.requests == [("tinker://base/sampler", {"max_tokens": 1})] * 3
+    # Two timed-out warm-up samples and the one that answered, all of one token on the start's sampler: the base
+    # model, since the job starts from the default start.
+    assert sampler.requests == [(None, {"max_tokens": 1})] * 3
     assert rolled_out_after == [3]
 
 

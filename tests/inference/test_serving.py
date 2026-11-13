@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 from tests.support.runtime_stubs import RunningEngines
 
-from reef.artifact import REFERENCE_FILE, DownloadedSnapshot, HuggingFaceRevision, HuggingFaceSource
+from reef.artifact import (
+    BASE_FILE,
+    REFERENCE_FILE,
+    BaseRoot,
+    DownloadedSnapshot,
+    HuggingFaceRevision,
+    HuggingFaceSource,
+)
 from reef.artifact.artifact import Artifact, SnapshotRef
 from reef.core.errors import ReefError
 from reef.core.weight_layout import ADAPTER_DIR
@@ -137,6 +144,13 @@ def saved_full_weights(path: Path) -> Path:
     return path
 
 
+def saved_base_root(path: Path, model: str = "Qwen/Qwen3-8B") -> Path:
+    """A base root: the base file alone, which names the default start of ``model``."""
+    path.mkdir(parents=True)
+    (path / BASE_FILE).write_text(BaseRoot({"model": model, "lora_rank": "16"}).to_text())
+    return path
+
+
 def published_snapshot(path: Path, artifact_id: str) -> Artifact:
     return Artifact(SnapshotRef(artifact_id, None), None, artifact_id=artifact_id, local_path=path)
 
@@ -198,12 +212,47 @@ def test_an_activation_loads_another_snapshot_and_the_default_start_loads_as_any
     first = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
     older = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "older"), "o"), scenario="math")
     assert older != first and serving.serving_adapter_runtime_load_id("math") == older
-    # A root snapshot made from the default start holds the untrained adapter, which loads under a version of its own.
+    # A root snapshot of an older Reef holds the untrained adapter, which loads under a version of its own.
     base = serving.activate_checkpoint(
         published_snapshot(saved_adapter(tmp_path / "untrained"), "base"), scenario="math"
     )
     assert base not in (first, older, serving.base_version)
     assert serving.serving_adapter_runtime_load_id("math") == base
+
+
+def test_a_base_root_serves_the_base_model_and_loads_no_adapter(engines, tmp_path):
+    serving = opened(
+        AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=2, model_path="Qwen/Qwen3-8B")
+    )
+    base = published_snapshot(saved_base_root(tmp_path / "base"), "base")
+    calls = len(engines.events)
+    # Before any adapter: the engines serve the base model already, and nothing changes in them.
+    assert serving.activate_checkpoint(base, scenario="math") == serving.base_version
+    assert engines.events[calls:] == []
+    assert serving.served_artifact("base", "math").model_name == "Qwen/Qwen3-8B"
+
+    trained = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
+    other = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "code"), "c1"), scenario="code")
+    route = serving.served_artifact("j1", "math")
+    calls = len(engines.events)
+    # After an adapter: the scenario serves no adapter again. The requests that still name the adapter finish on
+    # it, so nothing unloads until its route stops.
+    assert serving.activate_checkpoint(base, scenario="math") == serving.base_version
+    assert engines.events[calls:] == []
+    assert serving.serving_adapter_runtime_load_id("math") is None
+    assert serving.served_model_name("math") == "Qwen/Qwen3-8B"
+    assert serving.serving_adapter_runtime_load_id("code") == other
+    serving.stop_serving(route)
+    assert engines.events[-1] == ("unload", adapter_name("math", trained))
+    # The adapter loads again under a new version when the scenario selects it again.
+    again = serving.activate_checkpoint(published_snapshot(saved_adapter(tmp_path / "job-1b"), "j1"), scenario="math")
+    assert again not in (trained, serving.base_version) and serving.served_model_name("math") != "Qwen/Qwen3-8B"
+
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / BASE_FILE).write_text("{}")
+    with pytest.raises(ReefError, match="no readable base file"):
+        serving.activate_checkpoint(published_snapshot(tmp_path / "broken", "broken"), scenario="math")
+    assert serving.serving_adapter_runtime_load_id("math") == again
 
 
 def test_only_a_saved_adapter_of_a_named_scenario_is_served(serving, tmp_path):
@@ -279,6 +328,29 @@ def test_full_weights_load_under_a_new_version_and_the_same_artifact_loads_nothi
     assert len(engines.events) == calls
     rolled_back = serving.activate_checkpoint(published_snapshot(saved_full_weights(tmp_path / "step-0"), "w0"))
     assert rolled_back not in (initial, version)
+
+
+def test_a_base_root_loads_the_base_models_directory_as_full_weights(engines, tmp_path):
+    model = saved_full_weights(tmp_path / "model")
+    serving = opened(FullWeightServingRuntime(RunningEngines(engines), Handler(), model_path=str(model)))
+    trained = serving.activate_checkpoint(published_snapshot(saved_full_weights(tmp_path / "step-1"), "w1"))
+    base = published_snapshot(saved_base_root(tmp_path / "base", str(model)), "base")
+    version = serving.activate_checkpoint(base)
+    assert version not in (trained, serving.base_version)
+    assert engines.events[-4:] == ["pause", ("recover", 0), ("load", "full", None, version, model), "resume"]
+    calls = len(engines.events)
+    assert serving.activate_checkpoint(base) == version
+    assert len(engines.events) == calls
+    # Recovery loads the base model again under the same version.
+    engines.dead = 1
+    serving.recover_engines()
+    assert engines.loads()[-1] == ("load", "full", None, version, model)
+
+    # A model path that is no directory on this host cannot be loaded again: the activation fails and changes nothing.
+    hub = opened(FullWeightServingRuntime(RunningEngines(Engines()), Handler(), model_path="Qwen/Qwen3-8B"))
+    with pytest.raises(ReefError, match="is no directory on this host"):
+        hub.activate_checkpoint(base)
+    assert hub.served_artifact_id is None
 
 
 @pytest.mark.parametrize("adapter", [False, True])

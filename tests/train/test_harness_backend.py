@@ -297,9 +297,9 @@ def test_a_refused_evaluate_call_adds_no_candidate(
             refusals.append(f"{type(exc).__name__}: {exc}")
         return
 
-    recipe = harness_recipe(tmp_path, step, max_runs_per_step=1, evaluation={} if scored else {"policy": "none"})
-    recipe = recipe if scored else rebuilt_recipe(recipe, scorer=None)
-    backend = build_harness_backend(recipe, "demo")
+    recipe, live = harness_recipe(tmp_path, step, max_runs_per_step=1, evaluation={} if scored else {"policy": "none"})
+    recipe, live = (recipe, live) if scored else rebuilt_recipe(recipe, live, scorer=None)
+    backend = build_harness_backend(recipe, live, "demo")
     result = backend_step(backend, data(1), HarnessState().to_json())
     assert len(refusals) == 1 and refusals[0].startswith(refusal)
     # The history holds the head alone, and no run completed.

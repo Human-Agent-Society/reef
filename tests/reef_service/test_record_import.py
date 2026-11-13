@@ -20,6 +20,7 @@ from reef.inference.interfaces import InferenceHandler
 from reef.recipe import Recipe
 from reef.record2sample import ReportSamples
 from reef.sample2job import Sample2Job
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sql_coordination import memory_coordination
@@ -108,10 +109,10 @@ class LearningTrainers(OneTrainerBuilder):
         )
 
 
-def served_recipe() -> LearningRecipe:
-    """A learning recipe whose runtime names an HTTP engine and a model, so its scenarios have a served model; the
+def served_live() -> LiveObjects:
+    """Live objects whose runtime names an HTTP engine and a model, so a recipe's scenarios have a served model; the
     app's ``inference_handler`` answers for that engine."""
-    return LearningRecipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="example-model"))
+    return LiveObjects(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="example-model"))
 
 
 class EchoHandler(InferenceHandler):
@@ -123,10 +124,11 @@ class EchoHandler(InferenceHandler):
         return inference_payload(payload["messages"][0]["content"])["response"]
 
 
-def dispatcher_for(tmp_path, recipe):
+def dispatcher_for(tmp_path, recipe, live=None):
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
         trainer_builder=LearningTrainers(recipe) if isinstance(recipe, LearningRecipe) else None,
@@ -153,7 +155,7 @@ async def wait_for_training(scenario, recipe, count):
 
 @pytest.mark.parametrize("endpoint", ("/v1/chat/completions", "/v1/messages"))
 def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
-    dispatcher = dispatcher_for(tmp_path, served_recipe())
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe(), served_live())
     dispatcher.get_or_create_scenario("s")
     handler = EchoHandler()
     text = "x" * (3 * 1024 * 1024)
@@ -198,8 +200,8 @@ def test_record_import_takes_a_long_trajectory_and_keeps_its_body_limit(tmp_path
 
 @pytest.mark.parametrize("bulk", (False, True))
 def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk):
-    recipe = served_recipe()
-    dispatcher = dispatcher_for(tmp_path, recipe)
+    recipe = LearningRecipe()
+    dispatcher = dispatcher_for(tmp_path, recipe, served_live())
     handler = EchoHandler()
 
     async def run():

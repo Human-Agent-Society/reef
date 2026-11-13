@@ -1788,7 +1788,9 @@ A job object has these keys. A time is an ISO 8601 string in UTC, such as
 - ``attempt_count``: how many times a training worker took the job, an
   integer from 0.
 - ``checkpoints``: the saved checkpoints that the job reported, in step
-  order, each ``{step, path, artifact_path, metrics}``.
+  order, each ``{step, path, artifact_path, metrics, changed_parts}``.
+  ``changed_parts`` lists the parts of the scenario component that the
+  checkpoint changed from the job's start, ``[]`` for a weight job.
 - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job
   finished, else ``null``.
 - ``error``: the error of a failed job, or the last retryable error of a
@@ -1829,7 +1831,8 @@ For example:
      "attempt_count": 1,
      "checkpoints": [
        {"step": 1, "path": "/jobs/4f2a9c1e/step-1",
-        "artifact_path": "/jobs/4f2a9c1e/step-1/release", "metrics": {"loss": 0.41}}
+        "artifact_path": "/jobs/4f2a9c1e/step-1/release", "metrics": {"loss": 0.41},
+        "changed_parts": []}
      ],
      "result": {"state": "finished", "metrics": {"loss": 0.41}},
      "error": null,
@@ -2735,6 +2738,19 @@ component makes. The training backend and its configuration decide it:
 |                             |                                                | validation       |
 +-----------------------------+------------------------------------------------+------------------+
 
+A weight component of the Slime or the Tinker backend also takes a base root:
+a directory that holds ``base.json`` alone. The file names a deployment's
+default start by its inputs, for example
+``{"format": "reef-base-root-1", "inputs": {"model": "/models/qwen", "lora_rank": "8"}}``,
+and the artifact stands for the base model with no adapter (`Artifact imports
+<python-api.rst#artifact-imports>`__). Reef accepts it only when the inputs
+equal the inputs of this deployment's default start, which the ``source`` of
+a scenario's ``creation`` row shows. Another base model, rank or service
+answers HTTP 400 and names each input that differs. Serving such an artifact
+serves the base model, and training from it starts at the base model. A new
+scenario of these backends starts from a base root that Reef writes
+(`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
+
 A component without a layout, such as the records of a trainer that serves
 nothing, takes no import.
 
@@ -3213,8 +3229,11 @@ samples that one automatic job takes, beside the rest of a group.
 A scenario that trains weights also reports its training jobs.
 ``training_jobs`` lists the jobs that the scenario's training component runs,
 in the order of their submission. Each holds the ``job_id``, the ``backend``
-that runs the job, the ``start`` that the job trains from as the component
-reads it, ``checkpoints_handled`` and ``train_from``. ``checkpoints_handled``
+that runs the job, the ``start`` that the job trains from,
+``checkpoints_handled`` and ``train_from``. ``start`` is a checkpoint's path
+as the component reads it, or ``snapshot:`` and a JSON object
+``{revision, root}`` that names the snapshot of the scenario that the job
+starts from. ``checkpoints_handled``
 is the number of the job's saved checkpoints that Reef has committed.
 ``train_from`` is the artifact that the job's request named as its start, or
 ``null`` for a job that continues the training start. The list is empty while

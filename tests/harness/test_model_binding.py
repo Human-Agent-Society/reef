@@ -21,6 +21,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
+from reef.scenario.live_objects import LiveObjects, harness_models
 
 
 class _Response(io.BytesIO):
@@ -462,8 +463,8 @@ def test_recipe_binds_the_model_metadata_of_the_served_model() -> None:
         "model": {"path": "small"},
         **evolution_config(adapter="codex", model_metadata={"small": {"context_window": 640_000, "reasoning": True}}),
     }
-    codex = load_recipe(HarnessEvolutionRecipe, config, {}, runtime=runtime)
-    assert codex.harness_models().served().metadata.context_window == 640_000
+    codex = load_recipe(HarnessEvolutionRecipe, config, {})
+    assert harness_models(codex, LiveObjects(runtime=runtime)).served().metadata.context_window == 640_000
 
 
 def test_unknown_api_is_refused() -> None:
@@ -551,10 +552,11 @@ def test_recipe_declares_named_models_under_evolution_models() -> None:
 
     def recipe(models: dict[str, Any], environ: dict[str, str]) -> HarnessEvolutionRecipe:
         config = {"model": {"path": "small"}, **evolution_config(models=models)}
-        return load_recipe(HarnessEvolutionRecipe, config, environ, runtime=runtime)
+        return load_recipe(HarnessEvolutionRecipe, config, environ)
 
     teacher = {"url": "http://big", "model": "large", "api_key_env": "TEACHER_KEY"}
-    models = recipe({"teacher": teacher}, {"TEACHER_KEY": "sk-t"}).harness_models().bindings()
+    built = recipe({"teacher": teacher}, {"TEACHER_KEY": "sk-t"})
+    models = harness_models(built, LiveObjects(runtime=runtime)).bindings()
     assert models.served.model == "small" and models["teacher"].api_key == "sk-t"
     with pytest.raises(RecipeConfigError, match="may not name a model 'served'"):
         recipe({"served": {"url": "http://x", "model": "m"}}, {})

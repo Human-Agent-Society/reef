@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepositoryBackend
@@ -27,7 +27,7 @@ from reef.scenario.registry import InstanceState
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.component import ScenarioRoot, TrainingComponent
+from reef.train.component import ScenarioRoot, SnapshotStart, TrainingComponent
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import PipelineSettings
 
@@ -435,7 +435,7 @@ class _RootImportingComponent(StubTrainingComponent):
         super().__init__(shares_scenarios=True)
         self.model = model
 
-    def default_start(self) -> DefaultStart:
+    def stub_default_start(self) -> DefaultStart:
         return DefaultStart(files={"model.txt": self.model}, inputs={"model": self.model})
 
     def root_start(self, root: ScenarioRoot) -> str:
@@ -446,8 +446,9 @@ def weights_dispatcher(tmp_path, backend_factory, model: str) -> Dispatcher:
     """A dispatcher of the test policy recipe whose training component's default start is the model ``model``."""
     component = _RootImportingComponent(model)
     return Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, StubInferenceRuntime(shared_by_training_scenarios=True))),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, StubInferenceRuntime(shared_by_training_scenarios=True)),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -488,16 +489,19 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
         assert old.repository.start_artifact == old.current_snapshot() == old_root
         # The runtime serves the old scenario's own root.
         wait_for_serving(second, "old")
-        assert second.recipe.runtime.served == "old-model"
+        assert second.live.runtime.served == "old-model"
         assert old.served_artifact_id() == old.repository.resolve(old_root).artifact_id
-        old_start = Path(JobLoopState.from_dict(old.trainer.state).start)
-        assert (old_start / "model.txt").read_text() == "old-model"
+        # The trainer's start names the scenario's own root, with the inputs that the root was made from.
+        old_start = SnapshotStart.from_text(JobLoopState.from_dict(old.trainer.state).start)
+        assert old_start == SnapshotStart(old_root.revision, RootSource("default", inputs={"model": "old-model"}))
+        assert (old.repository.materialize(old_root).local_path / "model.txt").read_text() == "old-model"
         assert old.artifacts()[0]["source"] == {"kind": "default", "inputs": {"model": "old-model"}}
 
         new = second.get_or_create_scenario("new")
         new_root = new.repository.materialize(new.repository.start_artifact)
         assert (new_root.local_path / "model.txt").read_text() == "new-model"
-        assert (Path(JobLoopState.from_dict(new.trainer.state).start) / "model.txt").read_text() == "new-model"
+        new_start = SnapshotStart.from_text(JobLoopState.from_dict(new.trainer.state).start)
+        assert new_start is not None and new_start.revision == new.repository.start_artifact.revision
     finally:
         second.close()
 
@@ -567,8 +571,8 @@ def test_composite_item_roots_are_checked_before_registration(
     tmp_path: Path, component: str, accepts_item: bool
 ) -> None:
     training = _RootImportingComponent("base-model") if accepts_item else _NoArtifactStarts("base-model")
-    weights = TestPolicyRecipe(**runtime_bindings(training, StubInferenceRuntime(shared_by_training_scenarios=True)))
-    recipe = CompositeRecipe(components={"weights": weights, "harness": ItemTreeRecipe()})
+    live = live_objects(training, StubInferenceRuntime(shared_by_training_scenarios=True))
+    recipe = CompositeRecipe(components={"weights": TestPolicyRecipe(), "harness": ItemTreeRecipe()})
     backend_factory = InMemoryRepositoryBackend.factory()
     directory = tmp_path / "item"
     directory.mkdir()
@@ -586,6 +590,7 @@ def test_composite_item_roots_are_checked_before_registration(
     dispatcher = Dispatcher(
         recipe,
         backend_factory,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
     )
@@ -643,8 +648,9 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
 
     component = _NoArtifactStarts("base-model")
     pinned = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, StubInferenceRuntime(shared_by_training_scenarios=True))),
+        TestPolicyRecipe(),
         InMemoryRepositoryBackend.factory(),
+        live=live_objects(component, StubInferenceRuntime(shared_by_training_scenarios=True)),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )

@@ -142,7 +142,9 @@ class RemoteInferenceBackend(InferenceBackend):
         if runtime_load_id is not None:
             query["runtime_load_id"] = runtime_load_id
         with tempfile.TemporaryFile() as archive:
-            with tarfile.open(fileobj=archive, mode="w") as tar:
+            # A Hugging Face snapshot directory, such as the base model's, links each file into its cache: the
+            # archive holds the files themselves, since the component refuses a link that leaves its directory.
+            with tarfile.open(fileobj=archive, mode="w", dereference=True) as tar:
                 for entry in sorted(files.path.iterdir()):
                     tar.add(entry, arcname=entry.name)
             size = archive.tell()

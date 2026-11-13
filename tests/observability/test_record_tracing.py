@@ -10,7 +10,7 @@ from tests.reef_service.test_sse_streams import FakeStream
 from tests.support.artifact_versions import ImportingComponent, finished_jobs
 from tests.support.policy_recipe import TestPolicyRecipe
 from tests.support.records import report, token_inference
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import live_objects
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -438,8 +438,9 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
     observer = _CapturingObserver()
     component = ImportingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer),
         coordination=memory_coordination(),

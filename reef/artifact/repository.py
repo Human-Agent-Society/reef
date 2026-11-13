@@ -25,9 +25,8 @@ from reef.artifact.artifact import (
     SnapshotRef,
     artifact_components,
 )
-from reef.artifact.composite import compose_snapshot, link_or_copy
+from reef.artifact.composite import compose_snapshot
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
 from reef.core.snapshot import SELECTION_VIEW_PREFIX
 
@@ -217,80 +216,43 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
     def list_registrations(self) -> tuple[str, ...]: ...
 
 
-class BaseModelFiles(ABC):
-    """The model files of a default start, which a process makes only when a scenario's root snapshot holds them.
-
-    Purpose: a training component gives a value in ``DefaultStart.model_files``. ``ScenarioFactory`` calls
-    ``directory`` only when it creates a scenario from the default start. Thus a process that only opens scenarios
-    makes no model files.
-    """
-
-    @abstractmethod
-    def directory(self) -> Path:
-        """A directory of the model files. The first call makes them; a later call gives the same directory."""
-
-
-@dataclass(frozen=True)
-class ModelDirectory(BaseModelFiles):
-    """Model files that exist already.
-
-    Values: ``path`` is an existing directory; the constructor raises ``ValueError`` for another path.
-    ``directory`` returns ``path``.
-    """
-
-    path: Path
-
-    def __post_init__(self) -> None:
-        if not self.path.is_dir():
-            raise ValueError(f"model directory {self.path} does not exist")
-
-    def directory(self) -> Path:
-        return self.path
-
-
 @dataclass(frozen=True)
 class DefaultStart:
     """The content of a new scenario's root snapshot when the scenario starts from the deployment's configuration.
 
     Values:
 
-    - ``files`` maps relative POSIX paths inside the snapshot to the text of each file.
-    - ``model_files`` gives the directory of model files, or is ``None`` for no model files.
-    - ``model_component`` is the component directory that the model files go into. ``None`` is the snapshot root.
-      It is ``None`` when ``model_files`` is ``None``.
+    - ``files`` maps relative POSIX paths inside the snapshot to the text of each file. No path is empty or
+      absolute, and none has a ``..`` part.
     - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
       configured model and the checksum of the configured seed.
 
-    Purpose: a recipe makes the value (``Recipe.default_start``). ``ScenarioFactory`` writes it as the root snapshot
-    of a scenario that it creates without an artifact item; only that write reads the model files. The root records
-    ``inputs`` in its ``RootSource``, so a training component that cannot import a snapshot (Slime) can compare
-    them with its own configuration.
+    The constructor raises ``ValueError`` for another value. The value holds text only: a start of weights names
+    its base model in a small file (a base root, ``reef.artifact.base_root``, or a reference,
+    ``reef.artifact.sources.REFERENCE_FILE``) and holds no weight file.
+
+    Purpose: a recipe or a training backend's facts make the value from configuration (``Recipe.default_start``,
+    ``TrainingBackendFacts.default_start``). ``ScenarioFactory`` writes it as the root snapshot of a scenario that
+    it creates without an artifact item. The root records ``inputs`` in its ``RootSource``, so a training component
+    that cannot import a snapshot (Slime) can compare them with its own configuration.
     """
 
     files: Mapping[str, str] = field(default_factory=dict)
-    model_files: BaseModelFiles | None = None
-    model_component: str | None = None
     inputs: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for relative in self.files:
+        for relative, text in self.files.items():
             path = PurePosixPath(relative)
             if not relative or path.is_absolute() or ".." in path.parts:
                 raise ValueError(f"default start file {relative!r} must be a relative path inside the snapshot")
-        if self.model_files is None and self.model_component is not None:
-            raise ValueError("model_component names where model files go, so it requires model_files")
-        if self.model_component is not None:
-            validate_component_name(self.model_component)
+            if not isinstance(text, str):
+                raise ValueError(f"default start file {relative!r} must hold text")
         for name, value in self.inputs.items():
             if not isinstance(name, str) or not name or not isinstance(value, str) or not value:
                 raise ValueError(f"default start input {name!r} must map a non-empty name to a non-empty string")
 
     def write(self, directory: Path) -> None:
-        """Write the start's files into the empty directory ``directory``: the model files under ``model_component``
-        as hard links where the file system allows, and each of ``files`` at its path."""
-        if self.model_files is not None:
-            target = directory if self.model_component is None else directory / self.model_component
-            shutil.copytree(self.model_files.directory(), target, dirs_exist_ok=True, copy_function=link_or_copy)
+        """Write each of ``files`` at its path under the directory ``directory``."""
         for relative, text in self.files.items():
             path = directory / relative
             path.parent.mkdir(parents=True, exist_ok=True)

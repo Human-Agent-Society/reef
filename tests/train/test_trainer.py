@@ -18,7 +18,7 @@ from tests.support.runtime_stubs import (
     StubInferenceRuntime,
     StubTrainingComponent,
     job_sized_stages,
-    runtime_bindings,
+    live_objects,
 )
 from tests.support.samples import data_storage, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
@@ -708,12 +708,9 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
             return PipelineSpec(ComparisonSetSamples, GroupedPolicyJobData)
 
     dispatcher = Dispatcher(
-        GroupedPgRecipe(
-            **runtime_bindings(component, inference_runtime),
-            name="grouped_pg",
-            pipeline_stages=job_sized_stages(GroupedPgRecipe.pipeline_spec()),
-        ),
+        GroupedPgRecipe(name="grouped_pg", pipeline_stages=job_sized_stages(GroupedPgRecipe.pipeline_spec())),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component, inference_runtime),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),

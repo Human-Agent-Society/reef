@@ -21,7 +21,14 @@ from tests.support.harness_jobs import (
     harness_recipe,
     rebuilt_recipe,
 )
-from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
+from tests.support.harness_service import (
+    REPOSITORIES,
+    catalog,
+    drive_trainer_job,
+    harness_dispatcher,
+    job_backend,
+    seed_root,
+)
 from tests.support.polling import became_true
 from tests.support.records import item_records, memory_records
 from tests.support.runtime_stubs import (
@@ -30,6 +37,7 @@ from tests.support.runtime_stubs import (
     StubInferenceRuntime,
     StubTrainingComponent,
     job_sized_stages,
+    live_objects,
 )
 from tests.support.samples_service import make_samples as produce_samples
 from tests.support.serving import wait_for_serving
@@ -49,6 +57,7 @@ from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample.traces import InferenceSamples
 from reef.sample2job import Sample2Job
+from reef.scenario.live_objects import LiveObjects
 from reef.service.app import create_app
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.sql_coordination import memory_coordination
@@ -195,8 +204,8 @@ def open_dispatcher(tmp_path):
     """Open ``harness_dispatcher`` over the test's directory; each dispatcher closes at teardown."""
     opened = []
 
-    def open_one(recipe):
-        dispatcher = harness_dispatcher(tmp_path, recipe)
+    def open_one(recipe, live=None):
+        dispatcher = harness_dispatcher(tmp_path, recipe, LiveObjects() if live is None else live)
         opened.append(dispatcher)
         return dispatcher
 
@@ -210,15 +219,18 @@ def artifact_texts(dispatcher, scenario="s"):
     return [row.get("metrics", {}).get("training_request", {}).get("text") for row in rows]
 
 
-def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
-    """A pi harness recipe over ``method`` in training mode ``mode``; ``fields`` go to ``harness_recipe``."""
-    return replace(harness_recipe(tmp_path, method, **fields), training_mode=mode)
+def recipe_in(mode, tmp_path, method, **fields) -> tuple[HarnessEvolutionRecipe, LiveObjects]:
+    """A pi harness recipe over ``method`` in training mode ``mode``, and its live objects; ``fields`` go to
+    ``harness_recipe``."""
+    recipe, live = harness_recipe(tmp_path, method, **fields)
+    return replace(recipe, training_mode=mode), live
 
 
-def recipe_trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
+def recipe_trainer(recipe: HarnessEvolutionRecipe, live: LiveObjects, records) -> Trainer:
     """The recipe's trainer over an in-memory commit history whose base is the recipe's seed."""
     return trainers.recipe_trainer(
         recipe,
+        live,
         "s",
         records,
         artifacts=ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT),
@@ -320,7 +332,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
         called.set()
 
     dispatcher = open_dispatcher(
-        rebuilt_recipe(recipe_in("manual", tmp_path, method), pipeline_stages=harness_stages())
+        *rebuilt_recipe(*recipe_in("manual", tmp_path, method), pipeline_stages=harness_stages())
     )
     dispatcher.get_or_create_scenario("s")
 
@@ -362,7 +374,7 @@ def test_train_route_needs_no_inference_and_retries_do_not_train_twice(tmp_path,
 
 
 def test_auto_takes_a_request(tmp_path, open_dispatcher):
-    dispatcher = open_dispatcher(harness_recipe(tmp_path, lambda workspace, services: None))
+    dispatcher = open_dispatcher(*harness_recipe(tmp_path, lambda workspace, services: None))
     scenario = dispatcher.get_or_create_scenario("s")
     assert scenario.training_mode == "auto"
     assert file_request(dispatcher, "one") == "one"
@@ -595,8 +607,10 @@ def test_a_request_trains_in_auto_before_the_waiting_samples_and_leaves_them(rec
 @pytest.mark.parametrize("takes_requests", [False, True], ids=["record-only", "harness"])
 def test_http_training_mode_updates_only_existing_supported_processors(tmp_path, open_dispatcher, takes_requests):
     # A record-only recipe makes no job data, so it trains in auto alone; a harness recipe takes requests.
-    recipe = harness_recipe(tmp_path, lambda workspace, services: None) if takes_requests else Recipe()
-    dispatcher = open_dispatcher(recipe)
+    recipe, live = (
+        harness_recipe(tmp_path, lambda workspace, services: None) if takes_requests else (Recipe(), LiveObjects())
+    )
+    dispatcher = open_dispatcher(recipe, live)
     scenario = dispatcher.get_or_create_scenario("s")
     processor = scenario.trainer.pipeline
 
@@ -641,7 +655,7 @@ def test_http_mode_change_does_not_wait_for_running_method(tmp_path, open_dispat
         entered.set()
         assert release.wait(5)
 
-    dispatcher = open_dispatcher(recipe_in("manual", tmp_path, method))
+    dispatcher = open_dispatcher(*recipe_in("manual", tmp_path, method))
     dispatcher.get_or_create_scenario("s")
 
     async def run():
@@ -669,7 +683,7 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     def method(workspace, services):
         return None
 
-    dispatcher = open_dispatcher(harness_recipe(tmp_path, method))
+    dispatcher = open_dispatcher(*harness_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("s")
     assert dispatcher.set_training_mode("s", "manual") == {"scenario": "s", "training_mode": "manual"}
     assert scenario.trainer.pipeline.training_mode == "manual"
@@ -684,11 +698,13 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     assert became_true(lambda: dispatcher.get_or_create_scenario("s").commit_number == 2)
     dispatcher.close()
     # A new process loads the committed state and the stored mode.
-    restarted = open_dispatcher(harness_recipe(tmp_path, method))
+    restarted = open_dispatcher(*harness_recipe(tmp_path, method))
     loaded = restarted.get_or_create_scenario("s")
     assert loaded.commit_number == 2 and loaded.trainer.pipeline.training_mode == "manual"
     restarted.close()
-    # A recipe that takes no requests keeps its default, so a person can still select a mode.
+    # A recipe that takes no requests keeps its default, so a person can still select a mode. It is another
+    # deployment, with an artifact store of its own.
+    REPOSITORIES.pop(tmp_path)
     without_requests = open_dispatcher(Recipe())
     with caplog.at_level(logging.WARNING, logger="reef.scenario.registry"):
         assert without_requests.get_or_create_scenario("s").trainer.pipeline.training_mode == "auto"
@@ -758,7 +774,7 @@ def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_fa
     def score(task, result):
         raise ValueError("the scorer could not read the rollout")
 
-    dispatcher = open_dispatcher(recipe_in("manual", tmp_path, method, score=score))
+    dispatcher = open_dispatcher(*recipe_in("manual", tmp_path, method, score=score))
     dispatcher.get_or_create_scenario("s")
     file_request(dispatcher, "broken scorer")
     assert became_true(lambda: committed_skip(dispatcher, "broken scorer") == "request failed")
@@ -775,7 +791,7 @@ def test_a_queue_of_failing_requests_drains_and_keeps_the_selected_mode(tmp_path
     consumed. A failed request is not run again, and the scenario keeps the selected mode."""
     calls = []
     method, entered, release = raising_method(calls, poison=None, error="method outage")
-    dispatcher = open_dispatcher(harness_recipe(tmp_path, method))
+    dispatcher = open_dispatcher(*harness_recipe(tmp_path, method))
     try:
         scenario = dispatcher.get_or_create_scenario("s")
         assert scenario.store.durable
@@ -800,7 +816,7 @@ def test_a_queue_of_failing_requests_drains_and_keeps_the_selected_mode(tmp_path
 def test_a_failed_request_is_skipped_with_its_error_and_the_queue_moves_on(tmp_path, open_dispatcher):
     calls = []
     method, entered, release = raising_method(calls)
-    dispatcher = open_dispatcher(recipe_in("manual", tmp_path, method))
+    dispatcher = open_dispatcher(*recipe_in("manual", tmp_path, method))
     try:
         dispatcher.get_or_create_scenario("s")
         file_request(dispatcher, "poison")
@@ -827,7 +843,7 @@ def test_a_failed_request_is_skipped_with_its_error_and_the_queue_moves_on(tmp_p
 def test_a_failed_request_is_skipped_alone_and_its_units_wait_for_the_next_request(tmp_path, open_dispatcher):
     calls = []
     method, entered, release = raising_method(calls, with_traces=True)
-    dispatcher = open_dispatcher(recipe_in("manual", tmp_path, method))
+    dispatcher = open_dispatcher(*recipe_in("manual", tmp_path, method))
     try:
         dispatcher.get_or_create_scenario("s")
         file_request(dispatcher, "poison")
@@ -862,7 +878,7 @@ def test_a_failed_request_is_skipped_alone_and_its_units_wait_for_the_next_reque
     def method_again(workspace, services):
         seen.append(asked(workspace))
 
-    restarted = open_dispatcher(recipe_in("manual", tmp_path, method_again))
+    restarted = open_dispatcher(*recipe_in("manual", tmp_path, method_again))
     # The failed request's job committed twice: its submission and its end.
     assert restarted.get_or_create_scenario("s").commit_number == 2
     # Recovery never replays the request that the skip row named; the next request names the exchange's
@@ -889,9 +905,11 @@ def test_a_logless_scenario_ends_a_failed_requests_job_and_runs_the_next_request
         release.wait(10)
 
     factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    recipe, live = recipe_in("manual", tmp_path, method)
     dispatcher = Dispatcher(
-        recipe_in("manual", tmp_path, method),
+        recipe,
         factory,
+        live=live,
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -979,7 +997,7 @@ def job_events(dispatcher):
 
 def test_a_job_trainer_runs_each_request_as_a_job_and_a_failed_job_does_not_stop_the_queue(tmp_path, open_dispatcher):
     component, runtime = _FirstJobFails(tmp_path / "checkpoints"), StubInferenceRuntime()
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=runtime, training_mode="manual"))
+    dispatcher = open_dispatcher(_RequestJobRecipe(training_mode="manual"), live_objects(component, runtime))
     for receipt in ("a", "b"):
         dispatcher.accept_record(
             AgentRecord.create(
@@ -1025,7 +1043,7 @@ def test_a_job_trainer_runs_each_request_as_a_job_and_a_failed_job_does_not_stop
 
 def test_the_job_of_a_request_lists_the_requests_parameters_and_its_times(tmp_path, open_dispatcher):
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    dispatcher = open_dispatcher(_RequestJobRecipe(training_mode="manual"), live_objects(component))
     dispatcher.accept_record(
         AgentRecord.create(
             scenario="s",
@@ -1066,7 +1084,7 @@ def test_the_job_of_a_request_lists_the_requests_parameters_and_its_times(tmp_pa
 
 def test_each_job_lists_the_artifact_that_it_started_from(tmp_path, open_dispatcher):
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    dispatcher = open_dispatcher(_RequestJobRecipe(training_mode="manual"), live_objects(component))
     scenario = dispatcher.get_or_create_scenario("s")
     for receipt in ("a", "b", "c"):
         dispatcher.accept_record(
@@ -1112,7 +1130,7 @@ def test_each_job_lists_the_artifact_that_it_started_from(tmp_path, open_dispatc
 
 def test_a_request_that_names_train_from_starts_its_job_there_and_leaves_the_training_start(tmp_path, open_dispatcher):
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    dispatcher = open_dispatcher(_RequestJobRecipe(training_mode="manual"), live_objects(component))
     scenario = dispatcher.get_or_create_scenario("s")
     for receipt in ("a", "b", "c"):
         dispatcher.accept_record(
@@ -1152,7 +1170,8 @@ def test_a_request_that_names_train_from_starts_its_job_there_and_leaves_the_tra
 
     # The job starts from what the component imported of the named artifact, not from the first job's checkpoint.
     first, second = component.submitted
-    [imported] = component.imported
+    # The training service imported the artifact for the job's check and again for the job: one start.
+    [imported] = set(component.imported)
     assert (second.start, second.train_from_artifact_id) == (str(imported), creation)
     assert second.start != JobLoopState.from_dict(scenario.trainer.state).start
     # Its checkpoint names the start: the training start stays, and the new artifact's parent is the named artifact.
@@ -1173,7 +1192,7 @@ def test_a_request_whose_start_the_component_refuses_fails_and_the_next_request_
     tmp_path, open_dispatcher, monkeypatch
 ):
     component = StubTrainingComponent(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    dispatcher = open_dispatcher(_RequestJobRecipe(training_mode="manual"), live_objects(component))
     scenario = dispatcher.get_or_create_scenario("s")
     for receipt in ("a", "b"):
         dispatcher.accept_record(
@@ -1218,8 +1237,8 @@ class GatedManager(TrainingManager):
 def managed_dispatcher(tmp_path, component, manager, **options):
     """A dispatcher whose scenarios train in ``auto`` mode, one job for each sample by Reef's own rule, under
     ``manager``; with two reported records of scenario "s", which its active artifact answered, stored as samples."""
-    recipe = _RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="auto")
-    dispatcher = harness_dispatcher(tmp_path, recipe, training_manager=manager, **options)
+    recipe = _RequestJobRecipe(training_mode="auto")
+    dispatcher = harness_dispatcher(tmp_path, recipe, live_objects(component), training_manager=manager, **options)
     answered_by = dispatcher.get_or_create_scenario("s").serving_artifact_id()
     for receipt in ("a", "b"):
         dispatcher.accept_record(
@@ -1295,7 +1314,7 @@ def test_a_running_jobs_step_takes_no_commit_lock(tmp_path, open_dispatcher, mon
     """A poll of a running job can wait on the training service, so an activation does not wait for the poll. The
     step ends without the commit lock while the running job leaves no room for the next one."""
     component = SubmitRaisesForRequestOne(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    dispatcher = open_dispatcher(_RequestJobRecipe(training_mode="manual"), live_objects(component))
     scenario = dispatcher.get_or_create_scenario("s")
     trainer = scenario.trainers[0].trainer
     polled = threading.Event()
@@ -1354,9 +1373,9 @@ def test_a_request_runs_past_the_step_budget_and_the_failure_streak(tmp_path, re
     def method(workspace, services):
         seen.append(asked(workspace)[0])
 
-    recipe = recipe_in("manual", tmp_path, method, max_steps=1)
+    recipe, live = recipe_in("manual", tmp_path, method, max_steps=1)
     head = ArtifactTextFiles("base", dict(recipe.seed.files))
-    trainer = recipe_trainer(recipe, records)
+    trainer = recipe_trainer(recipe, live, records)
     file(training_requests, "one")
     file(training_requests, "two")
     rows = []
@@ -1379,7 +1398,7 @@ def test_a_request_runs_past_the_step_budget_and_the_failure_streak(tmp_path, re
     trainer.close()
 
     (tmp_path / "streak").mkdir()
-    trainer = recipe_trainer(recipe_in("manual", tmp_path / "streak", method, max_failure_streak=1), records)
+    trainer = recipe_trainer(*recipe_in("manual", tmp_path / "streak", method, max_failure_streak=1), records)
     backend = job_backend(trainer)
     state = HarnessState(failure_streak=1).to_json()
     automatic = backend.prepare_job(JobData("auto", ()), state, 0, head=head)
@@ -1417,7 +1436,7 @@ def test_manual_traffic_is_available_to_auto_without_a_replay(records, build, pr
 
 
 def test_hybrid_and_other_unknown_modes_are_refused(tmp_path):
-    recipe = harness_recipe(tmp_path, lambda workspace, services: None)
+    recipe, _ = harness_recipe(tmp_path, lambda workspace, services: None)
     pipeline = reports_pipeline(PipelineContext("s"))
     for mode in ("hybrid", "either"):
         with pytest.raises(ValueError, match="training_mode must be 'auto' or 'manual'"):
@@ -1548,8 +1567,8 @@ def test_manual_collects_the_failures_each_request_step_carries(tmp_path, open_d
     def method(workspace, services):
         calls.append(asked(workspace))
 
-    recipe = recipe_in("manual", tmp_path, method, job_samples=2, evaluation={"collect_failures": True})
-    dispatcher = open_dispatcher(recipe)
+    recipe, live = recipe_in("manual", tmp_path, method, job_samples=2, evaluation={"collect_failures": True})
+    dispatcher = open_dispatcher(recipe, live)
 
     def evaluation_rows():
         """Each step's traces, its evaluation's task count (the seed task and the collected ones) and whether it
@@ -1606,7 +1625,7 @@ class _FirstJobWaits(StubTrainingComponent):
 
 def test_a_client_cancels_a_queued_request_and_the_job_of_a_request(tmp_path, open_dispatcher):
     component = _FirstJobWaits(tmp_path / "checkpoints")
-    dispatcher = open_dispatcher(_RequestJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual"))
+    dispatcher = open_dispatcher(_RequestJobRecipe(training_mode="manual"), live_objects(component))
     for receipt in ("a", "b", "c"):
         dispatcher.accept_record(
             AgentRecord.create(

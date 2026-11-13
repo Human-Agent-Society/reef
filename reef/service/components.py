@@ -34,8 +34,9 @@ from aiohttp import web
 from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
-from reef.recipe.base import ServedEndpoint, close_runtimes
 from reef.recipe.composite import CompositeRecipe
+from reef.recipe.deployment import harness_adapter
+from reef.scenario.live_objects import ServedEndpoint, close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
@@ -44,9 +45,9 @@ from reef.service.assembly import (
     build_dispatcher,
     build_task_files,
     default_served_url,
+    load_deployment,
     open_scenario_storage,
     open_service_coordination,
-    serving_recipe,
     with_harness_components,
 )
 from reef.service.auth import evaluation_token_for
@@ -59,7 +60,7 @@ from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.tasks import TaskFileStore
-from reef.train.job_queue import TrainingJobWorker
+from reef.train.job_queue import TrainingCheckWorker, TrainingJobWorker
 
 
 class ComponentApp(ABC):
@@ -81,11 +82,14 @@ class ControlApp(ComponentApp):
 
 
 class InferenceApp(ComponentApp):
-    """The inference service owns runtime startup and serves requests from published routes."""
+    """The inference service owns runtime startup and serves requests from published routes.
+
+    It runs no training job, so it builds no training component: it reads the backend's facts
+    (``load_deployment``)."""
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
-        recipe = serving_recipe(settings, environ)
-        runtime = recipe.runtime
+        recipe, live = load_deployment(settings, environ, runs_training=False)
+        runtime = live.runtime
         coordination = open_service_coordination(settings)
         try:
             backends = build_artifact_backend(settings) if runtime is not None and runtime.serves_requests else None
@@ -97,7 +101,7 @@ class InferenceApp(ComponentApp):
                 storage = ObservedScenarioStorage(storage, record_observer)
         except BaseException:
             coordination.close()
-            close_runtimes(recipe.job_components(), runtime)
+            close_runtimes(live.job_components(), runtime)
             raise
         timeout_seconds = settings.inference_timeout_s if runtime is None else runtime.inference_timeout_s
         app = build_inference_app(
@@ -109,7 +113,7 @@ class InferenceApp(ComponentApp):
             tokens=settings.tokens,
             evaluation_tokens=evaluation_token_for(settings.tokens),
             timeout_seconds=timeout_seconds,
-            for_codex=recipe.harness_adapter == "codex",
+            for_codex=harness_adapter(recipe) == "codex",
         )
         if settings.routing_manifest is not None:
             try:
@@ -117,6 +121,7 @@ class InferenceApp(ComponentApp):
                     app,
                     settings,
                     recipe,
+                    live,
                     ReplicaRecords(ServedModelsCache(coordination.served_models), storage),
                     environ,
                 )
@@ -124,13 +129,14 @@ class InferenceApp(ComponentApp):
                 data_store.close()
                 storage.close()
                 coordination.close()
-                close_runtimes(recipe.job_components(), runtime)
+                close_runtimes(live.job_components(), runtime)
                 raise
 
         worker = None
         if backends is not None:
             worker = ServingWorker(
                 recipe,
+                live,
                 backends,
                 coordination,
                 worker_id=instance_id("inference-startup"),
@@ -145,7 +151,7 @@ class InferenceApp(ComponentApp):
             data_store.close()
             storage.close()
             coordination.close()
-            close_runtimes(recipe.job_components(), runtime)
+            close_runtimes(live.job_components(), runtime)
 
         app.on_cleanup.append(close_inference)
         return app
@@ -169,7 +175,7 @@ class HarnessApp(ComponentApp):
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({"harness"}))
-        if not dispatcher.recipe.harness_adapter:
+        if harness_adapter(dispatcher.recipe) is None:
             dispatcher.close()
             raise ValueError(f"recipe {settings.recipe!r} evolves no harness, so it has no harness service")
         return create_harness_app(
@@ -183,33 +189,46 @@ class HarnessApp(ComponentApp):
 class TrainingApp(ComponentApp):
     """Build the training service from its job components and coordination store.
 
-    Values: this stateless builder returns an app with one worker per recipe job component, and refuses a recipe
-    with no job component. The app owns these workers, their components, the runtime and the coordination store.
-    Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario or artifact stores. It opens
-    the data store, which keeps the data directory of each job.
+    Values: this stateless builder returns an app with two workers per job component of the process, one that
+    runs the jobs (``TrainingJobWorker``) and one that answers control's checks (``TrainingCheckWorker``), and
+    refuses a deployment with no job component. The app owns these workers, their components, the runtime and the
+    coordination store.
+    Purpose: ``build_component_app("training", ...)`` is the only process of a split deployment that builds a
+    training component. It opens no scenario store. It opens the data store, which keeps the data directory of
+    each job, and the artifact store, from which it reads the snapshot that a job starts from
+    (``reef.train.job_queue.resolved_job``).
     """
 
     def build(self, settings: ServiceSettings, environ: Mapping[str, str]) -> web.Application:
-        recipe = serving_recipe(settings, environ)
+        recipe, live = load_deployment(settings, environ, runs_training=True)
         if isinstance(recipe, CompositeRecipe):
-            recipe = recipe.with_served_endpoint(
-                ServedEndpoint(url=settings.served_url or default_served_url(settings.host, settings.port), token=None)
+            live = replace(
+                live,
+                served_endpoint=ServedEndpoint(
+                    url=settings.served_url or default_served_url(settings.host, settings.port), token=None
+                ),
             )
-        runtime = recipe.runtime
+        runtime = live.runtime
         try:
-            # The harness training component reads the served endpoint, so it is built after the recipe has it.
-            recipe = with_harness_components(recipe, environ)
+            # The harness training component reads the served endpoint, so it is built after ``live`` has it.
+            live = with_harness_components(recipe, live, environ, runs_training=True)
         except BaseException:
-            close_runtimes(recipe.job_components(), runtime)
+            close_runtimes(live.job_components(), runtime)
             raise
-        components = recipe.job_components()
+        components = live.job_components()
         coordination: Coordination | None = None
         task_files: TaskFileStore | None = None
         data_store: DataStore | None = None
         workers: list[TrainingJobWorker] = []
+        check_workers: list[TrainingCheckWorker] = []
 
         def close_training() -> None:
             errors: list[BaseException] = []
+            for check_worker in check_workers:
+                try:
+                    check_worker.stop()
+                except BaseException as exc:
+                    errors.append(exc)
             unclosed_components = list(components[len(workers) :])
             for worker in reversed(workers):
                 try:
@@ -238,17 +257,34 @@ class TrainingApp(ComponentApp):
             coordination = open_service_coordination(settings)
             task_files = build_task_files(settings)
             data_store = build_data_store(settings, task_files)
+            # A job names the snapshot that it starts from, which the workers read from the artifact store.
+            backends = build_artifact_backend(settings)
+            local_artifact_dir = Path(settings.artifact_cache_dir) / "staged"
             workers.extend(
                 TrainingJobWorker(
                     component,
                     coordination.work_queue,
                     data_store,
+                    backends,
                     worker_id=instance_id(f"training-{component.name}"),
+                    local_artifact_dir=local_artifact_dir,
                     slots=settings.training_max_jobs,
                 )
                 for component in components
             )
-            for worker in workers:
+            check_workers.extend(
+                TrainingCheckWorker(
+                    component,
+                    coordination.work_queue,
+                    data_store,
+                    backends,
+                    worker_id=instance_id(f"training-check-{component.name}"),
+                    local_artifact_dir=local_artifact_dir,
+                )
+                for component in components
+            )
+            # The job worker starts the component's jobs first (``TrainingComponent.start_jobs``).
+            for worker in (*workers, *check_workers):
                 worker.start()
             app = service_application(settings.tokens)
         except BaseException:

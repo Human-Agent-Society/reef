@@ -1500,9 +1500,16 @@ whose recipe component trains weights is deployed the way that recipe is.
 inference runtime serve every recipe component. A top-level ``pipeline`` or
 ``evaluation`` section goes to the recipe component that trains weights.
 
+``components`` holds at least two recipe components. At most one of them
+trains weights, because a snapshot loads one component into the runtime. At
+most one of them is a harness evolution recipe, because a process has one
+harness training component. A recipe component cannot be a composite. Reef
+refuses any other ``components`` object when it loads the configuration.
+
 A scenario's root snapshot keeps one directory per recipe component. Reef
-writes each recipe component's default start there: its seed, and the model
-snapshot under the directory of the recipe component that trains weights. A
+writes each recipe component's default start there: its seed, and the base
+root or the reference to the base model under the directory of the recipe
+component that trains weights. A
 recipe component whose recipe seeds nothing starts empty. Each recipe component's trainer runs as its own
 worker and commits into the same snapshot chain. Every step therefore
 checkpoints, and the recipe components share one ``training_mode``. Reef
@@ -2198,9 +2205,11 @@ The lifetime is the sum of the task's build, agent and verifier time limits,
 plus one hour. A nonzero ``override_timeout_sec`` in ``rollout.agent`` replaces
 the task's agent time limit in that sum, and an ``override_setup_timeout_sec``
 adds to it. The lifetime is at most one day, so a rollout that needs more time
-loses its sandbox after one day. When neither the task nor ``rollout.agent``
-gives the agent a time limit, the sandbox keeps Harbor's default lifetime of
-one day.
+loses its sandbox after one day.
+
+When neither the task nor a nonzero ``override_timeout_sec`` gives the agent a
+time limit, this sum does not apply. A Modal sandbox then lives for two hours.
+An E2B sandbox keeps Harbor's default lifetime of one day.
 
 Reef asks the service to delete an E2B sandbox at the end of its lifetime.
 Without this request, a self-hosted service can pause the sandbox and keep it.

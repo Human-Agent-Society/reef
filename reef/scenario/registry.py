@@ -35,9 +35,11 @@ from reef.evaluation.activation import EvaluatedActivation, activation_setting, 
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
+from reef.recipe.deployment import harness_adapter
 from reef.recipe.errors import RecipeConfigError
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ItemStart, ScenarioFactory
+from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.served_models import ServedModels
@@ -106,6 +108,7 @@ class ScenarioRegistry:
         recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
+        live: LiveObjects | None = None,
         local_artifact_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
@@ -123,6 +126,7 @@ class ScenarioRegistry:
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
+            live=live,
             local_artifact_dir=local_artifact_dir,
             scenario_storage=scenario_storage,
             experiment_reports=self.experiment_reports,
@@ -276,7 +280,7 @@ class ScenarioRegistry:
             registered = self._backend_factory.list_registrations()
         with self._lock:
             loaded = dict(self._scenarios)
-        adapter = self._recipe.harness_adapter
+        adapter = harness_adapter(self._recipe)
         rows = []
         for name in sorted(set(registered) | set(loaded)):
             current = loaded.get(name)
