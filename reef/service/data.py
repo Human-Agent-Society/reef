@@ -339,13 +339,17 @@ def query_items(
     group: tuple[str, str | None] | None = None,
     benchmark: str | None = None,
     trajectory_set: str | None = None,
+    id_prefix: str | None = None,
+    before: int | None = None,
 ) -> dict[str, Any]:
     """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, each item with its
     content when ``content`` (``item_json``), else without. ``group`` keeps only the items of one group,
-    ``benchmark`` only the task items of one benchmark, and ``trajectory_set`` only the trajectory items of one
-    trajectory set (``DataStore.query``).
+    ``benchmark`` only the task items of one benchmark, ``trajectory_set`` only the trajectory items of one
+    trajectory set, and ``id_prefix`` only the items whose ID starts with it (``DataStore.query``). With
+    ``before``, the items come newest first, from the one just before ``before``.
 
-    ``next`` is the ``after`` of the next page, or null after the last item.
+    ``next`` is the ``after`` of the next page, or with ``before`` the ``before`` of the next page: the sequence of
+    the page's last item. It is null after the last item.
     """
     if kind is not None and kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
@@ -360,6 +364,8 @@ def query_items(
         group=group,
         benchmark=benchmark,
         trajectory_set=trajectory_set,
+        id_prefix=id_prefix,
+        before=before,
     )
     return {
         "owner": owner,

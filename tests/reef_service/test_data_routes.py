@@ -253,6 +253,15 @@ def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path)
         assert listed["next"] is None
         members = await (await client.get(f"{base}?trajectory_set=day-1", headers=AUTH)).json()
         assert [item["id"] for item in members["items"]] == ["t1", "t2"]
+        # The trajectory before t2 in the set, and the items of an ID prefix.
+        before = members["items"][1]["sequence"]
+        earlier = await (await client.get(f"{base}?trajectory_set=day-1&before={before}&limit=1", headers=AUTH)).json()
+        assert ([item["id"] for item in earlier["items"]], earlier["next"]) == (
+            ["t1"],
+            members["items"][0]["sequence"],
+        )
+        prefixed = await (await client.get(f"{base}?kind=trajectory&id_prefix=t2", headers=AUTH)).json()
+        assert [item["id"] for item in prefixed["items"]] == ["t2"]
         assert (await client.get(f"{base}/sets/trajectory", headers=AUTH)).status == 400
         assert (await (await client.delete(f"{sets}/day-1", headers=AUTH)).json())["released"] is True
         assert await trajectories() == []
