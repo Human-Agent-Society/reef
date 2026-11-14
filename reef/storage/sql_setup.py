@@ -1,14 +1,41 @@
-"""Connection setup shared by the SQL stores: SQLite's WAL mode and PostgreSQL URLs and schema names."""
+"""Connection setup shared by the SQL stores: SQLite's WAL mode, PostgreSQL URLs and schema names, and the range of
+the strings that start with a prefix."""
 
 from __future__ import annotations
 
 import re
 import time
 
+from sqlalchemy import ColumnElement, and_
 from sqlalchemy.engine import URL, Connection, make_url
 from sqlalchemy.exc import ArgumentError, OperationalError
 
 from reef.core.errors import ReefError
+
+
+def prefix_upper_bound(prefix: str) -> str | None:
+    """The least string that is greater than every string that starts with ``prefix``, in code point order; None when
+    no string is (``prefix`` is empty or has only U+10FFFF, the largest code point).
+
+    Code point order is the byte order of UTF-8: the order of SQLite's BINARY collation and of PostgreSQL's "C"
+    collation.
+    """
+    kept = prefix.rstrip(chr(0x10FFFF))
+    if not kept:
+        return None
+    following = ord(kept[-1]) + 1
+    # The surrogates U+D800 to U+DFFF are not characters: the code point after U+D7FF is U+E000.
+    return kept[:-1] + chr(0xE000 if following == 0xD800 else following)
+
+
+def prefix_range(column: ColumnElement[str], prefix: str) -> ColumnElement[bool]:
+    """The condition that ``column``, a string in code point order (SQLite's BINARY collation, PostgreSQL's "C"
+    collation), starts with ``prefix``: it is from ``prefix`` to ``prefix_upper_bound(prefix)``. An index of the
+    column in that order finds the rows of the range."""
+    upper = prefix_upper_bound(prefix)
+    if upper is None:
+        return column >= prefix
+    return and_(column >= prefix, column < upper)
 
 
 def enable_wal(connection: Connection, database: str, *, timeout_seconds: float, retry_seconds: float) -> None:

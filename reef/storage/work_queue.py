@@ -410,8 +410,12 @@ class WorkQueue(ABC):
         """The items of ``queue`` with ``changed_sequence > after_sequence``, in that order, at most ``limit``."""
 
     @abstractmethod
-    def items(self, queue: str, *, scenario: str | None = None, kind: str | None = None) -> tuple[WorkItem, ...]:
-        """The items of ``queue``, optionally of one scenario and kind, in ``created_sequence`` order."""
+    def items(
+        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+    ) -> tuple[WorkItem, ...]:
+        """The items of ``queue``, optionally of one scenario and kind, in ``created_sequence`` order. ``id_prefix``,
+        a non-empty string, keeps only the items whose ID starts with it; a store reads only those. Raise
+        ``ValueError`` for another ``id_prefix``."""
 
     def page(
         self,
