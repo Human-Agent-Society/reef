@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from reef.execution.sandbox.e2b import PRIVATE_TRAFFIC_ENV, private_traffic_enabled
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.execution.sandbox.task_environment import (
     HARBOR_TASK_ENVIRONMENTS,
@@ -200,7 +199,6 @@ def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_t
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     e2b = pytest.importorskip("e2b")
-    monkeypatch.delenv(PRIVATE_TRAFFIC_ENV, raising=False)
     environments = harbor_e2b_environments(tmp_path)
     calls: dict[str, list[dict[str, object]]] = {name: [] for name in environments}
     created = object()
@@ -228,98 +226,3 @@ def test_reefs_e2b_sandbox_is_created_as_harbors_and_asks_to_be_deleted_at_its_t
     assert harbor_call["timeout"] == 120 + 900 + 300 + 3600 and "lifecycle" not in harbor_call
     # Every argument of Harbor's call, and one more: delete the sandbox at its timeout, never pause it.
     assert calls["reef"][-1] == {**harbor_call, "lifecycle": {"on_timeout": "kill"}}
-
-
-@pytest.mark.unit
-def test_private_traffic_is_on_only_for_true_and_any_other_setting_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(PRIVATE_TRAFFIC_ENV, raising=False)
-    assert private_traffic_enabled() is False
-    for value, enabled in (("true", True), ("false", False)):
-        monkeypatch.setenv(PRIVATE_TRAFFIC_ENV, value)
-        assert private_traffic_enabled() is enabled
-    for value in ("", "yes", "True", "1", " true"):
-        monkeypatch.setenv(PRIVATE_TRAFFIC_ENV, value)
-        # The whole message: the setting and its accepted values, and never the value that is set.
-        with pytest.raises(ValueError, match=r"^REEF_E2B_PRIVATE_TRAFFIC must be true or false$"):
-            private_traffic_enabled()
-
-
-class CreatedSandbox:
-    """A sandbox as ``AsyncSandbox.create`` returns it, with the traffic access token that the service gave it."""
-
-    def __init__(self, traffic_access_token: str | None) -> None:
-        self.traffic_access_token = traffic_access_token
-        self.kills = 0
-
-    async def kill(self) -> bool:
-        self.kills += 1
-        return True
-
-
-def recording_create(made: list[dict[str, object]], sandbox: CreatedSandbox) -> staticmethod:
-    """A stand-in for ``AsyncSandbox.create`` that appends its arguments to ``made`` and returns ``sandbox``."""
-
-    async def create(**options: object) -> CreatedSandbox:
-        made.append(options)
-        return sandbox
-
-    return staticmethod(create)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("harbor_network", ["allowlist", "none"])
-def test_a_private_e2b_sandbox_keeps_harbors_egress_rules_and_closes_its_ports_to_the_public(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, harbor_network: str
-) -> None:
-    e2b = pytest.importorskip("e2b")
-    monkeypatch.setenv(PRIVATE_TRAFFIC_ENV, "true")
-    environments = harbor_e2b_environments(tmp_path)
-    if harbor_network == "none":
-        # A trial whose network options Harbor leaves to the service's default.
-        for environment in environments.values():
-            monkeypatch.setattr(environment, "_sandbox_create_network_options", lambda: None)
-    calls: dict[str, list[dict[str, object]]] = {name: [] for name in environments}
-    created = CreatedSandbox("traffic-token")
-    for name, environment in environments.items():
-        monkeypatch.setattr(e2b.AsyncSandbox, "create", recording_create(calls[name], created))
-        asyncio.run(environment._create_sandbox())
-        assert environment._sandbox is created
-    (harbor_call,), (reef_call,) = calls["harbor"], calls["reef"]
-    # Harbor's own class reads no Reef setting; Reef's adds only the ingress rule and the deletion at timeout.
-    assert reef_call == {
-        **harbor_call,
-        "network": {**(harbor_call["network"] or {}), "allow_public_traffic": False},
-        "lifecycle": {"on_timeout": "kill"},
-    }
-    assert reef_call["allow_internet_access"] is True
-    if harbor_network == "allowlist":
-        assert reef_call["network"] == {
-            "allow_out": ["pypi.org"],
-            "deny_out": [e2b.ALL_TRAFFIC],
-            "allow_public_traffic": False,
-        }
-    else:
-        assert harbor_call["network"] is None and reef_call["network"] == {"allow_public_traffic": False}
-    assert created.kills == 0
-
-
-@pytest.mark.unit
-def test_a_private_e2b_sandbox_without_a_traffic_token_is_killed_and_a_mistyped_setting_creates_none(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    e2b = pytest.importorskip("e2b")
-    environment = harbor_e2b_environments(tmp_path)["reef"]
-    made: list[dict[str, object]] = []
-    sandbox = CreatedSandbox(None)
-    monkeypatch.setattr(e2b.AsyncSandbox, "create", recording_create(made, sandbox))
-    monkeypatch.setenv(PRIVATE_TRAFFIC_ENV, "true")
-    with pytest.raises(RuntimeError, match="no traffic access token"):
-        asyncio.run(environment._create_sandbox())
-    # Harbor's retry policy tries once more; each sandbox is killed, and the environment keeps none.
-    assert len(made) == sandbox.kills == 2
-    assert environment._sandbox is None
-    made.clear()
-    monkeypatch.setenv(PRIVATE_TRAFFIC_ENV, "yes")
-    with pytest.raises(ValueError, match="REEF_E2B_PRIVATE_TRAFFIC must be true or false"):
-        asyncio.run(environment._create_sandbox())
-    assert made == []

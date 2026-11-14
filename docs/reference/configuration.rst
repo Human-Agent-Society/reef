@@ -2248,17 +2248,8 @@ Set ``rollout.environment`` to ``e2b`` for an E2B-compatible service such as
 AgentENV, or ``modal`` for Modal. For a self-hosted E2B service, set
 ``E2B_API_URL``, ``E2B_SANDBOX_URL`` and ``E2B_API_KEY`` in the process that
 runs the rollouts. The first two select the service's API and sandbox
-endpoints.
-
-To require authentication for the ports of each E2B sandbox that Reef starts,
-also set ``REEF_E2B_PRIVATE_TRAFFIC=true`` there. Reef authenticates its own
-connections automatically. The setting applies to E2B rollouts and to agents
-that run in E2B (``evolution.executor`` or ``evolution.agent.sandbox`` set to
-``e2b``). Outbound network rules do not change. If the service cannot make a
-sandbox private, Reef stops the sandbox and reports an error. Unset or
-``false`` keeps the service's default. Any other value, including an empty
-one, fails with an error that names the setting. The Slime training component
-applies all of these settings to its workers automatically.
+endpoints. The Slime training component applies these settings to its
+workers automatically.
 
 Harbor deletes the sandbox when the rollout ends. If the rollout process is
 killed before cleanup, the sandbox's lifetime limits how long it can remain.
@@ -2502,8 +2493,8 @@ With ``e2b``, a task runs only its ``environment/Dockerfile`` (no
 compose services), an agent inside the sandbox cannot reach a
 ``generator.agent-host`` on a private host, and E2B builds a template for each
 new task image. The E2B rules of ``rollout.environment`` apply to the checks
-and to the rollouts: the value for a self-hosted service, ``REEF_E2B_PRIVATE_TRAFFIC``,
-the sandbox lifetime, and the request to delete the sandbox at its end. A rollout takes
+and to the rollouts: the value for a self-hosted service, the sandbox
+lifetime, and the request to delete the sandbox at its end. A rollout takes
 the agent's time limits from ``generator.agent``. A check runs Harbor's oracle
 or nop agent, which sets no time limit, so only the task's time limits count
 for a check.

@@ -19,13 +19,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from reef.execution.sandbox.e2b import (
-    PRIVATE_TRAFFIC_ENV,
-    TRAFFIC_ACCESS_TOKEN_HEADER,
-    E2BExecutor,
-    E2BSession,
-    template_alias,
-)
+from reef.execution.sandbox.e2b import TRAFFIC_ACCESS_TOKEN_HEADER, E2BExecutor, E2BSession, template_alias
 from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramLaunchError,
@@ -635,7 +629,6 @@ def test_a_run_longer_than_e2bs_ceiling_opens_within_it_and_keeps_its_sandbox_al
 
     monkeypatch.setattr(e2b.Sandbox, "create", staticmethod(create))
     monkeypatch.setattr(remote_executor, "REAPED_OWNERS", set())
-    monkeypatch.delenv(PRIVATE_TRAFFIC_ENV, raising=False)
 
     # Four hours of agent run: the sandbox is still created within what E2B grants.
     session = E2BExecutor(api_key="k", template="reef-pi", timeout_s=14400).open()
@@ -660,13 +653,13 @@ def test_a_run_longer_than_e2bs_ceiling_opens_within_it_and_keeps_its_sandbox_al
 
 
 class CreatedSandbox:
-    """An E2B sandbox as ``Sandbox.create`` returns it, with the traffic access token that the service gave it."""
+    """An E2B sandbox as ``Sandbox.create`` returns it: with the traffic access token of a private sandbox, or None
+    for a public one."""
 
     def __init__(self, traffic_access_token: str | None) -> None:
         self.traffic_access_token = traffic_access_token
         self.files = Mock()
         self.commands = Mock()
-        self.killed = False
 
     def get_host(self, port: int) -> str:
         # E2B's wildcard host of a sandbox port; no other header routes the request.
@@ -676,23 +669,24 @@ class CreatedSandbox:
         pass
 
     def kill(self) -> bool:
-        self.killed = True
         return True
 
 
 @pytest.mark.unit
-def test_a_private_e2b_sandbox_needs_its_traffic_token_and_each_relay_request_carries_it(monkeypatch) -> None:
+@pytest.mark.parametrize("traffic_access_token", [TRAFFIC_TOKEN, None])
+def test_an_e2b_relay_gets_the_sandboxs_traffic_token_when_the_service_returns_one(
+    monkeypatch, traffic_access_token: str | None
+) -> None:
     e2b = pytest.importorskip("e2b")
 
     import reef.execution.sandbox.remote as remote_executor
 
     created: list[dict] = []
-    sandboxes: list[CreatedSandbox] = []
     started: list[tuple[str, dict[str, str]]] = []
 
     def create(**options):
         created.append(options)
-        return sandboxes.pop(0)
+        return CreatedSandbox(traffic_access_token)
 
     class RecordingPump:
         """Stands in for ``TunnelPump`` in ``RemoteSession.forward``: records the relay's address and the session's
@@ -709,31 +703,10 @@ def test_a_private_e2b_sandbox_needs_its_traffic_token_and_each_relay_request_ca
 
     monkeypatch.setattr(e2b.Sandbox, "create", staticmethod(create))
     monkeypatch.setattr(remote_executor, "TunnelPump", RecordingPump)
-    executor = E2BExecutor(api_key="fleet-api-key", template="reef-pi", forward_ports=(9000,))
-
-    # Unset, the sandbox keeps the service's ingress, and its relay gets no provider header.
-    monkeypatch.delenv(PRIVATE_TRAFFIC_ENV, raising=False)
-    sandboxes.append(CreatedSandbox(None))
-    executor.open().close()
-    assert created[-1]["network"] is None
-    assert started[-1] == ("https://21080-sandbox-id.agentenv.example", {})
-
-    # Private: the relay at the sandbox's wildcard host gets the token and nothing else, so never the API key.
-    monkeypatch.setenv(PRIVATE_TRAFFIC_ENV, "true")
-    sandboxes.append(CreatedSandbox(TRAFFIC_TOKEN))
-    executor.open().close()
-    assert created[-1]["network"] == {"allow_public_traffic": False}
-    assert started[-1] == ("https://21080-sandbox-id.agentenv.example", {TRAFFIC_ACCESS_TOKEN_HEADER: TRAFFIC_TOKEN})
-
-    # A private sandbox that the service gave no token is killed before any relay starts.
-    missing = CreatedSandbox("")
-    sandboxes.append(missing)
-    with pytest.raises(ProgramLaunchError, match="no traffic access token"):
-        executor.open()
-    assert missing.killed and len(started) == 2
-
-    # A mistyped setting creates no sandbox, and the error does not repeat the value.
-    monkeypatch.setenv(PRIVATE_TRAFFIC_ENV, "yes")
-    with pytest.raises(ProgramLaunchError, match=r"REEF_E2B_PRIVATE_TRAFFIC must be true or false$"):
-        executor.open()
-    assert len(created) == 3
+    E2BExecutor(api_key="fleet-api-key", template="reef-pi", forward_ports=(9000,)).open().close()
+    # Reef creates an ordinary sandbox: the service decides whether its ports are private.
+    (options,) = created
+    assert "network" not in options
+    # The relay at the sandbox's wildcard host gets the token when there is one, and nothing else: never the API key.
+    tunnel_headers = {TRAFFIC_ACCESS_TOKEN_HEADER: TRAFFIC_TOKEN} if traffic_access_token else {}
+    assert started == [("https://21080-sandbox-id.agentenv.example", tunnel_headers)]

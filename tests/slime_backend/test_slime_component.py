@@ -32,7 +32,6 @@ from reef.core.snapshot import RootSource
 from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR, ArtifactFormat
 from reef.execution.executor import ExecutorFuture, base
-from reef.execution.sandbox.e2b import PRIVATE_TRAFFIC_ENV, private_traffic_enabled
 from reef.storage.durable_files import write_json
 from reef.train.component import JobStatus, ScenarioRoot, TrainingJob
 from reef.train.learning_rate import LearningRateSchedule, LearningRateScheduleState
@@ -1153,7 +1152,7 @@ def build_calls(tmp_path, monkeypatch):
         "CUDA_DEVICE_MAX_CONNECTIONS",
         "NCCL_NVLS_ENABLE",
         *startup.TASK_ENVIRONMENT_CREDENTIALS,
-        *startup.TASK_ENVIRONMENT_SETTINGS,
+        *startup.TASK_ENVIRONMENT_ENDPOINTS,
     ):
         monkeypatch.delenv(name, raising=False)
     calls["args"] = args
@@ -1395,28 +1394,18 @@ def test_the_workers_runtime_env_carries_the_cuda_defaults_and_this_processs_pyt
 
 
 @pytest.mark.unit
-def test_the_workers_runtime_env_carries_the_e2b_services_settings_as_this_process_sets_them(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_workers_runtime_env_carries_the_e2b_services_endpoints_as_this_process_sets_them() -> None:
     defaults = {"CUDA_DEVICE_MAX_CONNECTIONS": "1", "NCCL_NVLS_ENABLE": "0"}
-    assert PRIVATE_TRAFFIC_ENV in startup.TASK_ENVIRONMENT_SETTINGS
-    # Without its endpoints, a rollout would send a self-hosted service's key to E2B's own API; without the private
-    # traffic setting, it would create public sandboxes.
+    # Without its endpoints, a rollout would send a self-hosted service's key to E2B's own API.
     e2b_settings = {
         "E2B_API_KEY": "agentenv-key",
         "E2B_API_URL": "https://api.agentenv.example",
         "E2B_SANDBOX_URL": "https://sandbox.agentenv.example",
         "E2B_DOMAIN": "agentenv.example",
-        PRIVATE_TRAFFIC_ENV: "true",
     }
     assert startup.job_runtime_env({**e2b_settings, "OTHER": "x"}) == {"env_vars": {**defaults, **e2b_settings}}
-    # A setting that is set but empty or invalid stays as it is, so the workers refuse it as this process does.
-    for setting in ("", "yes"):
-        env_vars = startup.job_runtime_env({PRIVATE_TRAFFIC_ENV: setting})["env_vars"]
-        assert env_vars == {**defaults, PRIVATE_TRAFFIC_ENV: setting}
-        monkeypatch.setenv(PRIVATE_TRAFFIC_ENV, env_vars[PRIVATE_TRAFFIC_ENV])
-        with pytest.raises(ValueError, match="must be true or false"):
-            private_traffic_enabled()
+    # An endpoint that is set but empty stays empty, so a worker cannot keep another value of its own.
+    assert startup.job_runtime_env({"E2B_API_URL": ""}) == {"env_vars": {**defaults, "E2B_API_URL": ""}}
 
 
 @pytest.mark.unit

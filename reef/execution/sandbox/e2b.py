@@ -13,10 +13,8 @@ so AgentENV deletes an abandoned sandbox instead of pausing it. The shared ``env
 class for Reef's Harbor rollouts and generator checks through ``import_path``. A standalone Harbor trial that
 selects only ``e2b`` uses Harbor's own class.
 
-``REEF_E2B_PRIVATE_TRAFFIC=true`` (:func:`private_traffic_enabled`) makes each sandbox that both classes create
-private: its ports answer only a request with the sandbox's traffic access token. Creation fails, and the sandbox
-is killed, when the service returns no token. An :class:`E2BSession` sends the token to its relays
-(:meth:`E2BSession.tunnel_headers`). The SDK's own command and file requests use the sandbox's envd token.
+A service can keep a sandbox's ports private and return a traffic access token for them. An :class:`E2BSession`
+then sends that token with each request to the sandbox's relays (:meth:`E2BSession.tunnel_headers`).
 
 This module can load without the optional E2B SDK. Opening a sandbox requires the SDK; the Harbor subclass also
 requires Harbor 0.25, installed through ``reef-infra[e2b]``.
@@ -25,7 +23,6 @@ requires Harbor 0.25, installed through ``reef-infra[e2b]``.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -65,25 +62,8 @@ logger = logging.getLogger(__name__)
 SANDBOX_MAX_TIMEOUT_S = 3600
 #: How long before that deadline the keeper asks for it again, so a slow extension still lands in time.
 SANDBOX_RENEW_MARGIN_S = 300
-#: The process setting that makes each E2B sandbox Reef creates private: ``true`` or ``false``; unset is ``false``.
-PRIVATE_TRAFFIC_ENV = "REEF_E2B_PRIVATE_TRAFFIC"
 #: The header that carries a sandbox's traffic access token to a port of a private sandbox.
 TRAFFIC_ACCESS_TOKEN_HEADER = "e2b-traffic-access-token"
-
-
-def private_traffic_enabled() -> bool:
-    """Whether ``REEF_E2B_PRIVATE_TRAFFIC`` asks for private sandboxes: ``true`` yes; ``false`` or unset no.
-
-    A private sandbox is created with ``network.allow_public_traffic`` false. Raise ``ValueError`` for any other
-    value, including an empty one, so that a mistyped setting never leaves a sandbox public. The message names the
-    setting and its accepted values, not the value that is set.
-    """
-    value = os.environ.get(PRIVATE_TRAFFIC_ENV)
-    if value is None or value == "false":
-        return False
-    if value == "true":
-        return True
-    raise ValueError(f"{PRIVATE_TRAFFIC_ENV} must be true or false")
 
 
 def template_alias(adapter: str, version: str) -> str:
@@ -114,7 +94,7 @@ class E2BExecutor(RemoteExecutor):
     """A :class:`RemoteExecutor` on E2B.
 
     ``api_key`` is the E2B key; ``template`` is the sandbox's image by alias. With ``npm_package`` a missing
-    alias is built first. :meth:`open` creates a private sandbox when :func:`private_traffic_enabled`.
+    alias is built first.
     """
 
     provider: ClassVar[str] = "e2b"
@@ -202,7 +182,6 @@ class E2BExecutor(RemoteExecutor):
 
         self.reap_once()
         try:
-            private_traffic = private_traffic_enabled()
             if self.npm_package:
                 ensure_template(self.template, self.npm_package, self.api_key)
             sandbox = Sandbox.create(
@@ -211,16 +190,9 @@ class E2BExecutor(RemoteExecutor):
                 timeout=min(int(self.timeout_s + SANDBOX_MARGIN_S), SANDBOX_MAX_TIMEOUT_S),
                 api_key=self.api_key,
                 metadata=self.labels(),
-                network={"allow_public_traffic": False} if private_traffic else None,
             )
         except Exception as exc:
             raise ProgramLaunchError(f"the E2B sandbox did not start: {exc}") from exc
-        if private_traffic and not sandbox.traffic_access_token:
-            try:
-                sandbox.kill()
-            except Exception as exc:
-                logger.warning("could not stop the E2B sandbox that has no traffic access token: %s", exc)
-            raise ProgramLaunchError("the E2B service returned no traffic access token for a private sandbox")
         session = E2BSession(sandbox, env=self.env)
         try:
             for index, port in enumerate(self.forward_ports):
@@ -374,55 +346,35 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
     the parent's, and ``type()`` is ``e2b``.
     Purpose: Harbor's ``EnvironmentFactory`` makes one for an ``e2b`` trial whose environment config names this class
     as its ``import_path``. ``start`` creates the sandbox with ``_create_sandbox``, and ``stop`` deletes it, as before.
-    When :func:`private_traffic_enabled`, ``_create_sandbox`` adds ``allow_public_traffic`` false to Harbor's network
-    options, and keeps their egress rules. It then requires the sandbox's traffic access token: without one, it kills
-    the sandbox and raises ``RuntimeError``. An invalid setting raises ``ValueError``. Harbor's retry policy tries
-    either failure once more.
     """
 
     # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The body is
-    # Harbor's create call with one more argument, and the private traffic rule when the setting asks for it. The
-    # decorator is Harbor's retry policy, because Harbor's decorator wraps its own method and not this one. When
-    # Harbor adds an argument to the call, add it here too: the parity test in tests/sandbox/test_task_environment.py
-    # compares the two calls.
+    # Harbor's create call with one more argument, and the decorator is Harbor's retry policy, because Harbor's
+    # decorator wraps its own method and not this one. When Harbor adds an argument to the call, add it here too: the
+    # parity test in tests/sandbox/test_task_environment.py compares the two calls.
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
     @override
     async def _create_sandbox(self) -> None:
         # Keep this optional SDK import inside sandbox creation.
         from e2b import AsyncSandbox
 
-        private_traffic = private_traffic_enabled()
-        network = self._sandbox_create_network_options()
-        if private_traffic:
-            network = (
-                {"allow_public_traffic": False} if network is None else {**network, "allow_public_traffic": False}
-            )
-        sandbox = await AsyncSandbox.create(
+        self._sandbox = await AsyncSandbox.create(
             template=self._template_name,
             metadata={"environment_name": self.environment_name, "session_id": self.session_id},
             envs=self._startup_env(),
             timeout=self._sandbox_timeout,
             allow_internet_access=self.network_policy.network_mode != NetworkMode.NO_NETWORK,
-            network=network,
+            network=self._sandbox_create_network_options(),
             lifecycle={"on_timeout": "kill"},
         )
-        if private_traffic and not sandbox.traffic_access_token:
-            try:
-                await sandbox.kill()
-            except Exception as exc:
-                logger.warning("could not stop the E2B sandbox that has no traffic access token: %s", exc)
-            raise RuntimeError("the E2B service returned no traffic access token for a private sandbox")
-        self._sandbox = sandbox
 
 
 __all__ = [
-    "PRIVATE_TRAFFIC_ENV",
     "TRAFFIC_ACCESS_TOKEN_HEADER",
     "E2BExecutor",
     "E2BSession",
     "KillOnTimeoutE2BEnvironment",
     "SandboxKeeper",
     "ensure_template",
-    "private_traffic_enabled",
     "template_alias",
 ]
