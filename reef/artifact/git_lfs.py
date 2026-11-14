@@ -1211,8 +1211,9 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
     def discard_all_content(self) -> None:
         """Delete every content ref of the scenario, in groups that fit on a command line, and mark their cache
         entries discarded (``mark_discarded``). Then remove the LFS objects of a local repository that no ref
-        references (``LocalLFSObjects.reclaim``), as control's sweep does: the scenario's delete calls this, so its
-        checkpoints do not wait for the next sweep. When a write runs meanwhile, the next sweep removes them."""
+        references (``LocalLFSObjects.reclaim``), as control's sweep does: the cleanup of a deleted scenario calls
+        this, so its checkpoints do not wait for the next sweep. When a write runs meanwhile, the next sweep
+        removes them."""
         with self._workspace.lock:
             stored = self._workspace.ls_remote_prefix(self.content_ref_prefix)
             names = sorted(stored)
@@ -1481,6 +1482,12 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             shutil.rmtree(work_dir, ignore_errors=True)
             archived.append(str(work_dir))
         return tuple(archived)
+
+    def forget_scenario(self, scenario: str) -> None:
+        """Drop the scenario's backend and its work clone. The repository keeps everything."""
+        super().forget_scenario(scenario)
+        encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
+        shutil.rmtree(self._work_dir / encoded, ignore_errors=True)
 
     def reclaim_discarded(self) -> None:
         """Free what discarded content holds on this host, in two steps.

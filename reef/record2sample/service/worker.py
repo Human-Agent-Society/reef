@@ -54,8 +54,9 @@ BACKGROUND_POLL_SECONDS = 1.0
 #: The longest wait, in seconds, between two fallback looks at background work that changed nothing.
 MAX_BACKGROUND_POLL_SECONDS = 300.0
 #: The sources that request a selection: accepted records, a data sync, a commit, a scenario reload, background
-#: work that still runs, and a set that waits for time.
-TRIGGERS = ("records", "data", "commit", "reload", "background", "due")
+#: work that still runs, a set that waits for time, and the delete of the scenario, after which the samples service
+#: drops what it keeps of the scenario and makes nothing.
+TRIGGERS = ("records", "data", "commit", "reload", "background", "due", "delete")
 #: The shortest time, in seconds, between two progress writes of one selection.
 PROGRESS_INTERVAL_SECONDS = 1.0
 
@@ -81,6 +82,11 @@ class Selection(ABC):
         before each write. The default holds always: no queue gives the attempt."""
         return
 
+    def requested_by(self, trigger: str) -> bool:
+        """Whether ``trigger`` (one of ``TRIGGERS``) requested this selection. The default is False: no queue item
+        records the requests."""
+        return False
+
 
 class ItemSelection(Selection):
     """The attempt of the selection ``item`` that a samples worker runs: it writes the counts so far to the item's
@@ -93,6 +99,9 @@ class ItemSelection(Selection):
         self.item = item
         self.last_write = -math.inf
         self.lease_lost = threading.Event() if lease_lost is None else lease_lost
+
+    def requested_by(self, trigger: str) -> bool:
+        return f"trigger:{trigger}" in self.item.metadata
 
     def check_lease(self) -> None:
         if self.lease_lost.is_set():

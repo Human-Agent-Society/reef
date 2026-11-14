@@ -513,11 +513,28 @@ class ScenarioRegistry:
             raise NotImplementedError("this repository backend cannot archive a scenario")
 
     def archive_registration(self, scenario: str) -> tuple[str, ...]:
-        """Move the scenario's durable registration aside and forget its cached backend; what was archived."""
+        """Move the scenario's durable registration aside and forget its cached backend; what was archived. The
+        archived registration marks the scenario deleted (``was_deleted``)."""
         factory = self._backend_factory
         if not isinstance(factory, CachedRepositoryBackendFactory) or not factory.archives_registrations:
             raise NotImplementedError("this repository backend cannot archive a scenario")
         return factory.archive_registration(scenario)
+
+    def was_deleted(self, scenario: str) -> bool:
+        """Whether a delete archived the scenario's registration
+        (``CachedRepositoryBackendFactory.has_archived_registration``). It stays true for good."""
+        factory = self._backend_factory
+        return isinstance(factory, CachedRepositoryBackendFactory) and factory.has_archived_registration(scenario)
+
+    def drop_deleted(self, scenario: str) -> None:
+        """Close the loaded instance of the deleted ``scenario``, if any, and drop its backend and its local work
+        state (``RepositoryBackendFactory.forget_scenario``). A process that does not run control calls it."""
+        with self.lock_for(scenario):
+            dropped = self.remove(scenario)
+            if dropped is not None:
+                dropped.close()
+            self._backend_factory.forget_scenario(scenario)
+        self.forget_lock(scenario)
 
     def forget_lock(self, scenario: str) -> None:
         """Release the per-scenario lock's slot once nothing holds it; a later create makes a fresh one."""

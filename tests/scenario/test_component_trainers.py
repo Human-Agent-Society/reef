@@ -59,6 +59,7 @@ from reef.core.requirements import required_by
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.samples import LocalSampleProducers
+from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.execution.jobs import SupportsReceipt
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.pipeline_context import PipelineContext
@@ -1991,6 +1992,8 @@ def test_a_job_that_was_submitted_and_not_committed_is_cancelled_when_its_scenar
             (job,) = dispatcher.queue.items(JOBS_QUEUE)
             assert job.state == "queued" and scenario.trainer_for(WEIGHTS).state["jobs"] == []
             dispatcher.delete_scenario("agent")
+            # Control's sweep cancels the scenario's jobs.
+            dispatcher.sweeper.sweep()
         else:
             # The delete ends while the cycle is about to add the job to the queue.
             queued = scenario.trainer_for(WEIGHTS).job_loop_required().component
@@ -2015,12 +2018,13 @@ def test_a_job_that_was_submitted_and_not_committed_is_cancelled_when_its_scenar
 
 @pytest.mark.unit
 def test_a_job_queued_after_the_delete_does_not_run_when_the_cycle_stops_before_its_cancel(
-    tmp_path: Path, dispatchers: _Dispatchers
+    tmp_path: Path, dispatchers: _Dispatchers, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The cycle adds its job to the queue after the delete cancelled the scenario's jobs, and its process stops
-    before the cycle cancels the job: here the cycle waits until the test ends. The job stays queued, and the
-    training worker that takes it finds no registration of the scenario: it cancels the job before the component
-    runs it."""
+    """The cycle adds its job to the queue after the delete, and its process stops before the cycle cancels the
+    job: here the cycle waits until the test ends. Control's sweep does not run either. The job stays queued, and
+    the training worker that takes it finds no registration of the scenario: it cancels the job before the
+    component runs it."""
+    monkeypatch.setattr(EndedWorkSweeper, "start", lambda self: None)
     training = WeightsJobComponent(tmp_path / "checkpoints")
     factory = _repository(tmp_path)
     dispatcher, _ = dispatchers.open(

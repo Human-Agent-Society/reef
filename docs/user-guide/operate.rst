@@ -345,7 +345,7 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its history and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, which also records that the scenario ID is never used again. Deleting a weight-training scenario cancels its running training job.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario in two parts. The request renames its repository ref into ``refs/reef/archived/``: from then on the scenario does not exist, and its ID is never used again. Control's sweep of ended work, which the delete wakes, then frees the scenario's space: it cancels its training jobs, discards its stored content, has the storage backend archive its records, commits, settings and task files, and has the training service move its history and step records under an ``archived/`` sibling. A failed step stays for the next sweep, an hour later, and the first sweep after a restart finishes a delete that stopped.
 
 Run the services in separate processes
 --------------------------------------
@@ -474,10 +474,11 @@ sandbox where the training service runs. Only the training service reads and
 writes ``evolution.state_dir``. It copies the running step's progress into the
 step's job in the shared store, and it stores each ended step's record files in
 the artifact backend. Control reads both there for the snapshot and request
-pages. The record files stay as long as the scenario: Reef removes them from
-the artifact backend when you delete the scenario. When you delete a scenario, control asks the training service to move
-the scenario's directory under ``evolution.state_dir`` to ``archived/``; the
-request waits while no training service runs. Control builds no harness
+pages. The record files stay as long as the scenario: control's sweep removes
+them from the artifact backend after you delete the scenario. The sweep also
+asks the training service to move the scenario's directory under
+``evolution.state_dir`` to ``archived/``; the request waits while no training
+service runs. Control builds no harness
 training component: it needs neither the adapter's binary nor the sandbox, and
 it shares no directory with the training service.
 
@@ -790,8 +791,8 @@ Git LFS objects depends on where the repository is:
 
 - A local repository, named by a path or a ``file://`` URL: the discard
   deletes the ref only. Control's sweep of ended work, once an hour, removes
-  each LFS object that no ref references any more. The delete of a scenario
-  does the same at once. Snapshots, pending snapshots and archived scenarios
+  each LFS object that no ref references any more. The sweep's cleanup of a
+  deleted scenario does the same at once. Snapshots, pending snapshots and archived scenarios
   keep their objects. A materialized file is a link to its object. So the
   sweep removes a cache entry of discarded content one sweep later, because
   another service that shares the cache directory can still read it. The

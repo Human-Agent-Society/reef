@@ -20,7 +20,7 @@ What only the component can answer, control asks through the ``training_checks``
   and whose answer nobody reads;
 - ``result`` is ``{"refusal": <message>}`` when the component raised ``ValueError``, else ``{"refusal": null}``;
 - ``id`` is ``job:<job ID>`` for a job check, so control finds the check of a job in the queue,
-  ``artifact:<random>`` for an artifact check, and ``archive:<scenario>:<random>`` for an archive;
+  ``artifact:<random>`` for an artifact check, and ``archive:<scenario>`` for an archive;
 - ``metadata["asked_at"]`` is the time in seconds when control last asked for the answer, and
   ``metadata["answer_read"]`` is true once control read it.
 
@@ -450,8 +450,9 @@ def cancel_scenario_job(queue: WorkQueue, scenario: str, job_id: str) -> dict[st
 
 def cancel_scenario_jobs(queue: WorkQueue, scenario: str) -> int:
     """Cancel every training job of ``scenario`` that has not ended, also a job that a trainer added to the queue
-    and whose submission no commit recorded yet; return how many. The delete of a scenario calls it, so that no
-    job of the scenario keeps running and stores a checkpoint or its record files after the scenario is gone."""
+    and whose submission no commit recorded yet; return how many. Control's cleanup of a deleted scenario calls it
+    (``DeletedScenarioCleanup``), so that no job of the scenario keeps running and stores a checkpoint or its record
+    files after the scenario is gone."""
     cancelled = 0
     for item in queue.items(JOBS_QUEUE, scenario=scenario):
         if not item.final:
@@ -573,8 +574,9 @@ class JobQueueComponent(TrainingComponent):
 
     def archive_scenario(self, scenario: str) -> None:
         """Ask the training service to move aside what its component keeps for the deleted ``scenario``. The
-        request waits in the queue while no training service runs, and nobody reads its answer."""
-        item_id = f"archive:{scenario}:{uuid.uuid4().hex}"
+        request waits in the queue while no training service runs, and nobody reads its answer. A scenario ID is
+        deleted once, so the request has one ID for each scenario, and a second call adds nothing."""
+        item_id = f"archive:{scenario}"
         self.queue.append(
             NewWork(
                 CHECKS_QUEUE,
@@ -930,8 +932,7 @@ class TrainingJobWorker(QueueWorker):
             raise WorkLeaseLostError(f"the scenario of job {item.id} was deleted")
         held = self.queue.read(JOBS_QUEUE, item.id)
         if held is None or held.worker_id != self.worker_id or held.final:
-            # The job was cancelled meanwhile, as the delete of its scenario does: no page reads these records, and
-            # the delete discarded the scenario's content before this store.
+            # The job was cancelled meanwhile: no page reads these records.
             backend.discard_content(job_records_content(item.id))
             raise WorkLeaseLostError(f"job {item.id} is no longer held by {self.worker_id}")
 
@@ -943,10 +944,11 @@ class TrainingJobWorker(QueueWorker):
         the checkpoints that the item names, the job's record files, and any other content that a job stored after
         the delete.
 
-        The delete of a scenario cancels the jobs that it finds in the queue, and a trainer whose cycle added a job
-        after that look cancels it when the cycle returns. When the trainer's process stops in between, the job
-        stays queued. The delete archives the registration last, so the worker that takes such a job, or stores
-        for it after the delete, finds no registration: the job does not run on, and its content does not stay.
+        The delete of a scenario archives the registration first, as the scenario's mark, and control's sweep then
+        cancels the jobs that it finds in the queue and discards the scenario's content. A job that the sweep did
+        not find, such as one that a trainer's cycle added after the look, still runs on a worker. Whatever that
+        worker stores, before the discard or after it, it checks the registration after the store, and from the
+        mark on it finds none: the job does not run on, and its content does not stay.
         """
         if isinstance(self.backends, RegistrationAwareRepositoryBackendFactory):
             registered = self.backends.has_registration(item.scenario)
@@ -957,6 +959,7 @@ class TrainingJobWorker(QueueWorker):
         logger.warning("training worker %s cancels job %s: its scenario was deleted", self.worker_id, item.id)
         self.queue.cancel(JOBS_QUEUE, item.id, SCENARIO_DELETED_ERROR)
         self.backends(item.scenario).discard_all_content()
+        self.backends.forget_scenario(item.scenario)
         return True
 
 
@@ -969,7 +972,8 @@ class TrainingCheckWorker(QueueWorker):
     ``run_item`` answers ``{"refusal": None}`` when the component accepted and ``{"refusal": message}`` when it
     raised ``ValueError(message)``: ``check_job`` of the job with its own start (``resolved_job``) for a ``job``
     check, ``check_remote_artifact`` for an ``artifact`` check. An ``archive`` runs ``archive_scenario`` of the
-    item's scenario and answers ``{"refusal": None}``, however old it is. Any other payload fails the item. So does
+    item's scenario, drops this service's backend of the scenario (``RepositoryBackendFactory.forget_scenario``), and
+    answers ``{"refusal": None}``, however old it is. Any other payload fails the item. So does
     a job or artifact check that control last asked for more than ``UNASKED_CHECK_SECONDS`` ago (``metadata["asked_at"]``, else the
     item's ``created_at``), with ``UNASKED_CHECK_ERROR``: nobody waits for it, so it imports no start.
 
@@ -1004,6 +1008,8 @@ class TrainingCheckWorker(QueueWorker):
         if check == "archive":
             # Nobody waits for this answer, and the request stays valid however long the service was down.
             self.component.archive_scenario(item.scenario)
+            if self.backends is not None:
+                self.backends.forget_scenario(item.scenario)
             return {"refusal": None}
         asked_at = item.metadata.get(ASKED_AT_KEY, item.created_at)
         if isinstance(asked_at, int | float) and time.time() - asked_at > UNASKED_CHECK_SECONDS:

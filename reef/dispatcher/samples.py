@@ -29,6 +29,10 @@ class LocalSampleProducers(SampleProducers):
     def produce(self, scenario: str, component: str, selection: Selection) -> ProducedSamples:
         if self.local_workers is not None:
             current = self.registry.get_loaded(scenario)
+        elif selection.requested_by("delete") and self.registry.was_deleted(scenario):
+            # Control's cleanup of the deleted scenario asks: this process drops its instance and its backend.
+            self.registry.drop_deleted(scenario)
+            current = None
         else:
             current = self.registry.get_or_create(scenario, allow_implicit_creation=False)
             if current is not None:

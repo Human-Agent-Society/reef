@@ -30,6 +30,7 @@ from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.manager_worker import ManagedTraining, TrainingManagerWorker
 from reef.dispatcher.samples import LocalSampleProducers
+from reef.dispatcher.scenario_deletes import DeletedScenarioCleanup, request_cleanup
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, take_control_lease
 from reef.dispatcher.serving import ServingWorker
 from reef.dispatcher.status import TrainingStatus
@@ -65,7 +66,6 @@ from reef.train.job_queue import (
     TrainingJobWorker,
     cancel_request_jobs,
     cancel_scenario_job,
-    cancel_scenario_jobs,
     scenario_jobs,
 )
 from reef.train.manager import (
@@ -174,7 +174,8 @@ class Dispatcher(
         The data store keeps the data directory of each training job (``reef.storage.job_data``): control writes
         it, and the training service opens it. Without a data store, a ``MemoryDataStore`` keeps them.
         The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
-        the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
+        the work items that ended more than ``work_retention_seconds`` ago, and cleans up the deleted scenarios
+        (``EndedWorkSweeper``).
 
         Each training backend whose facts ``live`` holds gets its jobs through the jobs queue: the dispatcher gives
         the trainers a ``JobQueueComponent`` of the facts. ``live`` holds a backend's component only in a process
@@ -288,6 +289,8 @@ class Dispatcher(
         )
         #: The writer of serving requests, when this process runs control.
         self.publisher: ServedModelsPublisher | None = None
+        #: The sweep of ended work and deleted scenarios, when this process runs control.
+        self.sweeper: EndedWorkSweeper | None = None
         #: Set when another control instance took the lease (``control_lease_lost``).
         self.lease_lost = Event()
         if self.services.runs_control:
@@ -311,9 +314,22 @@ class Dispatcher(
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
-            self.workers.add(
-                EndedWorkSweeper(coordination.work_queue, backend_factory, retention_seconds=work_retention_seconds)
+            deletions = DeletedScenarioCleanup(
+                coordination.work_queue,
+                self.registry,
+                backend_factory,
+                publisher=publisher,
+                job_components=self.live.job_components(),
+                record_retention_lock=self.record_retention_lock,
+                worker_id=instance_id("scenario-cleanup"),
             )
+            self.sweeper = EndedWorkSweeper(
+                coordination.work_queue,
+                backend_factory,
+                retention_seconds=work_retention_seconds,
+                deletions=deletions,
+            )
+            self.workers.add(self.sweeper)
             if training_manager is not None:
                 self.workers.add(TrainingManagerWorker(training_manager, self))
             if data_store is not None:
@@ -407,59 +423,48 @@ class Dispatcher(
             return 0 if self.data_store is None else self.data_store.prune_records(retention.max_bytes)
 
     def delete_scenario(self, scenario: str) -> dict[str, Any]:
-        """Remove a scenario from this deployment and move its own state aside.
+        """Mark a scenario deleted, drop it from this process, and leave the removal of its state to control's sweep.
 
-        The method holds the scenario's lock, so no accept or commit runs
-        meanwhile. It does these steps:
+        The method holds the scenario's lock, so no accept, load or commit runs meanwhile. An unknown scenario
+        raises ``ScenarioNotFoundError``, and a repository backend that cannot archive a registration raises
+        ``NotImplementedError``; both change nothing. Then it does these steps:
 
-        - Its ``served_models`` rows go, so the inference service answers it 404.
-        - The workers drop the scenario, and a training job it runs is cancelled.
-        - The loaded instance closes.
-        - The stored content of the scenario leaves the artifact store: the record files of its jobs, and any
-          checkpoint that no commit took (``RepositoryBackend.discard_all_content``).
-        - The storage archives the records, the commits and the settings.
-        - The recipe's own directories move to an ``archived`` sibling.
-        - The repository registration is archived. The archive also records that the scenario ID is never used
-          again (``CachedRepositoryBackendFactory.has_archived_registration``).
+        - It adds the scenario's cleanup item to the ``scenario_deletes`` queue (``request_cleanup``).
+        - It archives the scenario's registration in the artifact store. This is the mark: from it on, the scenario
+          does not exist for any process. Its ID is never used again
+          (``CachedRepositoryBackendFactory.has_archived_registration``), nothing loads it, and a training worker
+          that takes one of its jobs, or stores for one, cancels the job and discards what it stored.
+        - In a control process, its ``served_models`` rows go, so the inference service answers it 404.
+        - The loaded instance leaves the registry and closes, and the workers of this process drop the scenario.
+        - It wakes control's sweep, which removes the rest: its jobs, its stored content, its storage, and the
+          training service's directories (``DeletedScenarioCleanup``). A step that fails is tried again by the
+          next sweep.
 
-        Artifacts that other scenarios share stay.
-
-        What can refuse runs first: an unknown scenario, and a repository backend that cannot archive a
-        registration (``NotImplementedError``), change nothing. The steps then run in the order above. A delete
-        that fails at the discard of the content, because the artifact store did not answer, leaves the scenario
-        with its storage and its registration: it loads again on its next use, with no running job and without
-        the content that was discarded, and the same call again finishes the delete.
+        The item goes before the mark, so a stop between them leaves a whole scenario, whose item the sweep ends.
+        A stop after the mark leaves a deleted scenario whose item the sweep finishes. Return ``{"scenario",
+        "archived"}``, where ``archived`` names the archive of the registration.
         """
         if "/" in scenario or scenario in ("", ".", ".."):
             raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
-        with self.record_retention_lock, self.registry.lock_for(scenario):
+        with self.registry.lock_for(scenario):
             if not self.registry.has(scenario):
                 raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
             self.registry.require_archivable()
-            # The inference service stops answering the scenario first, so no record reaches the archived store.
+            request_cleanup(self.queue, scenario)
+            archived = self.registry.archive_registration(scenario)
             if self.publisher is not None:
+                # The inference service answers the scenario 404 at once; the sweep withdraws it again after a stop.
                 self.publisher.withdraw(scenario)
             dropped = self.registry.remove(scenario)
             self.local_workers.remove(scenario)
             self.errors.forget(scenario)
             if dropped is not None:
-                for component_trainer in dropped.trainers:
-                    # Nothing would read the job's checkpoints once its scenario is gone.
-                    component_trainer.trainer.cancel_job()
                 dropped.close()
-            # A trainer adds a job to the queue before the commit that records it. Such a job is in no trainer's
-            # state, so the queue is asked: no job of the scenario runs on and stores files after the delete. A job
-            # that a cycle adds after this look, and that the cycle cannot cancel because its process stopped, is
-            # cancelled by the training worker, which finds the registration archived below
-            # (``TrainingJobWorker.refuses_deleted_scenario``).
-            cancel_scenario_jobs(self.queue, scenario)
             self.local_workers.close_replaced_instances(scenario)
-            # The discard can fail when the artifact store does not answer. It runs before the scenario's storage
-            # and registration are archived, so the scenario is whole and a repeated delete finishes.
-            self.backend_factory(scenario).discard_all_content()
-            archived = [*self.archive_scenario_state(scenario), *self.registry.archive_registration(scenario)]
         self.registry.forget_lock(scenario)
-        return {"scenario": scenario, "archived": archived}
+        if self.sweeper is not None:
+            self.sweeper.wake()
+        return {"scenario": scenario, "archived": list(archived)}
 
     def scenario_loaded(self, instance: Scenario) -> None:
         """The registry calls this when it loads a scenario: its weight trainers resume their jobs and records.
@@ -588,16 +593,6 @@ class Dispatcher(
         while not self.local_workers.closed.wait(min(idle_seconds, self.idle_unload_check_seconds)):
             for name in self.registry.unused_since(time.monotonic() - idle_seconds):
                 self.unload_if_idle(name)
-
-    def archive_scenario_state(self, scenario: str) -> list[str]:
-        """Move the scenario's storage under an ``archived`` sibling (``ScenarioRegistry.archive_store``), and ask
-        each training service to do the same with what its component keeps for the scenario
-        (``JobQueueComponent.archive_scenario``). This process moves no directory of another service, and no
-        record-to-sample stage keeps a directory of its own."""
-        moved = list(self.registry.archive_store(scenario))
-        for component in self.live.job_components():
-            component.archive_scenario(scenario)
-        return moved
 
     def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
         """Each component's artifacts of ``scenario``, newest first, with each component's active one marked."""

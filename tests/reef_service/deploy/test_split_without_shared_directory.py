@@ -18,6 +18,7 @@ What the tests prove, and what they do not:
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import subprocess
@@ -41,6 +42,7 @@ from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.scenario_deletes import DELETES_QUEUE
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.harness.tree import TreePatch
@@ -180,11 +182,14 @@ def split(
     components: tuple[TrainingComponent, ...],
     *,
     inference_apart: bool = False,
+    samples_apart: bool = False,
 ) -> Iterator[Dispatcher]:
     """Control over ``recipe`` with the facts of ``live`` and no training component, while the training service
     runs ``components`` from the same queue. The control process also runs the other services. With
     ``inference_apart``, the inference service is a dispatcher of its own, with its own directory
-    ``tmp_path / "inference"`` and its own runtime, so the weights that it loads are not under control's."""
+    ``tmp_path / "inference"`` and its own runtime, so the weights that it loads are not under control's. With
+    ``samples_apart``, the samples service is a dispatcher of its own too, with its own directory
+    ``tmp_path / "samples"``."""
     storage = data_storage(tmp_path / "records")
     # The work queues live beside the records, so each service opens the coordination store itself.
     coordination = open_coordination("sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None)
@@ -196,8 +201,28 @@ def split(
         scenario_storage=storage,
         record_storage=storage.inner,
         coordination=coordination,
-        components=frozenset(SERVICE_COMPONENTS) - {"training"} - ({"inference"} if inference_apart else set()),
+        components=frozenset(SERVICE_COMPONENTS)
+        - {"training"}
+        - ({"inference"} if inference_apart else set())
+        - ({"samples"} if samples_apart else set()),
     )
+    apart: list[Dispatcher] = []
+    if samples_apart:
+        samples_storage = data_storage(tmp_path / "records")
+        apart.append(
+            Dispatcher(
+                recipe,
+                git_backends(tmp_path / "samples"),
+                live=replace(live, training_component=None, harness_component=None, data_store=samples_storage.data),
+                local_artifact_dir=tmp_path / "samples" / "staged",
+                scenario_storage=samples_storage,
+                record_storage=samples_storage.inner,
+                coordination=open_coordination(
+                    "sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None
+                ),
+                components=frozenset({"samples"}),
+            )
+        )
     inference = None
     if inference_apart:
         served = data_storage(tmp_path / "records")
@@ -248,6 +273,8 @@ def split(
             worker.stop()
         if inference is not None:
             inference.close()
+        for service in apart:
+            service.close()
         control.close()
 
 
@@ -310,6 +337,7 @@ def test_a_weight_scenario_trains_serves_and_is_deleted_with_no_weight_byte_in_c
         assert (snapshot.materialize().local_path / VERSION_FILE).read_text() == "w1"
 
         assert control.delete_scenario("math")["scenario"] == "math"
+        control.sweeper.sweep()
         wait_until(
             lambda: all(item.final for item in control.queue.items(CHECKS_QUEUE)),
             "the training service did not answer the archive request",
@@ -452,12 +480,66 @@ def test_a_harness_scenario_trains_shows_its_step_and_is_deleted_with_no_directo
         # They are one content for each job, and a harness step is one job.
         assert len(stored_content_refs(tmp_path)) == 1
         control.delete_scenario("demo")
+        control.sweeper.sweep()
         wait_until(lambda: not (training_state / "demo").exists(), "the training service did not archive its state")
     # The training service moved its own directory aside, and control wrote nothing where it has no state.
     assert [path.name for path in (training_state / "archived").iterdir()] == ["demo"]
     assert sorted(path.name for path in control_state.iterdir()) == before
     # Nothing that a job of the scenario stored outlives the scenario.
     assert stored_content_refs(tmp_path) == []
+
+
+def scenario_files(directory: Path, scenario: str) -> list[str]:
+    """The paths under ``directory``, outside each ``archived`` directory, whose name holds ``scenario`` or its
+    encoded form in the artifact store's work directory."""
+    names = {scenario, base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")}
+    return sorted(
+        str(path.relative_to(directory))
+        for path in directory.rglob("*")
+        if "archived" not in path.relative_to(directory).parts and any(name in path.name for name in names)
+    )
+
+
+@pytest.mark.integration
+def test_a_deleted_scenario_leaves_nothing_in_any_service_after_the_sweep(tmp_path: Path, real_lfs: None) -> None:
+    """Control, the samples service and the training service run apart. A delete only marks the scenario; control's
+    sweep then removes the rest, each service what it owns, and nothing of the scenario stays in a service's
+    directory, the artifact store or the queues."""
+    for service in ("control", "training"):
+        (tmp_path / service).mkdir()
+    recipe, control_live = harness_recipe(tmp_path / "control", changing_rules)
+    _, training_live = harness_recipe(tmp_path / "training", changing_rules)
+    component = training_live.harness_component
+    assert component is not None
+    with split(tmp_path, recipe, control_live, (component,), samples_apart=True) as control:
+        scenario = control.get_or_create_scenario("demo")
+        for record in report_records("demo", "1"):
+            control.accept_record(record)
+        wait_until(lambda: scenario.trainer.state["finished_jobs"] == 1, "the step did not train to a commit")
+        assert stored_content_refs(tmp_path) and scenario_files(tmp_path / "training", "demo")
+
+        control.delete_scenario("demo")
+        # The mark alone: the scenario is gone for every caller before any cleanup.
+        assert not control.has_scenario("demo")
+        control.sweeper.sweep()
+        # Each service ends the items of its cleanup: the training service's archive, the samples service's drop.
+        queues = (JOBS_QUEUE, CHECKS_QUEUE, SAMPLES_QUEUE, DELETES_QUEUE)
+        wait_until(
+            lambda: all(item.final for queue in queues for item in control.queue.items(queue, scenario="demo")),
+            "the services did not end the items of the deleted scenario",
+        )
+        assert {item.payload.get("check") for item in control.queue.items(CHECKS_QUEUE, scenario="demo")} >= {
+            "archive"
+        }
+        assert any("trigger:delete" in item.metadata for item in control.queue.items(SAMPLES_QUEUE, scenario="demo"))
+        ((cleanup_state, cleanup_result),) = [
+            (item.state, item.result) for item in control.queue.items(DELETES_QUEUE, scenario="demo")
+        ]
+        assert cleanup_state == "finished" and cleanup_result["deleted"] is True
+    assert stored_content_refs(tmp_path) == []
+    for service in ("control", "training", "samples", "records"):
+        assert scenario_files(tmp_path / service, "demo") == [], service
+    assert not [path for path in (tmp_path / "records").iterdir() if path.suffix == ".sqlite3" and "demo" in path.name]
 
 
 @pytest.mark.integration
@@ -586,6 +668,7 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
             lambda: len(control.queue.items(JOBS_QUEUE, scenario="agent")) > 0, "no further job was queued", state
         )
         control.delete_scenario("agent")
+        control.sweeper.sweep()
         checked("delete during a job")
         wait_until(
             lambda: all(item.final for queue in (JOBS_QUEUE, CHECKS_QUEUE) for item in control.queue.items(queue)),

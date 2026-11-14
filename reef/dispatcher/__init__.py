@@ -15,6 +15,8 @@ Request handling lives in ``reef.service``; the dispatcher is transport-free.
 - ``status`` builds the training status and runs its health checks.
 - ``errors`` keeps the training errors and failure counts that the status
   and the operational metrics report.
+- ``scenario_deletes`` holds the cleanup of deleted scenarios, and
+  ``work_retention`` the sweep of control that runs it.
 
 Lock order: cycle locks, then a scenario's registry lock, then the
 coordination lock of ``local_workers``, then the training errors lock.

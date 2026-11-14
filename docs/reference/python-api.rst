@@ -1116,13 +1116,20 @@ A backend shares no snapshot between scenarios. It must:
     check that reads files calls it, and the pages that show a job's records.
   - ``discard_content(name)`` removes the content. A name that the backend
     does not hold changes nothing, and every snapshot keeps its files.
-  - ``discard_all_content()`` removes every content of the scenario. Reef
-    calls it when the scenario is deleted, so no content outlives its
-    scenario.
+  - ``discard_all_content()`` removes every content of the scenario.
+    Control's sweep calls it after the scenario was deleted, so no content
+    outlives its scenario. The scenario's registration is archived by then,
+    so the call must find the content of a scenario that has no
+    registration. The sweep repeats a call that failed.
 
   A discard can delete only the content's name and leave its files. Then
   the factory frees them in ``reclaim_discarded()``, which control's sweep of
   ended work calls once per sweep. The default frees nothing.
+  ``forget_scenario(scenario)`` drops what the process keeps of a deleted
+  scenario beside the store, such as a cached backend or a clone. Each
+  service calls it after it discarded the scenario's content. The default
+  does nothing, and ``CachedRepositoryBackendFactory`` drops its cached
+  backend.
   - ``publish_parts(parts, *, metadata, expected_parent, advance_head)``
     stores a snapshot of files that the backend holds already, and moves the
     head as ``publish`` does. Callers use the inherited ``publish_stored``,

@@ -133,8 +133,10 @@ class RepositoryBackend(ArtifactRepository):
     def discard_all_content(self) -> None:
         """Remove every content of this scenario's repository, whatever its name. Every snapshot keeps its files.
 
-        Reef calls it when the scenario is deleted: content lives no longer than its scenario. Raise
-        ``ArtifactPublicationError`` when the content cannot be removed.
+        Control's sweep calls it after the scenario was deleted, so content lives no longer than its scenario. The
+        scenario's registration is archived then (``CachedRepositoryBackendFactory.archive_registration``), so the
+        call must find the content of a scenario that has no registration; the sweep repeats a call that failed.
+        Raise ``ArtifactPublicationError`` when the content cannot be removed.
         """
 
     def publish_stored(
@@ -357,6 +359,13 @@ class RepositoryBackendFactory(ABC):
         objects or a local cache, frees them here."""
         return
 
+    def forget_scenario(self, scenario: str) -> None:
+        """Drop what this process keeps of the deleted ``scenario`` beside the store: its backend and its local work
+        state, such as a clone. A later call for the scenario builds them again. Each service calls it after it
+        discarded the scenario's content (``DeletedScenarioCleanup``, ``TrainingJobWorker``,
+        ``TrainingCheckWorker``). The default keeps nothing, so it does nothing."""
+        return
+
 
 class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
     @abstractmethod
@@ -506,6 +515,11 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
             self._backends.pop(scenario, None)
             self._registration_misses.pop(scenario, None)
         return self._archive_persisted_registration(scenario)
+
+    def forget_scenario(self, scenario: str) -> None:
+        """Drop the cached backend of ``scenario`` (``RepositoryBackendFactory.forget_scenario``)."""
+        with self._lock:
+            self._backends.pop(scenario, None)
 
     @abstractmethod
     def has_archived_registration(self, scenario: str) -> bool:
