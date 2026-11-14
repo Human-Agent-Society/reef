@@ -1248,7 +1248,10 @@ def test_a_task_that_joins_or_leaves_a_held_benchmark_joins_or_leaves_the_scenar
 
 
 def test_a_scenario_that_holds_a_trajectory_set_uses_its_trajectories(store, tmp_path):
-    store.create("acme", [trajectory("t1", set_id="day-1"), trajectory("t2", set_id="day-2"), trajectory("t3")])
+    store.create(
+        "acme",
+        [trajectory("t1", trajectory_sets=["day-1"]), trajectory("t2", trajectory_sets=["day-2"]), trajectory("t3")],
+    )
     # A benchmark with the name of the set is another set: its task is no trajectory.
     store.create("acme", [benchmark_task(tmp_path, "add", "day-1")])
     held = store.hold("acme", "coding", "trajectory_set", "day-1", "train")
@@ -1258,13 +1261,13 @@ def test_a_scenario_that_holds_a_trajectory_set_uses_its_trajectories(store, tmp
 
     # A trajectory joins the set by a patch or by its create, and leaves it with another set.
     last = store.last_use_sequence("acme", "coding")
-    store.update("acme", ["t3"], {"set_id": "day-1"})
-    store.create("acme", [trajectory("t4", "four", set_id="day-1")])
+    store.update("acme", ["t3"], {"trajectory_sets": ["day-1"]})
+    store.create("acme", [trajectory("t4", "four", trajectory_sets=["day-1"])])
     assert uses_of(store, "coding", after=last, kind="trajectory") == [
         ("t3", "train", "day-1"),
         ("t4", "train", "day-1"),
     ]
-    store.update("acme", ["t1"], {"set_id": "day-2"})
+    store.update("acme", ["t1"], {"trajectory_sets": ["day-2"]})
     assert [use[0] for use in uses_of(store, "coding", kind="trajectory")] == ["t3", "t4"]
     assert store.holding_scenarios("acme", "trajectory_set", ["day-1", "day-2"]) == ("coding",)
 
@@ -1278,16 +1281,81 @@ def test_a_scenario_that_holds_a_trajectory_set_uses_its_trajectories(store, tmp
     assert uses_of(store, "coding", kind="trajectory") == [] and uses_of(store, "coding") == [("add", "eval", "day-1")]
 
 
-def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_store):
+def test_a_trajectory_is_in_each_of_its_sets_as_a_task_in_each_of_its_benchmarks(store, tmp_path):
+    store.create("acme", [trajectory("t0", trajectory_sets=["a"]), trajectory("t1", trajectory_sets=["a", "b"])])
+    store.create("acme", [trajectory("t2", set_id="c"), benchmark_task(tmp_path, "add", "lite", "full")])
+    store.create("other", [trajectory("o1", trajectory_sets=["a"])])
+
+    def listed(kind, **page):
+        return [(group.value, group.item_count) for group in store.sets("acme", kind, **page)]
+
+    # Newest first by the first item of each set. set_id is no set: it is metadata like any other key.
+    assert listed("trajectory_set") == [("b", 1), ("a", 2)]
+    # Both benchmarks begin with the one task, so their order is not defined.
+    assert sorted(listed("benchmark")) == [("full", 1), ("lite", 1)]
+    (newest,) = store.sets("acme", "trajectory_set", limit=1)
+    assert (newest.metadata["trajectory_sets"], listed("trajectory_set", before=newest.first_sequence)) == (
+        ["a", "b"],
+        [("a", 2)],
+    )
+    assert [item.item_id for item in store.query("acme", trajectory_set="a")] == ["t0", "t1"]
+    assert [item.item_id for item in store.query("acme", benchmark="full")] == ["add"]
+
+    # A scenario that holds both sets uses t1 once through each.
+    store.hold("acme", "coding", "trajectory_set", "a", "train")
+    store.hold("acme", "coding", "trajectory_set", "b", "train")
+    assert sorted(uses_of(store, "coding", kind="trajectory")) == [
+        ("t0", "train", "a"),
+        ("t1", "train", "a"),
+        ("t1", "train", "b"),
+    ]
+    # A listing for a scenario counts only the items that it uses, each once; a set without one is left out.
+    store.update("acme", ["t2"], {"scenarios": {"writing": "train"}, "trajectory_sets": ["a"]})
+    assert listed("trajectory_set", scenario="coding") == [("b", 1), ("a", 3)]
+    assert listed("trajectory_set", scenario="writing") == [("a", 1)]
+    assert listed("trajectory_set", scenario="unused") == []
+    store.update("acme", ["t2"], {"scenarios": {"writing": None}, "trajectory_sets": None})
+    # t1 leaves a and stays in b; a deleted item leaves its sets.
+    store.update("acme", ["t1"], {"trajectory_sets": ["b"]})
+    assert sorted(uses_of(store, "coding", kind="trajectory")) == [("t0", "train", "a"), ("t1", "train", "b")]
+    assert store.delete("acme", "t0")
+    assert listed("trajectory_set") == [("b", 1)]
+    assert [(hold.name, hold.item_count) for hold in store.holds("acme", "coding")] == [("a", 0), ("b", 1)]
+
+    for metadata in ({"trajectory_sets": "a"}, {"trajectory_sets": ["a", "a"]}, {"trajectory_sets": [""]}):
+        with pytest.raises(ValueError, match="trajectory_sets"):
+            store.create("acme", [trajectory("bad", **metadata)])
+    with pytest.raises(ValueError, match=r"only a trajectory item has metadata\.trajectory_sets"):
+        store.create("acme", [benchmark_task(tmp_path, "sub", trajectory_sets=["a"])])
+    with pytest.raises(ValueError, match="kind"):
+        store.sets("acme", "trajectory")
+
+
+def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_store, tmp_path):
     with closing(open_durable_store()) as store:
-        store.create("acme", [trajectory("t1"), trajectory("t2"), trajectory("t3")])
+        sets = [["day-1"], ["day-1"], []]
+        store.create("acme", [trajectory(f"t{n}", trajectory_sets=sets[n - 1]) for n in (1, 2, 3)])
+        store.create("acme", [benchmark_task(tmp_path, "add", "lite")])
+        # A trajectory that a stage of coding made from its records, before such a sample joined a set.
+        made = {"scenario": "coding", "component": "", "records": ["r1"]}
+        store.create("acme", [trajectory("t4", origin=made)])
         schema = store.uses_table.schema
         prefix = "" if schema is None else f"{schema}."
         with store.transaction() as connection:
-            # A database of version 1: the uses are in data_item_scenario, no table records the version, and
-            # PostgreSQL has no index of the IDs in the "C" collation.
+            # A database of version 1: the uses are in data_item_scenario, no table records the version,
+            # PostgreSQL has no index of the IDs in the "C" collation, no table holds the sets of the items, and a
+            # trajectory names its one set in set_id. A set_id that is no string is in no set.
             connection.exec_driver_sql(f"DROP TABLE {prefix}data_schema_version")
             connection.exec_driver_sql(f"DROP INDEX IF EXISTS {prefix}data_item_by_item_id")
+            connection.exec_driver_sql(f"DROP TABLE {prefix}data_item_set")
+            for item_id, set_id in (("t1", "day-1"), ("t2", "day-1"), ("t3", 7)):
+                old = {"kind": "trajectory", "owner": "acme", "scenarios": {}, "set_id": set_id}
+                connection.execute(
+                    sqlalchemy.text(
+                        f"UPDATE {prefix}data_item SET metadata_json = :metadata WHERE item_id = :item_id"
+                    ),
+                    {"metadata": canonical_json(old), "item_id": item_id},
+                )
             connection.exec_driver_sql(
                 f"CREATE TABLE {prefix}data_item_scenario (sequence INTEGER PRIMARY KEY, owner TEXT, item_id TEXT,"
                 " scenario TEXT, split VARCHAR(8))"
@@ -1297,18 +1365,31 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
                 " (7, 'acme', 't3', 'coding', 'train'), (9, 'acme', 't1', 'coding', 'train')"
             )
     for _ in range(2):
-        # The second open finds version 3 and changes nothing.
+        # The second open finds version 4 and changes nothing.
         with closing(open_durable_store()) as store:
             assert uses_of(store, "coding", kind="trajectory") == [("t3", "train", None), ("t1", "train", None)]
-            assert [item.item_id for item in store.query("acme", id_prefix="t")] == ["t1", "t2", "t3"]
+            assert [item.item_id for item in store.query("acme", id_prefix="t")] == ["t1", "t2", "t3", "t4"]
+            assert store.read("acme", "t1").metadata == {
+                "kind": "trajectory",
+                "owner": "acme",
+                "scenarios": {},
+                "trajectory_sets": ["day-1"],
+            }
+            assert store.read("acme", "t3").metadata["set_id"] == 7
+            assert store.read("acme", "t4").metadata["trajectory_sets"] == ["samples:coding"]
+            assert [(group.value, group.item_count) for group in store.sets("acme", "trajectory_set")] == [
+                ("samples:coding", 1),
+                ("day-1", 2),
+            ]
+            assert [(group.value, group.item_count) for group in store.sets("acme", "benchmark")] == [("lite", 1)]
             with store.transaction(read_only=True) as connection:
                 tables = sqlalchemy.inspect(connection)
                 assert not tables.has_table("data_item_scenario", schema=schema)
                 indexes = {index["name"] for index in tables.get_indexes("data_item", schema=schema)}
                 assert ("data_item_by_item_id" in indexes) == (connection.dialect.name == "postgresql")
                 versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
-                assert versions.fetchall() == [(3,)]
+                assert versions.fetchall() == [(4,)]
     with closing(open_durable_store()) as store, store.transaction() as connection:
-        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 4")
+        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 5")
     with pytest.raises(ReefError, match="a later Reef wrote them"):
         open_durable_store()

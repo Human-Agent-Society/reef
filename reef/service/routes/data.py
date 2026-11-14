@@ -37,6 +37,7 @@ from reef.service.data import (
     query_items,
     read_item,
     replace_task_item,
+    set_listing,
     update_items,
 )
 from reef.service.data_transfer import TRANSFER_KINDS, item_archive, start_transfer, transfer_status
@@ -187,6 +188,20 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             content=content == 1,
             group=None if group_key is None else (group_key, request.query.get("group_value")),
             benchmark=request.query.get("benchmark") or None,
+            trajectory_set=request.query.get("trajectory_set") or None,
+        )
+        return web.json_response(listing)
+
+    async def sets(request: web.Request) -> web.Response:
+        before = query_int(request, "before", 0)
+        listing = await asyncio.to_thread(
+            set_listing,
+            data,
+            request.match_info["owner"],
+            kind=request.match_info["kind"],
+            scenario=request.query.get("scenario") or None,
+            before=before or None,
+            limit=query_int(request, "limit", MAX_QUERY_LIMIT),
         )
         return web.json_response(listing)
 
@@ -269,6 +284,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     app.router.add_post(f"{base}/{transfers}", start)
     app.router.add_get(f"{base}/{transfers}/{{transfer_id}}", transfer)
     app.router.add_get(f"{base}/groups/{{key}}", groups)
+    app.router.add_get(f"{base}/sets/{{kind}}", sets)
     add_signed_download(app, base + "/{item_id:.+}/archive", archive)
     # An item ID can hold '/', so the route takes the rest of the path.
     app.router.add_get(base + "/{item_id:.+}", read)

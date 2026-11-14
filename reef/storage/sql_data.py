@@ -56,8 +56,8 @@ from sqlalchemy import (
     insert,
     literal,
     literal_column,
+    or_,
     select,
-    true,
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -67,7 +67,6 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 from sqlalchemy.sql.elements import ColumnElement
-from sqlalchemy.sql.selectable import FromClause, TableValuedAlias
 
 from reef.core.atif_payloads import call_shape, provider_payload
 from reef.core.config import config_metadata, config_option
@@ -79,7 +78,7 @@ from reef.storage.data import (
     HOLD_ITEM_KINDS,
     JOB_DIRECTORY_TTL_SECONDS,
     MAX_QUERY_LIMIT,
-    TRAJECTORY_SET_KEY,
+    SET_KEYS,
     DataStore,
     ItemConflictError,
     ItemGroup,
@@ -96,6 +95,7 @@ from reef.storage.data import (
     check_hold,
     check_owner,
     check_query,
+    check_sets,
     generation_origin,
     held_sets,
     patched_metadata,
@@ -185,9 +185,11 @@ def item_id_prefix(items: Table, prefix: str, *, sqlite: bool) -> ColumnElement[
 
 def data_tables(
     metadata: MetaData, *, sqlite: bool
-) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table]:
+) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table, Table]:
     """Define ``data_item``, ``data_item_use``, ``data_record_node``, ``data_segment``, ``data_job_directory``,
-    ``data_scenario``, ``data_record_loss``, ``data_collection`` and ``data_scenario_hold`` in ``metadata``.
+    ``data_scenario``, ``data_record_loss``, ``data_collection``, ``data_scenario_hold`` and ``data_item_set`` in
+    ``metadata``. ``data_item_set`` has one row for each set that an item is in (``held_sets``): the owner, the
+    set's kind and name, and the item's sequence and ID. It changes with the item's metadata in one transaction.
     ``data_scenario_hold`` has one row per hold of a set by a scenario of an owner, with the set's kind and name and
     the hold's split (``DataStore.hold``); a scenario can hold one benchmark in both splits. ``data_collection`` has one row
     per ``TaskCollection`` of an owner, with its JSON. ``data_scenario`` has the current generation of each
@@ -320,7 +322,19 @@ def data_tables(
         Column("collection_json", Text, nullable=False),
         PrimaryKeyConstraint("owner", "name"),
     )
-    return items, uses, nodes, segments, job_directories, generations, losses, collections, holds
+    # A page of a set reads its rows in item order, and a delete of an item finds the rows of its sets.
+    item_sets = Table(
+        "data_item_set",
+        metadata,
+        Column("owner", Text, nullable=False),
+        Column("kind", String(16), nullable=False),
+        Column("name", Text, nullable=False),
+        Column("sequence", BigInteger, nullable=False),
+        Column("item_id", Text, nullable=False),
+        PrimaryKeyConstraint("owner", "kind", "name", "sequence"),
+        Index("data_item_set_by_item", "owner", "item_id"),
+    )
+    return items, uses, nodes, segments, job_directories, generations, losses, collections, holds, item_sets
 
 
 class UsesWithHeldSets(SchemaStep):
@@ -374,8 +388,94 @@ class ItemIdIndex(SchemaStep):
         Index("data_item_by_item_id", items.c.owner, items.c.item_id.collate("C")).create(connection)
 
 
+class ItemSets(SchemaStep):
+    """Version 3 to 4 of the data tables: a trajectory can be in many trajectory sets, as a task in many benchmarks,
+    and ``data_item_set`` holds the sets of each item.
+
+    The ``set_id`` of a trajectory's metadata, when it is a non-empty string, becomes ``trajectory_sets``, a list of
+    that one name, and leaves the metadata. A trajectory sample that a scenario's stage made from its records
+    (``origin`` with a ``component``) joins the set ``samples:<scenario>`` (``record_samples_set``).
+    ``data_item_set`` then gets one row for each set of each task and trajectory: the names of its ``benchmarks`` or
+    ``trajectory_sets``. The step reads the items a page at a time, and parses only the metadata whose text has one
+    of these keys.
+    """
+
+    def apply(self, connection: Connection, schema: str | None) -> None:
+        tables = MetaData(schema=schema)
+        items = Table(
+            "data_item",
+            tables,
+            Column("sequence", BigInteger),
+            Column("owner", Text),
+            Column("item_id", Text),
+            Column("kind", String(16)),
+            Column("metadata_json", Text),
+        )
+        item_sets = Table(
+            "data_item_set",
+            tables,
+            Column("owner", Text),
+            Column("kind", String(16)),
+            Column("name", Text),
+            Column("sequence", BigInteger),
+            Column("item_id", Text),
+        )
+        set_keys = {"task": ("benchmark", "benchmarks"), "trajectory": ("trajectory_set", "trajectory_sets")}
+        keyed = or_(
+            *(
+                items.c.metadata_json.contains(f'"{key}"')
+                for key in ("set_id", "benchmarks", "trajectory_sets", "component")
+            )
+        )
+        after = 0
+        while rows := connection.execute(
+            select(items.c.sequence, items.c.owner, items.c.item_id, items.c.kind, items.c.metadata_json)
+            .where(items.c.sequence > after, items.c.kind.in_(list(set_keys)), keyed)
+            .order_by(items.c.sequence)
+            .limit(MAX_QUERY_LIMIT)
+        ).all():
+            rewritten: list[dict[str, Any]] = []
+            members: list[dict[str, Any]] = []
+            for row in rows:
+                metadata = json.loads(row.metadata_json)
+                joined: list[str] = []
+                if row.kind == "trajectory":
+                    name, origin = metadata.get("set_id"), metadata.get("origin")
+                    if isinstance(name, str) and name:
+                        metadata.pop("set_id")
+                        joined.append(name)
+                    if isinstance(origin, dict) and "component" in origin:
+                        joined.append(f"samples:{origin['scenario']}")
+                if joined:
+                    metadata["trajectory_sets"] = joined
+                    rewritten.append({"row_sequence": row.sequence, "metadata_json": canonical_json(metadata)})
+                set_kind, key = set_keys[row.kind]
+                names = metadata.get(key)
+                members.extend(
+                    {
+                        "owner": row.owner,
+                        "kind": set_kind,
+                        "name": name,
+                        "sequence": row.sequence,
+                        "item_id": row.item_id,
+                    }
+                    for name in dict.fromkeys(names if isinstance(names, list) else [])
+                    if isinstance(name, str) and name
+                )
+            if rewritten:
+                connection.execute(
+                    update(items)
+                    .where(items.c.sequence == bindparam("row_sequence"))
+                    .values(metadata_json=bindparam("metadata_json")),
+                    rewritten,
+                )
+            if members:
+                connection.execute(insert(item_sets), members)
+            after = rows[-1].sequence
+
+
 #: The steps of the data tables, in the order of their versions: step ``n`` upgrades version ``n``.
-DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (UsesWithHeldSets(), ItemIdIndex())
+DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (UsesWithHeldSets(), ItemIdIndex(), ItemSets())
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -425,7 +525,7 @@ class SQLDataStore(DataStore):
 
     def __init__(
         self,
-        tables: tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table],
+        tables: tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table, Table],
         task_files: TaskFileStore,
         segments: SegmentStore | None,
         job_directories: SegmentStore | None = None,
@@ -441,6 +541,7 @@ class SQLDataStore(DataStore):
             self.losses_table,
             self.collections_table,
             self.holds_table,
+            self.item_sets_table,
         ) = tables
         self.task_files = task_files
         self.segments = segments
@@ -497,16 +598,6 @@ class SQLDataStore(DataStore):
         string. ``key`` passes ``GROUP_KEY``."""
 
     @abstractmethod
-    def in_benchmark(self, benchmark: str) -> ColumnElement[bool]:
-        """The condition that the list under ``benchmarks`` in the ``metadata_json`` of an item row has the string
-        ``benchmark``."""
-
-    @abstractmethod
-    def benchmark_names(self) -> TableValuedAlias:
-        """The strings of the list under ``benchmarks`` in the ``metadata_json`` of an item row, as a table of one
-        column, ``value``, that a query joins to the item rows."""
-
-    @abstractmethod
     def record_source(self) -> ColumnElement[str]:
         """The source of the record item of an item row (``reef.storage.data.record_source``): its
         ``origin.source``, or ``inference`` when it has none."""
@@ -550,17 +641,69 @@ class SQLDataStore(DataStore):
             statement = statement.having(first < before)
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(first.desc()).limit(limit)).all()
-            metadata = {
-                int(sequence): json.loads(text)
-                for sequence, text in connection.execute(
-                    select(items.c.sequence, items.c.metadata_json).where(
-                        items.c.owner == owner, items.c.sequence.in_([int(row[2]) for row in found])
-                    )
-                )
-            }
+            metadata = self.metadata_of(connection, owner, [int(row[2]) for row in found])
         return tuple(
             ItemGroup(value, int(count), int(low), int(high), metadata[int(low)]) for value, count, low, high in found
         )
+
+    def sets(
+        self,
+        owner: str,
+        kind: str,
+        *,
+        scenario: str | None = None,
+        before: int | None = None,
+        limit: int = MAX_QUERY_LIMIT,
+    ) -> tuple[ItemGroup, ...]:
+        check_sets(owner, kind, scenario, before, limit)
+        item_sets, uses = self.item_sets_table, self.uses_table
+        first = func.min(item_sets.c.sequence)
+        statement = (
+            select(item_sets.c.name, func.count(), first, func.max(item_sets.c.sequence))
+            .where(item_sets.c.owner == owner, item_sets.c.kind == kind)
+            .group_by(item_sets.c.name)
+        )
+        if scenario is not None:
+            # An item that the scenario uses through several sets or splits counts once.
+            used = exists().where(
+                uses.c.owner == owner, uses.c.item_id == item_sets.c.item_id, uses.c.scenario == scenario
+            )
+            statement = statement.where(used)
+        if before is not None:
+            statement = statement.having(first < before)
+        with self.transaction(read_only=True) as connection:
+            found = connection.execute(statement.order_by(first.desc()).limit(limit)).all()
+            metadata = self.metadata_of(connection, owner, [int(row[2]) for row in found])
+        return tuple(
+            ItemGroup(name, int(count), int(low), int(high), metadata[int(low)]) for name, count, low, high in found
+        )
+
+    def metadata_of(self, connection: Connection, owner: str, sequences: Sequence[int]) -> dict[int, dict[str, Any]]:
+        """The metadata of the items of ``owner`` with ``sequences``, by sequence."""
+        items = self.items_table
+        return {
+            int(sequence): json.loads(text)
+            for sequence, text in connection.execute(
+                select(items.c.sequence, items.c.metadata_json).where(
+                    items.c.owner == owner, items.c.sequence.in_(list(sequences))
+                )
+            )
+        }
+
+    def insert_sets(
+        self, connection: Connection, owner: str, items: Mapping[str, tuple[int, Mapping[str, Any]]]
+    ) -> None:
+        """Insert the rows of ``data_item_set`` of each item ID in ``items``, which maps it to the item's sequence and
+        metadata: one for each set of the item (``held_sets``)."""
+        rows: list[dict[str, Any]] = []
+        for item_id, (sequence, metadata) in items.items():
+            set_kind, names = held_sets(metadata) or ("", ())
+            rows.extend(
+                {"owner": owner, "kind": set_kind, "name": name, "sequence": sequence, "item_id": item_id}
+                for name in names
+            )
+        if rows:
+            connection.execute(insert(self.item_sets_table), rows)
 
     @contextmanager
     def pack_lock(self, owner: str) -> Iterator[bool]:
@@ -879,6 +1022,11 @@ class SQLDataStore(DataStore):
             sequences = self.write_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
             self.write_uses(connection, owner, {item_id: metadata_of[item_id] for item_id in sequences}, holds)
+            self.insert_sets(
+                connection,
+                owner,
+                {item_id: (sequence, metadata_of[item_id]) for item_id, sequence in sequences.items()},
+            )
             self.trajectory_nodes(owner).append_many(
                 connection,
                 [
@@ -948,6 +1096,7 @@ class SQLDataStore(DataStore):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        trajectory_set: str | None = None,
         id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]:
         check_query(
@@ -960,6 +1109,7 @@ class SQLDataStore(DataStore):
             request_type=request_type,
             group=group,
             benchmark=benchmark,
+            trajectory_set=trajectory_set,
             id_prefix=id_prefix,
         )
         items = self.items_table
@@ -976,8 +1126,18 @@ class SQLDataStore(DataStore):
             if group[0] == "evaluation_id" and group[1] is not None:
                 # The same condition in the form of the index data_item_by_evaluation_sequence, which finds the rows.
                 statement = statement.where(self.evaluation_id() == group[1])
-        if benchmark is not None:
-            statement = statement.where(items.c.kind == "task", self.in_benchmark(benchmark))
+        for set_kind, name in (("benchmark", benchmark), ("trajectory_set", trajectory_set)):
+            if name is not None:
+                member = self.item_sets_table.alias(f"{set_kind}_member")
+                statement = statement.join(
+                    member,
+                    and_(
+                        member.c.owner == items.c.owner,
+                        member.c.sequence == items.c.sequence,
+                        member.c.kind == set_kind,
+                        member.c.name == name,
+                    ),
+                )
         if id_prefix is not None:
             statement = statement.where(self.has_id_prefix(id_prefix))
         with self.transaction(read_only=True) as connection:
@@ -1119,46 +1279,28 @@ class SQLDataStore(DataStore):
                     found.setdefault(row.item_id, set()).add(row.split)
         return {item_id: frozenset(splits) for item_id, splits in found.items()}
 
-    def set_members(self, owner: str, kind: str, name: str) -> tuple[ColumnElement[bool], ...]:
-        """The conditions that an item row is an item of ``owner`` in the set ``name`` of ``kind`` (``held_sets``)."""
-        items = self.items_table
-        in_set = self.in_benchmark(name) if kind == "benchmark" else self.metadata_string(TRAJECTORY_SET_KEY) == name
-        return (items.c.owner == owner, items.c.kind == HOLD_ITEM_KINDS[kind], in_set)
-
     def set_count(self, connection: Connection, owner: str, kind: str, name: str) -> int:
         """The number of items of ``owner`` in the set ``name`` of ``kind``."""
-        statement = select(func.count()).select_from(self.items_table).where(*self.set_members(owner, kind, name))
-        return int(connection.execute(statement).scalar_one())
+        return self.set_counts(connection, owner, kind, [name]).get(name, 0)
 
     def set_counts(self, connection: Connection, owner: str, kind: str, names: Iterable[str]) -> dict[str, int]:
-        """The number of items of ``owner`` in each set of ``names`` of ``kind``, by name, as ``set_count`` gives it.
-        A set with no item has no entry. One query reads the items of the kind once for all the sets: a query for
-        each set read them again for each, 0.25 s each time for 60,000 tasks."""
+        """The number of items of ``owner`` in each set of ``names`` of ``kind``, by name. A set with no item has no
+        entry. One query reads the rows of ``data_item_set`` of the sets, not the items."""
         wanted = sorted(set(names))
         if not wanted:
             return {}
-        items = self.items_table
-        name: ColumnElement[str]
-        source: FromClause
-        if kind == "benchmark":
-            names_of_item = self.benchmark_names()
-            name = names_of_item.c.value
-            source = items.join(names_of_item, true())
-        else:
-            name = self.metadata_string(TRAJECTORY_SET_KEY)
-            source = items
+        item_sets = self.item_sets_table
         statement = (
-            select(name, func.count(items.c.item_id.distinct()))
-            .select_from(source)
-            .where(items.c.owner == owner, items.c.kind == HOLD_ITEM_KINDS[kind], name.in_(wanted))
-            .group_by(name)
+            select(item_sets.c.name, func.count())
+            .where(item_sets.c.owner == owner, item_sets.c.kind == kind, item_sets.c.name.in_(wanted))
+            .group_by(item_sets.c.name)
         )
         return {str(row[0]): int(row[1]) for row in connection.execute(statement)}
 
     def hold(self, owner: str, scenario: str, kind: str, name: str, split: str) -> ScenarioHold:
         check_owner(owner)
         check_hold(scenario, kind, name, split)
-        items, uses, holds = self.items_table, self.uses_table, self.holds_table
+        uses, holds = self.uses_table, self.holds_table
         with self.transaction() as connection:
             # No item joins or leaves the set until this commits, and each new use gets its sequence under the
             # scenario's lock (RFC #1219).
@@ -1178,10 +1320,11 @@ class SQLDataStore(DataStore):
                     insert(holds).values(owner=owner, scenario=scenario, kind=kind, name=name, split=split)
                 )
                 # One statement writes the use of each member, in the order of the items.
+                item_sets = self.item_sets_table
                 begun = (
-                    select(literal(owner), items.c.item_id, literal(scenario), literal(name), literal(split))
-                    .where(*self.set_members(owner, kind, name))
-                    .order_by(items.c.sequence)
+                    select(literal(owner), item_sets.c.item_id, literal(scenario), literal(name), literal(split))
+                    .where(item_sets.c.owner == owner, item_sets.c.kind == kind, item_sets.c.name == name)
+                    .order_by(item_sets.c.sequence)
                 )
                 connection.execute(
                     insert(uses).from_select(["owner", "item_id", "scenario", "held_set", "split"], begun)
@@ -1269,19 +1412,18 @@ class SQLDataStore(DataStore):
             scenarios = patch.get("scenarios") if isinstance(patch, Mapping) else None
             marked = set(scenarios) if isinstance(scenarios, Mapping) else set()
             holds: dict[tuple[str, str], set[tuple[str, str]]] | None = None
-            if isinstance(patch, Mapping) and ("benchmarks" in patch or TRAJECTORY_SET_KEY in patch):
+            if isinstance(patch, Mapping) and any(key in patch for key in SET_KEYS.values()):
                 # The uses that the holds give change with the sets of the items. Under ``HOLDS_LOCK`` no other
                 # write changes a set of these items or a hold, so the unlocked read below names the scenarios to
                 # lock, and one call locks them all.
                 self.lock_scenarios(connection, owner, [HOLDS_LOCK])
                 before = self.rows(connection, owner, unique_ids)
-                named = patch.get("benchmarks")
-                sets: dict[str, set[str]] = {
-                    "benchmark": {
+                sets: dict[str, set[str]] = {}
+                for set_kind, key in SET_KEYS.items():
+                    named = patch.get(key)
+                    sets[set_kind] = {
                         name for name in (named if isinstance(named, list) else []) if isinstance(name, str)
-                    },
-                    "trajectory_set": {name for name in [patch.get(TRAJECTORY_SET_KEY)] if isinstance(name, str)},
-                }
+                    }
                 for row in before.values():
                     kind, names = held_sets(json.loads(row["metadata_json"])) or ("", ())
                     sets.setdefault(kind, set()).update(names)
@@ -1308,6 +1450,17 @@ class SQLDataStore(DataStore):
                 ],
             )
             self.write_uses(connection, owner, patched, holds)
+            if holds is not None:
+                # The patch named a key of the sets: the rows of the items' sets follow their new metadata.
+                item_sets = self.item_sets_table
+                connection.execute(
+                    delete(item_sets).where(item_sets.c.owner == owner, item_sets.c.item_id.in_(unique_ids))
+                )
+                self.insert_sets(
+                    connection,
+                    owner,
+                    {item_id: (int(existing[item_id]["sequence"]), metadata) for item_id, metadata in patched.items()},
+                )
             return tuple(
                 StoredItem(existing[item_id]["sequence"], owner, item_id, metadata, existing[item_id]["digest"])
                 for item_id, metadata in patched.items()
@@ -1549,6 +1702,11 @@ class SQLDataStore(DataStore):
             self.lock_uses(connection, owner, [json.loads(row["metadata_json"])])
             connection.execute(
                 delete(self.uses_table).where(self.uses_table.c.owner == owner, self.uses_table.c.item_id == item_id)
+            )
+            connection.execute(
+                delete(self.item_sets_table).where(
+                    self.item_sets_table.c.owner == owner, self.item_sets_table.c.item_id == item_id
+                )
             )
             connection.execute(
                 delete(self.items_table).where(
@@ -1887,13 +2045,6 @@ class SQLiteDataStore(SQLDataStore):
         metadata = self.items_table.c.metadata_json
         return case((func.json_type(metadata, path) == "text", func.json_extract(metadata, path)))
 
-    def in_benchmark(self, benchmark: str) -> ColumnElement[bool]:
-        names = func.json_each(self.items_table.c.metadata_json, "$.benchmarks").table_valued("value")
-        return exists().where(names.c.value == benchmark)
-
-    def benchmark_names(self) -> TableValuedAlias:
-        return func.json_each(self.items_table.c.metadata_json, "$.benchmarks").table_valued("value")
-
     def record_source(self) -> ColumnElement[str]:
         return func.coalesce(func.json_extract(self.items_table.c.metadata_json, "$.origin.source"), "inference")
 
@@ -1993,19 +2144,6 @@ class PostgresDataStore(SQLDataStore):
     def metadata_string(self, key: str) -> ColumnElement[str]:
         metadata = cast(self.items_table.c.metadata_json, JSONB)
         return case((func.jsonb_typeof(metadata[key]) == "string", metadata[key].astext))
-
-    def in_benchmark(self, benchmark: str) -> ColumnElement[bool]:
-        return cast(self.items_table.c.metadata_json, JSONB).contains({"benchmarks": [benchmark]})
-
-    def benchmark_names(self) -> TableValuedAlias:
-        # Only a list has elements: jsonb_array_elements_text refuses another value. A bound "[]" would be the JSON
-        # string, so the empty list is jsonb_build_array().
-        metadata = cast(self.items_table.c.metadata_json, JSONB)
-        listed = case(
-            (func.jsonb_typeof(metadata["benchmarks"]) == "array", metadata["benchmarks"]),
-            else_=func.jsonb_build_array(),
-        )
-        return func.jsonb_array_elements_text(listed).table_valued("value")
 
     def record_source(self) -> ColumnElement[str]:
         metadata = cast(self.items_table.c.metadata_json, JSONB)
