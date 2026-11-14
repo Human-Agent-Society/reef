@@ -143,6 +143,7 @@ def test_chat_facade_splits_a_tag_free_reply_by_the_rendered_prompt(tmp_path, te
             await server.close()
 
         assert response["choices"][0]["message"] == message
+        assert "prompt_token_ids" not in response and "token_ids" not in response["choices"][0]
 
     asyncio.run(run())
 
@@ -329,6 +330,7 @@ def test_chat_facade_answers_from_engine_native_ids_without_retokenizing(tmp_pat
                     "max_completion_tokens": 2,
                     "logprobs": True,
                     "top_logprobs": 1,
+                    "return_token_ids": True,
                 },
             )
         finally:
@@ -339,6 +341,7 @@ def test_chat_facade_answers_from_engine_native_ids_without_retokenizing(tmp_pat
         assert "output_token_logprobs" not in response["choices"][0]["meta_info"]
         logprobs = response["choices"][0]["logprobs"]["content"]
         assert [(item["token"], item["logprob"]) for item in logprobs] == [("<20>", -0.25), ("<21>", -0.5)]
+        assert (response["prompt_token_ids"], response["choices"][0]["token_ids"]) == ([10, 11], [20, 21])
         assert "training" not in response, "serving returns no training tensors"
 
     asyncio.run(run())
@@ -853,6 +856,7 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
                     "messages": [{"role": "user", "content": "hello"}],
                     "max_completion_tokens": 1,
                     "logprobs": True,
+                    "return_token_ids": True,
                     "stream": True,
                 },
             )
@@ -863,9 +867,12 @@ def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None
         assert b'"content": "answer"' in body
         assert b'"logprobs": {"content":' in body
         assert body.endswith(b"data: [DONE]\n\n")
+        last_chunk = [json.loads(frame[6:]) for frame in body.split(b"\n\n") if frame.startswith(b"data: {")][-1]
+        assert (last_chunk["prompt_token_ids"], last_chunk["choices"][0]["token_ids"]) == ([10, 11], [20])
         recorded = stream_record(stream, body, complete=True)
         assert recorded["choices"][0]["message"]["content"] == "answer"
         assert [item["logprob"] for item in recorded["choices"][0]["logprobs"]["content"]] == [-0.5]
+        assert (recorded["prompt_token_ids"], recorded["choices"][0]["token_ids"]) == ([10, 11], [20])
         assert "training" not in recorded
         assert recorded["stream_delivery"]["complete"] is True
 

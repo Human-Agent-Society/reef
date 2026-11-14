@@ -226,11 +226,14 @@ class _OpenAIChunkWriter(_StreamWriter):
         return [self._chunk({}, logprobs={"content": content})]
 
     def finish(self, response: Mapping[str, Any], *, output_tokens: int) -> list[bytes]:
+        """The last chunk carries the finish reason and ``meta_info``, and the token IDs of a response that has
+        them: ``token_ids`` in its choice and ``prompt_token_ids`` beside ``choices``."""
         choice = response["choices"][0]
-        return [
-            self._chunk({}, finish_reason=choice["finish_reason"], meta_info=choice["meta_info"]),
-            b"data: [DONE]\n\n",
-        ]
+        closing = {"index": 0, "delta": {}, "finish_reason": choice["finish_reason"], "meta_info": choice["meta_info"]}
+        if "token_ids" in choice:
+            closing["token_ids"] = choice["token_ids"]
+        prompt = {"prompt_token_ids": response["prompt_token_ids"]} if "prompt_token_ids" in response else {}
+        return [_sse_data({**self._common, **prompt, "choices": [closing]}), b"data: [DONE]\n\n"]
 
 
 class _AnthropicEventWriter(_StreamWriter):
@@ -614,7 +617,11 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         }
         if call.request.get("logprobs") is True:
             choice["logprobs"] = {"content": self._openai_logprobs(captured.output_ids, captured.rollout_log_probs)}
-        return {
+        # vLLM's ``return_token_ids`` extension: the rendered prompt's ids and the sampled ids, as the client asked.
+        return_token_ids = call.request.get("return_token_ids") is True
+        if return_token_ids:
+            choice["token_ids"] = list(captured.output_ids)
+        response: dict[str, Any] = {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
@@ -626,6 +633,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 "total_tokens": len(call.prompt_ids) + len(captured.output_ids),
             },
         }
+        if return_token_ids:
+            response["prompt_token_ids"] = list(call.prompt_ids)
+        return response
 
     # -- Streaming --------------------------------------------------------------
 
