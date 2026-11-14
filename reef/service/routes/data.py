@@ -199,6 +199,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             data,
             request.match_info["owner"],
             kind=request.match_info["kind"],
+            scenario=request.query.get("scenario") or None,
             before=before or None,
             limit=query_int(request, "limit", MAX_QUERY_LIMIT),
         )

@@ -393,9 +393,11 @@ class ItemSets(SchemaStep):
     and ``data_item_set`` holds the sets of each item.
 
     The ``set_id`` of a trajectory's metadata, when it is a non-empty string, becomes ``trajectory_sets``, a list of
-    that one name, and leaves the metadata. ``data_item_set`` then gets one row for each set of each task and
-    trajectory: the names of its ``benchmarks`` or ``trajectory_sets``. The step reads the items a page at a time,
-    and parses only the metadata whose text has one of these keys.
+    that one name, and leaves the metadata. A trajectory sample that a scenario's stage made from its records
+    (``origin`` with a ``component``) joins the set ``samples:<scenario>`` (``record_samples_set``).
+    ``data_item_set`` then gets one row for each set of each task and trajectory: the names of its ``benchmarks`` or
+    ``trajectory_sets``. The step reads the items a page at a time, and parses only the metadata whose text has one
+    of these keys.
     """
 
     def apply(self, connection: Connection, schema: str | None) -> None:
@@ -420,7 +422,10 @@ class ItemSets(SchemaStep):
         )
         set_keys = {"task": ("benchmark", "benchmarks"), "trajectory": ("trajectory_set", "trajectory_sets")}
         keyed = or_(
-            *(items.c.metadata_json.contains(f'"{key}"') for key in ("set_id", "benchmarks", "trajectory_sets"))
+            *(
+                items.c.metadata_json.contains(f'"{key}"')
+                for key in ("set_id", "benchmarks", "trajectory_sets", "component")
+            )
         )
         after = 0
         while rows := connection.execute(
@@ -433,10 +438,16 @@ class ItemSets(SchemaStep):
             members: list[dict[str, Any]] = []
             for row in rows:
                 metadata = json.loads(row.metadata_json)
-                name = metadata.get("set_id")
-                if row.kind == "trajectory" and isinstance(name, str) and name:
-                    metadata.pop("set_id")
-                    metadata["trajectory_sets"] = [name]
+                joined: list[str] = []
+                if row.kind == "trajectory":
+                    name, origin = metadata.get("set_id"), metadata.get("origin")
+                    if isinstance(name, str) and name:
+                        metadata.pop("set_id")
+                        joined.append(name)
+                    if isinstance(origin, dict) and "component" in origin:
+                        joined.append(f"samples:{origin['scenario']}")
+                if joined:
+                    metadata["trajectory_sets"] = joined
                     rewritten.append({"row_sequence": row.sequence, "metadata_json": canonical_json(metadata)})
                 set_kind, key = set_keys[row.kind]
                 names = metadata.get(key)
@@ -636,16 +647,28 @@ class SQLDataStore(DataStore):
         )
 
     def sets(
-        self, owner: str, kind: str, *, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+        self,
+        owner: str,
+        kind: str,
+        *,
+        scenario: str | None = None,
+        before: int | None = None,
+        limit: int = MAX_QUERY_LIMIT,
     ) -> tuple[ItemGroup, ...]:
-        check_sets(owner, kind, before, limit)
-        item_sets = self.item_sets_table
+        check_sets(owner, kind, scenario, before, limit)
+        item_sets, uses = self.item_sets_table, self.uses_table
         first = func.min(item_sets.c.sequence)
         statement = (
             select(item_sets.c.name, func.count(), first, func.max(item_sets.c.sequence))
             .where(item_sets.c.owner == owner, item_sets.c.kind == kind)
             .group_by(item_sets.c.name)
         )
+        if scenario is not None:
+            # An item that the scenario uses through several sets or splits counts once.
+            used = exists().where(
+                uses.c.owner == owner, uses.c.item_id == item_sets.c.item_id, uses.c.scenario == scenario
+            )
+            statement = statement.where(used)
         if before is not None:
             statement = statement.having(first < before)
         with self.transaction(read_only=True) as connection:

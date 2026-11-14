@@ -906,9 +906,11 @@ Read, query, update and delete items
   To read the items of one group, query with ``group_key`` and its
   ``value``, and page with ``after`` from its ``first_sequence``. Give the
   same ``scenario`` to that query.
-- ``GET /reef/namespaces/{owner}/data/sets/{kind}?before=&limit=`` lists the
-  owner's sets of ``kind``, ``benchmark`` or ``trajectory_set``, that have at
-  least one item: ``{"owner", "sets", "next"}``. Each set is ``{"name",
+- ``GET /reef/namespaces/{owner}/data/sets/{kind}?scenario=&before=&limit=``
+  lists the owner's sets of ``kind``, ``benchmark`` or ``trajectory_set``, that
+  have at least one item: ``{"owner", "sets", "next"}``. ``scenario`` lists
+  only the sets with an item that the scenario uses, and counts only those
+  items. Each set is ``{"name",
   "item_count", "first_sequence", "last_sequence", "metadata"}``.
   ``metadata`` is that of the set's first item. The sets come newest first, by
   ``first_sequence``. ``before`` and ``limit`` page them as in the groups
@@ -1014,6 +1016,8 @@ benchmark is for tasks: a trajectory is in the set when the list
 upload the trajectories, or with a metadata patch:
 ``metadata={"trajectory_sets": ["week-12"]}``. It holds distinct non-empty
 strings, so a trajectory can be in several sets. Only a trajectory has it.
+The trajectories that a scenario's trainer makes from its records are in the
+set ``samples:<scenario>``.
 
 .. code:: bash
 

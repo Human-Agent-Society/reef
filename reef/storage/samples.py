@@ -56,6 +56,11 @@ def consumed_sample_id(sample_id: str) -> str:
     return f"{CONSUMED_SAMPLE_PREFIX}{sample_id}"
 
 
+def record_samples_set(scenario: str) -> str:
+    """The trajectory set of the trajectory samples that the stages of ``scenario`` made from its records."""
+    return f"samples:{scenario}"
+
+
 def stage_item_id(scenario: str, name: str) -> str:
     """The item ID of the sample that a stage of ``scenario`` made under ``name``. It holds no ``/``, so a task item
     can have a directory of that name."""
@@ -386,7 +391,8 @@ class TrainerSamples:
         names the sample processing tasks of the samples (``TrainingPipeline.lineage``), so a query by group finds
         them. With ``stale``, the samples are stored with the stale mark (``mark_stale``).
 
-        The sample named ``name`` is the item ``stage_item_id(scenario, name)``. An item that exists stays as it is,
+        The sample named ``name`` is the item ``stage_item_id(scenario, name)``. A trajectory sample is in the
+        trajectory set ``record_samples_set(scenario)``. An item that exists stays as it is,
         so a stage that makes a sample again, after a restart, changes nothing. ``record_ids`` is empty for samples
         that a stage made from no record set.
         """
@@ -411,7 +417,10 @@ class TrainerSamples:
             try:
                 if isinstance(sample, TrajectorySample):
                     group_id = {} if sample.group_id is None else {"group_id": sample.group_id}
-                    item = NewItem(item_id, dict(sample.trajectory), {"kind": "trajectory", **metadata, **group_id})
+                    in_set = {"trajectory_sets": [record_samples_set(store.scenario)]}
+                    item = NewItem(
+                        item_id, dict(sample.trajectory), {"kind": "trajectory", **metadata, **group_id, **in_set}
+                    )
                     store.data.create(store.owner, [item])
                 else:
                     with tempfile.TemporaryDirectory(prefix="reef-stage-task-") as directory:

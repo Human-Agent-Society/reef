@@ -571,9 +571,10 @@ class DataStore(Plugin, JobDataReader, ABC):
     * ``release(owner, scenario, kind, name, split)`` ends the hold in ``split`` and its uses, and returns True, or
       returns False when the scenario does not hold the set in that split.
     * ``holds(owner, scenario)`` returns the holds of ``scenario``, in the order of their kinds and names.
-    * ``sets(owner, kind, before, limit)`` returns the sets of ``kind`` (a key of ``HOLD_ITEM_KINDS``) that have an
-      item of ``owner``, as ``ItemGroup`` with the set's name as ``value``: newest first by ``first_sequence``, only
-      those with ``first_sequence < before`` when ``before`` is given, at most ``limit``.
+    * ``sets(owner, kind, scenario, before, limit)`` returns the sets of ``kind`` (a key of ``HOLD_ITEM_KINDS``) that
+      have an item of ``owner``, as ``ItemGroup`` with the set's name as ``value``: newest first by
+      ``first_sequence``, only those with ``first_sequence < before`` when ``before`` is given, at most ``limit``.
+      With ``scenario``, a set has only the items that the scenario uses, and a set without one is left out.
     * ``holding_scenarios(owner, kind, names)`` returns the scenarios that hold one of the sets ``names`` of
       ``kind``, in name order. A write that changes the items of a set wakes them.
     * ``last_use_sequence(owner, scenario)`` returns the sequence of the newest use by ``scenario``, or 0.
@@ -823,14 +824,20 @@ class DataStore(Plugin, JobDataReader, ABC):
         return tuple(group for group in newest if before is None or group.first_sequence < before)[:limit]
 
     def sets(
-        self, owner: str, kind: str, *, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+        self,
+        owner: str,
+        kind: str,
+        *,
+        scenario: str | None = None,
+        before: int | None = None,
+        limit: int = MAX_QUERY_LIMIT,
     ) -> tuple[ItemGroup, ...]:
         """The sets of ``kind`` that have an item of ``owner`` (see the class). The default reads every page of
         ``query`` of the set's item kind without content; a store can read the sets at once."""
-        check_sets(owner, kind, before, limit)
+        check_sets(owner, kind, scenario, before, limit)
         found: dict[str, ItemGroup] = {}
         after = 0
-        while page := self.query(owner, kind=HOLD_ITEM_KINDS[kind], after=after, content=False):
+        while page := self.query(owner, kind=HOLD_ITEM_KINDS[kind], scenario=scenario, after=after, content=False):
             for item in page:
                 for name in (held_sets(item.metadata) or ("", ()))[1]:
                     group = found.get(name)
@@ -942,9 +949,9 @@ def in_set(metadata: Mapping[str, Any], set_kind: str, name: str) -> bool:
     return found is not None and found[0] == set_kind and name in found[1]
 
 
-def check_sets(owner: str, kind: object, before: object, limit: object) -> None:
+def check_sets(owner: str, kind: object, scenario: object, before: object, limit: object) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.sets`` are valid."""
-    check_owner(owner)
+    check_filters(owner, None, scenario, None, None, 0)
     if kind not in HOLD_ITEM_KINDS:
         raise ValueError(f"a set kind is one of {', '.join(HOLD_ITEM_KINDS)}, got {kind!r}")
     if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 1):

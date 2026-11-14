@@ -398,14 +398,16 @@ def group_items(
     }
 
 
-def set_listing(data: DataAccess, owner: str, *, kind: str, before: int | None, limit: int) -> dict[str, Any]:
-    """The sets of ``kind`` that have an item of ``owner`` (``DataStore.sets``), newest first: ``{owner, sets,
-    next}``. Each set is ``{name, item_count, first_sequence, last_sequence, metadata}``, where ``metadata`` is the
+def set_listing(
+    data: DataAccess, owner: str, *, kind: str, scenario: str | None, before: int | None, limit: int
+) -> dict[str, Any]:
+    """The sets of ``kind`` that have an item of ``owner`` (``DataStore.sets``), with only the items that
+    ``scenario`` uses when it is given, newest first: ``{owner, sets, next}``. Each set is ``{name, item_count, first_sequence, last_sequence, metadata}``, where ``metadata`` is the
     metadata of its first item.
 
     ``next`` is the ``before`` of the next page, or null after the last set.
     """
-    found = data.require_store().sets(owner, kind, before=before, limit=limit)
+    found = data.require_store().sets(owner, kind, scenario=scenario, before=before, limit=limit)
     return {
         "owner": owner,
         "sets": [

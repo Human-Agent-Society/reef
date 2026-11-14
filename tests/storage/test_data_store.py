@@ -1309,6 +1309,12 @@ def test_a_trajectory_is_in_each_of_its_sets_as_a_task_in_each_of_its_benchmarks
         ("t1", "train", "a"),
         ("t1", "train", "b"),
     ]
+    # A listing for a scenario counts only the items that it uses, each once; a set without one is left out.
+    store.update("acme", ["t2"], {"scenarios": {"writing": "train"}, "trajectory_sets": ["a"]})
+    assert listed("trajectory_set", scenario="coding") == [("b", 1), ("a", 3)]
+    assert listed("trajectory_set", scenario="writing") == [("a", 1)]
+    assert listed("trajectory_set", scenario="unused") == []
+    store.update("acme", ["t2"], {"scenarios": {"writing": None}, "trajectory_sets": None})
     # t1 leaves a and stays in b; a deleted item leaves its sets.
     store.update("acme", ["t1"], {"trajectory_sets": ["b"]})
     assert sorted(uses_of(store, "coding", kind="trajectory")) == [("t0", "train", "a"), ("t1", "train", "b")]
@@ -1330,6 +1336,9 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
         sets = [["day-1"], ["day-1"], []]
         store.create("acme", [trajectory(f"t{n}", trajectory_sets=sets[n - 1]) for n in (1, 2, 3)])
         store.create("acme", [benchmark_task(tmp_path, "add", "lite")])
+        # A trajectory that a stage of coding made from its records, before such a sample joined a set.
+        made = {"scenario": "coding", "component": "", "records": ["r1"]}
+        store.create("acme", [trajectory("t4", origin=made)])
         schema = store.uses_table.schema
         prefix = "" if schema is None else f"{schema}."
         with store.transaction() as connection:
@@ -1359,7 +1368,7 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
         # The second open finds version 4 and changes nothing.
         with closing(open_durable_store()) as store:
             assert uses_of(store, "coding", kind="trajectory") == [("t3", "train", None), ("t1", "train", None)]
-            assert [item.item_id for item in store.query("acme", id_prefix="t")] == ["t1", "t2", "t3"]
+            assert [item.item_id for item in store.query("acme", id_prefix="t")] == ["t1", "t2", "t3", "t4"]
             assert store.read("acme", "t1").metadata == {
                 "kind": "trajectory",
                 "owner": "acme",
@@ -1367,8 +1376,10 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
                 "trajectory_sets": ["day-1"],
             }
             assert store.read("acme", "t3").metadata["set_id"] == 7
+            assert store.read("acme", "t4").metadata["trajectory_sets"] == ["samples:coding"]
             assert [(group.value, group.item_count) for group in store.sets("acme", "trajectory_set")] == [
-                ("day-1", 2)
+                ("samples:coding", 1),
+                ("day-1", 2),
             ]
             assert [(group.value, group.item_count) for group in store.sets("acme", "benchmark")] == [("lite", 1)]
             with store.transaction(read_only=True) as connection:
