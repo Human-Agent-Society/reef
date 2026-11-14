@@ -415,7 +415,9 @@ class ArtifactEvaluationRequest:
     ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
     ``max_concurrent_rollouts`` is the most rollouts of the evaluation that run at once, a positive int, or None for
     no limit. ``max_failed_fraction`` is the largest fraction of failed rollouts, a number greater than 0 and less
-    than 1, above which Reef stops the evaluation; None for no limit.
+    than 1, above which Reef stops the evaluation; None for no limit. ``log_probs`` is a bool: True asks the
+    candidate's engine for the sampled tokens' log probabilities and token IDs in every model call of the
+    evaluation (``ArtifactEndpoint``), so that the kept calls hold them.
     Purpose: the evaluation service reads it from a request (``from_json``), stores it (``to_json``), and runs it.
     """
 
@@ -429,6 +431,7 @@ class ArtifactEvaluationRequest:
     max_concurrent_rollouts: int | None = None
     max_failed_fraction: float | None = None
     collection: EvaluationCollection | None = None
+    log_probs: bool = False
 
     def __post_init__(self) -> None:
         for name, value in (
@@ -479,6 +482,8 @@ class ArtifactEvaluationRequest:
             isinstance(fraction, bool) or not isinstance(fraction, int | float) or not 0 < fraction < 1
         ):
             raise ValueError("an artifact evaluation's max_failed_fraction is a number between 0 and 1, or null")
+        if not isinstance(self.log_probs, bool):
+            raise ValueError("an artifact evaluation's log_probs is true or false")
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -492,17 +497,18 @@ class ArtifactEvaluationRequest:
             "max_concurrent_rollouts": self.max_concurrent_rollouts,
             "max_failed_fraction": self.max_failed_fraction,
             "collection": None if self.collection is None else self.collection.to_json(),
+            "log_probs": self.log_probs,
         }
 
     @classmethod
     def from_json(cls, value: object) -> ArtifactEvaluationRequest:
         """The request that ``to_json`` gave; raise ``ValueError`` for any other value. A request stored before
-        ``max_concurrent_rollouts`` or ``max_failed_fraction`` existed has no such limit, and one stored before
-        ``collection`` existed has no collection."""
+        ``max_concurrent_rollouts`` or ``max_failed_fraction`` existed has no such limit, one stored before
+        ``collection`` existed has no collection, and one stored before ``log_probs`` existed asks for none."""
         keys = {"artifact_id", "component", "harness", "model", "task_names", "rollouts_per_task", "environment"}
         if (
             not isinstance(value, Mapping)
-            or set(value) - {"max_concurrent_rollouts", "max_failed_fraction", "collection"} != keys
+            or set(value) - {"max_concurrent_rollouts", "max_failed_fraction", "collection", "log_probs"} != keys
             or not isinstance(value["task_names"], list)
         ):
             raise ValueError(f"an artifact evaluation request is an object of {sorted(keys)}")
@@ -517,6 +523,7 @@ class ArtifactEvaluationRequest:
             value.get("max_concurrent_rollouts"),
             value.get("max_failed_fraction"),
             None if value.get("collection") is None else EvaluationCollection.from_json(value["collection"]),
+            value.get("log_probs", False),
         )
 
 
@@ -527,7 +534,8 @@ class ArtifactEvaluationSettings:
 
     Values: ``component`` is None, for the one component of the snapshots that has a kind, or a non-empty
     component name. ``harness``, ``model``, ``task_names``, ``rollouts_per_task``, ``environment``,
-    ``max_concurrent_rollouts`` and ``max_failed_fraction`` meet the conditions of ``ArtifactEvaluationRequest``.
+    ``max_concurrent_rollouts``, ``max_failed_fraction`` and ``log_probs`` meet the conditions of
+    ``ArtifactEvaluationRequest``.
     ``collection`` is None, or the non-empty name of a collection of the scenario's owner, and then ``task_names`` is
     empty: the evaluation runs the eval tasks of the collection. ``num_samples`` is None, to run every task that the
     other fields select, or a positive int: the most tasks that the evaluation runs (``sampled_task_names``).
@@ -548,6 +556,7 @@ class ArtifactEvaluationSettings:
     collection: str | None = None
     num_samples: int | None = None
     sample_seed: int | None = None
+    log_probs: bool = False
 
     def __post_init__(self) -> None:
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
@@ -580,6 +589,7 @@ class ArtifactEvaluationSettings:
             self.environment,
             self.max_concurrent_rollouts,
             self.max_failed_fraction,
+            log_probs=self.log_probs,
         )
 
     def sampled_task_names(self, task_names: Sequence[str]) -> tuple[str, ...]:
@@ -614,6 +624,7 @@ class ArtifactEvaluationSettings:
             "collection": self.collection,
             "num_samples": self.num_samples,
             "sample_seed": self.sample_seed,
+            "log_probs": self.log_probs,
         }
 
     @classmethod
@@ -637,6 +648,7 @@ class ArtifactEvaluationSettings:
             "collection",
             "num_samples",
             "sample_seed",
+            "log_probs",
         }
         unknown = sorted(set(value) - known)
         if unknown:
@@ -656,6 +668,7 @@ class ArtifactEvaluationSettings:
             value.get("collection"),
             value.get("num_samples"),
             value.get("sample_seed"),
+            value.get("log_probs", False),
         )
 
 

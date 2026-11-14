@@ -13,6 +13,9 @@ from reef.inference.provider_protocol import usage_of
 
 #: Provider fields forwarded unchanged to native engines.
 NATIVE_REQUEST_KEYS = ("lora_path", "rid", "sglang_sampling_params", "vllm_sampling_params")
+#: Reef's extension of Anthropic Messages: the request fields that ask for the sampled tokens' log probabilities and
+#: token IDs, as Chat Completions names them. A buffered response then carries them at its top level.
+TOKEN_REQUEST_KEYS = ("logprobs", "return_token_ids")
 
 
 def anthropic_request(payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -57,7 +60,15 @@ def anthropic_request(payload: Mapping[str, Any]) -> dict[str, Any]:
         "messages": messages,
         "max_completion_tokens": max_tokens,
     }
-    for key in ("temperature", "top_p", "top_k", "stream", "chat_template_kwargs", *NATIVE_REQUEST_KEYS):
+    for key in (
+        "temperature",
+        "top_p",
+        "top_k",
+        "stream",
+        "chat_template_kwargs",
+        *NATIVE_REQUEST_KEYS,
+        *TOKEN_REQUEST_KEYS,
+    ):
         if key in payload and payload[key] is not None:
             request[key] = payload[key]
     stop_sequences = payload.get("stop_sequences")
@@ -283,6 +294,16 @@ def anthropic_response(original_request: Mapping[str, Any], response: Mapping[st
     # Anthropic has no stop reason for an engine abort: the response names it in its meta_info, which the
     # service reads (inference_aborted); an aborted response never reaches the client.
     aborted = {"meta_info": {"finish_reason": "abort"}} if choice.get("finish_reason") == "abort" else {}
+    # Reef's extension (TOKEN_REQUEST_KEYS): the chat response's log probabilities and token IDs, when it has them.
+    tokens = {
+        key: value
+        for key, value in (
+            ("logprobs", choice.get("logprobs")),
+            ("token_ids", choice.get("token_ids")),
+            ("prompt_token_ids", response.get("prompt_token_ids")),
+        )
+        if value is not None
+    }
     return {
         "id": f"msg_{uuid.uuid4().hex}",
         "type": "message",
@@ -293,6 +314,7 @@ def anthropic_response(original_request: Mapping[str, Any], response: Mapping[st
         "stop_sequence": None,
         "usage": usage_of(response) or {"input_tokens": 0, "output_tokens": 0},
         **aborted,
+        **tokens,
     }
 
 
