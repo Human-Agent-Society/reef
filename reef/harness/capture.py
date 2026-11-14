@@ -16,7 +16,7 @@ import time
 import urllib.request
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, MutableMapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from http.server import ThreadingHTTPServer
 from typing import Any
 
@@ -93,19 +93,31 @@ class CaptureObserver(ABC):
 
 class TaggedStore(CaptureStore):
     """The capture store plus, per capture, the tags in force when it landed, so a trial's receipts are told apart.
-    ``observer``, when set, gets each capture after it landed."""
+    ``observer``, when set, gets each capture after it landed, with its bodies.
 
-    def __init__(self, tags: Mapping[str, str], observer: CaptureObserver | None = None) -> None:
+    With ``keeps_bodies`` false, the store keeps a capture without its request body, and without its response body
+    when it answered 200: an error body stays, to name the failure. An agent's request carries the whole
+    conversation so far, so the kept bodies of one long rollout grow with the square of its calls."""
+
+    def __init__(
+        self, tags: Mapping[str, str], observer: CaptureObserver | None = None, *, keeps_bodies: bool = True
+    ) -> None:
         super().__init__()
         self.tag_values = tags
         self.observer = observer
+        self.keeps_bodies = keeps_bodies
         self.tagged: list[dict[str, Any]] = []
         self.guard = threading.Lock()
 
     def add(self, turn: CapturedTurn) -> None:
+        kept = (
+            turn
+            if self.keeps_bodies
+            else replace(turn, request=None, response=None if turn.status == 200 else turn.response)
+        )
         with self.guard:
-            super().add(turn)
-            self.tagged.append({**asdict(turn), "tags": dict(self.tag_values)})
+            super().add(kept)
+            self.tagged.append({**asdict(kept), "tags": dict(self.tag_values)})
         if self.observer is not None:
             self.observer.call_captured(turn)
 
@@ -147,7 +159,9 @@ class CaptureProxy:
     record of it, and the captured response holds the whole training block. A streaming agent still gets a
     stream, which the proxy makes from the complete answer.
 
-    ``observer``, when set, gets each captured call as it lands (``CaptureObserver``)."""
+    ``observer``, when set, gets each captured call as it lands (``CaptureObserver``). With ``keeps_bodies`` false,
+    the captures that ``drain`` returns have no request body, and no response body when they answered 200
+    (``TaggedStore``)."""
 
     def __init__(
         self,
@@ -159,6 +173,7 @@ class CaptureProxy:
         listen_host: str = "127.0.0.1",
         is_unrecorded: bool = False,
         observer: CaptureObserver | None = None,
+        keeps_bodies: bool = True,
     ) -> None:
         self.upstream = upstream
         self.scenario = scenario
@@ -175,7 +190,7 @@ class CaptureProxy:
         self.tags: MutableMapping[str, str] = ProxyTags(self.config, fixed)
         for name, value in (tags or {}).items():
             self.tags[name] = value
-        self.store = TaggedStore(self.tags, observer)
+        self.store = TaggedStore(self.tags, observer, keeps_bodies=keeps_bodies)
         self.handler = build_handler(self.config, self.store)
         self.server: CaptureProxyServer | None = None
 
