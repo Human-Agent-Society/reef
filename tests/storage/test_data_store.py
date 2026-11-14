@@ -44,7 +44,7 @@ from reef.storage.record_items import (
     record_item,
     stored_evaluation_call,
 )
-from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
+from reef.storage.sql_data import USES_TABLE, PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.sql_setup import prefix_upper_bound
 from reef.storage.task_collections import TaskCollection, collection_benchmarks
@@ -467,6 +467,10 @@ def test_a_query_before_a_sequence_pages_backward_newest_first(store):
     assert [item.item_id for item in store.query("acme", before=sequence["t5"])] == ["t4", "t3", "t2", "t1"]
     assert [item.item_id for item in store.query("acme", after=sequence["t1"], before=sequence["t4"])] == ["t3", "t2"]
     assert store.query("acme", before=sequence["t1"]) == ()
+    # A scenario's items page backward too: t2 and t4 are the ones that coding uses.
+    store.update("acme", ["t2", "t4"], {"scenarios": {"coding": "train"}})
+    assert [item.item_id for item in store.query("acme", scenario="coding", before=sequence["t5"])] == ["t4", "t2"]
+    assert [item.item_id for item in store.query("acme", scenario="coding", before=sequence["t4"], limit=1)] == ["t2"]
     for before in (0, -1, True, "2"):
         with pytest.raises(ValueError, match="before"):
             store.query("acme", before=before)
@@ -1036,6 +1040,18 @@ def test_an_evaluation_call_links_only_within_its_attempt_and_is_no_scenarios_da
         store.update("acme", [ids[0]], {"scenarios": {"coding": "train"}})
     with pytest.raises(ValueError, match="never changes"):
         store.update("acme", [ids[0]], {"evaluation_id": "e2"})
+    if not isinstance(store, MemoryDataStore):
+        # The budget holds the bytes of the scenario's own calls and of their nodes, not of the evaluation calls.
+        items, nodes = store.items_table, store.nodes_table
+        own = items.c.item_id.in_(["coding/call-1", "coding/call-2"])
+        with store.transaction(read_only=True) as connection:
+            held = connection.execute(select(func.sum(func.length(items.c.content_json))).where(own)).scalar_one()
+            held += connection.execute(
+                select(func.sum(nodes.c.body_bytes))
+                .join(items, (items.c.owner == nodes.c.owner) & (items.c.sequence == nodes.c.node_sequence))
+                .where(own)
+            ).scalar_one()
+        assert store.prune_records(held) == 0
     # Pruning deletes and counts the scenario's own calls only; evaluation calls stay.
     assert store.prune_records(0) == 2
     assert store.record_loss("acme", "coding").record_count == 2
@@ -1345,6 +1361,66 @@ def test_a_trajectory_is_in_each_of_its_sets_as_a_task_in_each_of_its_benchmarks
         store.sets("acme", "trajectory")
 
 
+def test_a_store_upgrades_the_uses_of_version_4_to_the_order_of_their_items(open_durable_store):
+    def read(store):
+        """What the store gives for the uses of coding: the records and items in item order, their counts, and the
+        newest record of coding."""
+        return (
+            [item.item_id for item in store.query("acme", kind="record", scenario="coding")],
+            [item.item_id for item in store.query("acme", kind="record", scenario="coding", origin="coding")],
+            [item.item_id for item in store.query("acme", scenario="coding", content=False)],
+            store.count("acme", scenario="coding"),
+            store.count("acme", kind="record", scenario="coding", origin="coding", after=1),
+            store.last_sequence("acme", kind="record", scenario="coding", origin="coding"),
+        )
+
+    with closing(open_durable_store()) as store:
+        store.create("acme", [record_item(conversation("other", 1, scenario="review"))])
+        store.create("acme", calls(1, 2))
+        # coding uses t1 twice: through its own metadata and through the held set a.
+        store.create("acme", [trajectory("t1", scenarios={"coding": "train"}, trajectory_sets=["a"])])
+        store.hold("acme", "coding", "trajectory_set", "a", "train")
+        store.update("acme", ["review/other"], {"scenarios": {"coding": "train"}})
+        before = read(store)
+        assert before == (
+            ["review/other", "coding/call-1", "coding/call-2"],
+            ["coding/call-1", "coding/call-2"],
+            ["review/other", "coding/call-1", "coding/call-2", "t1"],
+            4,
+            2,
+            store.read("acme", "coding/call-2").sequence,
+        )
+        schema = store.uses_table.schema
+        prefix = "" if schema is None else f"{schema}."
+        with store.transaction() as connection:
+            # A database of version 4: the uses have no item sequence, retention has no partial index, and a use
+            # of an item that no longer exists remains.
+            for index in ("data_item_use_by_item", "data_item_of_inference", "data_record_node_scenario_bytes"):
+                connection.exec_driver_sql(f"DROP INDEX {prefix}{index}")
+            connection.exec_driver_sql(f"ALTER TABLE {prefix}data_item_use DROP COLUMN item_sequence")
+            connection.exec_driver_sql(
+                f"INSERT INTO {prefix}data_item_use (owner, item_id, scenario, held_set, split)"
+                " VALUES ('acme', 'gone', 'coding', '', 'train')"
+            )
+            connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 4")
+    with closing(open_durable_store()) as store:
+        assert read(store) == before
+        uses = store.uses_table
+        with store.transaction(read_only=True) as connection:
+            assert connection.execute(select(func.count()).where(uses.c.item_id == "gone")).scalar_one() == 0
+            tables = sqlalchemy.inspect(connection)
+            assert "data_item_use_by_item" in {
+                index["name"] for index in tables.get_indexes(USES_TABLE, schema=schema)
+            }
+            nodes = {index["name"] for index in tables.get_indexes("data_record_node", schema=schema)}
+            assert "data_record_node_scenario_bytes" in nodes
+            versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
+            assert versions.fetchall() == [(6,)]
+        # A new use after the upgrade has its item's sequence too.
+        store.create("acme", calls(3))
+        assert read(store)[1] == ["coding/call-1", "coding/call-2", "coding/call-3"]
+
+
 def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_store, tmp_path):
     with closing(open_durable_store()) as store:
         sets = [["day-1"], ["day-1"], []]
@@ -1357,10 +1433,12 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
         prefix = "" if schema is None else f"{schema}."
         with store.transaction() as connection:
             # A database of version 1: the uses are in data_item_scenario, no table records the version,
-            # PostgreSQL has no index of the IDs in the "C" collation, no table holds the sets of the items, and a
-            # trajectory names its one set in set_id. A set_id that is no string is in no set.
+            # PostgreSQL has no index of the IDs in the "C" collation, retention has no partial index, no table holds
+            # the sets of the items, and a trajectory names its one set in set_id. A set_id that is no string is in
+            # no set.
             connection.exec_driver_sql(f"DROP TABLE {prefix}data_schema_version")
-            connection.exec_driver_sql(f"DROP INDEX IF EXISTS {prefix}data_item_by_item_id")
+            for index in ("data_item_by_item_id", "data_item_of_inference", "data_record_node_scenario_bytes"):
+                connection.exec_driver_sql(f"DROP INDEX IF EXISTS {prefix}{index}")
             connection.exec_driver_sql(f"DROP TABLE {prefix}data_item_set")
             for item_id, set_id in (("t1", "day-1"), ("t2", "day-1"), ("t3", 7)):
                 old = {"kind": "trajectory", "owner": "acme", "scenarios": {}, "set_id": set_id}
@@ -1379,9 +1457,11 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
                 " (7, 'acme', 't3', 'coding', 'train'), (9, 'acme', 't1', 'coding', 'train')"
             )
     for _ in range(2):
-        # The second open finds version 4 and changes nothing.
+        # The second open finds version 6 and changes nothing.
         with closing(open_durable_store()) as store:
             assert uses_of(store, "coding", kind="trajectory") == [("t3", "train", None), ("t1", "train", None)]
+            # A copied use has the sequence of its item, so a query of the scenario's items reads them in item order.
+            assert [item.item_id for item in store.query("acme", scenario="coding")] == ["t1", "t3"]
             assert [item.item_id for item in store.query("acme", id_prefix="t")] == ["t1", "t2", "t3", "t4"]
             assert store.read("acme", "t1").metadata == {
                 "kind": "trajectory",
@@ -1402,8 +1482,8 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
                 indexes = {index["name"] for index in tables.get_indexes("data_item", schema=schema)}
                 assert ("data_item_by_item_id" in indexes) == (connection.dialect.name == "postgresql")
                 versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
-                assert versions.fetchall() == [(4,)]
+                assert versions.fetchall() == [(6,)]
     with closing(open_durable_store()) as store, store.transaction() as connection:
-        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 5")
+        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 7")
     with pytest.raises(ReefError, match="a later Reef wrote them"):
         open_durable_store()
