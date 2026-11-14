@@ -19,7 +19,7 @@ from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, Rol
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
 from reef.execution.sandbox.task_environment import HARBOR_E2B_ENVIRONMENT, environment_config
-from reef.harness.capture import CaptureObserver
+from reef.harness.capture import CaptureObserver, TaggedStore
 from reef.harness.harbor.rollouts import (
     DEFAULT_AGENT,
     ReefEvalLab,
@@ -755,6 +755,56 @@ def test_a_capture_observer_gets_every_call_as_it_lands_failed_calls_with_their_
     assert [(turn.status, turn.response) for turn in refused.turns] == [
         (401, {"error": {"message": "invalid service token"}})
     ] * 2
+
+
+def test_an_unrecorded_rollout_without_turns_keeps_no_call_body_and_its_observer_gets_them_all(
+    tmp_path: Path,
+) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    observed, refused_observed = ObservedCalls(), ObservedCalls()
+    with contextlib.closing(StandInReef()) as reef:
+        ran = runner(
+            reef,
+            tmp_path,
+            StandInLab({"reward": 1.0}),
+            is_reporting=False,
+            is_unrecorded=True,
+            keeps_turns=False,
+            capture_observer=observed,
+        ).run(task_path)
+    with contextlib.closing(StandInReef(refuse_inference=True)) as reef:
+        refused_ran = runner(
+            reef,
+            tmp_path,
+            StandInLab({"reward": 0.0}),
+            is_reporting=False,
+            is_unrecorded=True,
+            keeps_turns=False,
+            capture_observer=refused_observed,
+        ).run(task_path)
+    assert (ran.reward, ran.error, ran.failed_calls, ran.turns) == (1.0, "", 0, ())
+    assert [turn.request["messages"][0]["content"] for turn in observed.turns] == ["turn 0", "turn 1"]
+    # A refused call keeps its error body, which names the failure.
+    assert refused_ran.failed_calls == 2 and refused_ran.turns == ()
+    assert refused_ran.error.startswith("2 model calls failed; the first answered 401")
+    assert len(refused_observed.turns) == 2
+
+
+def test_a_store_without_bodies_keeps_an_error_body_and_gives_the_observer_the_whole_call() -> None:
+    observed = ObservedCalls()
+    store = TaggedStore({"task": "t1"}, observed, keeps_bodies=False)
+    answered = CapturedTurn(
+        "s", "/v1/chat/completions", 200, {"messages": ["long"]}, {"choices": []}, None, False, 1.0
+    )
+    refused = CapturedTurn("s", "/v1/chat/completions", 401, {"messages": ["long"]}, {"error": "no"}, None, False, 1.0)
+    store.add(answered)
+    store.add(refused)
+    assert [(turn["status"], turn["request"], turn["response"], turn["tags"]) for turn in store.drain()] == [
+        (200, None, None, {"task": "t1"}),
+        (401, None, {"error": "no"}, {"task": "t1"}),
+    ]
+    assert observed.turns == [answered, refused]
+    assert all(turn["request"] is None for turn in store.snapshot())
 
 
 def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: StandInReef, tmp_path: Path) -> None:

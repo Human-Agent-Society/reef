@@ -313,6 +313,11 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     ``model_adapter`` when it is given. A request names a task directory, and ``run_rollouts`` runs up to
     ``concurrency`` rollouts at a time. ``capture_observer``, when set, gets each model call of each rollout as it
     lands, failed calls too (``CaptureObserver``).
+
+    An unrecorded rollout (``is_unrecorded``) keeps the bodies of its answered calls as its ``turns`` while
+    ``keeps_turns``. Without ``keeps_turns``, its proxy keeps no request body and no answered response body, its
+    ``turns`` are empty, and a call counts as answered when it answered 200. ``keeps_turns`` changes nothing for a
+    recorded rollout.
     """
 
     def __init__(
@@ -335,6 +340,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         verifier_timeout_reward: float | None = None,
         concurrency: int = 1,
         capture_observer: CaptureObserver | None = None,
+        keeps_turns: bool = True,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -371,6 +377,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         self.is_reporting = is_reporting
         # An unrecorded rollout: Reef keeps no record of its calls, and the rollout keeps their turns.
         self.is_unrecorded = is_unrecorded
+        self.keeps_turns = keeps_turns
         # The reward for a rollout whose verifier ran past its timeout; None leaves such a rollout unscored.
         self.verifier_timeout_reward = verifier_timeout_reward
         self.concurrency = concurrency
@@ -491,6 +498,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             listen_host=listen_host,
             is_unrecorded=self.is_unrecorded,
             observer=self.capture_observer,
+            keeps_bodies=self.keeps_turns or not self.is_unrecorded,
         )
         proxy.start()
         try:
@@ -507,7 +515,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             proxy.stop()
         receipts: tuple[str, ...] = ()
         answered: tuple[RolloutTurn, ...] = ()
-        if self.is_unrecorded:
+        if self.is_unrecorded and self.keeps_turns:
             answered = tuple(
                 RolloutTurn(turn["request"], turn["response"])
                 for turn in turns
@@ -517,6 +525,9 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             )
             failed_calls = len(turns) - len(answered)
             error = row.error or ("" if answered else unrecorded_call_failure(turns))
+        elif self.is_unrecorded:
+            failed_calls = sum(turn.get("status") != 200 for turn in turns)
+            error = row.error or ("" if failed_calls < len(turns) else unrecorded_call_failure(turns))
         else:
             receipts = tuple(
                 str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200
