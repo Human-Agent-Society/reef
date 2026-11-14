@@ -692,14 +692,17 @@ scenario package depends only on storage contracts. The storage contract is:
      - Whether new sessions and settings survive a process restart.
    * - ``open(scenario)``
      - Open an independently owned session (the ``ScenarioStore`` below).
+       Raise ``ScenarioDeletedError`` for a scenario that ``archive``
+       archived, so a late record makes no new store of a deleted scenario.
    * - ``read_settings(scenario)``
      - The scenario's ``ScenarioSettings``; defaults for a scenario with none.
    * - ``write_settings(scenario, settings)``
      - Replace the settings durably. The caller serializes writers of one scenario.
+       Raise ``ScenarioDeletedError`` for a scenario that ``archive`` archived.
    * - ``archive(scenario)``
      - Retire the scenario's commits, tasks and settings, and remove the
-       scenario from the uses of its owner's items, so a recreated scenario
-       starts empty; return the archive locations.
+       scenario from the uses of its owner's items; return the archive
+       locations. A repeated call changes nothing more.
    * - ``close()``
      - Release shared resources; repeated calls are safe.
 
@@ -1116,13 +1119,23 @@ A backend shares no snapshot between scenarios. It must:
     check that reads files calls it, and the pages that show a job's records.
   - ``discard_content(name)`` removes the content. A name that the backend
     does not hold changes nothing, and every snapshot keeps its files.
-  - ``discard_all_content()`` removes every content of the scenario. Reef
-    calls it when the scenario is deleted, so no content outlives its
-    scenario.
+  - ``discard_all_content()`` removes every content of the scenario.
+    Control's sweep calls it after the scenario was deleted, so no content
+    outlives its scenario. The scenario's registration is archived by then,
+    so the call must find the content of a scenario that has no
+    registration. The sweep repeats a call that failed.
 
   A discard can delete only the content's name and leave its files. Then
   the factory frees them in ``reclaim_discarded()``, which control's sweep of
   ended work calls once per sweep. The default frees nothing.
+  ``forget_scenario(scenario)`` drops what the process keeps of a deleted
+  scenario beside the store, such as a cached backend, a clone or the cached
+  files of its snapshots. It changes nothing for a scenario that was not
+  deleted. Each service calls it when it learns of the delete. The default
+  does nothing. ``CachedRepositoryBackendFactory`` checks
+  ``has_archived_registration``, drops its cached backend, and calls
+  ``forget_local_state(scenario)``, which a subclass overrides to remove
+  its own files.
   - ``publish_parts(parts, *, metadata, expected_parent, advance_head)``
     stores a snapshot of files that the backend holds already, and moves the
     head as ``publish`` does. Callers use the inherited ``publish_stored``,

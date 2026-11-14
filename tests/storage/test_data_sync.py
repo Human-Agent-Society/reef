@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 import pytest
 from tests.support.samples import sample_store
 
+from reef.core.errors import ScenarioDeletedError
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.data import NewItem
 from reef.storage.data_queue import DATA_SYNC_KIND, DATA_SYNC_QUEUE
@@ -61,15 +62,15 @@ def test_the_first_open_sets_the_owner_and_each_open_reads_the_owners_items(stor
         assert sample_ids(opened, session) == ["t1"]
 
 
-def test_an_archive_releases_the_items_so_a_new_scenario_of_the_name_uses_none(stores):
+def test_an_archive_releases_the_items_and_the_name_is_not_opened_again(stores):
     stores.data.create("math", [trajectory("t1", math="train")])
     opened = DataScenarioStorage(stores.storage, stores.data)
     with closing(opened.open("math")) as session:
         assert sample_ids(opened, session) == ["t1"]
     opened.archive("math")
     assert stores.data.read("math", "t1").scenarios == {}
-    with closing(opened.open("math")) as session:
-        assert sample_ids(opened, session) == []
+    with pytest.raises(ScenarioDeletedError):
+        opened.open("math")
 
 
 def test_one_queued_sync_covers_each_request_of_its_scenario():

@@ -108,6 +108,13 @@ class InMemoryRepositoryBackend(StagedSnapshotRepositoryBackend):
             self._metadata = dict(stored_metadata)
             return ref
 
+    def forget_head(self) -> None:
+        """Drop the head and its metadata, so ``metadata`` is None: the scenario's registration was archived. The
+        snapshots and the stored content stay, until ``discard_all_content`` removes the content."""
+        with self._storage.lock:
+            self._current = None
+            self._metadata = None
+
     def metadata(self) -> Mapping[str, object] | None:
         if self._current is None:
             return None
@@ -256,9 +263,30 @@ class _InMemoryRepositoryBackendFactory(CachedRepositoryBackendFactory):
         self._directory = None if directory is None else Path(directory)
         #: The scenarios whose registration this factory archived. The store lives in this process only.
         self.archived: set[str] = set()
+        #: The backend that this factory built for each scenario: the store of its snapshots and content.
+        self.built: dict[str, InMemoryRepositoryBackend] = {}
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
-        return self._backend_type(scenario, directory=self._directory)
+        backend = self._backend_type(scenario, directory=self._directory)
+        self.built[scenario] = backend
+        return backend
+
+    def archive_registration(self, scenario: str) -> tuple[str, ...]:
+        """Archive as ``CachedRepositoryBackendFactory.archive_registration`` does, and keep the scenario's backend
+        with no head (``InMemoryRepositoryBackend.forget_head``): the backend is the only holder of the scenario's
+        stored content, so a later ``discard_all_content`` of the deleted scenario finds it."""
+        archived = super().archive_registration(scenario)
+        with self._lock:
+            backend = self.built.get(scenario)
+            if backend is not None:
+                backend.forget_head()
+                self._backends[scenario] = backend
+        return archived
+
+    def forget_local_state(self, scenario: str) -> None:
+        """Drop the scenario's backend from ``built``. Its snapshots go with it."""
+        with self._lock:
+            self.built.pop(scenario, None)
 
     def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
         self.archived.add(scenario)

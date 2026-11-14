@@ -23,7 +23,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.schema import CreateSchema
 
 from reef.core.config import config_metadata, config_option
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, ScenarioDeletedError
 from reef.core.plugins import PluginSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.data import DataStore
@@ -115,11 +115,22 @@ class PostgresRecordDatabase:
         return None if storage_id is None else str(storage_id)
 
     def storage_id(self, name: str) -> str:
-        """Open or create a named store generation, safely across connections."""
+        """Open or create a named store generation, safely across connections. ``ScenarioDeletedError`` for a name
+        with no active generation and an archived one: a deleted scenario is not opened again."""
         if not isinstance(name, str) or not name:
             raise ValueError("record store name must be a non-empty string")
         key = hashlib.sha256(name.encode("utf-8")).hexdigest()
         with self.transaction() as connection:
+            active = connection.execute(select(self._stores.c.storage_id).where(self._stores.c.active_key == key))
+            if active.first() is None:
+                # A name whose generation was archived is a deleted scenario: its ID is never used again.
+                archived = connection.execute(
+                    select(self._stores.c.storage_id)
+                    .where(self._stores.c.name == name, self._stores.c.active_key.is_(None))
+                    .limit(1)
+                ).first()
+                if archived is not None:
+                    raise ScenarioDeletedError(f"scenario {name!r} was deleted, and its storage is archived")
             connection.execute(
                 insert(self._stores)
                 .values(storage_id=uuid.uuid4().hex, active_key=key, name=name)

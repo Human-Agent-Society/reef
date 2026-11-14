@@ -14,6 +14,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.errors import ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.scenario_deletes import DELETES_QUEUE
 from reef.pipeline_context import PipelineContext
 from reef.recipe.base import Recipe
 from reef.record2sample import NoSamples
@@ -252,8 +253,10 @@ def test_injected_storage_keeps_records_in_the_data_store_that_retention_prunes(
         assert dispatcher.read_record("code", "other") is None
 
         math.records.append(trace("archived"))
-        result = dispatcher.delete_scenario("math")
-        assert result["archived"] == ["archive://math"]
+        dispatcher.delete_scenario("math")
+        dispatcher.sweeper.sweep()
+        (cleanup,) = dispatcher.queue.items(DELETES_QUEUE, scenario="math")
+        assert cleanup.result == {"deleted": True, "archived": ["archive://math"]}
         assert factory.read_settings("math") == ScenarioSettings()
         assert factory.events.index(("close", "math")) < factory.events.index(("archive", "math"))
         assert dispatcher.prune_record_archives(retention) == 1

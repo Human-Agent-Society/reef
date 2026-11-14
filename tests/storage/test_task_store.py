@@ -11,6 +11,7 @@ from typing import Any, Self
 import pytest
 
 from reef.core.config import config_option
+from reef.core.errors import ScenarioDeletedError
 from reef.core.plugins import PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.service.assembly import build_dispatcher
@@ -284,13 +285,8 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
             assert store.state_document_keys() == ("cursor",) and store.state_document("cursor") == "second"
             assert read_harbor_task(store.path(saved_digest)) == generated("parent")
         storage.archive("math")
-        with closing(storage.open("math")) as session:
-            store = session.tasks.open("tasks")
-            assert store.generations() == () and store.documents() == {}
-            assert store.state_document_keys() == ()
-            for digest in (published.files_digest, saved_digest):
-                with pytest.raises(TaskStoreError, match="no files"):
-                    store.path(digest)
+        with pytest.raises(ScenarioDeletedError):
+            storage.open("math")
 
 
 def test_an_archived_postgres_session_writes_no_task(postgres_config, tmp_path):

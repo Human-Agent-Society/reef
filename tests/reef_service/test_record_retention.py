@@ -12,6 +12,7 @@ from sqlalchemy.exc import OperationalError
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.scenario_deletes import DELETES_QUEUE
 from reef.recipe import Recipe
 from reef.scenario.live_objects import LiveObjects
 from reef.service import assembly
@@ -118,7 +119,11 @@ def test_retention_serializes_with_scenario_file_archival(tmp_path, monkeypatch)
 
     def remove():
         deleting.set()
-        return dispatcher.delete_scenario("math")
+        dispatcher.delete_scenario("math")
+        # The sweep archives the scenario's storage, and waits for the retention that runs.
+        dispatcher.sweeper.sweep()
+        (cleanup,) = dispatcher.queue.items(DELETES_QUEUE, scenario="math")
+        return cleanup.result
 
     monkeypatch.setattr(SQLiteDataStore, "prune_records", held)
     try:

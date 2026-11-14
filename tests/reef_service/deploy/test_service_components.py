@@ -27,6 +27,7 @@ from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
 from reef.dispatcher.samples import LocalSampleProducers
+from reef.dispatcher.scenario_deletes import DeletedScenarioFollower
 from reef.dispatcher.served import ServedModelsPublisher
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
@@ -105,9 +106,13 @@ def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> 
         EvaluationRolloutWorker,
     }
     assert worker_types(tmp_path / "control", frozenset({"control"})) == control
-    assert worker_types(tmp_path / "samples", frozenset({"samples"})) == {SamplesWorker}
-    assert worker_types(tmp_path / "data", frozenset({"data"})) == {DataWorker}
-    assert worker_types(tmp_path / "evaluation", frozenset({"evaluation"})) == {EvaluationRolloutWorker}
+    # A process without control drops what it keeps of each deleted scenario.
+    assert worker_types(tmp_path / "samples", frozenset({"samples"})) == {SamplesWorker, DeletedScenarioFollower}
+    assert worker_types(tmp_path / "data", frozenset({"data"})) == {DataWorker, DeletedScenarioFollower}
+    assert worker_types(tmp_path / "evaluation", frozenset({"evaluation"})) == {
+        EvaluationRolloutWorker,
+        DeletedScenarioFollower,
+    }
     with pytest.raises(ValueError, match="unknown services"):
         service_components({"control", "router"})
     with pytest.raises(ValueError, match="one or more"):

@@ -7,7 +7,7 @@ from threading import Barrier
 
 import pytest
 
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.snapshot import SnapshotRef
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
@@ -91,10 +91,14 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path):
             assert store.records.append_result(record()).inserted is False
         archived = factory.archive("math")
         assert archived[0].startswith("postgres://")
-        with closing(factory.open("math")) as store:
-            assert store.history() == ()
-            assert store.records.count("math") == 0
-            assert store.records.append_result(record("second")).inserted
+        # A deleted scenario's ID is never opened again, also by a new factory.
+        with pytest.raises(ScenarioDeletedError):
+            factory.open("math")
+    with (
+        closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as factory,
+        pytest.raises(ScenarioDeletedError),
+    ):
+        factory.open("math")
 
 
 @pytest.mark.parametrize(

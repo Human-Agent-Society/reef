@@ -192,7 +192,7 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/trajectories``                                           | the trajectories of an evaluation, as NDJSON      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``DELETE /reef/scenarios/{scenario}``                                                                                 | remove a scenario; its state is archived          |
+| ``DELETE /reef/scenarios/{scenario}``                                                                                 | delete a scenario; the sweep archives its state   |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness``                                                                                                 | the harness tree of the active selection, rendered|
 |                                                                                                                       | for the adapter, as its source tree, or bound for |
@@ -1895,7 +1895,9 @@ returns HTTP 404, and you create the scenario first:
 |                                             | for each kind whose schema the training     |
 |                                             | component declares                          |
 +---------------------------------------------+---------------------------------------------+
-| ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``; 404 unknown     |
+| ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``: the scenario is |
+|                                             | deleted, and the sweep removes its state;   |
+|                                             | 404 unknown                                 |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/jobs``     | → ``{scenario, jobs}``: the scenario's      |
 |                                             | training jobs in the jobs queue, oldest     |
@@ -2011,26 +2013,41 @@ An unknown scenario, or a request that the scenario does not have, returns
 Deleting a scenario
 -------------------
 
-``DELETE /reef/scenarios/{scenario}`` removes the scenario from the running
-service. Nothing is destroyed: the record store and commit
-log move under ``<agent_record_dir>/archived/``, the recipe's own directories
-(a harness scenario's history and step records) move under an
-``archived/`` sibling, and the
-scenario's ref in the artifact repository is renamed into
-``refs/reef/archived/``, so every snapshot it published stays reachable. A
-scenario ID is never used again after its delete: a create with the ID, and a
-record that would create the scenario implicitly, answer 409. A new scenario
-needs a new ID. A local step in flight for the scenario ends without a
-commit. Only a local artifact repository can be archived; a remote one
-answers 501.
+``DELETE /reef/scenarios/{scenario}`` deletes the scenario. The request
+renames the scenario's ref in the artifact repository into
+``refs/reef/archived/`` and returns ``{"scenario", "archived"}``, where
+``archived`` names the archived ref. From then on the scenario does not
+exist:
 
-For a scenario that trains weights, the delete also cancels the scenario's
-running training job at its training component, since nothing would read the
-job's checkpoints afterwards. The training service also cancels a job of the
-scenario that reaches the queue after the delete, also when control stopped
-before it could cancel it: the service finds no registration of the scenario
-when it takes the job or stores a checkpoint, and it discards what the job
-stored. On a runtime that serves per-scenario adapters,
+- A read of the scenario and a second delete answer 404.
+- A create with the ID, and a record that would create the scenario
+  implicitly, answer 409. A scenario ID is never used again, so a new
+  scenario needs a new ID.
+- The inference service answers the scenario 404.
+- A local step in flight for the scenario ends without a commit.
+- The training service does not run a job of the scenario. When it takes
+  such a job, or stores for one, it finds no registration, cancels the job
+  and discards what the job stored.
+
+Control's sweep of ended work then removes the scenario's state. The delete
+wakes the sweep, so it starts at once. The sweep cancels the scenario's
+training jobs, discards its stored content, and moves its record store and
+commit log under ``<agent_record_dir>/archived/``. It asks the training
+service to move the recipe's own directories (a harness scenario's history
+and step records) under an ``archived/`` sibling; that request waits while no
+training service runs. It archives the storage only after the samples
+service has ended the scenario's selections; a selection that runs past the
+delete writes no sample. Each service that does not run control drops its
+instance, its clone and its cached snapshots of the scenario within seconds.
+Every snapshot that the scenario published stays reachable under the
+archived ref. When a step of the sweep fails, for
+example because the artifact store does not answer, the scenario stays
+deleted and the next sweep, an hour later, tries again. The first sweep
+after a restart finishes a delete that stopped.
+Only a local artifact repository can be archived; a remote one answers 501
+and changes nothing.
+
+On a runtime that serves per-scenario adapters,
 the scenario's adapter stays resident in the serving engines until the
 adapter residency evicts it.
 

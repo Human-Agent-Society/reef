@@ -1211,8 +1211,9 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
     def discard_all_content(self) -> None:
         """Delete every content ref of the scenario, in groups that fit on a command line, and mark their cache
         entries discarded (``mark_discarded``). Then remove the LFS objects of a local repository that no ref
-        references (``LocalLFSObjects.reclaim``), as control's sweep does: the scenario's delete calls this, so its
-        checkpoints do not wait for the next sweep. When a write runs meanwhile, the next sweep removes them."""
+        references (``LocalLFSObjects.reclaim``), as control's sweep does: the cleanup of a deleted scenario calls
+        this, so its checkpoints do not wait for the next sweep. When a write runs meanwhile, the next sweep
+        removes them."""
         with self._workspace.lock:
             stored = self._workspace.ls_remote_prefix(self.content_ref_prefix)
             names = sorted(stored)
@@ -1481,6 +1482,60 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             shutil.rmtree(work_dir, ignore_errors=True)
             archived.append(str(work_dir))
         return tuple(archived)
+
+    def persisted_local_scenarios(self) -> tuple[str, ...]:
+        """The scenarios with a work clone in the work directory, by its base64url name."""
+        if not self._work_dir.is_dir():
+            return ()
+        names = []
+        for entry in self._work_dir.iterdir():
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            try:
+                names.append(base64.urlsafe_b64decode(entry.name + "=" * (-len(entry.name) % 4)).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+        return tuple(names)
+
+    def forget_local_state(self, scenario: str) -> None:
+        """Remove the scenario's work clone, and the cache entries of its snapshots: each commit of its archived
+        refs, and each pending snapshot whose parent is one of them, with the entries of their components and
+        files (``<commit>``, ``<commit>.<name>``). The repository keeps everything. A remote repository's
+        snapshots are not listed, so their entries stay; a delete needs a local repository anyway."""
+        encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
+        local = local_directory(str(self._repository))
+        if local is not None and self._cache_dir.is_dir():
+            self.forget_cached_snapshots(local, encoded)
+        # The clone goes last: a process that stops before lists the scenario again when it starts.
+        shutil.rmtree(self._work_dir / encoded, ignore_errors=True)
+
+    def forget_cached_snapshots(self, local: Path, encoded: str) -> None:
+        """Remove the cache entries of the snapshots of the scenario ``encoded`` in the local repository ``local``
+        (``forget_local_state``)."""
+        client = GitClient(self._work_dir / ".registration-check", self._git_config)
+        git_dir = ("git", "--git-dir", str(local))
+        chain = set(
+            client.run(
+                (*git_dir, "rev-list", f"--glob={self._refs.archived(encoded, '*')}"), source_error=True
+            ).split()
+        )
+        if not chain:
+            return
+        snapshots = set(chain)
+        pending = client.run(
+            (*git_dir, "rev-list", "--no-walk", "--parents", f"--glob={self._refs.snapshot('*')}"), source_error=True
+        )
+        for line in pending.splitlines():
+            commit, *parents = line.split()
+            if chain.intersection(parents):
+                snapshots.add(commit)
+        for entry in self._cache_dir.iterdir():
+            if entry.name.split(".", 1)[0] not in snapshots:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
 
     def reclaim_discarded(self) -> None:
         """Free what discarded content holds on this host, in two steps.

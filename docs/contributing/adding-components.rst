@@ -319,7 +319,9 @@ snapshot-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   inherits ``CachedRepositoryBackendFactory`` implements
   ``has_archived_registration(scenario)``: true exactly when a delete
   archived the scenario in any process that shares the store, and never false
-  again after that, because a deleted scenario's ID is never used again. See `Artifact
+  again after that, because a deleted scenario's ID is never used again. A
+  delete archives the registration first, so ``discard_all_content`` must
+  find the content of a scenario that has no registration. See `Artifact
   backends <../reference/python-api.rst#artifact-backends>`__.
 - Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
   ``reef/inference/``, and client-pull delivery in a
