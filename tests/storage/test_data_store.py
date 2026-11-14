@@ -459,6 +459,19 @@ def test_query_arguments_are_checked(store):
             store.query("acme", **arguments)
 
 
+def test_a_query_before_a_sequence_pages_backward_newest_first(store):
+    store.create("acme", [trajectory(f"t{n}", trajectory_sets=["a"] if n != 3 else []) for n in range(1, 6)])
+    sequence = {item.item_id: item.sequence for item in store.query("acme")}
+    # The trajectory before t4 in the set a is t2: t3 is in no set.
+    assert [item.item_id for item in store.query("acme", trajectory_set="a", before=sequence["t4"], limit=1)] == ["t2"]
+    assert [item.item_id for item in store.query("acme", before=sequence["t5"])] == ["t4", "t3", "t2", "t1"]
+    assert [item.item_id for item in store.query("acme", after=sequence["t1"], before=sequence["t4"])] == ["t3", "t2"]
+    assert store.query("acme", before=sequence["t1"]) == ()
+    for before in (0, -1, True, "2"):
+        with pytest.raises(ValueError, match="before"):
+            store.query("acme", before=before)
+
+
 def test_a_query_keeps_the_items_whose_id_starts_with_a_prefix(store):
     store.create("acme", [trajectory(item_id) for item_id in ("e1:1:1:0", "e1:1:10:0", "e1_1:1:0", "e1%1:1:0")])
     assert [item.item_id for item in store.query("acme", id_prefix="e1:1:1:")] == ["e1:1:1:0"]

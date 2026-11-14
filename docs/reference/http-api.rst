@@ -874,18 +874,23 @@ an artifact item: see `Create a scenario`_.
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&benchmark=&trajectory_set=&group_key=&group_value=&after=&limit=&content=``
+- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&benchmark=&trajectory_set=&id_prefix=&group_key=&group_value=&after=&before=&limit=&content=``
   lists the owner's items in the order they arrived: ``{"owner", "items",
   "next"}``. ``kind`` and ``scenario`` filter the items. ``benchmark`` keeps
   only the tasks of one benchmark, and ``trajectory_set`` only the
-  trajectories of one trajectory set. ``group_key`` keeps
+  trajectories of one trajectory set. ``id_prefix`` keeps only the items
+  whose ID starts with it. ``group_key`` keeps
   only the items of one group of the groups route below: those with the
   string ``group_value`` under ``group_key`` in their metadata, or with no
   string there when ``group_value`` is not given. ``group_value`` without
   ``group_key`` returns 400. ``after`` is the
   ``sequence`` of the last item of the previous page, 0 by default. ``limit``
   is 1 to 1000, 1000 by default. ``next`` is the ``after`` of the next page,
-  or null after the last item. With ``content=1``, each item has its
+  or null after the last item. ``before`` pages backward: the items come
+  newest first, from the one just before the sequence ``before``, and ``next``
+  is the ``before`` of the next page. For example, ``trajectory_set=week-12``,
+  ``before`` set to a trajectory's sequence and ``limit=1`` give the trajectory
+  before it in the set. With ``content=1``, each item has its
   ``content``, as a read of the item gives it; the default ``content=0``
   leaves it out. Use it with ``kind=artifact`` to read the artifact library's
   kinds and sources in one page; a page of trajectories with content can be
