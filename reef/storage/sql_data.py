@@ -153,6 +153,36 @@ def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
     return cast(items.c.metadata_json, JSONB).op("->>")(literal_column("'evaluation_id'"))
 
 
+def prefix_upper_bound(prefix: str) -> str | None:
+    """The least string that is greater than every string that starts with ``prefix``, in code point order; None when
+    no string is (``prefix`` is empty or has only U+10FFFF, the largest code point).
+
+    Code point order is the byte order of UTF-8: the order of SQLite's BINARY collation and of PostgreSQL's "C"
+    collation.
+    """
+    kept = prefix.rstrip(chr(0x10FFFF))
+    if not kept:
+        return None
+    following = ord(kept[-1]) + 1
+    # The surrogates U+D800 to U+DFFF are not characters: the code point after U+D7FF is U+E000.
+    return kept[:-1] + chr(0xE000 if following == 0xD800 else following)
+
+
+def item_id_prefix(items: Table, prefix: str, *, sqlite: bool) -> ColumnElement[bool]:
+    """The condition that the ``item_id`` of an item row starts with ``prefix``, in the form of an index: on SQLite
+    the unique index of (``owner``, ``item_id``), on PostgreSQL ``data_item_by_item_id``.
+
+    The condition is the range of the IDs from ``prefix`` to ``prefix_upper_bound(prefix)`` in code point order, not
+    ``LIKE``: PostgreSQL uses an index for ``LIKE`` only under the "C" collation, and SQLite only when ``LIKE`` is
+    case-sensitive. Without an index, a query of one prefix reads every row of the table.
+    """
+    item_id = items.c.item_id if sqlite else items.c.item_id.collate("C")
+    upper = prefix_upper_bound(prefix)
+    if upper is None:
+        return item_id >= prefix
+    return and_(item_id >= prefix, item_id < upper)
+
+
 def data_tables(
     metadata: MetaData, *, sqlite: bool
 ) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table]:
@@ -278,6 +308,10 @@ def data_tables(
         item_evaluation_id(items, sqlite=sqlite),
         items.c.sequence,
     )
+    if not sqlite:
+        # A query of an ID prefix reads the range of its IDs in code point order (``item_id_prefix``). The unique
+        # index of (owner, item_id) has the database's collation, whose order is another one.
+        Index("data_item_by_item_id", items.c.owner, items.c.item_id.collate("C"))
     collections = Table(
         "data_collection",
         metadata,
@@ -327,8 +361,21 @@ class UsesWithHeldSets(SchemaStep):
         earlier.drop(connection)
 
 
+class ItemIdIndex(SchemaStep):
+    """Version 2 to 3 of the data tables: on PostgreSQL, ``data_item`` gets the index ``data_item_by_item_id`` of
+    (``owner``, ``item_id`` in the "C" collation), so that a query of an ID prefix reads only the rows of its range
+    (``item_id_prefix``). On SQLite nothing changes: the unique index of (``owner``, ``item_id``) is in that order.
+    """
+
+    def apply(self, connection: Connection, schema: str | None) -> None:
+        if connection.dialect.name == "sqlite":
+            return
+        items = Table("data_item", MetaData(schema=schema), Column("owner", Text), Column("item_id", Text))
+        Index("data_item_by_item_id", items.c.owner, items.c.item_id.collate("C")).create(connection)
+
+
 #: The steps of the data tables, in the order of their versions: step ``n`` upgrades version ``n``.
-DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (UsesWithHeldSets(),)
+DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (UsesWithHeldSets(), ItemIdIndex())
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -468,6 +515,11 @@ class SQLDataStore(DataStore):
     def evaluation_id(self) -> ColumnElement[Any]:
         """The ``evaluation_id`` of the metadata of an item row, as the index ``data_item_by_evaluation_sequence``
         holds it (``item_evaluation_id``)."""
+
+    @abstractmethod
+    def has_id_prefix(self, prefix: str) -> ColumnElement[bool]:
+        """The condition that the ``item_id`` of an item row starts with ``prefix``, in the form of an index
+        (``item_id_prefix``)."""
 
     def is_inference(self) -> ColumnElement[bool]:
         """The condition that an item row is a record item of the source ``inference``, which ``prune_records``
@@ -927,7 +979,7 @@ class SQLDataStore(DataStore):
         if benchmark is not None:
             statement = statement.where(items.c.kind == "task", self.in_benchmark(benchmark))
         if id_prefix is not None:
-            statement = statement.where(items.c.item_id.startswith(id_prefix, autoescape=True))
+            statement = statement.where(self.has_id_prefix(id_prefix))
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
@@ -1005,7 +1057,7 @@ class SQLDataStore(DataStore):
         if kind is not None:
             conditions.append(items.c.kind == kind)
         if origin is not None:
-            conditions.append(items.c.item_id.startswith(f"{origin}/", autoescape=True))
+            conditions.append(self.has_id_prefix(f"{origin}/"))
         if request_type is not None:
             conditions.append(items.c.request_type == request_type)
         return conditions
@@ -1848,6 +1900,9 @@ class SQLiteDataStore(SQLDataStore):
     def evaluation_id(self) -> ColumnElement[Any]:
         return item_evaluation_id(self.items_table, sqlite=True)
 
+    def has_id_prefix(self, prefix: str) -> ColumnElement[bool]:
+        return item_id_prefix(self.items_table, prefix, sqlite=True)
+
     def close(self) -> None:
         with self.lock:
             if self.connection is not None:
@@ -1958,6 +2013,9 @@ class PostgresDataStore(SQLDataStore):
 
     def evaluation_id(self) -> ColumnElement[Any]:
         return item_evaluation_id(self.items_table, sqlite=False)
+
+    def has_id_prefix(self, prefix: str) -> ColumnElement[bool]:
+        return item_id_prefix(self.items_table, prefix, sqlite=False)
 
     @contextmanager
     def pack_lock(self, owner: str) -> Iterator[bool]:
