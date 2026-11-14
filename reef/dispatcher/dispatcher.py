@@ -30,7 +30,7 @@ from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.manager_worker import ManagedTraining, TrainingManagerWorker
 from reef.dispatcher.samples import LocalSampleProducers
-from reef.dispatcher.scenario_deletes import DeletedScenarioCleanup, request_cleanup
+from reef.dispatcher.scenario_deletes import DeletedScenarioCleanup, DeletedScenarioFollower, request_cleanup
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, take_control_lease
 from reef.dispatcher.serving import ServingWorker
 from reef.dispatcher.status import TrainingStatus
@@ -334,6 +334,9 @@ class Dispatcher(
                 self.workers.add(TrainingManagerWorker(training_manager, self))
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
+        else:
+            # Another process runs control: this one drops what it keeps of each scenario that a delete marked.
+            self.workers.add(DeletedScenarioFollower(coordination.work_queue, self.registry))
         if self.services.runs_inference and self.live.runtime is not None and self.live.runtime.serves_requests:
             self.workers.add(
                 ServingWorker(

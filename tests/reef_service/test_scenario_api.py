@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from dataclasses import replace
 from unittest.mock import ANY
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.records import token_inference
-from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.records import report, token_inference
+from tests.support.runtime_stubs import StubFacts, StubInferenceRuntime, StubTrainingComponent
+from tests.support.trajectory_uploads import dispatcher_for
 
 from reef.artifact import (
     ArtifactNotFoundError,
@@ -22,13 +26,15 @@ from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.dispatcher.scenario_deletes import DELETES_QUEUE, request_cleanup
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.recipe import Recipe
+from reef.record2sample.service import SAMPLES_QUEUE
 from reef.scenario.admission import ScenarioLimits
-from reef.scenario.live_objects import RecipeChecks
+from reef.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
 from reef.train.job_queue import JOBS_QUEUE, SCENARIO_DELETED_ERROR, TrainingJobWorker, job_records_content
+from reef.train.pipeline import TrainingPipeline
 
 
 def _dispatcher(tmp_path, *, allow_implicit_creation: bool = True) -> Dispatcher:
@@ -419,3 +425,77 @@ def test_scenario_limits_answer_409_and_503_over_http(tmp_path) -> None:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_a_selection_between_its_read_and_its_write_when_the_mark_lands_stores_no_sample(
+    tmp_path, monkeypatch, swept_by_the_test
+) -> None:
+    """The samples service read the scenario's records and is about to write their samples when a delete marks the
+    scenario. The write checks the mark and stores nothing. Control's sweep, which runs meanwhile, archives the
+    storage only after the selection ended, so a write that passed its check before the mark would be archived too."""
+    component = StubTrainingComponent()
+    dispatcher = dispatcher_for(
+        tmp_path,
+        TestPolicyRecipe(),
+        live=LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component)),
+    )
+    sweeping: list[threading.Thread] = []
+    original = TrainingPipeline.write_record_samples
+
+    def marked_then_written(pipeline, group, record_ids, samples):
+        if not sweeping:
+            request_cleanup(dispatcher.queue, "math")
+            dispatcher.registry.archive_registration("math")
+            sweeping.append(threading.Thread(target=dispatcher.sweeper.sweep))
+            sweeping[0].start()
+            # The sweep holds the cleanup item and waits for the selections, the delete selection among them.
+            assert became_true(
+                lambda: any(
+                    "trigger:delete" in item.metadata
+                    for item in dispatcher.queue.items(SAMPLES_QUEUE, scenario="math")
+                )
+            )
+            assert [item.state for item in dispatcher.queue.items(DELETES_QUEUE)] in (["assigned"], ["running"])
+        return original(pipeline, group, record_ids, samples)
+
+    monkeypatch.setattr(TrainingPipeline, "write_record_samples", marked_then_written)
+    try:
+        current = dispatcher.get_or_create_scenario("math")
+        assert current is not None
+        root = current.serving_artifact_id()
+        dispatcher.accept_record(token_inference("i1", artifact_id=root))
+        dispatcher.accept_record(report("r1", "i1"))
+        assert became_true(lambda: bool(sweeping))
+        sweeping[0].join(30)
+        assert not sweeping[0].is_alive()
+        assert dispatcher.data_store.query("math", kind="trajectory") == ()
+        assert dispatcher.data_store.query("math", kind="task") == ()
+        assert dispatcher.data_store.query("math", scenario="math") == ()
+        selections = dispatcher.queue.items(SAMPLES_QUEUE, scenario="math")
+        assert SCENARIO_DELETED_ERROR in [item.error for item in selections]
+        ((state, result),) = cleanup_items(dispatcher, "math")
+        assert state == "finished" and result["deleted"] is True
+    finally:
+        dispatcher.close()
+
+
+def became_true(condition, seconds: float = 20.0) -> bool:
+    """Whether ``condition`` holds within ``seconds``."""
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.02)
+    return True
+
+
+def test_a_process_forgets_only_a_deleted_scenario(tmp_path) -> None:
+    """A service may forget a scenario on any hint of a delete: a scenario that was not deleted keeps its backend."""
+    factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
+    live = factory("live")
+    factory.forget_scenario("live")
+    assert factory("live") is live
+    gone = factory("gone")
+    factory.archive_registration("gone")
+    factory.forget_scenario("gone")
+    assert factory("gone") is not gone

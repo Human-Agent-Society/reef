@@ -1483,11 +1483,40 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             archived.append(str(work_dir))
         return tuple(archived)
 
-    def forget_scenario(self, scenario: str) -> None:
-        """Drop the scenario's backend and its work clone. The repository keeps everything."""
-        super().forget_scenario(scenario)
+    def forget_local_state(self, scenario: str) -> None:
+        """Remove the scenario's work clone, and the cache entries of its snapshots: each commit of its archived
+        refs, and each pending snapshot whose parent is one of them, with the entries of their components and
+        files (``<commit>``, ``<commit>.<name>``). The repository keeps everything. A remote repository's
+        snapshots are not listed, so their entries stay; a delete needs a local repository anyway."""
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
         shutil.rmtree(self._work_dir / encoded, ignore_errors=True)
+        local = local_directory(str(self._repository))
+        if local is None or not self._cache_dir.is_dir():
+            return
+        client = GitClient(self._work_dir / ".registration-check", self._git_config)
+        git_dir = ("git", "--git-dir", str(local))
+        chain = set(
+            client.run(
+                (*git_dir, "rev-list", f"--glob={self._refs.archived(encoded, '*')}"), source_error=True
+            ).split()
+        )
+        if not chain:
+            return
+        snapshots = set(chain)
+        pending = client.run(
+            (*git_dir, "rev-list", "--no-walk", "--parents", f"--glob={self._refs.snapshot('*')}"), source_error=True
+        )
+        for line in pending.splitlines():
+            commit, *parents = line.split()
+            if chain.intersection(parents):
+                snapshots.add(commit)
+        for entry in self._cache_dir.iterdir():
+            if entry.name.split(".", 1)[0] not in snapshots:
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
 
     def reclaim_discarded(self) -> None:
         """Free what discarded content holds on this host, in two steps.

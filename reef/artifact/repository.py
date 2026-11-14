@@ -360,10 +360,11 @@ class RepositoryBackendFactory(ABC):
         return
 
     def forget_scenario(self, scenario: str) -> None:
-        """Drop what this process keeps of the deleted ``scenario`` beside the store: its backend and its local work
-        state, such as a clone. A later call for the scenario builds them again. Each service calls it after it
-        discarded the scenario's content (``DeletedScenarioCleanup``, ``TrainingJobWorker``,
-        ``TrainingCheckWorker``). The default keeps nothing, so it does nothing."""
+        """Drop what this process keeps of ``scenario`` beside the store when the scenario was deleted: its backend
+        and its local state, such as a clone and the cached files of its snapshots. A scenario that was not deleted
+        keeps everything, so a caller may call it on any hint of a delete. Each service calls it when it learns of
+        the delete (``DeletedScenarioCleanup``, the training workers, ``DeletedScenarioFollower``). The default
+        keeps nothing, so it does nothing."""
         return
 
 
@@ -517,9 +518,18 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
         return self._archive_persisted_registration(scenario)
 
     def forget_scenario(self, scenario: str) -> None:
-        """Drop the cached backend of ``scenario`` (``RepositoryBackendFactory.forget_scenario``)."""
+        """When ``has_archived_registration(scenario)``, drop the cached backend of ``scenario`` and its local state
+        (``forget_local_state``); else nothing (``RepositoryBackendFactory.forget_scenario``)."""
+        if not self.has_archived_registration(scenario):
+            return
         with self._lock:
             self._backends.pop(scenario, None)
+        self.forget_local_state(scenario)
+
+    def forget_local_state(self, scenario: str) -> None:
+        """Remove what this process keeps on disk or in memory for the deleted ``scenario`` beside its cached
+        backend. ``forget_scenario`` calls it. The default keeps nothing, so it does nothing."""
+        return
 
     @abstractmethod
     def has_archived_registration(self, scenario: str) -> bool:

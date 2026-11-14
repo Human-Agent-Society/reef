@@ -283,9 +283,8 @@ class _InMemoryRepositoryBackendFactory(CachedRepositoryBackendFactory):
                 self._backends[scenario] = backend
         return archived
 
-    def forget_scenario(self, scenario: str) -> None:
-        """Drop the scenario's backend. Its snapshots go with it; call it after ``discard_all_content``."""
-        super().forget_scenario(scenario)
+    def forget_local_state(self, scenario: str) -> None:
+        """Drop the scenario's backend from ``built``. Its snapshots go with it."""
         with self._lock:
             self.built.pop(scenario, None)
 

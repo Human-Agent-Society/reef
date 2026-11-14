@@ -9,8 +9,41 @@ control changed the scenario's ``record2sample_config``. Control learns of the s
 from __future__ import annotations
 
 from reef.dispatcher.local_workers import LocalTrainingWorkers
+from reef.execution.workers import ItemFailedError
 from reef.record2sample.service import ProducedSamples, SampleProducers, Selection
 from reef.scenario.registry import ScenarioRegistry
+from reef.train.job_queue import SCENARIO_DELETED_ERROR
+
+
+class UndeletedSelection(Selection):
+    """``selection`` of a trainer of ``scenario``, whose check before each write also checks that a delete did not
+    mark the scenario (``ScenarioRegistry.was_deleted``).
+
+    Values: ``selection`` is the attempt that runs; ``registry`` reads the mark; ``scenario`` is the selection's
+    scenario. ``task_id`` is the task ID of ``selection``.
+
+    Purpose: ``LocalSampleProducers`` gives it to the trainer, so a selection that runs past a delete's mark writes
+    nothing after it: ``check_lease`` raises ``ItemFailedError`` with ``SCENARIO_DELETED_ERROR``, and the item fails
+    for good. A write that passed its check before the mark lands before control archives the storage, because
+    control waits for the samples service to answer its ``delete`` selection, which runs after this one.
+    """
+
+    def __init__(self, selection: Selection, registry: ScenarioRegistry, scenario: str) -> None:
+        super().__init__(selection.task_id)
+        self.selection = selection
+        self.registry = registry
+        self.scenario = scenario
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        self.selection.progress(records_read, samples_created)
+
+    def check_lease(self) -> None:
+        self.selection.check_lease()
+        if self.registry.was_deleted(self.scenario):
+            raise ItemFailedError(SCENARIO_DELETED_ERROR)
+
+    def requested_by(self, trigger: str) -> bool:
+        return self.selection.requested_by(trigger)
 
 
 class LocalSampleProducers(SampleProducers):
@@ -29,9 +62,8 @@ class LocalSampleProducers(SampleProducers):
     def produce(self, scenario: str, component: str, selection: Selection) -> ProducedSamples:
         if self.local_workers is not None:
             current = self.registry.get_loaded(scenario)
-        elif selection.requested_by("delete") and self.registry.was_deleted(scenario):
-            # Control's cleanup of the deleted scenario asks: this process drops its instance and its backend.
-            self.registry.drop_deleted(scenario)
+        elif selection.requested_by("delete") and self.registry.drop_deleted(scenario):
+            # Control's cleanup of the deleted scenario asks: this process dropped its instance and its backend.
             current = None
         else:
             current = self.registry.get_or_create(scenario, allow_implicit_creation=False)
@@ -46,7 +78,7 @@ class LocalSampleProducers(SampleProducers):
         produced = ProducedSamples(changed=False, background=False)
         for component_trainer in current.trainers:
             if component_trainer.component == component and component_trainer.trainer.trains:
-                produced = current.produce_samples(component, selection)
+                produced = current.produce_samples(component, UndeletedSelection(selection, self.registry, scenario))
         # Only new input gives the trainer's worker something to build; a selection that brought none leaves it.
         if self.local_workers is not None and produced.changed:
             self.local_workers.wake(current)

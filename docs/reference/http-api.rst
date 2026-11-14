@@ -2035,8 +2035,12 @@ training jobs, discards its stored content, and moves its record store and
 commit log under ``<agent_record_dir>/archived/``. It asks the training
 service to move the recipe's own directories (a harness scenario's history
 and step records) under an ``archived/`` sibling; that request waits while no
-training service runs. Every snapshot that the scenario published stays
-reachable under the archived ref. When a step of the sweep fails, for
+training service runs. It archives the storage only after the samples
+service has ended the scenario's selections; a selection that runs past the
+delete writes no sample. Each service that does not run control drops its
+instance, its clone and its cached snapshots of the scenario within seconds.
+Every snapshot that the scenario published stays reachable under the
+archived ref. When a step of the sweep fails, for
 example because the artifact store does not answer, the scenario stays
 deleted and the next sweep, an hour later, tries again. The first sweep
 after a restart finishes a delete that stopped.

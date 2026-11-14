@@ -183,16 +183,22 @@ def split(
     *,
     inference_apart: bool = False,
     samples_apart: bool = False,
+    harness_apart: bool = False,
+    services: dict[str, Dispatcher] | None = None,
 ) -> Iterator[Dispatcher]:
     """Control over ``recipe`` with the facts of ``live`` and no training component, while the training service
     runs ``components`` from the same queue. The control process also runs the other services. With
-    ``inference_apart``, the inference service is a dispatcher of its own, with its own directory
-    ``tmp_path / "inference"`` and its own runtime, so the weights that it loads are not under control's. With
-    ``samples_apart``, the samples service is a dispatcher of its own too, with its own directory
-    ``tmp_path / "samples"``."""
+    ``inference_apart``, ``samples_apart`` or ``harness_apart``, that service is a dispatcher of its own, with its
+    own directory ``tmp_path / <service>``; with ``inference_apart`` it has its own runtime, so the weights that it
+    loads are not under control's. ``services`` gets each dispatcher that runs apart, by its service name."""
     storage = data_storage(tmp_path / "records")
     # The work queues live beside the records, so each service opens the coordination store itself.
     coordination = open_coordination("sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None)
+    names = {
+        name
+        for name, apart in (("inference", inference_apart), ("samples", samples_apart), ("harness", harness_apart))
+        if apart
+    }
     control = Dispatcher(
         recipe,
         git_backends(tmp_path / "control"),
@@ -201,42 +207,22 @@ def split(
         scenario_storage=storage,
         record_storage=storage.inner,
         coordination=coordination,
-        components=frozenset(SERVICE_COMPONENTS)
-        - {"training"}
-        - ({"inference"} if inference_apart else set())
-        - ({"samples"} if samples_apart else set()),
+        components=frozenset(SERVICE_COMPONENTS) - {"training"} - names,
     )
-    apart: list[Dispatcher] = []
-    if samples_apart:
-        samples_storage = data_storage(tmp_path / "records")
-        apart.append(
-            Dispatcher(
-                recipe,
-                git_backends(tmp_path / "samples"),
-                live=replace(live, training_component=None, harness_component=None, data_store=samples_storage.data),
-                local_artifact_dir=tmp_path / "samples" / "staged",
-                scenario_storage=samples_storage,
-                record_storage=samples_storage.inner,
-                coordination=open_coordination(
-                    "sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None
-                ),
-                components=frozenset({"samples"}),
-            )
-        )
-    inference = None
-    if inference_apart:
-        served = data_storage(tmp_path / "records")
-        inference = Dispatcher(
+    apart: dict[str, Dispatcher] = {} if services is None else services
+    for name in sorted(names):
+        service_storage = data_storage(tmp_path / "records")
+        apart[name] = Dispatcher(
             recipe,
-            git_backends(tmp_path / "inference"),
-            live=replace(live, training_component=None, harness_component=None, data_store=served.data),
-            local_artifact_dir=tmp_path / "inference" / "staged",
-            scenario_storage=served,
-            record_storage=served.inner,
+            git_backends(tmp_path / name),
+            live=replace(live, training_component=None, harness_component=None, data_store=service_storage.data),
+            local_artifact_dir=tmp_path / name / "staged",
+            scenario_storage=service_storage,
+            record_storage=service_storage.inner,
             coordination=open_coordination(
                 "sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None
             ),
-            components=frozenset({"inference"}),
+            components=frozenset({name}),
         )
     training_backends = git_backends(tmp_path / "training")
     workers: list[TrainingJobWorker | TrainingCheckWorker] = []
@@ -271,9 +257,7 @@ def split(
     finally:
         for worker in reversed(workers):
             worker.stop()
-        if inference is not None:
-            inference.close()
-        for service in apart:
+        for service in apart.values():
             service.close()
         control.close()
 
@@ -490,14 +474,31 @@ def test_a_harness_scenario_trains_shows_its_step_and_is_deleted_with_no_directo
 
 
 def scenario_files(directory: Path, scenario: str) -> list[str]:
-    """The paths under ``directory``, outside each ``archived`` directory, whose name holds ``scenario`` or its
-    encoded form in the artifact store's work directory."""
-    names = {scenario, base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")}
+    """The paths under ``directory``, outside each ``archived`` directory, whose name holds ``scenario``, its
+    encoded form in the artifact store's work directory, or a commit of its archived chain (a cache entry)."""
+    encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
+    commits = subprocess.run(
+        [
+            "git",
+            "--git-dir",
+            str(directory.parent / "artifacts.git"),
+            "rev-list",
+            f"--glob=refs/reef/archived/{encoded}/*",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+    names = {scenario, encoded, *commits}
     return sorted(
         str(path.relative_to(directory))
         for path in directory.rglob("*")
         if "archived" not in path.relative_to(directory).parts and any(name in path.name for name in names)
     )
+
+
+#: The directory of each service of ``split``, and the records of the shared storage.
+SERVICE_DIRECTORIES = ("control", "training", "samples", "inference", "harness", "records")
 
 
 @pytest.mark.integration
@@ -511,12 +512,26 @@ def test_a_deleted_scenario_leaves_nothing_in_any_service_after_the_sweep(tmp_pa
     _, training_live = harness_recipe(tmp_path / "training", changing_rules)
     component = training_live.harness_component
     assert component is not None
-    with split(tmp_path, recipe, control_live, (component,), samples_apart=True) as control:
+    services: dict[str, Dispatcher] = {}
+    with split(
+        tmp_path,
+        recipe,
+        control_live,
+        (component,),
+        samples_apart=True,
+        inference_apart=True,
+        harness_apart=True,
+        services=services,
+    ) as control:
         scenario = control.get_or_create_scenario("demo")
         for record in report_records("demo", "1"):
             control.accept_record(record)
         wait_until(lambda: scenario.trainer.state["finished_jobs"] == 1, "the step did not train to a commit")
+        # The harness service serves the trained tree to a harness client, from its own clone and cache.
+        harness_requests = RequestService(services["harness"])
+        assert harness_requests.harness_manifest({"x-reef-scenario": "demo"})["files"]
         assert stored_content_refs(tmp_path) and scenario_files(tmp_path / "training", "demo")
+        assert scenario_files(tmp_path / "harness", "demo")
 
         control.delete_scenario("demo")
         # The mark alone: the scenario is gone for every caller before any cleanup.
@@ -536,8 +551,16 @@ def test_a_deleted_scenario_leaves_nothing_in_any_service_after_the_sweep(tmp_pa
             (item.state, item.result) for item in control.queue.items(DELETES_QUEUE, scenario="demo")
         ]
         assert cleanup_state == "finished" and cleanup_result["deleted"] is True
+        # Each service without control drops the scenario when it reads the cleanup item.
+        wait_until(
+            lambda: all(not scenario_files(tmp_path / service, "demo") for service in SERVICE_DIRECTORIES),
+            "a service kept a file of the deleted scenario",
+            lambda: {service: scenario_files(tmp_path / service, "demo") for service in SERVICE_DIRECTORIES},
+        )
+        assert not services["harness"].has_scenario("demo")
+        assert services["harness"].get_or_create_scenario("demo", allow_implicit_creation=False) is None
     assert stored_content_refs(tmp_path) == []
-    for service in ("control", "training", "samples", "records"):
+    for service in SERVICE_DIRECTORIES:
         assert scenario_files(tmp_path / service, "demo") == [], service
     assert not [path for path in (tmp_path / "records").iterdir() if path.suffix == ".sqlite3" and "demo" in path.name]
 

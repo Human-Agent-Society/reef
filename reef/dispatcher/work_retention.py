@@ -72,6 +72,8 @@ class EndedWorkSweeper(ServiceWorker):
     def stop(self) -> None:
         self.stopped.set()
         self.woken.set()
+        if self.deletions is not None:
+            self.deletions.stop()
         if self.thread is not None:
             self.thread.join()
             self.thread = None

@@ -9,6 +9,8 @@ from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.samples import LocalSampleProducers
+from reef.record2sample.service import SamplesWorker
 
 
 def report(record_id: str) -> AgentRecord:
@@ -71,6 +73,15 @@ def test_another_scenario_of_the_owner_trains_on_an_item_that_names_it_and_store
             assert current.used_record("s/r1") is None
         dispatcher.data_store.update("s", ["s/r1"], {"scenarios": {"t": "train"}})
 
+        # The samples service runs again: control's cleanup waits for it to end the deleted scenario's selections.
+        dispatcher.workers.add(
+            SamplesWorker(
+                dispatcher.queue,
+                LocalSampleProducers(dispatcher.registry, dispatcher.local_workers),
+                worker_id="samples",
+            )
+        )
+        dispatcher.workers.start()
         # Archiving t releases the item; the record stays an item of its origin.
         dispatcher.delete_scenario("t")
         dispatcher.sweeper.sweep()

@@ -1126,10 +1126,13 @@ A backend shares no snapshot between scenarios. It must:
   the factory frees them in ``reclaim_discarded()``, which control's sweep of
   ended work calls once per sweep. The default frees nothing.
   ``forget_scenario(scenario)`` drops what the process keeps of a deleted
-  scenario beside the store, such as a cached backend or a clone. Each
-  service calls it after it discarded the scenario's content. The default
-  does nothing, and ``CachedRepositoryBackendFactory`` drops its cached
-  backend.
+  scenario beside the store, such as a cached backend, a clone or the cached
+  files of its snapshots. It changes nothing for a scenario that was not
+  deleted. Each service calls it when it learns of the delete. The default
+  does nothing. ``CachedRepositoryBackendFactory`` checks
+  ``has_archived_registration``, drops its cached backend, and calls
+  ``forget_local_state(scenario)``, which a subclass overrides to remove
+  its own files.
   - ``publish_parts(parts, *, metadata, expected_parent, advance_head)``
     stores a snapshot of files that the backend holds already, and moves the
     head as ``publish`` does. Callers use the inherited ``publish_stored``,

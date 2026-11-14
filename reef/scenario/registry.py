@@ -526,15 +526,19 @@ class ScenarioRegistry:
         factory = self._backend_factory
         return isinstance(factory, CachedRepositoryBackendFactory) and factory.has_archived_registration(scenario)
 
-    def drop_deleted(self, scenario: str) -> None:
-        """Close the loaded instance of the deleted ``scenario``, if any, and drop its backend and its local work
-        state (``RepositoryBackendFactory.forget_scenario``). A process that does not run control calls it."""
+    def drop_deleted(self, scenario: str) -> bool:
+        """When ``was_deleted(scenario)``, close its loaded instance, if any, drop its backend and its local state
+        (``RepositoryBackendFactory.forget_scenario``), and return True; else change nothing and return False. A
+        process that does not run control calls it."""
+        if not self.was_deleted(scenario):
+            return False
         with self.lock_for(scenario):
             dropped = self.remove(scenario)
             if dropped is not None:
                 dropped.close()
             self._backend_factory.forget_scenario(scenario)
         self.forget_lock(scenario)
+        return True
 
     def forget_lock(self, scenario: str) -> None:
         """Release the per-scenario lock's slot once nothing holds it; a later create makes a fresh one."""
