@@ -227,7 +227,8 @@ class TrajectoryIndex:
 
     Purpose: a record-to-sample stage adds each inference record that it reads (``add``) and asks for the trajectory that a
     record ends (``trajectory``), and whether it ends a trajectory now (``is_end``). A replay of the retained
-    records rebuilds it.
+    records rebuilds it. A reader of a stored rollout adds each record and drops its body, then reads the
+    ``conversations`` of the record IDs, so it holds one body at a time.
     """
 
     calls: dict[str, IndexedCall] = field(default_factory=dict)
@@ -296,6 +297,13 @@ class TrajectoryIndex:
         call = self.calls.get(record_id)
         return call is not None and not call.continued and not call.retried
 
+    def conversations(self, record_ids: Sequence[str]) -> list[tuple[str, ...]]:
+        """The trajectories that end at a record of ``record_ids`` now (``is_end``), each as the IDs of its calls
+        (``trajectory``), in the order of their first calls in ``record_ids``. Each ID of ``record_ids`` was added."""
+        order = {record_id: position for position, record_id in enumerate(record_ids)}
+        ends = (self.trajectory(record_id) for record_id in record_ids if self.is_end(record_id))
+        return sorted(ends, key=lambda calls: order[calls[0]])
+
     def forget(self, record_ids: Iterable[str]) -> None:
         """Drop released records that no other call names as parent. Others stay as links of later calls."""
         parents = {call.parent for call in self.calls.values()}
@@ -312,9 +320,7 @@ def conversations(records: Sequence[AgentRecord]) -> list[list[AgentRecord]]:
     for record in records:
         index.add(record)
     by_id = {record.agent_record_id: record for record in records}
-    order = {record_id: position for position, record_id in enumerate(by_id)}
-    ends = (index.trajectory(record_id) for record_id in by_id if index.is_end(record_id))
-    return [[by_id[record_id] for record_id in calls] for calls in sorted(ends, key=lambda calls: order[calls[0]])]
+    return [[by_id[record_id] for record_id in calls] for calls in index.conversations(list(by_id))]
 
 
 __all__ = [
