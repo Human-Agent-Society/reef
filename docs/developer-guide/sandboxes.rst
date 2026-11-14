@@ -74,7 +74,12 @@ field: ``reef.execution.sandbox.e2b.KillOnTimeoutE2BEnvironment``. This
 is Harbor's ``E2BEnvironment`` with one more argument when it creates the
 sandbox, ``lifecycle={"on_timeout": "kill"}``. The argument asks the service to
 delete the sandbox at the end of its lifetime. Harbor's own class sends no
-such argument, so a self-hosted service can pause the sandbox instead.
+such argument, so a self-hosted service can pause the sandbox instead. With
+``REEF_E2B_PRIVATE_TRAFFIC=true``, the class also adds
+``allow_public_traffic=False`` to Harbor's network options and keeps their
+outbound rules. If the service returns no traffic access token, the class
+kills the sandbox and the start fails. The `configuration reference
+<../reference/configuration.rst>`__ describes the setting.
 
 Two callers apply the config. ``reef.harness.harbor.rollouts.TaskRolloutRunner``
 gives it to each in-process trial and to each environment build. That covers
@@ -237,8 +242,13 @@ session::
 
 Local and default-network bubblewrap executors already reach the host, so the
 session is the executor itself. An isolated bubblewrap network forwards the
-ports. A cloud sandbox opens one sandbox with a tunnel for each port. ``push``, ``pull`` and
-``close`` do nothing for an executor whose processes use the host's files.
+ports. A cloud sandbox opens one sandbox with a tunnel for each port. A
+provider's ``RemoteSession`` returns the headers that its public address
+requires from ``tunnel_headers()``; an E2B session returns the sandbox's
+traffic access token, if any. Each tunnel request carries these headers and
+the relay's secret to the relay only, and never follows a redirect.
+``push``, ``pull`` and ``close`` do nothing for an executor whose processes
+use the host's files.
 ``runs_on_host`` tells a caller whether processes see the host's paths,
 environment and container runtime.
 
