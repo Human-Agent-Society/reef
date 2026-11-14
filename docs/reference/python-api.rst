@@ -692,14 +692,17 @@ scenario package depends only on storage contracts. The storage contract is:
      - Whether new sessions and settings survive a process restart.
    * - ``open(scenario)``
      - Open an independently owned session (the ``ScenarioStore`` below).
+       Raise ``ScenarioDeletedError`` for a scenario that ``archive``
+       archived, so a late record makes no new store of a deleted scenario.
    * - ``read_settings(scenario)``
      - The scenario's ``ScenarioSettings``; defaults for a scenario with none.
    * - ``write_settings(scenario, settings)``
      - Replace the settings durably. The caller serializes writers of one scenario.
+       Raise ``ScenarioDeletedError`` for a scenario that ``archive`` archived.
    * - ``archive(scenario)``
      - Retire the scenario's commits, tasks and settings, and remove the
-       scenario from the uses of its owner's items, so a recreated scenario
-       starts empty; return the archive locations.
+       scenario from the uses of its owner's items; return the archive
+       locations. A repeated call changes nothing more.
    * - ``close()``
      - Release shared resources; repeated calls are safe.
 

@@ -57,6 +57,7 @@ from reef.storage.record_items import evaluation_call_item, evaluation_trajector
 from reef.storage.records import RecordRetention
 from reef.storage.samples import SAMPLE_KINDS, ListedSample, StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.storage.served_models import ControlLeaseConflictError
 from reef.storage.tasks import LocalTaskFileStore
 from reef.storage.work_queue import FINAL_STATES, WorkItem
 from reef.train.job_queue import (
@@ -437,6 +438,9 @@ class Dispatcher(
           does not exist for any process. Its ID is never used again
           (``CachedRepositoryBackendFactory.has_archived_registration``), nothing loads it, and a training worker
           that takes one of its jobs, or stores for one, cancels the job and discards what it stored.
+        - It adds the cleanup item again, unless a queued one covers it. A sweep of another control instance, at a
+          lease takeover, can have ended the first item before the mark (``{"deleted": false}``); this one is not
+          final, so every mark has a cleanup item.
         - In a control process, its ``served_models`` rows go, so the inference service answers it 404.
         - The loaded instance leaves the registry and closes, and the workers of this process drop the scenario.
         - It wakes control's sweep, which removes the rest: its jobs, its stored content, its storage, and the
@@ -455,9 +459,17 @@ class Dispatcher(
             self.registry.require_archivable()
             request_cleanup(self.queue, scenario)
             archived = self.registry.archive_registration(scenario)
+            # A sweep of another control instance can have ended the first item, finding no mark yet: the mark
+            # always gets a cleanup item that is not final.
+            request_cleanup(self.queue, scenario)
             if self.publisher is not None:
-                # The inference service answers the scenario 404 at once; the sweep withdraws it again after a stop.
-                self.publisher.withdraw(scenario)
+                try:
+                    # The inference service answers the scenario 404 at once; the sweep withdraws it again.
+                    self.publisher.withdraw(scenario)
+                except ControlLeaseConflictError:
+                    logger.warning(
+                        "scenario %r: this instance lost the control lease; the sweep withdraws it", scenario
+                    )
             dropped = self.registry.remove(scenario)
             self.local_workers.remove(scenario)
             self.errors.forget(scenario)

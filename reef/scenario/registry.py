@@ -540,6 +540,12 @@ class ScenarioRegistry:
         self.forget_lock(scenario)
         return True
 
+    def drop_deleted_local_scenarios(self) -> None:
+        """``drop_deleted`` for every scenario of which the backend factory keeps something in this process
+        (``RepositoryBackendFactory.local_scenarios``), such as a clone that an earlier run left."""
+        for scenario in self._backend_factory.local_scenarios():
+            self.drop_deleted(scenario)
+
     def forget_lock(self, scenario: str) -> None:
         """Release the per-scenario lock's slot once nothing holds it; a later create makes a fresh one."""
         with self._lock:

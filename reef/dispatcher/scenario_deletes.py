@@ -24,7 +24,7 @@ from reef.record2sample.service import SAMPLES_QUEUE, request_selection
 from reef.scenario.registry import ScenarioRegistry
 from reef.storage.work_queue import JsonValue, LeaseExtender, WorkLeaseLostError, WorkQueue
 from reef.train.component import TrainingComponent
-from reef.train.job_queue import cancel_scenario_jobs
+from reef.train.job_queue import CHECKS_QUEUE, archive_item_id, cancel_scenario_jobs
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +32,13 @@ logger = logging.getLogger(__name__)
 DELETES_QUEUE = "scenario_deletes"
 #: The kind of a cleanup item.
 DELETE_KIND = "scenario_delete"
-#: The wait, in seconds, between two looks at the selections of a deleted scenario.
-SAMPLES_POLL_SECONDS = 0.05
+#: The wait, in seconds, between two looks at the items of a deleted scenario that other services answer.
+ANSWER_POLL_SECONDS = 0.05
 
 
-class SamplesPendingError(ReefError):
-    """A selection of a deleted scenario has not ended within the cleanup's wait: the storage waits for the next
-    sweep, so that no sample lands after its archive."""
+class AnswerPendingError(ReefError):
+    """A selection or an archive item of a deleted scenario has not ended within the cleanup's wait: the cleanup
+    item waits for the next sweep."""
 
 
 def request_cleanup(queue: WorkQueue, scenario: str) -> None:
@@ -58,9 +58,10 @@ class DeletedScenarioFollower(ServiceWorker):
     Purpose: the dispatcher of a process that does not run control runs one, such as the inference, samples or
     harness service. Each cleanup item names a scenario that a delete marked, or tried to mark. The follower closes
     the scenario's loaded instance and drops its backend, its clone and its cached snapshots
-    (``ScenarioRegistry.drop_deleted``), which does nothing for a scenario that is not marked. It reads from the
-    first item at start, so a process that was down during a delete drops the scenario when it starts. A failed drop
-    is tried again at the next read.
+    (``ScenarioRegistry.drop_deleted``), which does nothing for a scenario that is not marked. When it starts, it
+    first drops every deleted scenario that this process keeps something of
+    (``ScenarioRegistry.drop_deleted_local_scenarios``), so a process that was down longer than the work retention
+    still drops it. A failed drop is tried again at the next read.
     """
 
     def __init__(self, queue: WorkQueue, registry: ScenarioRegistry, *, interval_seconds: float = 2.0) -> None:
@@ -87,8 +88,13 @@ class DeletedScenarioFollower(ServiceWorker):
             self.thread = None
 
     def run(self) -> None:
+        started = False
         while not self.stopped.is_set():
             try:
+                if not started:
+                    # A cleanup item goes after the work retention: what an earlier run left is found by the mark.
+                    self.registry.drop_deleted_local_scenarios()
+                    started = True
                 self.run_once()
             except Exception:
                 logger.exception("could not drop the deleted scenarios")
@@ -109,8 +115,8 @@ class DeletedScenarioCleanup:
     models when this process holds the control lease, else it is None; ``job_components`` are control's views of
     the training components (``JobQueueComponent``); ``record_retention_lock`` keeps record retention from running
     while the storage moves; ``worker_id`` is a non-empty name of this cleanup in the queue;
-    ``samples_answer_seconds`` is the longest wait, not negative, for the samples service to end the selections of
-    a deleted scenario before the storage is archived.
+    ``answer_seconds`` is the longest wait, not negative, for the samples and training services to end their items
+    of one deleted scenario.
 
     Purpose: control's sweep calls ``clean_up`` (``EndedWorkSweeper``). Every step of one scenario is idempotent,
     so a step that failed, and a stop at any point, leave work that the next ``clean_up`` finishes. A cleanup item
@@ -128,12 +134,12 @@ class DeletedScenarioCleanup:
         job_components: Sequence[TrainingComponent],
         record_retention_lock: Lock,
         worker_id: str,
-        samples_answer_seconds: float = 30.0,
+        answer_seconds: float = 30.0,
     ) -> None:
         if not worker_id:
             raise ValueError("worker_id is a non-empty string")
-        if samples_answer_seconds < 0:
-            raise ValueError("samples_answer_seconds is not negative")
+        if answer_seconds < 0:
+            raise ValueError("answer_seconds is not negative")
         self.queue = queue
         self.registry = registry
         self.backends = backends
@@ -141,7 +147,7 @@ class DeletedScenarioCleanup:
         self.job_components = tuple(job_components)
         self.record_retention_lock = record_retention_lock
         self.worker_id = worker_id
-        self.samples_answer_seconds = samples_answer_seconds
+        self.answer_seconds = answer_seconds
         #: Held for one whole ``clean_up``, so two calls at once run one after the other.
         self.lock = threading.Lock()
         #: Set by ``stop``: the wait of the running ``clean_up`` for the samples service ends at once.
@@ -192,15 +198,19 @@ class DeletedScenarioCleanup:
           A training worker that stores after this finds the mark and discards what it stored. Then this process
           drops its backend of the scenario and its local state (``RepositoryBackendFactory.forget_scenario``).
         - Each training service is asked to move aside what its component keeps for the scenario
-          (``JobQueueComponent.archive_scenario``); the request waits while no training service runs.
+          (``JobQueueComponent.archive_scenario``, item ``archive_item_id``). An archive item that failed is queued
+          again, once in each call.
         - The samples service is asked, by a ``delete`` selection of each trainer that had a selection, to drop its
           instance and its backend of the scenario (``LocalSampleProducers``). The selection runs after any
           selection of the trainer that runs now, so once every selection of the scenario has ended, no selection
-          writes samples any more (``UndeletedSelection``). The cleanup waits for that up to
-          ``samples_answer_seconds``, without the scenario's lock; else it raises ``SamplesPendingError``, and the
-          next sweep tries again.
+          writes samples any more (``UndeletedSelection``). The cleanup waits for that.
         - The storage archives the scenario's records, commits, tasks, samples and settings
           (``ScenarioStorage.archive``).
+        - The cleanup waits for every archive item to finish.
+
+        Each wait lasts up to ``answer_seconds`` in all, without the scenario's lock. When a service has not
+        answered by then, the call raises ``AnswerPendingError``, and the next sweep runs every step again. So the
+        item ends only after the training services archived their directories.
 
         Return ``{"deleted": true, "archived": [...]}`` with the archive locations of the storage.
         """
@@ -212,26 +222,43 @@ class DeletedScenarioCleanup:
             cancel_scenario_jobs(self.queue, scenario)
             self.backends(scenario).discard_all_content()
             self.backends.forget_scenario(scenario)
+            archives = [archive_item_id(scenario, component.name) for component in self.job_components]
             for component in self.job_components:
                 component.archive_scenario(scenario)
+            for item_id in archives:
+                archive = self.queue.read(CHECKS_QUEUE, item_id)
+                if archive is not None and archive.state == "failed":
+                    self.queue.retry(CHECKS_QUEUE, item_id)
             selections = self.queue.items(SAMPLES_QUEUE, scenario=scenario)
             for component_name in sorted({str(selection.payload["component"]) for selection in selections}):
                 request_selection(self.queue, scenario, component_name, trigger="delete")
-        deadline = time.monotonic() + self.samples_answer_seconds
-        while any(not selection.final for selection in self.queue.items(SAMPLES_QUEUE, scenario=scenario)):
-            if time.monotonic() >= deadline or self.stopping.wait(SAMPLES_POLL_SECONDS):
-                raise SamplesPendingError(f"the samples service has not answered the delete of {scenario!r} yet")
+        deadline = time.monotonic() + self.answer_seconds
+        while pending := [item.id for item in self.queue.items(SAMPLES_QUEUE, scenario=scenario) if not item.final]:
+            self.wait_for_answer(scenario, pending, deadline)
         with self.record_retention_lock, self.registry.lock_for(scenario):
             archived: list[JsonValue] = list(self.registry.archive_store(scenario))
+        while pending := [item_id for item_id in archives if not self.archive_finished(item_id)]:
+            self.wait_for_answer(scenario, pending, deadline)
         self.registry.forget_lock(scenario)
         return {"deleted": True, "archived": archived}
+
+    def archive_finished(self, item_id: str) -> bool:
+        """Whether the archive item ``item_id`` of a training service finished; a failed one has not."""
+        archive = self.queue.read(CHECKS_QUEUE, item_id)
+        return archive is not None and archive.state == "finished"
+
+    def wait_for_answer(self, scenario: str, pending: list[str], deadline: float) -> None:
+        """Wait ``ANSWER_POLL_SECONDS`` for the items ``pending`` of other services; raise ``AnswerPendingError`` at
+        ``deadline`` (``time.monotonic``) or when ``stop`` was called."""
+        if time.monotonic() >= deadline or self.stopping.wait(ANSWER_POLL_SECONDS):
+            raise AnswerPendingError(f"the services have not answered the delete of {scenario!r} yet: {pending}")
 
 
 __all__ = [
     "DELETES_QUEUE",
     "DELETE_KIND",
+    "AnswerPendingError",
     "DeletedScenarioCleanup",
     "DeletedScenarioFollower",
-    "SamplesPendingError",
     "request_cleanup",
 ]

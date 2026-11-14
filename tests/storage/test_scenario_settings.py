@@ -6,6 +6,7 @@ from contextlib import closing
 
 import pytest
 
+from reef.core.errors import ScenarioDeletedError
 from reef.core.serving_config import ServingConfig
 from reef.core.snapshot import SnapshotRef
 from reef.storage.commits import CommitHistoryError, CommitRecord
@@ -88,8 +89,9 @@ def test_archive_retires_settings_with_records_and_commits(open_storage):
     storage.write_settings("math", ScenarioSettings(artifact_evaluation=EVALUATION))
     storage.archive("math")
     assert storage.read_settings("math") == ScenarioSettings()
-    with closing(storage.open("math")) as store:
-        assert store.history() == ()
+    # A deleted scenario's ID is never opened again.
+    with pytest.raises(ScenarioDeletedError):
+        storage.open("math")
 
 
 def test_reading_settings_of_an_unknown_scenario_creates_nothing(tmp_path):

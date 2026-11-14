@@ -702,3 +702,55 @@ def test_no_operation_of_control_on_a_composite_brings_a_weight_byte_to_control(
         discard_ended_content(control.queue, control.backend_factory, ended_before=time.time() + 1, give_up_before=0.0)
         checked("the sweep after the delete")
     assert stored_content_refs(tmp_path) == []
+
+
+@pytest.mark.integration
+def test_a_service_that_was_down_past_the_work_retention_drops_a_deleted_scenario_when_it_starts(
+    tmp_path: Path, real_lfs: None
+) -> None:
+    """The cleanup item of a delete goes after the work retention. A service that was down meanwhile still drops
+    its clone and cached snapshots of the scenario when it starts: it checks the mark of what it keeps."""
+    recipe = Recipe()
+    storage = data_storage(tmp_path / "records")
+    control = Dispatcher(
+        recipe,
+        git_backends(tmp_path / "control"),
+        live=LiveObjects(data_store=storage.data),
+        scenario_storage=storage,
+        record_storage=storage.inner,
+        coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None),
+    )
+    try:
+        assert control.get_or_create_scenario("demo") is not None
+        # The samples service made the scenario local in an earlier run, then stopped.
+        earlier = git_backends(tmp_path / "samples")
+        backend = earlier("demo")
+        backend.materialize(backend.current())
+        assert scenario_files(tmp_path / "samples", "demo")
+        control.delete_scenario("demo")
+        control.sweeper.sweep()
+        control.queue.delete_final(finished_before=time.time() + 1)
+        assert control.queue.items(DELETES_QUEUE) == ()
+
+        service_storage = data_storage(tmp_path / "records")
+        service = Dispatcher(
+            recipe,
+            git_backends(tmp_path / "samples"),
+            live=LiveObjects(data_store=service_storage.data),
+            scenario_storage=service_storage,
+            record_storage=service_storage.inner,
+            coordination=open_coordination(
+                "sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None
+            ),
+            components=frozenset({"samples"}),
+        )
+        try:
+            wait_until(
+                lambda: not scenario_files(tmp_path / "samples", "demo"),
+                "the service kept its copies of the deleted scenario",
+                lambda: scenario_files(tmp_path / "samples", "demo"),
+            )
+        finally:
+            service.close()
+    finally:
+        control.close()

@@ -33,7 +33,14 @@ from reef.service.app import create_app
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
-from reef.train.job_queue import JOBS_QUEUE, SCENARIO_DELETED_ERROR, TrainingJobWorker, job_records_content
+from reef.train.job_queue import (
+    CHECKS_QUEUE,
+    JOBS_QUEUE,
+    SCENARIO_DELETED_ERROR,
+    TrainingJobWorker,
+    archive_item_id,
+    job_records_content,
+)
 from reef.train.pipeline import TrainingPipeline
 
 
@@ -439,6 +446,8 @@ def test_a_selection_between_its_read_and_its_write_when_the_mark_lands_stores_n
         TestPolicyRecipe(),
         live=LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component)),
     )
+    # No training service runs: the sweep stops waiting for its archive soon, and the test answers it below.
+    dispatcher.sweeper.deletions.answer_seconds = 2.0
     sweeping: list[threading.Thread] = []
     original = TrainingPipeline.write_record_samples
 
@@ -473,6 +482,12 @@ def test_a_selection_between_its_read_and_its_write_when_the_mark_lands_stores_n
         assert dispatcher.data_store.query("math", scenario="math") == ()
         selections = dispatcher.queue.items(SAMPLES_QUEUE, scenario="math")
         assert SCENARIO_DELETED_ERROR in [item.error for item in selections]
+        # The storage was archived after the selection ended; the cleanup waits for the training service only.
+        assert not list((tmp_path / "records").glob("*.sqlite3"))
+        (archive,) = dispatcher.queue.items(CHECKS_QUEUE, scenario="math")
+        taken = dispatcher.queue.take(CHECKS_QUEUE, "training", [archive.kind])
+        dispatcher.queue.finish(CHECKS_QUEUE, taken.id, "training", {"refusal": None})
+        dispatcher.sweeper.sweep()
         ((state, result),) = cleanup_items(dispatcher, "math")
         assert state == "finished" and result["deleted"] is True
     finally:
@@ -499,3 +514,74 @@ def test_a_process_forgets_only_a_deleted_scenario(tmp_path) -> None:
     factory.archive_registration("gone")
     factory.forget_scenario("gone")
     assert factory("gone") is not gone
+
+
+def test_a_mark_that_lands_after_another_instances_sweep_ended_the_first_item_still_gets_cleaned_up(
+    tmp_path, monkeypatch, swept_by_the_test
+) -> None:
+    """At a lease takeover, the new control instance sweeps between the old one's first cleanup item and its mark:
+    it finds no mark and ends the item. The delete adds the item again after the mark, so the next sweep cleans."""
+    import reef.dispatcher.dispatcher as dispatcher_module
+
+    value = durable_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts"))
+    assert value.get_or_create_scenario("delivery") is not None
+    calls: list[str] = []
+
+    def then_swept(queue, scenario):
+        request_cleanup(queue, scenario)
+        if not calls:
+            calls.append(scenario)
+            value.sweeper.sweep()
+
+    monkeypatch.setattr(dispatcher_module, "request_cleanup", then_swept)
+    value.delete_scenario("delivery")
+    assert cleanup_items(value, "delivery") == [("finished", {"deleted": False}), ("queued", None)]
+    value.sweeper.sweep()
+    assert cleanup_items(value, "delivery")[-1] == ("finished", {"deleted": True, "archived": ANY})
+    assert not any(path.suffix == ".sqlite3" for path in (tmp_path / "records").iterdir())
+    value.close()
+
+
+def test_the_cleanup_ends_only_after_the_training_service_archived_and_a_failed_archive_is_queued_again(
+    tmp_path, swept_by_the_test
+) -> None:
+    component = StubTrainingComponent()
+    value = dispatcher_for(
+        tmp_path,
+        TestPolicyRecipe(),
+        live=LiveObjects(runtime=StubInferenceRuntime(), training_facts=StubFacts(component)),
+    )
+    value.sweeper.deletions.answer_seconds = 0.2
+    assert value.get_or_create_scenario("math") is not None
+    value.delete_scenario("math")
+    value.sweeper.sweep()
+    # No training service answers: the cleanup waits, and the next sweep tries again.
+    assert [state for state, _ in cleanup_items(value, "math")] == ["failed"]
+    (archive,) = value.queue.items(CHECKS_QUEUE, scenario="math")
+    assert archive.id == archive_item_id("math", component.name)
+    # The training service fails the archive for good.
+    taken = value.queue.take(CHECKS_QUEUE, "training", [archive.kind])
+    value.queue.fail(CHECKS_QUEUE, taken.id, "training", "the directory did not move", retryable=False)
+    value.sweeper.sweep()
+    assert value.queue.read(CHECKS_QUEUE, archive.id).state == "queued"
+    assert [state for state, _ in cleanup_items(value, "math")] == ["failed"]
+    # It archives on the next attempt, and the next sweep ends the cleanup.
+    taken = value.queue.take(CHECKS_QUEUE, "training", [archive.kind])
+    value.queue.finish(CHECKS_QUEUE, taken.id, "training", {"refusal": None})
+    value.sweeper.sweep()
+    assert cleanup_items(value, "math")[-1][0] == "finished"
+    value.close()
+
+
+def test_a_control_instance_without_the_lease_fails_the_withdraw_step(tmp_path, swept_by_the_test) -> None:
+    value = durable_dispatcher(tmp_path, InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts"))
+    assert value.get_or_create_scenario("delivery") is not None
+    value.publisher.held = False
+    value.delete_scenario("delivery")
+    value.sweeper.sweep()
+    ((state, _),) = cleanup_items(value, "delivery")
+    assert state == "failed" and "control lease" in value.queue.items(DELETES_QUEUE)[0].error
+    value.publisher.held = True
+    value.sweeper.sweep()
+    assert cleanup_items(value, "delivery")[-1][0] == "finished"
+    value.close()

@@ -367,6 +367,12 @@ class RepositoryBackendFactory(ABC):
         keeps nothing, so it does nothing."""
         return
 
+    def local_scenarios(self) -> tuple[str, ...]:
+        """The scenarios of which this process keeps something beside the store, such as a cached backend or a
+        clone on disk; a process that starts lists those that an earlier run left. ``DeletedScenarioFollower``
+        forgets the deleted ones when it starts. The default keeps nothing, so it lists none."""
+        return ()
+
 
 class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
     @abstractmethod
@@ -525,6 +531,16 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
         with self._lock:
             self._backends.pop(scenario, None)
         self.forget_local_state(scenario)
+
+    def local_scenarios(self) -> tuple[str, ...]:
+        """The scenarios that have a cached backend, and those of ``persisted_local_scenarios``."""
+        with self._lock:
+            cached = set(self._backends)
+        return tuple(sorted(cached | set(self.persisted_local_scenarios())))
+
+    def persisted_local_scenarios(self) -> tuple[str, ...]:
+        """The scenarios whose local state an earlier run of this process left on disk. The default keeps none."""
+        return ()
 
     def forget_local_state(self, scenario: str) -> None:
         """Remove what this process keeps on disk or in memory for the deleted ``scenario`` beside its cached

@@ -20,7 +20,7 @@ What only the component can answer, control asks through the ``training_checks``
   and whose answer nobody reads;
 - ``result`` is ``{"refusal": <message>}`` when the component raised ``ValueError``, else ``{"refusal": null}``;
 - ``id`` is ``job:<job ID>`` for a job check, so control finds the check of a job in the queue,
-  ``artifact:<random>`` for an artifact check, and ``archive:<scenario>`` for an archive;
+  ``artifact:<random>`` for an artifact check, and ``archive_item_id`` for an archive;
 - ``metadata["asked_at"]`` is the time in seconds when control last asked for the answer, and
   ``metadata["answer_read"]`` is true once control read it.
 
@@ -448,6 +448,12 @@ def cancel_scenario_job(queue: WorkQueue, scenario: str, job_id: str) -> dict[st
     return job_json(item if cancelled is None else cancelled)
 
 
+def archive_item_id(scenario: str, component: str) -> str:
+    """The ID of the ``training_checks`` item that asks the training service of ``component`` to archive what it
+    keeps for the deleted ``scenario``: ``archive:<scenario>:<component>``."""
+    return f"archive:{scenario}:{component}"
+
+
 def cancel_scenario_jobs(queue: WorkQueue, scenario: str) -> int:
     """Cancel every training job of ``scenario`` that has not ended, also a job that a trainer added to the queue
     and whose submission no commit recorded yet; return how many. Control's cleanup of a deleted scenario calls it
@@ -574,9 +580,10 @@ class JobQueueComponent(TrainingComponent):
 
     def archive_scenario(self, scenario: str) -> None:
         """Ask the training service to move aside what its component keeps for the deleted ``scenario``. The
-        request waits in the queue while no training service runs, and nobody reads its answer. A scenario ID is
-        deleted once, so the request has one ID for each scenario, and a second call adds nothing."""
-        item_id = f"archive:{scenario}"
+        request waits in the queue while no training service runs. A scenario ID is deleted once, so the request
+        has one ID for each scenario and component (``archive_item_id``), and a second call adds nothing. Control's
+        cleanup reads its state (``DeletedScenarioCleanup``)."""
+        item_id = archive_item_id(scenario, self.name)
         self.queue.append(
             NewWork(
                 CHECKS_QUEUE,
@@ -1088,6 +1095,7 @@ __all__ = [
     "JobQueueComponent",
     "TrainingCheckWorker",
     "TrainingJobWorker",
+    "archive_item_id",
     "cancel_request_jobs",
     "cancel_scenario_job",
     "cancel_scenario_jobs",

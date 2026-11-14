@@ -16,7 +16,7 @@ from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination
-from reef.storage.served_models import AUTOMATIC_RETRIES, REDEPLOY
+from reef.storage.served_models import AUTOMATIC_RETRIES, REDEPLOY, ControlLeaseConflictError
 from reef.storage.work_queue import JsonValue, WorkItem, clock
 
 logger = logging.getLogger(__name__)
@@ -235,16 +235,20 @@ class ServedModelsPublisher(ServiceWorker):
                 )
 
     def withdraw(self, scenario: str, *, now: float | None = None) -> None:
-        """Withdraw the scenario and its pending startup before archiving its files."""
+        """Withdraw the scenario and its pending startup before archiving its files. Raise
+        ``ControlLeaseConflictError`` when this instance does not hold the control lease: the holder withdraws it."""
         with self.lock:
-            if self.held:
-                self.coordination.served_models.request(
-                    scenario,
-                    {},
-                    control_lease_number=self.lease_number,
-                    stop_delay_seconds=self.stop_delay_seconds,
-                    now=now,
+            if not self.held:
+                raise ControlLeaseConflictError(
+                    f"this instance does not hold the control lease to withdraw {scenario!r}"
                 )
+            self.coordination.served_models.request(
+                scenario,
+                {},
+                control_lease_number=self.lease_number,
+                stop_delay_seconds=self.stop_delay_seconds,
+                now=now,
+            )
 
     def run_once(self, *, now: float | None = None) -> bool:
         """Renew the lease and publish every loaded scenario, which retries the failed requests that are due;

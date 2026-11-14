@@ -1483,16 +1483,35 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             archived.append(str(work_dir))
         return tuple(archived)
 
+    def persisted_local_scenarios(self) -> tuple[str, ...]:
+        """The scenarios with a work clone in the work directory, by its base64url name."""
+        if not self._work_dir.is_dir():
+            return ()
+        names = []
+        for entry in self._work_dir.iterdir():
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            try:
+                names.append(base64.urlsafe_b64decode(entry.name + "=" * (-len(entry.name) % 4)).decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                continue
+        return tuple(names)
+
     def forget_local_state(self, scenario: str) -> None:
         """Remove the scenario's work clone, and the cache entries of its snapshots: each commit of its archived
         refs, and each pending snapshot whose parent is one of them, with the entries of their components and
         files (``<commit>``, ``<commit>.<name>``). The repository keeps everything. A remote repository's
         snapshots are not listed, so their entries stay; a delete needs a local repository anyway."""
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
-        shutil.rmtree(self._work_dir / encoded, ignore_errors=True)
         local = local_directory(str(self._repository))
-        if local is None or not self._cache_dir.is_dir():
-            return
+        if local is not None and self._cache_dir.is_dir():
+            self.forget_cached_snapshots(local, encoded)
+        # The clone goes last: a process that stops before lists the scenario again when it starts.
+        shutil.rmtree(self._work_dir / encoded, ignore_errors=True)
+
+    def forget_cached_snapshots(self, local: Path, encoded: str) -> None:
+        """Remove the cache entries of the snapshots of the scenario ``encoded`` in the local repository ``local``
+        (``forget_local_state``)."""
         client = GitClient(self._work_dir / ".registration-check", self._git_config)
         git_dir = ("git", "--git-dir", str(local))
         chain = set(
