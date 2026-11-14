@@ -36,6 +36,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     Float,
+    FromClause,
     Identity,
     Index,
     Integer,
@@ -54,6 +55,7 @@ from sqlalchemy import (
     exists,
     func,
     insert,
+    inspect,
     literal,
     literal_column,
     or_,
@@ -164,6 +166,51 @@ def item_id_prefix(items: Table, prefix: str, *, sqlite: bool) -> ColumnElement[
     return prefix_range(items.c.item_id if sqlite else items.c.item_id.collate("C"), prefix)
 
 
+def use_id_prefix(uses: Table, prefix: str, *, sqlite: bool) -> ColumnElement[bool]:
+    """The condition that the ``item_id`` of a row of ``data_item_use`` starts with ``prefix``, in a form that no
+    index of the table serves.
+
+    A query of the uses of one scenario then reads them from ``data_item_use_by_item`` in item order and checks the
+    ID of each (``SQLDataStore.filtered``). On PostgreSQL the condition is the range of ``prefix_range`` in the "C"
+    collation, which no index of the table has. On SQLite that range would use the unique index of the uses, so the
+    condition compares the first ``len(prefix)`` characters of the ID with ``prefix`` instead. SQLite counts these
+    characters in code points, as Python does, and compares strings by their bytes, so it keeps the same rows.
+    """
+    if sqlite:
+        return func.substr(uses.c.item_id, 1, len(prefix)) == prefix
+    return prefix_range(uses.c.item_id.collate("C"), prefix)
+
+
+def item_is_inference(items: Table, *, sqlite: bool) -> ColumnElement[bool]:
+    """The condition that an item row is a record item of the source ``inference``
+    (``reef.storage.data.record_source``), in the form of the predicate of the partial index ``data_item_of_inference``.
+
+    The condition holds only literals, not parameters, so that the database can prove that a query with the same
+    condition reads only rows of the index, also in a prepared statement.
+    """
+    source: ColumnElement[str] = (
+        func.json_extract(items.c.metadata_json, literal_column("'$.origin.source'"))
+        if sqlite
+        else cast(items.c.metadata_json, JSONB).op("#>>", return_type=Text)(literal_column("'{origin,source}'"))
+    )
+    return and_(
+        items.c.kind == literal_column("'record'"),
+        func.coalesce(source, literal_column("'inference'")) == literal_column("'inference'"),
+    )
+
+
+def node_of_scenario_call(nodes: Table) -> ColumnElement[bool]:
+    """The condition that a row of ``data_record_node`` is the node of a scenario's own call, not of an evaluation
+    call, in the form of the predicate of the partial index ``data_record_node_scenario_bytes``.
+
+    The scenario of a node is the link scope of its record (``record_link_scope``): the origin scenario of a
+    scenario's own call, and ``<scenario>/<rollout>`` for an evaluation call. A scenario name has no ``/``, so only
+    the node of an evaluation call has one. The pattern is a literal for the same reason as in
+    ``item_is_inference``.
+    """
+    return nodes.c.scenario.not_like(literal_column("'%/%'"))
+
+
 def data_tables(
     metadata: MetaData, *, sqlite: bool
 ) -> tuple[Table, Table, Table, Table, Table, Table, Table, Table, Table, Table]:
@@ -180,7 +227,9 @@ def data_tables(
     ``sequence`` orders the items as they arrived. ``data_item_use`` has one row per use of an item by a
     scenario, with its split and its held set: the name of the held benchmark or trajectory set that gives the use,
     or "" for the use of the item's own ``scenarios`` metadata. Its own ``sequence`` orders the uses as they began, and a use whose split
-    changes is a new row (``DataStore.scenario_items``). ``content_json`` is the canonical JSON of a trajectory's or a
+    changes is a new row (``DataStore.scenario_items``). ``item_sequence`` is the ``sequence`` of the used item, so
+    that a query of the items that a scenario uses reads them in item order from the index ``data_item_use_by_item``.
+    ``content_json`` is the canonical JSON of a trajectory's or a
     record's content, and NULL for a task. ``message_field`` names the message list of a record payload that the
     item's trajectory node keeps (``call_shape``); the content then holds an empty payload. It is NULL for an
     item without one. ``request_type`` is a record's request type, from its content, and NULL for another kind.
@@ -232,8 +281,10 @@ def data_tables(
         Column("scenario", Text, nullable=False),
         Column("held_set", Text, nullable=False),
         Column("split", String(8), nullable=False),
+        Column("item_sequence", BigInteger, nullable=False),
         UniqueConstraint("owner", "item_id", "scenario", "held_set", "split"),
         Index("data_item_use_by_scenario", "owner", "scenario", "sequence"),
+        Index("data_item_use_by_item", "owner", "scenario", "item_sequence"),
         sqlite_autoincrement=sqlite,
     )
     holds = Table(
@@ -295,6 +346,13 @@ def data_tables(
         # A query of an ID prefix reads the range of its IDs in code point order (``item_id_prefix``). The unique
         # index of (owner, item_id) has the database's collation, whose order is another one.
         Index("data_item_by_item_id", items.c.owner, items.c.item_id.collate("C"))
+    # Record retention (``SQLDataStore.prune_records``) counts the bytes of the record items of the source inference
+    # and of the nodes of the scenarios' own calls, then reads those items in sequence order. The partial indexes
+    # hold only these rows, so that the counts parse no metadata and read no row of an evaluation call.
+    inference = item_is_inference(items, sqlite=sqlite)
+    Index("data_item_of_inference", items.c.sequence, sqlite_where=inference, postgresql_where=inference)
+    own_calls = node_of_scenario_call(nodes)
+    Index("data_record_node_scenario_bytes", nodes.c.body_bytes, sqlite_where=own_calls, postgresql_where=own_calls)
     collections = Table(
         "data_collection",
         metadata,
@@ -324,7 +382,8 @@ class UsesWithHeldSets(SchemaStep):
 
     Version 1 had one use for each item and scenario, of the item's own ``scenarios`` metadata, so each copied use
     has no held set. The sequences are new, and their order is the earlier one, so a trainer reads its samples in
-    the same order.
+    the same order. Each copied use has the sequence of its item (``UseItemSequences``); a use of no item gives no
+    row, as no query found its item.
     """
 
     def apply(self, connection: Connection, schema: str | None) -> None:
@@ -346,11 +405,18 @@ class UsesWithHeldSets(SchemaStep):
             Column("scenario", Text),
             Column("held_set", Text),
             Column("split", String(8)),
+            Column("item_sequence", BigInteger),
         )
-        rows = select(earlier.c.owner, earlier.c.item_id, earlier.c.scenario, literal(""), earlier.c.split)
+        items = Table(
+            "data_item", tables, Column("sequence", BigInteger), Column("owner", Text), Column("item_id", Text)
+        )
+        rows = select(
+            earlier.c.owner, earlier.c.item_id, earlier.c.scenario, literal(""), earlier.c.split, items.c.sequence
+        ).join(items, (items.c.owner == earlier.c.owner) & (items.c.item_id == earlier.c.item_id))
         connection.execute(
             insert(uses).from_select(
-                ["owner", "item_id", "scenario", "held_set", "split"], rows.order_by(earlier.c.sequence)
+                ["owner", "item_id", "scenario", "held_set", "split", "item_sequence"],
+                rows.order_by(earlier.c.sequence),
             )
         )
         earlier.drop(connection)
@@ -455,8 +521,85 @@ class ItemSets(SchemaStep):
             after = rows[-1].sequence
 
 
+class UseItemSequences(SchemaStep):
+    """Version 4 to 5 of the data tables: each row of ``data_item_use`` gets ``item_sequence``, the sequence of its
+    item, and the index ``data_item_use_by_item`` of (``owner``, ``scenario``, ``item_sequence``). A query of the
+    items that a scenario uses then reads them in item order from that index (``SQLDataStore.filtered``), and no
+    longer reads every item of the owner that the other filters give.
+
+    The step deletes the uses of no item first: no query found their items. A table that this upgrade made at the
+    current layout, from version 1, has the column and the index already, and the step changes nothing in it.
+    SQLite adds a ``NOT NULL`` column only with a default, so there the column has the default 0, which no write
+    uses.
+    """
+
+    def apply(self, connection: Connection, schema: str | None) -> None:
+        if any(column["name"] == "item_sequence" for column in inspect(connection).get_columns(USES_TABLE, schema)):
+            return
+        tables = MetaData(schema=schema)
+        uses = Table(
+            USES_TABLE,
+            tables,
+            Column("owner", Text),
+            Column("item_id", Text),
+            Column("scenario", Text),
+            Column("item_sequence", BigInteger),
+        )
+        items = Table(
+            "data_item", tables, Column("sequence", BigInteger), Column("owner", Text), Column("item_id", Text)
+        )
+        item_of_use = (items.c.owner == uses.c.owner) & (items.c.item_id == uses.c.item_id)
+        connection.execute(delete(uses).where(~exists().where(item_of_use)))
+        name = connection.dialect.identifier_preparer.format_table(uses)
+        sqlite = connection.dialect.name == "sqlite"
+        connection.exec_driver_sql(
+            f"ALTER TABLE {name} ADD COLUMN item_sequence BIGINT" + (" NOT NULL DEFAULT 0" if sqlite else "")
+        )
+        connection.execute(
+            update(uses).values(item_sequence=select(items.c.sequence).where(item_of_use).scalar_subquery())
+        )
+        if not sqlite:
+            connection.exec_driver_sql(f"ALTER TABLE {name} ALTER COLUMN item_sequence SET NOT NULL")
+        Index("data_item_use_by_item", uses.c.owner, uses.c.scenario, uses.c.item_sequence).create(connection)
+
+
+class RetentionIndexes(SchemaStep):
+    """Version 5 to 6 of the data tables: the partial indexes ``data_item_of_inference`` of the record items of the
+    source inference (``item_is_inference``) and ``data_record_node_scenario_bytes`` of the nodes of the scenarios'
+    own calls (``node_of_scenario_call``). Record retention counts and reads these rows from them. ``data_item``
+    is in every version. A database of version 1 can lack ``data_record_node``: this upgrade then made it at the
+    current layout, with its index, and the step leaves that index.
+    """
+
+    def apply(self, connection: Connection, schema: str | None) -> None:
+        sqlite = connection.dialect.name == "sqlite"
+        tables = MetaData(schema=schema)
+        items = Table(
+            "data_item",
+            tables,
+            Column("sequence", BigInteger),
+            Column("kind", String(16)),
+            Column("metadata_json", Text),
+        )
+        nodes = Table("data_record_node", tables, Column("scenario", Text), Column("body_bytes", BigInteger))
+        inference = item_is_inference(items, sqlite=sqlite)
+        own_calls = node_of_scenario_call(nodes)
+        Index("data_item_of_inference", items.c.sequence, sqlite_where=inference, postgresql_where=inference).create(
+            connection
+        )
+        Index(
+            "data_record_node_scenario_bytes", nodes.c.body_bytes, sqlite_where=own_calls, postgresql_where=own_calls
+        ).create(connection, checkfirst=True)
+
+
 #: The steps of the data tables, in the order of their versions: step ``n`` upgrades version ``n``.
-DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (UsesWithHeldSets(), ItemIdIndex(), ItemSets())
+DATA_SCHEMA_STEPS: tuple[SchemaStep, ...] = (
+    UsesWithHeldSets(),
+    ItemIdIndex(),
+    ItemSets(),
+    UseItemSequences(),
+    RetentionIndexes(),
+)
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -579,11 +722,6 @@ class SQLDataStore(DataStore):
         string. ``key`` passes ``GROUP_KEY``."""
 
     @abstractmethod
-    def record_source(self) -> ColumnElement[str]:
-        """The source of the record item of an item row (``reef.storage.data.record_source``): its
-        ``origin.source``, or ``inference`` when it has none."""
-
-    @abstractmethod
     def evaluation_id(self) -> ColumnElement[Any]:
         """The ``evaluation_id`` of the metadata of an item row, as the index ``data_item_by_evaluation_sequence``
         holds it (``item_evaluation_id``)."""
@@ -593,10 +731,15 @@ class SQLDataStore(DataStore):
         """The condition that the ``item_id`` of an item row starts with ``prefix``, in the form of an index
         (``item_id_prefix``)."""
 
+    @abstractmethod
+    def use_has_id_prefix(self, prefix: str) -> ColumnElement[bool]:
+        """The condition that the ``item_id`` of a use row starts with ``prefix``, in a form that no index of the
+        uses serves (``use_id_prefix``)."""
+
+    @abstractmethod
     def is_inference(self) -> ColumnElement[bool]:
         """The condition that an item row is a record item of the source ``inference``, which ``prune_records``
-        counts and deletes."""
-        return and_(self.items_table.c.kind == "record", self.record_source() == "inference")
+        counts and deletes (``item_is_inference``)."""
 
     def groups(
         self,
@@ -796,15 +939,17 @@ class SQLDataStore(DataStore):
         self,
         connection: Connection,
         owner: str,
-        metadata: Mapping[str, Mapping[str, Any]],
+        items: Mapping[str, tuple[int, Mapping[str, Any]]],
         holds: Mapping[tuple[str, str], set[tuple[str, str]]] | None,
     ) -> None:
-        """Make the uses of each item ID in ``metadata`` those that its metadata gives: one for each scenario of its
-        ``scenarios``, and one for each hold in ``holds`` (``holds_of``) of a set of the item (``held_sets``). With
-        None for ``holds``, the write leaves the uses that holds give: the caller did not change the sets of the
-        items, and does not hold ``HOLDS_LOCK``. An unchanged use keeps its row and sequence, and a new use gets a
-        new row. At most three statements read and write the uses."""
+        """Make the uses of each item ID in ``items``, which maps it to the item's sequence and metadata, those that
+        its metadata gives: one for each scenario of its ``scenarios``, and one for each hold in ``holds``
+        (``holds_of``) of a set of the item (``held_sets``). With None for ``holds``, the write leaves the uses that
+        holds give: the caller did not change the sets of the items, and does not hold ``HOLDS_LOCK``. An unchanged
+        use keeps its row and sequence, and a new use gets a new row. At most three statements read and write the
+        uses."""
         uses = self.uses_table
+        metadata = {item_id: value for item_id, (_, value) in items.items()}
         wanted: dict[str, set[tuple[str, str, str]]] = {}
         for item_id, value in metadata.items():
             wanted[item_id] = {(scenario, "", split) for scenario, split in value["scenarios"].items()}
@@ -837,7 +982,14 @@ class SQLDataStore(DataStore):
                 ended,
             )
         begun = [
-            {"owner": owner, "item_id": item_id, "scenario": scenario, "held_set": held_set, "split": split}
+            {
+                "owner": owner,
+                "item_id": item_id,
+                "scenario": scenario,
+                "held_set": held_set,
+                "split": split,
+                "item_sequence": items[item_id][0],
+            }
             for item_id, kept in wanted.items()
             for scenario, held_set, split in sorted(kept - current[item_id])
         ]
@@ -1002,12 +1154,9 @@ class SQLDataStore(DataStore):
                     raise ScenarioArchivedError(f"generation {generation!r} of {origin!r} is no longer current")
             sequences = self.write_new_items(connection, list(values.values()))
             metadata_of = {entry[0].item_id: entry[1] for entry in reversed(prepared)}
-            self.write_uses(connection, owner, {item_id: metadata_of[item_id] for item_id in sequences}, holds)
-            self.insert_sets(
-                connection,
-                owner,
-                {item_id: (sequence, metadata_of[item_id]) for item_id, sequence in sequences.items()},
-            )
+            inserted = {item_id: (sequence, metadata_of[item_id]) for item_id, sequence in sequences.items()}
+            self.write_uses(connection, owner, inserted, holds)
+            self.insert_sets(connection, owner, inserted)
             self.trajectory_nodes(owner).append_many(
                 connection,
                 [
@@ -1102,7 +1251,8 @@ class SQLDataStore(DataStore):
             if content
             else (items.c.sequence, items.c.owner, items.c.item_id, items.c.metadata_json, items.c.digest)
         )
-        statement = select(*columns).where(*self.filters(owner, kind, scenario, origin, request_type, after))
+        source, sequence, conditions = self.filtered(owner, kind, scenario, origin, request_type, after)
+        statement = select(*columns).select_from(source).where(*conditions)
         if group is not None:
             value = self.metadata_string(group[0])
             statement = statement.where(value.is_(None) if group[1] is None else value == group[1])
@@ -1123,10 +1273,11 @@ class SQLDataStore(DataStore):
                 )
         if id_prefix is not None:
             statement = statement.where(self.has_id_prefix(id_prefix))
-        # A page before a sequence reads backward from it, newest first.
-        order = items.c.sequence if before is None else items.c.sequence.desc()
+        # A page before a sequence reads backward from it, newest first. ``sequence`` is the column of the item
+        # sequence that ``filtered`` reads in order: the use's for a scenario, else the item's.
+        order = sequence if before is None else sequence.desc()
         if before is not None:
-            statement = statement.where(items.c.sequence < before)
+            statement = statement.where(sequence < before)
         with self.transaction(read_only=True) as connection:
             found = connection.execute(statement.order_by(order).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
@@ -1142,7 +1293,8 @@ class SQLDataStore(DataStore):
         after: int = 0,
     ) -> int:
         check_filters(owner, kind, scenario, origin, request_type, after)
-        statement = select(func.count()).where(*self.filters(owner, kind, scenario, origin, request_type, after))
+        source, _, conditions = self.filtered(owner, kind, scenario, origin, request_type, after)
+        statement = select(func.count()).select_from(source).where(*conditions)
         with self.transaction(read_only=True) as connection:
             return int(connection.execute(statement).scalar_one())
 
@@ -1156,10 +1308,12 @@ class SQLDataStore(DataStore):
         request_type: str | None = None,
     ) -> int:
         check_filters(owner, kind, scenario, origin, request_type, 0)
-        newest = func.coalesce(func.max(self.items_table.c.sequence), 0)
-        statement = select(newest).where(*self.filters(owner, kind, scenario, origin, request_type, 0))
+        source, sequence, conditions = self.filtered(owner, kind, scenario, origin, request_type, 0)
+        # The largest sequence as the first row in descending order: the database reads an index backwards from the
+        # newest row and stops at the first row that the conditions keep. A max() over a join reads every row.
+        statement = select(sequence).select_from(source).where(*conditions).order_by(sequence.desc()).limit(1)
         with self.transaction(read_only=True) as connection:
-            return int(connection.execute(statement).scalar_one())
+            return int(connection.execute(statement).scalar() or 0)
 
     def collections(self, owner: str) -> tuple[TaskCollection, ...]:
         check_owner(owner)
@@ -1188,7 +1342,7 @@ class SQLDataStore(DataStore):
             removed = connection.execute(delete(table).where(table.c.owner == owner, table.c.name == name))
             return removed.rowcount > 0
 
-    def filters(
+    def filtered(
         self,
         owner: str,
         kind: ItemKind | None,
@@ -1196,18 +1350,44 @@ class SQLDataStore(DataStore):
         origin: str | None,
         request_type: str | None,
         after: int,
-    ) -> list[ColumnElement[bool]]:
-        """The conditions on the rows of ``data_item`` that the filters of ``query`` give. The ID of a record item
-        starts with the scenario that made it (``record_item``)."""
-        items = self.items_table
-        conditions = [items.c.owner == owner, items.c.sequence > after, *self.used_by(owner, items, scenario)]
+    ) -> tuple[FromClause, Column[int], list[ColumnElement[bool]]]:
+        """The rows that the filters of ``query`` give: a FROM clause, its column of the item sequence, and the
+        conditions on its rows. The ID of a record item starts with the scenario that made it (``record_item``).
+
+        Without a scenario, the FROM clause is ``data_item``. With a scenario, it is ``data_item`` joined with the
+        first use of each item by the scenario on ``item_sequence``. The conditions on the sequence and the ID are
+        on the use, and the ID condition has a form that no index serves (``use_has_id_prefix``). So the database
+        reads the uses of the scenario in item order from the index ``data_item_use_by_item``, also in a prepared
+        statement, and stops at the limit of a page. It never reads the items of the owner that the scenario does not use, such as
+        the evaluation calls. Each item gives one row: an item that the scenario uses through several sets or
+        splits gives the row of its first use.
+        """
+        items, uses = self.items_table, self.uses_table
+        conditions = [items.c.owner == owner]
         if kind is not None:
             conditions.append(items.c.kind == kind)
-        if origin is not None:
-            conditions.append(self.has_id_prefix(f"{origin}/"))
         if request_type is not None:
             conditions.append(items.c.request_type == request_type)
-        return conditions
+        if scenario is None:
+            source: FromClause = items
+            sequence = items.c.sequence
+            if origin is not None:
+                conditions.append(self.has_id_prefix(f"{origin}/"))
+        else:
+            source = uses.join(items, items.c.sequence == uses.c.item_sequence)
+            sequence = uses.c.item_sequence
+            earlier = uses.alias("earlier_use")
+            first_use = ~exists().where(
+                earlier.c.owner == uses.c.owner,
+                earlier.c.scenario == uses.c.scenario,
+                earlier.c.item_sequence == uses.c.item_sequence,
+                earlier.c.sequence < uses.c.sequence,
+            )
+            conditions += [uses.c.owner == owner, uses.c.scenario == scenario, first_use]
+            if origin is not None:
+                conditions.append(self.use_has_id_prefix(f"{origin}/"))
+        conditions.append(sequence > after)
+        return source, sequence, conditions
 
     def used_by(self, owner: str, items: Table, scenario: str | None) -> tuple[ColumnElement[bool], ...]:
         """The condition that ``scenario`` uses the item of the row of ``items``, or none without a scenario."""
@@ -1309,12 +1489,21 @@ class SQLDataStore(DataStore):
                 # One statement writes the use of each member, in the order of the items.
                 item_sets = self.item_sets_table
                 begun = (
-                    select(literal(owner), item_sets.c.item_id, literal(scenario), literal(name), literal(split))
+                    select(
+                        literal(owner),
+                        item_sets.c.item_id,
+                        literal(scenario),
+                        literal(name),
+                        literal(split),
+                        item_sets.c.sequence,
+                    )
                     .where(item_sets.c.owner == owner, item_sets.c.kind == kind, item_sets.c.name == name)
                     .order_by(item_sets.c.sequence)
                 )
                 connection.execute(
-                    insert(uses).from_select(["owner", "item_id", "scenario", "held_set", "split"], begun)
+                    insert(uses).from_select(
+                        ["owner", "item_id", "scenario", "held_set", "split", "item_sequence"], begun
+                    )
                 )
             return ScenarioHold(scenario, kind, name, split, self.set_count(connection, owner, kind, name))
 
@@ -1436,18 +1625,17 @@ class SQLDataStore(DataStore):
                     for item_id, metadata in patched.items()
                 ],
             )
-            self.write_uses(connection, owner, patched, holds)
+            changed = {
+                item_id: (int(existing[item_id]["sequence"]), metadata) for item_id, metadata in patched.items()
+            }
+            self.write_uses(connection, owner, changed, holds)
             if holds is not None:
                 # The patch named a key of the sets: the rows of the items' sets follow their new metadata.
                 item_sets = self.item_sets_table
                 connection.execute(
                     delete(item_sets).where(item_sets.c.owner == owner, item_sets.c.item_id.in_(unique_ids))
                 )
-                self.insert_sets(
-                    connection,
-                    owner,
-                    {item_id: (int(existing[item_id]["sequence"]), metadata) for item_id, metadata in patched.items()},
-                )
+                self.insert_sets(connection, owner, changed)
             return tuple(
                 StoredItem(existing[item_id]["sequence"], owner, item_id, metadata, existing[item_id]["digest"])
                 for item_id, metadata in patched.items()
@@ -1470,19 +1658,14 @@ class SQLDataStore(DataStore):
     def prune_records(self, max_bytes: int) -> int:
         items, nodes = self.items_table, self.nodes_table
         # An evaluation call is not pruned, so neither its row nor its node counts. Its node is in a scope of its own
-        # (``record_link_scope``), so no node of an inference record needs it.
-        evaluation_node = exists().where(
-            items.c.owner == nodes.c.owner,
-            items.c.sequence == nodes.c.node_sequence,
-            items.c.kind == "record",
-            self.record_source() == "evaluation",
-        )
+        # (``record_link_scope``), so no node of an inference record needs it. Both counts read the rows of a partial
+        # index (``data_item_of_inference``, ``data_record_node_scenario_bytes``).
         with self.transaction(read_only=True) as connection:
             held = connection.execute(
                 select(func.coalesce(func.sum(func.length(items.c.content_json)), 0)).where(self.is_inference())
             ).scalar_one()
             held += connection.execute(
-                select(func.coalesce(func.sum(nodes.c.body_bytes), 0)).where(~evaluation_node)
+                select(func.coalesce(func.sum(nodes.c.body_bytes), 0)).where(node_of_scenario_call(nodes))
             ).scalar_one()
         excess = int(held) - max_bytes
         sizes = EvictionSizes(nodes, ("owner",))
@@ -1670,6 +1853,7 @@ class SQLDataStore(DataStore):
                     "scenario": use.scenario,
                     "held_set": use.held_set,
                     "split": use.split,
+                    "item_sequence": stored.sequence,
                 }
                 for use in connection.execute(
                     select(uses.c.scenario, uses.c.held_set, uses.c.split).where(*where).order_by(uses.c.sequence)
@@ -2032,14 +2216,17 @@ class SQLiteDataStore(SQLDataStore):
         metadata = self.items_table.c.metadata_json
         return case((func.json_type(metadata, path) == "text", func.json_extract(metadata, path)))
 
-    def record_source(self) -> ColumnElement[str]:
-        return func.coalesce(func.json_extract(self.items_table.c.metadata_json, "$.origin.source"), "inference")
+    def is_inference(self) -> ColumnElement[bool]:
+        return item_is_inference(self.items_table, sqlite=True)
 
     def evaluation_id(self) -> ColumnElement[Any]:
         return item_evaluation_id(self.items_table, sqlite=True)
 
     def has_id_prefix(self, prefix: str) -> ColumnElement[bool]:
         return item_id_prefix(self.items_table, prefix, sqlite=True)
+
+    def use_has_id_prefix(self, prefix: str) -> ColumnElement[bool]:
+        return use_id_prefix(self.uses_table, prefix, sqlite=True)
 
     def close(self) -> None:
         with self.lock:
@@ -2132,15 +2319,17 @@ class PostgresDataStore(SQLDataStore):
         metadata = cast(self.items_table.c.metadata_json, JSONB)
         return case((func.jsonb_typeof(metadata[key]) == "string", metadata[key].astext))
 
-    def record_source(self) -> ColumnElement[str]:
-        metadata = cast(self.items_table.c.metadata_json, JSONB)
-        return func.coalesce(metadata[("origin", "source")].astext, "inference")
+    def is_inference(self) -> ColumnElement[bool]:
+        return item_is_inference(self.items_table, sqlite=False)
 
     def evaluation_id(self) -> ColumnElement[Any]:
         return item_evaluation_id(self.items_table, sqlite=False)
 
     def has_id_prefix(self, prefix: str) -> ColumnElement[bool]:
         return item_id_prefix(self.items_table, prefix, sqlite=False)
+
+    def use_has_id_prefix(self, prefix: str) -> ColumnElement[bool]:
+        return use_id_prefix(self.uses_table, prefix, sqlite=False)
 
     @contextmanager
     def pack_lock(self, owner: str) -> Iterator[bool]:
