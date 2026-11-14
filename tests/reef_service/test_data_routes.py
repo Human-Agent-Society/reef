@@ -221,7 +221,7 @@ def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path)
         # A scenario holds trajectory sets too: it trains the trajectories of the set, with no mark on them.
         sets = "/reef/namespaces/acme/scenarios/math/trajectory-sets"
         await upload_trajectories(client, AUTH, "t1", "t2", scenario=None, base=base)
-        named = {"ids": ["t1"], "patch": {"set_id": "day-1"}}
+        named = {"ids": ["t1"], "patch": {"trajectory_sets": ["day-1"]}}
         assert (await client.post(f"{base}/metadata", headers=AUTH, json=named)).status == 200
         one = await client.put(f"{sets}/day-1", headers=AUTH, json={})
         assert one.status == 200, await one.text()
@@ -244,9 +244,16 @@ def test_a_collection_names_benchmarks_and_a_scenario_holds_them(tmp_path: Path)
 
         assert await trajectories() == [("t1", "day-1")]
         # A trajectory that joins the set joins the scenario, and the release of the set ends both uses.
-        joined = {"ids": ["t2"], "patch": {"set_id": "day-1"}}
+        joined = {"ids": ["t2"], "patch": {"trajectory_sets": ["day-1", "day-2"]}}
         assert (await client.post(f"{base}/metadata", headers=AUTH, json=joined)).status == 200
         assert await trajectories() == [("t1", "day-1"), ("t2", "day-1")]
+        # The owner's trajectory sets, newest first, and the trajectories of one set.
+        listed = await (await client.get(f"{base}/sets/trajectory_set", headers=AUTH)).json()
+        assert [(found["name"], found["item_count"]) for found in listed["sets"]] == [("day-2", 1), ("day-1", 2)]
+        assert listed["next"] is None
+        members = await (await client.get(f"{base}?trajectory_set=day-1", headers=AUTH)).json()
+        assert [item["id"] for item in members["items"]] == ["t1", "t2"]
+        assert (await client.get(f"{base}/sets/trajectory", headers=AUTH)).status == 400
         assert (await (await client.delete(f"{sets}/day-1", headers=AUTH)).json())["released"] is True
         assert await trajectories() == []
         bad_split = {"scenario": "math", "split": "dev"}

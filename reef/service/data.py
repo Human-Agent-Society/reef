@@ -338,10 +338,12 @@ def query_items(
     content: bool,
     group: tuple[str, str | None] | None = None,
     benchmark: str | None = None,
+    trajectory_set: str | None = None,
 ) -> dict[str, Any]:
     """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, each item with its
     content when ``content`` (``item_json``), else without. ``group`` keeps only the items of one group,
-    and ``benchmark`` only the task items of one benchmark (``DataStore.query``).
+    ``benchmark`` only the task items of one benchmark, and ``trajectory_set`` only the trajectory items of one
+    trajectory set (``DataStore.query``).
 
     ``next`` is the ``after`` of the next page, or null after the last item.
     """
@@ -357,6 +359,7 @@ def query_items(
         content=content,
         group=group,
         benchmark=benchmark,
+        trajectory_set=trajectory_set,
     )
     return {
         "owner": owner,
@@ -384,6 +387,32 @@ def group_items(
         "groups": [
             {
                 "value": group.value,
+                "item_count": group.item_count,
+                "first_sequence": group.first_sequence,
+                "last_sequence": group.last_sequence,
+                "metadata": dict(group.metadata),
+            }
+            for group in found
+        ],
+        "next": found[-1].first_sequence if len(found) == limit else None,
+    }
+
+
+def set_listing(
+    data: DataAccess, owner: str, *, kind: str, scenario: str | None, before: int | None, limit: int
+) -> dict[str, Any]:
+    """The sets of ``kind`` that have an item of ``owner`` (``DataStore.sets``), with only the items that
+    ``scenario`` uses when it is given, newest first: ``{owner, sets, next}``. Each set is ``{name, item_count, first_sequence, last_sequence, metadata}``, where ``metadata`` is the
+    metadata of its first item.
+
+    ``next`` is the ``before`` of the next page, or null after the last set.
+    """
+    found = data.require_store().sets(owner, kind, scenario=scenario, before=before, limit=limit)
+    return {
+        "owner": owner,
+        "sets": [
+            {
+                "name": group.value,
                 "item_count": group.item_count,
                 "first_sequence": group.first_sequence,
                 "last_sequence": group.last_sequence,
@@ -497,6 +526,7 @@ __all__ = [
     "parsed_metadata",
     "query_items",
     "read_item",
+    "set_listing",
     "store_items",
     "update_items",
 ]

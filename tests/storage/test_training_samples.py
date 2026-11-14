@@ -134,13 +134,18 @@ def test_stage_samples_become_items_of_their_trainer_and_consume_their_records(s
     item_id = stage_item_id("math", "a:r1:0")
     assert (item_id, stage_item_id("math", "generated-tasks/x")) == ("math.a:r1:0", "math.generated-tasks.x")
     metadata = scenario.data.read("acme", item_id).metadata
-    assert {key: metadata[key] for key in ("kind", "scenarios", "origin", "group", "group_id")} == {
+    assert {key: metadata[key] for key in ("kind", "scenarios", "origin", "group", "group_id", "trajectory_sets")} == {
         "kind": "trajectory",
         "scenarios": {"math": "train"},
         "origin": {"scenario": "math", "component": "a", "records": ["r1"]},
         "group": "a:r1",
         "group_id": "g",
+        "trajectory_sets": ["samples:math"],
     }
+    # The trajectory samples of the scenario are one trajectory set; a task sample is in no set.
+    assert [(found.value, found.item_count) for found in scenario.data.sets("acme", "trajectory_set")] == [
+        ("samples:math", 2)
+    ]
     assert scenario.ids(trainer="a") == ["upload", item_id, "math.generated-tasks.x"]
     assert scenario.ids(trainer="b") == ["upload", "math.b:r3:0"]
     assert len(scenario.ids()) == 4

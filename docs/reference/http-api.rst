@@ -74,6 +74,8 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/groups/{key}``                                                                    | the owner's items grouped by a metadata value     |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/data/sets/{kind}``                                                                     | the owner's benchmarks or trajectory sets         |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/{id}``                                                                            | one item, with its content                        |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/metadata``                                                                       | patch the metadata of items                       |
@@ -582,7 +584,9 @@ for the deployment (RFC #1028). An item is content and metadata:
   ``origin.source`` is ``inference`` or ``evaluation``; a record without it is
   ``inference``. ``kind``, ``owner``, ``origin`` and ``evaluation_id`` never
   change. A task can have ``benchmarks``: the names of the benchmarks that
-  it is in (`Benchmarks and collections`_). You can add other keys.
+  it is in (`Benchmarks and collections`_). A trajectory can have
+  ``trajectory_sets``: the names of the trajectory sets that it is in
+  (`The sets that a scenario holds`_). You can add other keys.
 
 Each item belongs to one owner. The routes have the owner in the path:
 ``/reef/namespaces/{owner}/data``. ``scenarios`` maps each scenario that uses
@@ -870,10 +874,11 @@ an artifact item: see `Create a scenario`_.
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&benchmark=&group_key=&group_value=&after=&limit=&content=``
+- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&benchmark=&trajectory_set=&group_key=&group_value=&after=&limit=&content=``
   lists the owner's items in the order they arrived: ``{"owner", "items",
   "next"}``. ``kind`` and ``scenario`` filter the items. ``benchmark`` keeps
-  only the tasks of one benchmark. ``group_key`` keeps
+  only the tasks of one benchmark, and ``trajectory_set`` only the
+  trajectories of one trajectory set. ``group_key`` keeps
   only the items of one group of the groups route below: those with the
   string ``group_value`` under ``group_key`` in their metadata, or with no
   string there when ``group_value`` is not given. ``group_value`` without
@@ -887,8 +892,8 @@ Read, query, update and delete items
   large.
 - ``GET /reef/namespaces/{owner}/data/groups/{key}?kind=&scenario=&before=&limit=``
   groups the owner's items of ``kind`` by the string under ``key`` in their
-  metadata, for example the trajectories of each uploaded file by
-  ``set_id``: ``{"owner", "groups", "next"}``. Each group is ``{"value",
+  metadata, for example the evaluation calls by ``evaluation_id``:
+  ``{"owner", "groups", "next"}``. Each group is ``{"value",
   "item_count", "first_sequence", "last_sequence", "metadata"}``. ``value`` is
   null for the items without a string under ``key``. ``metadata`` is that of
   the group's first item. The groups come newest first, by
@@ -901,6 +906,17 @@ Read, query, update and delete items
   To read the items of one group, query with ``group_key`` and its
   ``value``, and page with ``after`` from its ``first_sequence``. Give the
   same ``scenario`` to that query.
+- ``GET /reef/namespaces/{owner}/data/sets/{kind}?scenario=&before=&limit=``
+  lists the owner's sets of ``kind``, ``benchmark`` or ``trajectory_set``, that
+  have at least one item: ``{"owner", "sets", "next"}``. ``scenario`` lists
+  only the sets with an item that the scenario uses, and counts only those
+  items. Each set is ``{"name",
+  "item_count", "first_sequence", "last_sequence", "metadata"}``.
+  ``metadata`` is that of the set's first item. The sets come newest first, by
+  ``first_sequence``. ``before`` and ``limit`` page them as in the groups
+  route. Reef reads a table of the items' sets, not the items, so a listing
+  takes the same time for sets of ten items and of ten thousand. To read the
+  items of one set, query with ``benchmark`` or ``trajectory_set``.
 - ``GET /reef/namespaces/{owner}/data/{id}`` returns one item with its
   ``content``. A task's ``content`` is null.
 - ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...],
@@ -994,10 +1010,14 @@ tasks, and trajectory sets. It then uses the items of the set. A hold writes
 no item, so it takes the same time for a set of ten items and of ten
 thousand.
 
-A trajectory set is a name for a set of the owner's trajectories. Like a
-benchmark, Reef does not store it: a trajectory is in the set when ``set_id``
-of its metadata is the name. Set it when you upload the trajectories, or with
-a metadata patch. A trajectory is in one set at most.
+A trajectory set is a name for a set of the owner's trajectories, as a
+benchmark is for tasks: a trajectory is in the set when the list
+``trajectory_sets`` of its metadata has the name. Set the list when you
+upload the trajectories, or with a metadata patch:
+``metadata={"trajectory_sets": ["week-12"]}``. It holds distinct non-empty
+strings, so a trajectory can be in several sets. Only a trajectory has it.
+The trajectories that a scenario's trainer makes from its records are in the
+set ``samples:<scenario>``.
 
 .. code:: bash
 
