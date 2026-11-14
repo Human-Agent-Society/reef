@@ -34,6 +34,7 @@ from sqlalchemy import (
     Column,
     ColumnElement,
     Float,
+    Index,
     Integer,
     MetaData,
     PrimaryKeyConstraint,
@@ -107,6 +108,10 @@ class CoordinationTables:
     control_lease: Table
     work_item: Table
     work_log: Table
+
+
+#: The indexes of ``work_item`` that a database of an earlier Reef can lack (``CoordinationDatabase.create``).
+POLL_INDEXES = frozenset({"work_item_by_state", "work_item_by_lease", "work_item_by_scenario"})
 
 
 def coordination_tables(metadata: MetaData) -> CoordinationTables:
@@ -184,6 +189,12 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("created_sequence", BigInteger, nullable=False, index=True),
         Column("changed_sequence", BigInteger, nullable=False, index=True),
         PrimaryKeyConstraint("queue", "item_id"),
+        # Each idle worker looks for a queued item (``take``) and for an expired lease (``requeue_expired``) several
+        # times a second. Without these indexes each look reads every item of the queue, ended ones too.
+        Index("work_item_by_state", "queue", "state", "created_sequence"),
+        Index("work_item_by_lease", "state", "lease_expires_at"),
+        # The items of one scenario of a queue, newest first (``page``), and their counts by state (``counts``).
+        Index("work_item_by_scenario", "queue", "scenario", "created_sequence"),
     )
     work_log = Table(
         "work_log",
@@ -266,6 +277,11 @@ class CoordinationDatabase(CoordinationResource):
 
     def create(self, connection: Connection, metadata: MetaData) -> None:
         metadata.create_all(connection)
+        # ``create_all`` makes the missing tables only: a work_item table that an earlier Reef made gets the indexes
+        # of the polls here.
+        for index in self.tables.work_item.indexes:
+            if index.name in POLL_INDEXES:
+                index.create(connection, checkfirst=True)
         present = set(connection.execute(select(self.tables.sequence.c.id)).scalars())
         for sequence in (WORK_SEQUENCE, SERVED_SEQUENCE):
             if sequence not in present:
