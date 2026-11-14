@@ -166,6 +166,48 @@ def test_private_fields_stay_in_extra_and_tools_take_the_function_schema() -> No
     assert call.reply[0][0]["metrics"] == {"prompt_tokens": 5, "completion_tokens": 3}
 
 
+def test_a_chat_reply_keeps_its_token_ids_and_log_probabilities_in_the_atif_metrics() -> None:
+    entries = [
+        {"token": "Do", "logprob": -0.25, "top_logprobs": []},
+        {"token": "ne", "logprob": -0.5, "top_logprobs": []},
+    ]
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "logprobs": True,
+        "return_token_ids": True,
+        "response": {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Done"},
+                    "finish_reason": "stop",
+                    "logprobs": {"content": entries},
+                    "token_ids": [20, 21],
+                }
+            ],
+            "prompt_token_ids": [10, 11],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 2},
+        },
+    }
+    call = atif_call(payload)
+    assert call is not None
+    assert call.reply[0][0]["metrics"] == {
+        "prompt_tokens": 2,
+        "completion_tokens": 2,
+        "prompt_token_ids": [10, 11],
+        "completion_token_ids": [20, 21],
+        "logprobs": [-0.25, -0.5],
+    }
+    assert canonical_json(provider_payload(call)) == canonical_json(payload)
+    steps = folded_steps([*call.entries, *call.reply])
+    Trajectory.model_validate({"schema_version": "ATIF-v1.7", "agent": {"name": "a", "version": "1"}, "steps": steps})
+
+    entries[1]["logprob"] = None
+    unreadable = atif_call(payload)
+    assert unreadable is not None and "logprobs" not in unreadable.reply[0][0]["metrics"]
+
+
 def test_a_payload_without_a_message_list_has_no_atif_call() -> None:
     assert atif_call({"prompt": "hi"}) is None
     assert atif_call({"input": "a string prompt"}) is None
