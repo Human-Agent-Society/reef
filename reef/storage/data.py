@@ -111,15 +111,18 @@ def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
     return scenarios
 
 
-def check_benchmarks(metadata: Mapping[str, Any]) -> None:
-    """Raise ``ValueError`` unless ``benchmarks``, when ``metadata`` has it, is a list of distinct non-empty strings
-    on a task item: the benchmarks that the task is in (RFC #1312)."""
-    if "benchmarks" in metadata:
-        if metadata["kind"] != "task":
-            raise ValueError("only a task item has metadata.benchmarks")
-        if not isinstance(metadata["benchmarks"], list):
-            raise ValueError("metadata.benchmarks must be a list of distinct non-empty strings")
-        check_names(metadata["benchmarks"], "metadata.benchmarks")
+def check_set_names(metadata: Mapping[str, Any]) -> None:
+    """Raise ``ValueError`` unless each key of ``SET_KEYS`` that ``metadata`` has is on an item of the set's item
+    kind (``HOLD_ITEM_KINDS``) and is a list of distinct non-empty strings: ``benchmarks`` of a task, the benchmarks
+    that it is in (RFC #1312), and ``trajectory_sets`` of a trajectory, the trajectory sets that it is in."""
+    for set_kind, key in SET_KEYS.items():
+        if key not in metadata:
+            continue
+        if metadata["kind"] != HOLD_ITEM_KINDS[set_kind]:
+            raise ValueError(f"only a {HOLD_ITEM_KINDS[set_kind]} item has metadata.{key}")
+        if not isinstance(metadata[key], list):
+            raise ValueError(f"metadata.{key} must be a list of distinct non-empty strings")
+        check_names(metadata[key], f"metadata.{key}")
 
 
 def check_origin(value: object) -> dict[str, str | None]:
@@ -210,7 +213,7 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); a trajectory or a task may have one
     when a trainer's stage made it (``check_stage_origin``). A trajectory that an evaluation's verifier wrote has
     empty ``scenarios``, an ``evaluation_id`` and ``evaluation`` (``check_evaluation_trajectory``), and no origin; no
-    other item but an evaluation call has ``evaluation_id``. A task may have ``benchmarks`` (``check_benchmarks``).
+    other item but an evaluation call has ``evaluation_id``. A task may have ``benchmarks``, and a trajectory ``trajectory_sets`` (``check_set_names``).
     Other keys are kept as they are. Raise ``ValueError``
     for metadata that breaks these rules.
     """
@@ -224,7 +227,7 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     created = copy.deepcopy(dict(metadata))
     created["owner"] = owner
     created["scenarios"] = check_scenarios(metadata.get("scenarios", {}), kind)
-    check_benchmarks(created)
+    check_set_names(created)
     if kind == "record":
         created["origin"] = check_record_origin(metadata.get("origin"))
         evaluation = created["origin"].get("evaluation")
@@ -302,7 +305,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
     The patch may not change a key of ``FIXED_KEYS``, or an ``artifact_id`` that the item has already. The patched ``scenarios`` must be valid for the
     item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
     that scenario's record store keeps the record. An evaluation call stays in no scenario. Only ``DataStore.delete_scenario`` removes that use.
-    The patched ``benchmarks`` must pass ``check_benchmarks``.
+    The patched ``benchmarks`` and ``trajectory_sets`` must pass ``check_set_names``.
     """
     if not isinstance(patch, Mapping):
         raise ValueError("a metadata patch must be an object")
@@ -313,7 +316,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
     if metadata.get("artifact_id") not in (None, patched.get("artifact_id")):
         raise ValueError("metadata.artifact_id is set once and never changes")
     patched["scenarios"] = check_scenarios(patched.get("scenarios", {}), metadata["kind"])
-    check_benchmarks(patched)
+    check_set_names(patched)
     if metadata["kind"] == "record":
         origin = metadata["origin"]["scenario"]
         if origin in metadata["scenarios"] and origin not in patched["scenarios"]:
@@ -385,8 +388,10 @@ class ItemGroup:
     sequence of the group's items, so ``first_sequence <= last_sequence``. ``metadata`` is the metadata of the item at
     ``first_sequence``.
 
-    Purpose: ``DataStore.groups`` returns it. A client lists the sets of items that an owner uploaded, such as the
-    trajectories of one file (``set_id``), without reading each item.
+    The items of one set (``DataStore.sets``) are a group too: ``value`` is then the set's name.
+
+    Purpose: ``DataStore.groups`` and ``DataStore.sets`` return it. A client lists the groups or the sets of an
+    owner's items without reading each item.
     """
 
     value: str | None
@@ -409,19 +414,17 @@ class ItemGroup:
 #: The kinds of sets that a scenario holds, each with the kind of its items: a benchmark is a set of tasks, and a
 #: trajectory set is a set of trajectories.
 HOLD_ITEM_KINDS: Mapping[str, ItemKind] = {"benchmark": "task", "trajectory_set": "trajectory"}
-#: The metadata key of a trajectory item that names its trajectory set.
-TRAJECTORY_SET_KEY = "set_id"
+#: The metadata key of an item that lists the sets of each kind that the item is in (``check_set_names``): the
+#: benchmarks of a task, and the trajectory sets of a trajectory. An item can be in many sets of its kind.
+SET_KEYS: Mapping[str, str] = {"benchmark": "benchmarks", "trajectory_set": "trajectory_sets"}
 
 
 def held_sets(metadata: Mapping[str, Any]) -> tuple[str, tuple[str, ...]] | None:
-    """The sets that an item with ``metadata`` is in, with their kind (a key of ``HOLD_ITEM_KINDS``): the benchmarks
-    of a task (``benchmarks``), or the one trajectory set of a trajectory, when ``TRAJECTORY_SET_KEY`` is a
-    non-empty string. None for an item of another kind."""
-    if metadata["kind"] == "task":
-        return "benchmark", tuple(metadata.get("benchmarks", ()))
-    if metadata["kind"] == "trajectory":
-        name = metadata.get(TRAJECTORY_SET_KEY)
-        return "trajectory_set", (name,) if isinstance(name, str) and name else ()
+    """The sets that an item with ``metadata`` is in, with their kind (a key of ``HOLD_ITEM_KINDS``): the names under
+    the kind's key of ``SET_KEYS``, none when the key is missing. None for an item of a kind that no set has."""
+    for set_kind, item_kind in HOLD_ITEM_KINDS.items():
+        if metadata["kind"] == item_kind:
+            return set_kind, tuple(metadata.get(SET_KEYS[set_kind], ()))
     return None
 
 
@@ -459,7 +462,7 @@ class ScenarioHold:
 
     Values: ``scenario`` and ``name`` are non-empty strings. ``kind`` is ``benchmark`` or ``trajectory_set``
     (``HOLD_ITEM_KINDS``): ``name`` is then a benchmark, the task items of the owner whose ``benchmarks`` metadata
-    has it, or a trajectory set, the trajectory items whose ``TRAJECTORY_SET_KEY`` metadata is it. ``split`` is
+    has it, or a trajectory set, the trajectory items whose ``trajectory_sets`` metadata has it. ``split`` is
     ``train`` or ``eval``, and ``train`` for a trajectory set: a trajectory always trains. A scenario can hold one
     benchmark in both splits, as two holds. ``item_count`` is a
     non-negative int, the number of items of the set when the value was made. The scenario uses each of those items
@@ -536,13 +539,15 @@ class DataStore(Plugin, JobDataReader, ABC):
       It returns the stored items in the order given, without their content; ``inserted`` marks those that this
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
-    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group, benchmark, id_prefix)`` returns the
+    * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group, benchmark, trajectory_set,
+      id_prefix)`` returns the
       items of ``owner`` with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario``
       when those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those
       of ``request_type``; they need ``kind="record"``. ``group``, a pair ``(key, value)``, keeps only the items of
       that group of ``groups``: the items with the string ``value`` under ``key`` in their metadata, or with no
       string there when ``value`` is None. ``benchmark`` keeps only the task items whose ``benchmarks`` metadata has
-      that name. ``id_prefix``, a non-empty string, keeps only the items whose ID starts with it. Without
+      that name, and ``trajectory_set`` only the trajectory items whose ``trajectory_sets`` metadata has it.
+      ``id_prefix``, a non-empty string, keeps only the items whose ID starts with it. Without
       ``content``, each item's ``content`` is None, and the store does not read it.
     * ``count(owner, kind, scenario, origin, request_type, after)`` returns the number of items that ``query``
       with these filters and no limit gives.
@@ -566,6 +571,9 @@ class DataStore(Plugin, JobDataReader, ABC):
     * ``release(owner, scenario, kind, name, split)`` ends the hold in ``split`` and its uses, and returns True, or
       returns False when the scenario does not hold the set in that split.
     * ``holds(owner, scenario)`` returns the holds of ``scenario``, in the order of their kinds and names.
+    * ``sets(owner, kind, before, limit)`` returns the sets of ``kind`` (a key of ``HOLD_ITEM_KINDS``) that have an
+      item of ``owner``, as ``ItemGroup`` with the set's name as ``value``: newest first by ``first_sequence``, only
+      those with ``first_sequence < before`` when ``before`` is given, at most ``limit``.
     * ``holding_scenarios(owner, kind, names)`` returns the scenarios that hold one of the sets ``names`` of
       ``kind``, in name order. A write that changes the items of a set wakes them.
     * ``last_use_sequence(owner, scenario)`` returns the sequence of the newest use by ``scenario``, or 0.
@@ -698,6 +706,7 @@ class DataStore(Plugin, JobDataReader, ABC):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        trajectory_set: str | None = None,
         id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]: ...
 
@@ -813,6 +822,27 @@ class DataStore(Plugin, JobDataReader, ABC):
         newest = sorted(found.values(), key=lambda group: group.first_sequence, reverse=True)
         return tuple(group for group in newest if before is None or group.first_sequence < before)[:limit]
 
+    def sets(
+        self, owner: str, kind: str, *, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[ItemGroup, ...]:
+        """The sets of ``kind`` that have an item of ``owner`` (see the class). The default reads every page of
+        ``query`` of the set's item kind without content; a store can read the sets at once."""
+        check_sets(owner, kind, before, limit)
+        found: dict[str, ItemGroup] = {}
+        after = 0
+        while page := self.query(owner, kind=HOLD_ITEM_KINDS[kind], after=after, content=False):
+            for item in page:
+                for name in (held_sets(item.metadata) or ("", ()))[1]:
+                    group = found.get(name)
+                    found[name] = (
+                        ItemGroup(name, 1, item.sequence, item.sequence, item.metadata)
+                        if group is None
+                        else replace(group, item_count=group.item_count + 1, last_sequence=item.sequence)
+                    )
+            after = page[-1].sequence
+        newest = sorted(found.values(), key=lambda group: group.first_sequence, reverse=True)
+        return tuple(group for group in newest if before is None or group.first_sequence < before)[:limit]
+
     def maintain(self) -> None:
         """Do the store's periodic work: delete the job data directories that no job used for the time to live."""
         self.delete_unused_job_directories(time.time() - self.job_directory_ttl_seconds)
@@ -906,6 +936,23 @@ def check_group_key(key: object) -> None:
         raise ValueError("key must be 1 to 64 letters, digits and underscores")
 
 
+def in_set(metadata: Mapping[str, Any], set_kind: str, name: str) -> bool:
+    """Whether an item with ``metadata`` is in the set ``name`` of ``set_kind`` (``held_sets``)."""
+    found = held_sets(metadata)
+    return found is not None and found[0] == set_kind and name in found[1]
+
+
+def check_sets(owner: str, kind: object, before: object, limit: object) -> None:
+    """Raise ``ValueError`` unless the arguments of ``DataStore.sets`` are valid."""
+    check_owner(owner)
+    if kind not in HOLD_ITEM_KINDS:
+        raise ValueError(f"a set kind is one of {', '.join(HOLD_ITEM_KINDS)}, got {kind!r}")
+    if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 1):
+        raise ValueError("before must be a positive int")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
+        raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
+
+
 def group_value(metadata: Mapping[str, Any], key: str) -> str | None:
     """The value of the group of ``key`` that an item with ``metadata`` is in: its string under ``key``, else None."""
     value = metadata.get(key)
@@ -923,12 +970,15 @@ def check_query(
     request_type: object = None,
     group: object = None,
     benchmark: object = None,
+    trajectory_set: object = None,
     id_prefix: object = None,
 ) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.query`` are valid."""
     check_filters(owner, kind, scenario, origin, request_type, after)
     if benchmark is not None and (not isinstance(benchmark, str) or not benchmark):
         raise ValueError("benchmark must be a non-empty benchmark name")
+    if trajectory_set is not None and (not isinstance(trajectory_set, str) or not trajectory_set):
+        raise ValueError("trajectory_set must be a non-empty trajectory set name")
     if id_prefix is not None and (not isinstance(id_prefix, str) or not id_prefix):
         raise ValueError("id_prefix must be a non-empty string")
     if group is not None:
@@ -1193,6 +1243,7 @@ class MemoryDataStore(DataStore):
         content: bool = True,
         group: tuple[str, str | None] | None = None,
         benchmark: str | None = None,
+        trajectory_set: str | None = None,
         id_prefix: str | None = None,
     ) -> tuple[StoredItem, ...]:
         check_query(
@@ -1205,14 +1256,20 @@ class MemoryDataStore(DataStore):
             request_type=request_type,
             group=group,
             benchmark=benchmark,
+            trajectory_set=trajectory_set,
             id_prefix=id_prefix,
         )
+        wanted_sets = {
+            set_kind: name
+            for set_kind, name in (("benchmark", benchmark), ("trajectory_set", trajectory_set))
+            if name is not None
+        }
         matched = sorted(
             (
                 item
                 for item in self.matching(owner, kind, scenario, origin, request_type, after)
                 if (group is None or group_value(item.metadata, group[0]) == group[1])
-                and (benchmark is None or (item.kind == "task" and benchmark in item.metadata.get("benchmarks", ())))
+                and all(in_set(item.metadata, set_kind, name) for set_kind, name in wanted_sets.items())
                 and (id_prefix is None or item.item_id.startswith(id_prefix))
             ),
             key=lambda item: item.sequence,
