@@ -1,16 +1,19 @@
-"""Claude Code as the AutoEnvScaling author: Reef's pinned Claude Code in a cloud sandbox, signed in with OAuth.
+"""Claude Code as the AutoEnvScaling Designer: Reef's pinned Claude Code in a cloud sandbox, signed in with OAuth.
 
-:class:`ClaudeCodeAuthor` runs Claude Code headless (``claude -p``) on the inputs, rules and workspace that pi
-gets (:class:`~recipes.beta.autoenvscaling.author.AgentAuthor`). Claude Code sends every model call itself, straight
-to Anthropic, with the token in its process environment, so Reef records none of them: the task names its session
-and Claude Code's transcript instead of a model-call record. The agent checks its task with the ``task_check.py``
-command, which reaches a loopback gateway (:class:`CheckGateway`) that runs the checks and answers every model
-route with 404.
+:class:`ClaudeCodeDesigner` runs Claude Code headless (``claude -p``) on the inputs, rules and workspace that pi
+gets (:class:`~recipes.beta.autoenvscaling.designer.AgentDesigner`). Claude Code sends every model call itself,
+straight to Anthropic, with the token in its process environment, so Reef records none of them: the task names its
+session and Claude Code's transcript instead of a model-call record. The agent checks its task with the
+``task_check.py`` command, which reaches a loopback gateway (:class:`CheckGateway`) that runs the checks and answers
+every model route with 404.
 
-The author supplies the token through the existing executor environment. The sandbox launcher includes environment
+The Designer supplies the token through the existing executor environment. The sandbox launcher includes environment
 values in bubblewrap's command arguments. Claude Code removes the token from its Bash, hook and MCP subprocesses
-(``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The author redacts its log and error messages and the retained run files.
+(``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The Designer redacts its log and error messages and the retained run files.
 It refuses a check of a task that holds the token and admits no such task (:class:`CredentialHeldError`).
+
+A run that ends on the model provider's refusal of its content is that proposal's failure (:class:`ModelRefusedError`);
+every other error of Claude Code's but its turn limit is an outage (:class:`DesignerOutageError`).
 """
 
 from __future__ import annotations
@@ -26,28 +29,27 @@ from pathlib import Path, PurePosixPath
 
 from reef_client.client import ReefClient
 
-from recipes.beta.autoenvscaling.author import (
+from recipes.beta.autoenvscaling.check_gateway import CheckGateway
+from recipes.beta.autoenvscaling.designer import (
     AGENT_PROMPT,
-    AGENT_RULES,
     FINISH_SECONDS,
     RECORD_READ_TIMEOUT_SECONDS,
-    REVIEW_TEXT,
     VARIANT_INPUTS_TEXT,
-    VARIANT_PROMPT,
     AgentTools,
-    AuthoredTask,
-    AuthorError,
     CandidateChecks,
+    DesignedTask,
+    DesignerOutageError,
+    ModelRefusedError,
+    RepositorySnapshots,
+    SeedVariantDesigner,
     TaskVariant,
-    VariantAuthor,
+    agent_prompt,
+    agent_rules,
     close_when_stopped,
-    rebuild_rules,
-    repository_snapshot,
     workspace_reply,
     write_inputs,
 )
-from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, CredentialHeldError, clean_run, scrubbed
-from recipes.beta.autoenvscaling.check_gateway import CheckGateway
+from recipes.beta.autoenvscaling.designer_credentials import CredentialChecks, CredentialHeldError, clean_run, scrubbed
 from recipes.beta.autoenvscaling.sources import SessionSource
 from reef.execution.sandbox.environment import execute
 from reef.execution.sandbox.process import (
@@ -60,18 +62,17 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
 from reef.harness.tree.render import render_tree
-from reef.record2sample.generator.designer import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
-#: The author_harness name of this author, and the designer_harness of its tasks.
+#: The designer_harness config value of this Designer, and the designer_harness metadata of its tasks.
 CLAUDE_HARNESS = "claude-code"
 #: The variable Claude Code reads its OAuth token from, in the sandbox.
 TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 #: How every Claude Code OAuth token (``claude setup-token``) starts.
 TOKEN_PREFIX = "sk-ant-oat"
 #: The tools the agent has, all of them allowed: the scrub switch keeps the permission mode at default.
-AUTHOR_TOOLS = "Read,Glob,Grep,Write,Edit,Bash"
+DESIGNER_TOOLS = "Read,Glob,Grep,Write,Edit,Bash"
 CHECK_SCRIPT = Path(__file__).with_name("task_check.py")
 BASH_TIMEOUT_MS = "600000"
 #: The variables a run sets for Claude Code beside its adapter's own (``CLAUDE_CONFIG_DIR`` and the switches that
@@ -83,24 +84,29 @@ RUN_VARIABLES = frozenset(
         "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB",
         "BASH_DEFAULT_TIMEOUT_MS",
         "BASH_MAX_TIMEOUT_MS",
-        "REEF_AUTHOR_URL",
-        "REEF_AUTHOR_DEADLINE_MS",
-        "REEF_AUTHOR_FINISH_SECONDS",
-        "REEF_AUTHOR_CHECK",
+        "REEF_DESIGNER_URL",
+        "REEF_DESIGNER_DEADLINE_MS",
+        "REEF_DESIGNER_FINISH_SECONDS",
+        "REEF_DESIGNER_CHECK",
     }
 )
 #: The most characters of Claude Code's own text that an error message keeps.
 ERROR_TEXT_CHARS = 500
 #: A Claude Code session id names its transcript file.
 SESSION_ID = re.compile(r"[0-9A-Za-z-]+")
+#: The result's ``stop_reason`` when the model provider refused the content of the run's last model call.
+REFUSAL_STOP_REASON = "refusal"
+#: The start of the error text Claude Code gives that refusal, as in "API Error: Opus 4.8's safeguards flagged this
+#: message. ...".
+REFUSAL_TEXT = re.compile(r"API Error: [^\n]*'s safeguards flagged this message")
 # Appended to the agent's rules: task_check is a command here, not a tool.
 CLAUDE_CHECK_TEXT = """
 HOW TO CHECK:
-- task_check is a command: run `python3 "$REEF_AUTHOR_CHECK"` with Bash. It prints the check's result as JSON, then
+- task_check is a command: run `python3 "$REEF_DESIGNER_CHECK"` with Bash. It prints the check's result as JSON, then
   your remaining time.
 - When it prints `state: running`, the check still runs: run the command it prints
-  (`python3 "$REEF_AUTHOR_CHECK" --wait <check_id>`) to wait for that check's result. While a check runs,
-  `python3 "$REEF_AUTHOR_CHECK"` also waits for it and starts no other check.
+  (`python3 "$REEF_DESIGNER_CHECK" --wait <check_id>`) to wait for that check's result. While a check runs,
+  `python3 "$REEF_DESIGNER_CHECK"` also waits for it and starts no other check.
 - When it prints "Finish now", stop with the best task you have in ./task/.
 """
 
@@ -132,6 +138,13 @@ def claude_result(stdout: str) -> dict[str, object] | None:
     return None
 
 
+def is_refusal(result: Mapping[str, object], text: str) -> bool:
+    """Whether Claude Code's error ``result``, whose text is ``text``, ended on the model provider's refusal of the
+    run's content: the stop reason :data:`REFUSAL_STOP_REASON`, or the error text :data:`REFUSAL_TEXT` that Claude
+    Code gives that refusal. A spent plan, a lost sign-in or a failed call is no refusal."""
+    return result.get("stop_reason") == REFUSAL_STOP_REASON or REFUSAL_TEXT.match(text) is not None
+
+
 def transcript_path(work_dir: Path, session_id: str) -> str:
     """The path, relative to ``work_dir``, of Claude Code's transcript of ``session_id``, or of its newest session
     when that one is not there; ``""`` when Claude Code wrote none."""
@@ -142,16 +155,16 @@ def transcript_path(work_dir: Path, session_id: str) -> str:
     return found[-1].relative_to(work_dir).as_posix() if found else ""
 
 
-class ClaudeCodeAuthor(VariantAuthor):
+class ClaudeCodeDesigner(SeedVariantDesigner):
     """Reef's pinned Claude Code in a cloud sandbox, signed in with ``claude_token`` and asking for ``model``.
 
     Values: ``reef_url`` and ``token`` read the source sessions, and ``cache_dir`` keeps the repository snapshots.
     ``claude_token`` is a Claude Code OAuth token (it starts with ``sk-ant-oat``). One run lasts at most
     ``timeout_seconds`` (positive) and at most ``max_turns`` (positive) agent turns, Claude Code's ``--max-turns``.
     With ``has_behaviour_rule`` the rules include the behaviour rule.
-    Purpose: the generator builds one for ``author_harness: claude-code``; :meth:`author` runs Claude Code on one
-    session, and :meth:`vary` on a parent of that session, and each returns its task with no recorded model call
-    and the path of its transcript.
+    Purpose: the generator builds one for ``designer_harness: claude-code``; :meth:`design` runs Claude Code on one
+    session, :meth:`vary` on a parent of that session and :meth:`vary_seed` on a seeded parent, and each returns its
+    task with no recorded model call and the path of its transcript.
     """
 
     def __init__(
@@ -170,18 +183,18 @@ class ClaudeCodeAuthor(VariantAuthor):
         if not claude_token.startswith(TOKEN_PREFIX):
             raise ValueError(f"the Claude Code token must be an OAuth token, which starts with {TOKEN_PREFIX}")
         if not model or timeout_seconds <= 0 or max_turns < 1:
-            raise ValueError("the Claude Code author needs a model, a positive timeout and positive turns")
+            raise ValueError("the Claude Code Designer needs a model, a positive timeout and positive turns")
         self.reef = ReefClient(reef_url, token=token, timeout_s=RECORD_READ_TIMEOUT_SECONDS)
         self.claude_token = claude_token
         self.model = model
         self.executor = executor
-        self.cache_dir = cache_dir
+        self.snapshots = RepositorySnapshots(cache_dir)
         self.timeout_seconds = timeout_seconds
         self.max_turns = max_turns
         self.has_behaviour_rule = has_behaviour_rule
         self.descriptor = get_adapter("claude")
 
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -189,7 +202,7 @@ class ClaudeCodeAuthor(VariantAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         return self.write_task(source, work_dir, checks, tags=tags, stop=stop)
 
     def vary(
@@ -201,29 +214,45 @@ class ClaudeCodeAuthor(VariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         return self.write_task(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+
+    def vary_seed(
+        self,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> DesignedTask:
+        return self.write_task(None, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
     def write_task(
         self,
-        source: SessionSource,
+        source: SessionSource | None,
         work_dir: Path,
         checks: CandidateChecks,
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant | None = None,
-    ) -> AuthoredTask:
-        """Claude Code's task from ``source``, or with ``variant`` a variant of its parent; ``tags`` go unused,
-        since Reef records none of its model calls.
+    ) -> DesignedTask:
+        """Claude Code's task from ``source``, or with ``variant`` a variant of its parent; a ``source`` of None is a
+        variant of a seeded parent, written from the parent alone. ``tags`` go unused, since Reef records none of its
+        model calls.
 
-        Raises :class:`CredentialHeldError` when the task holds the token: the task is not admitted.
+        Raises :class:`CredentialHeldError` when the task holds the token, also after a refused run or an outage, which
+        its message names and which is its cause: the task is not admitted.
         """
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
         write_inputs(self.reef, source, work_dir, variant)
+        failure: ModelRefusedError | DesignerOutageError | None = None
+        transcript = ""
         try:
-            shutil.copytree(repository_snapshot(source, self.cache_dir), inputs / "repo", symlinks=True)
+            if source is not None:
+                shutil.copytree(self.snapshots.snapshot(source), inputs / "repo", symlinks=True)
             tools = AgentTools(work_dir, CredentialChecks(checks, token=self.claude_token))
             gateway = CheckGateway(tools)
             gateway.start()
@@ -233,18 +262,29 @@ class ClaudeCodeAuthor(VariantAuthor):
                     gateway,
                     tools,
                     stop,
-                    extra_rules="" if variant is None else VARIANT_INPUTS_TEXT,
-                    prompt=AGENT_PROMPT if variant is None else VARIANT_PROMPT.format(direction=variant.direction),
+                    extra_rules="" if variant is None or source is None else VARIANT_INPUTS_TEXT,
+                    prompt=agent_prompt(variant, source is None),
+                    is_seeded=source is None,
                 )
+            except (ModelRefusedError, DesignerOutageError) as exc:
+                # A held token ends the generation as a held token, which a refusal or an outage would not report, so
+                # the token check comes first.
+                failure = exc
             finally:
                 gateway.stop()
         finally:
             is_held = clean_run(work_dir, self.claude_token)
         if is_held:
-            raise CredentialHeldError("the agent's task held the run's Claude Code token, so it is not admitted")
+            held = "the agent's task held the run's Claude Code token, so it is not admitted"
+            if failure is None:
+                raise CredentialHeldError(held)
+            # The failure, such as a spent plan or a lost sign-in, can meet the next run too.
+            raise CredentialHeldError(f"{held}; the run also ended with: {failure}") from failure
+        if failure is not None:
+            raise failure
         # The transcript's path names the file as renamed.
         transcript = scrubbed(transcript, self.claude_token)
-        return AuthoredTask(reply=workspace_reply(task_dir), record_ids=(), transcript=transcript)
+        return DesignedTask(reply=workspace_reply(task_dir), record_ids=(), transcript=transcript)
 
     def run(
         self,
@@ -255,25 +295,23 @@ class ClaudeCodeAuthor(VariantAuthor):
         *,
         extra_rules: str = "",
         prompt: str = AGENT_PROMPT,
+        is_seeded: bool = False,
     ) -> str:
         """Claude Code in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set;
-        ``extra_rules`` extends the authoring rules and ``prompt`` states the task to write. Answers the path of its
+        ``extra_rules`` extends the Designer's rules and ``prompt`` states the task to write. With ``is_seeded`` the
+        Designer's rules are the seed rules (:func:`agent_rules`): the inputs hold no session. Answers the path of its
         transcript, relative to ``work_dir``, or ``""``.
 
-        Raises :class:`AuthorError` when the run could not start or was stopped, and when Claude Code ended with an
-        error other than its turn limit: an outage (a spent plan, a lost sign-in) must not pass for the agent's
-        failure. Every message is redacted.
+        Raises :class:`ModelRefusedError` when Claude Code ended on the model provider's refusal of the run's content
+        (:func:`is_refusal`): a run on the same inputs is likely to meet the same refusal. Raises
+        :class:`DesignerOutageError` when the run could not start or was stopped, and when Claude Code ended with any
+        other error but its turn limit: an outage (a spent plan, a lost sign-in) must not pass for the agent's failure.
+        Every message is redacted.
         """
         if stop.is_set():
-            raise AuthorError("the agent's run was stopped before it started")
+            raise DesignerOutageError("the agent's run was stopped before it started")
         executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
-        rules = AGENT_RULES.format(
-            system_prompt=SYSTEM_PROMPT,
-            rules=rebuild_rules(self.has_behaviour_rule),
-            max_checks=tools.checks.max_checks,
-            review=REVIEW_TEXT if tools.checks.is_reviewing else "",
-            variant=extra_rules,
-        )
+        rules = agent_rules(tools.checks, self.has_behaviour_rule, extra_rules, is_seeded)
         # The rules reach Claude Code as the plugin that --plugin-dir loads, as the adapter's run does, and
         # settings.json holds its defaults: no model binding, so no endpoint.
         files = render_tree(HarnessTree({"rules.md": rules + CLAUDE_CHECK_TEXT}), self.descriptor)
@@ -296,10 +334,10 @@ class ClaudeCodeAuthor(VariantAuthor):
                 "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
                 "BASH_DEFAULT_TIMEOUT_MS": BASH_TIMEOUT_MS,
                 "BASH_MAX_TIMEOUT_MS": BASH_TIMEOUT_MS,
-                "REEF_AUTHOR_URL": gateway.base_url,
-                "REEF_AUTHOR_DEADLINE_MS": str(int((time.time() + self.timeout_seconds) * 1000)),
-                "REEF_AUTHOR_FINISH_SECONDS": str(FINISH_SECONDS),
-                "REEF_AUTHOR_CHECK": str(work_dir / "tools" / "task_check.py"),
+                "REEF_DESIGNER_URL": gateway.base_url,
+                "REEF_DESIGNER_DEADLINE_MS": str(int((time.time() + self.timeout_seconds) * 1000)),
+                "REEF_DESIGNER_FINISH_SECONDS": str(FINISH_SECONDS),
+                "REEF_DESIGNER_CHECK": str(work_dir / "tools" / "task_check.py"),
             }
         )
         argv = [
@@ -313,9 +351,9 @@ class ClaudeCodeAuthor(VariantAuthor):
             "--max-turns",
             str(self.max_turns),
             "--tools",
-            AUTHOR_TOOLS,
+            DESIGNER_TOOLS,
             "--allowedTools",
-            AUTHOR_TOOLS,
+            DESIGNER_TOOLS,
             "--disable-slash-commands",
             "--strict-mcp-config",
             "--plugin-dir",
@@ -346,8 +384,8 @@ class ClaudeCodeAuthor(VariantAuthor):
             return transcript_path(work_dir, "")
         except (ProgramLaunchError, SandboxUnavailableError) as exc:
             if stop.is_set():
-                raise AuthorError("the agent's run was stopped") from None
-            raise AuthorError(f"Claude Code could not run: {scrubbed(str(exc), self.claude_token)}") from None
+                raise DesignerOutageError("the agent's run was stopped") from None
+            raise DesignerOutageError(f"Claude Code could not run: {scrubbed(str(exc), self.claude_token)}") from None
         finally:
             finished.set()
             if session is not None:
@@ -361,7 +399,7 @@ class ClaudeCodeAuthor(VariantAuthor):
         result = claude_result(outcome.stdout)
         if result is None:
             tail = scrubbed(outcome.stderr.strip() or outcome.stdout.strip(), self.claude_token)[-ERROR_TEXT_CHARS:]
-            raise AuthorError(f"Claude Code exited {outcome.exit_code} without a result: {tail}")
+            raise DesignerOutageError(f"Claude Code exited {outcome.exit_code} without a result: {tail}")
         # The result holds the agent's own text, so each field logged or raised is redacted.
         subtype = scrubbed(str(result.get("subtype")), self.claude_token)
         errors = result.get("errors")
@@ -384,5 +422,7 @@ class ClaudeCodeAuthor(VariantAuthor):
             or is_api_error
         ):
             cut = scrubbed(text, self.claude_token)[:ERROR_TEXT_CHARS]
-            raise AuthorError(f"Claude Code's run ended with an error ({subtype}): {cut}")
+            if is_refusal(result, text):
+                raise ModelRefusedError(f"the model provider refused Claude Code's run: {cut}")
+            raise DesignerOutageError(f"Claude Code's run ended with an error ({subtype}): {cut}")
         return transcript

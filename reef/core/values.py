@@ -16,6 +16,11 @@ def require_text(value: object, name: str) -> str:
     return value
 
 
+def is_whole_number(value: object) -> bool:
+    """Whether ``value`` is an int and not a bool."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
     """``base`` with ``overlay`` merged in: nested objects merge key by key, every other value of ``overlay`` wins."""
     merged = dict(base)
@@ -25,4 +30,4 @@ def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str,
     return merged
 
 
-__all__ = ["JsonValue", "deep_merge", "require_text"]
+__all__ = ["JsonValue", "deep_merge", "is_whole_number", "require_text"]

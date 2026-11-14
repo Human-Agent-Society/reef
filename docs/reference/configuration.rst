@@ -2146,7 +2146,7 @@ which are not records.
 .. container:: config
 
    ``pipeline.record2sample.config.jobs_per_round`` : 1
-       trained jobs after which the next round starts
+       trained jobs after which the next round starts; 0 starts it when the previous round ends, so generation runs ahead of training until ``refill_tasks`` tasks wait
 
    ``pipeline.record2sample.config.source_records_per_round`` : 0
        recorded sessions that each round gives the generator, at most; 0 generates from the description only
@@ -2155,7 +2155,7 @@ which are not records.
        the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
 
    ``pipeline.record2sample.config.refill_tasks`` : 1
-       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
+       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait. With ``pool_capacity`` above 0, it must stay 1.
 
    ``pipeline.record2sample.config.rounds`` : 0
        rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
@@ -2181,6 +2181,27 @@ which are not records.
    ``pipeline.record2sample.config.generation_deadline_seconds`` : 1800
        seconds that all attempts of one generation may take
 
+   ``pipeline.record2sample.config.validation_concurrency`` : 1
+       candidates that one generation checks at once. After a check that fails to run, no further check starts, and the attempt fails when the running checks end.
+
+   ``pipeline.record2sample.config.pool_capacity`` : 0
+       0 trains each train task once. Above 0, a task trains again after its job ends, and rounds start only while fewer tasks than this are active.
+
+   ``pipeline.record2sample.config.review_interval`` : 0
+       task jobs between two pool reviews; 0 reviews nothing
+
+   ``pipeline.record2sample.config.review_window`` : 2
+       the most recent rewards of a task that a review reads; at least 2
+
+   ``pipeline.record2sample.config.review_band_low`` : 0
+       a review retires a task whose pass rate is below this; between 0 and 1
+
+   ``pipeline.record2sample.config.review_band_high`` : 1
+       a review retires a task whose pass rate is above this; between ``review_band_low`` and 1
+
+   ``pipeline.record2sample.config.review_min_reward_std`` : 0
+       a review retires a task whose rewards have a smaller population standard deviation; 0 turns this rule off
+
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no rollouts; the saved train tasks run later, and their results are kept in the store.
 The task files go in the task file store; see `Choose the task file store
@@ -2200,6 +2221,47 @@ that a generator gets.
 Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's configuration.
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
+
+With ``pipeline.record2sample.config.pool_capacity`` above 0, the train tasks
+form a training pool. When a task's job ends, the task waits for a job again
+after the tasks that wait already, so the tasks train in turn. A new round
+starts only while fewer tasks than ``pool_capacity`` are active, so the pool
+can hold more tasks than the capacity by the train tasks of one generation.
+The ``review_*`` keys need ``pool_capacity`` above 0, and ``refill_tasks``
+must stay 1. Imported train tasks still train once.
+
+After every ``review_interval`` task jobs, a review reads the last
+``review_window`` rewards of each active task. A failed task job counts too.
+The pass rate is the mean of those rewards. A task with fewer rewards stays.
+The review retires a task for one of these reasons, in this order:
+
+- ``below_band``: the pass rate is below ``review_band_low``.
+- ``above_band``: the pass rate is above ``review_band_high``.
+- ``no_reward_spread``: the population standard deviation of the rewards is
+  below ``review_min_reward_std``.
+
+A pass rate on a bound keeps the task. A retired task does not train again,
+except in a job whose tasks the trainer took before the review. The review
+reads the rewards that training recorded, so they can be one pool cycle old.
+The defaults run no review, and each of their rules keeps every task. The
+generator still receives the first rollout of each task only.
+
+The status shows the pool under ``training_pool``: ``capacity``, ``active``,
+``retired``, ``reviews``, and ``last_review_retired``. The task store keeps
+each use of a task with its rewards, each review, and each retired task with
+its reason, so a restart continues the pool in the same order. When a
+deployment sets ``pool_capacity`` on a scenario whose train tasks trained
+once, those tasks join the pool at the start.
+
+Two limits of the training pool:
+
+- When the trainer starts the next job before the stage reads the end of a
+  failed task job, the tasks of the next job also get a use with no rewards,
+  and their rewards in that job are not kept.
+- The tasks of a job that a new training start cancelled return to the pool
+  only when a later job ends. When that job held so many tasks that fewer than
+  ``job_samples`` wait and the pool is full, no job and no round can start,
+  also after a restart. Restart with a larger ``pool_capacity``.
 
 The saved train tasks become task items that the scenario uses,
 ``<scenario>.generated-tasks.<task name>``, and train like every other

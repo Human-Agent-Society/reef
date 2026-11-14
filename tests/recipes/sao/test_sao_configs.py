@@ -146,6 +146,7 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--lr-decay-iters",
         "--lr-decay-style",
         "--lr-warmup-iters",
+        "--min-lr",
         "--moe-aux-loss-coeff",
         "--moe-grouped-gemm",
         "--moe-permute-fusion",
@@ -158,6 +159,7 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--optimizer-cpu-offload",
         "--optimizer-offload-fraction",
         "--overlap-cpu-optimizer-d2h-h2d",
+        "--use-distributed-optimizer",
         "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
         "--padded-vocab-size",
@@ -285,8 +287,10 @@ def _slime_tokens(config: dict) -> tuple[list[str], str, str]:
     recipe_type = recipe_class_for(recipe)
     weight_type = None if recipe_type is None else selected_weight_training(recipe_type, config)
     assert weight_type is not None, f"reef.recipe {recipe!r} must train weights"
+    # As the service does: the recipe's defaults with the deployment's job_parameters over them.
+    default_parameters = weight_type.configured_parameters(config["reef"].get("job_parameters"))
     runtime = SlimeDeployment().component_config(
-        asdict(service_config_from_mapping(config)), default_parameters=weight_type.default_parameters()
+        asdict(service_config_from_mapping(config)), default_parameters=default_parameters
     )
     loss_family = runtime["loss_family"]
     assert runtime["recipe"] == recipe
@@ -412,7 +416,9 @@ def test_user_facing_example_deployments_are_discovered() -> None:
     paths = {_config_id(path) for path in EXAMPLE_DEPLOYMENTS}
     assert paths == {
         "recipes/basic/external-provider.yaml",
-        "recipes/beta/autoenvscaling/examples/tinker/serve.yaml",
+        "recipes/beta/autoenvscaling/examples/recorded_sessions/serve-tinker.yaml",
+        "recipes/beta/autoenvscaling/examples/tmax_seeds/serve-tinker.yaml",
+        "recipes/beta/autoenvscaling/examples/tmax_seeds/serve.yaml",
         "recipes/beta/coral/examples/coral_demo/serve.yaml",
         "recipes/beta/spade/examples/tinker/serve.yaml",
         "recipes/basic/local-sglang.yaml",
@@ -528,6 +534,13 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
     else:
         validate_tokenizers.assert_not_called()
     validate_slime_args(args, spec)
+    with patch.dict(os.environ, _CONFIG_ENV, clear=False):
+        job_parameters = load_deployment(config_path)["reef"].get("job_parameters", {})
+    if "harbor" in job_parameters:
+        from reef.train.slime_backend.harbor_rollouts import check_task_job_options
+
+        # A task job's options pass the check that refuses them at its first submit.
+        check_task_job_options(args)
 
 
 @pytest.mark.unit

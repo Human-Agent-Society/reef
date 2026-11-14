@@ -813,7 +813,7 @@ A generation job runs no rollouts. It:
 1. Asks the generator for tasks with the configured ``description`` and the
    round's source sessions.
 2. Saves the candidates in the scenario's task store, then validates each
-   task with the generator.
+   task with the generator, ``validation_concurrency`` tasks at once.
 3. Publishes each valid task with its train/eval split. It runs no eval
    tasks.
 
@@ -887,7 +887,9 @@ last round is released at once.
 The first round starts when the pipeline first looks for job data. The next
 round starts after ``jobs_per_round`` jobs trained since the previous
 round started, and only while fewer than ``refill_tasks`` stored train tasks
-wait to train, so saved tasks train before more are generated. A task waits
+wait to train, so saved tasks train before more are generated. With
+``jobs_per_round`` 0, the next round starts when the previous one ends, so
+generation runs ahead of training until ``refill_tasks`` tasks wait. A task waits
 until a committed job trains it; a task in a running job does not wait. A
 round that made no train task and a failed task job are followed at once,
 because no job end comes from them. So is a state in which every train task
@@ -896,6 +898,19 @@ limit counts the rounds that finished a generation; a round of replayed
 sessions does not count. A round whose generation ran out of attempts counts
 too, and the next round retries the same sessions and finishes the same
 generation from its saved candidates.
+
+With ``pool_capacity`` above 0, the stage keeps a training pool, and each train
+task trains again until a review retires it. A round is then due while fewer
+train tasks of complete generations than ``pool_capacity`` are active, in place
+of the ``refill_tasks`` rule. When a job's end commits, the stage saves each use
+that the end ends, with its rewards, and runs the review that is due after every
+``review_interval`` jobs. Then it makes the sample of each active task's next
+use, ``generated-tasks/<task name>@<k>`` for use ``k``, which waits after the
+samples that wait already. A review that retires a task ends the scenario's use
+of the task's waiting sample (``TrainerSamples.delete_samples``), so no later
+job takes it; the item stays in the data store with its train counts. See
+`generated tasks <../reference/configuration.rst#generated-tasks>`__ for the
+keys.
 
 The record-to-sample stage keeps its tasks in the task store ``generated-tasks``
 of the scenario session (see `Where the stages live`_). It records each

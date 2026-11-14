@@ -20,6 +20,9 @@ generator's method:
   ``StoredGeneratorState`` is the generator's state in the scenario's task store.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
+- ``pool``: the training pool, with ``pool_capacity``: each use of a train
+  task, the pool reviews, and the tasks that a review retired, kept in the same
+  documents.
 - ``recipe``: the report contract. The deployment names the objective in the
   recipe's ``job_parameters``, as a dotted reference to a method that it provides.
 

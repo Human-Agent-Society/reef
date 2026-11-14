@@ -1,7 +1,7 @@
-"""The task_check command of Claude Code as the AutoEnvScaling author: its task through the oracle and nop check.
+"""The task_check command of Claude Code as the AutoEnvScaling Designer: its task through the oracle and nop check.
 
-Claude Code runs it with its Bash tool as ``python3 "$REEF_AUTHOR_CHECK"``. It needs only the Python standard
-library and holds no credential: the gateway at ``REEF_AUTHOR_URL`` runs the check through Reef's generator service.
+Claude Code runs it with its Bash tool as ``python3 "$REEF_DESIGNER_CHECK"``. It needs only the Python standard
+library and holds no credential: the gateway at ``REEF_DESIGNER_URL`` runs the check through Reef's generator service.
 A check outlasts one Bash call (a build alone may take 20 minutes), so the command starts a check, or finds the one
 that runs, and polls it. It stops waiting before the Bash call's own limit and prints ``state: running``;
 ``--wait CHECK_ID`` then waits for that check again, also after it ended.
@@ -50,7 +50,7 @@ def gateway(url: str, route: str, body: dict[str, object]) -> dict[str, object]:
 
 def main(arguments: list[str], environ: Mapping[str, str]) -> int:
     """Start a check (or, with ``--wait``, take a started one) and print its result once it ends, then the time
-    left until ``REEF_AUTHOR_DEADLINE_MS`` in ``environ``.
+    left until ``REEF_DESIGNER_DEADLINE_MS`` in ``environ``.
 
     Prints ``state: running`` and how to keep waiting when the check outlasts :data:`WAIT_SECONDS` or the run's
     deadline. Answers 0 with a result or a running check, and 1 when the gateway did not answer.
@@ -58,8 +58,8 @@ def main(arguments: list[str], environ: Mapping[str, str]) -> int:
     parser = argparse.ArgumentParser(description="Check ./task: the oracle and nop trials of the task.")
     parser.add_argument("--wait", type=int, metavar="CHECK_ID", help="wait for this check instead of starting one")
     options = parser.parse_args(arguments)
-    url = environ["REEF_AUTHOR_URL"]
-    deadline = float(environ["REEF_AUTHOR_DEADLINE_MS"]) / 1000
+    url = environ["REEF_DESIGNER_URL"]
+    deadline = float(environ["REEF_DESIGNER_DEADLINE_MS"]) / 1000
     started = time.monotonic()
     try:
         if options.wait is None:
@@ -85,10 +85,10 @@ def main(arguments: list[str], environ: Mapping[str, str]) -> int:
             print("The run's time is up: finish with the task as it stands.")
         else:
             print(
-                f'The check still runs. Run `python3 "$REEF_AUTHOR_CHECK" --wait {check_id}` to wait for its result.'
+                f'The check still runs. Run `python3 "$REEF_DESIGNER_CHECK" --wait {check_id}` to wait for its result.'
             )
     print(f"Remaining time: {remaining} seconds.")
-    if remaining <= float(environ["REEF_AUTHOR_FINISH_SECONDS"]):
+    if remaining <= float(environ["REEF_DESIGNER_FINISH_SECONDS"]):
         print(FINISH_TEXT)
     return 0
 
