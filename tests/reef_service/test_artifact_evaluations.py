@@ -677,10 +677,18 @@ def test_an_evaluation_with_a_harbor_agent_starts_without_reading_a_task_file(tm
         async with TestClient(server) as client:
             artifact_id = await created(client, tmp_path, "add", "sort")
             monkeypatch.setattr(DataAccess.of(dispatcher).require_store(), "task_path", refuse)
-            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "task_names": ["sort"]}
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "task_names": ["sort"],
+                "log_probs": True,
+            }
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 202, await response.text()
-            assert (await response.json())["request"]["task_names"] == ["sort"]
+            request = (await response.json())["request"]
+            assert (request["task_names"], request["log_probs"]) == (["sort"], True)
+            [rollout] = dispatcher.queue.items(EVALUATIONS_QUEUE, scenario="s")
+            assert EvaluationRollout.from_item(rollout).log_probs is True
 
     asyncio.run(run())
 

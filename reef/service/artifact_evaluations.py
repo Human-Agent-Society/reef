@@ -943,6 +943,7 @@ class ArtifactEvaluations:
                 request.environment,
                 cast(dict[str, JsonValue], selection),
                 tree,
+                request.log_probs,
             )
             for index, name in enumerate(names)
             for repeat in range(request.rollouts_per_task)

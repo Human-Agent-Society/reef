@@ -1298,6 +1298,24 @@ The body takes these fields:
   (82%), over the limit of 50%``. Each rollout that did not end fails with
   ``stopped: too many rollouts failed``, and the rollouts that wait never
   start (RFC #1287).
+- ``log_probs``: ``true`` to keep the sampled tokens' log probabilities and
+  token IDs in each model call of the evaluation; ``false`` by default. Reef
+  adds the request fields that ask for them to each call that any agent sends,
+  over the agent's own values:
+
+  - ``/v1/chat/completions``: ``logprobs``, ``return_token_ids`` and
+    ``return_prompt_token_ids``, all ``true``.
+  - ``/v1/messages``: ``logprobs`` and ``return_token_ids``, all ``true``
+    (Reef's extension; see `Inference`_).
+  - ``/v1/responses``: ``message.output_text.logprobs`` in ``include``.
+
+  The kept call holds the engine's answer with these fields, and its ATIF
+  trajectory step holds them in ``metrics``. The candidate's engine must accept
+  the fields. Reef's SGLang and vLLM handlers accept all of them. SGLang's and
+  vLLM's OpenAI servers accept the Chat Completions and Responses fields. A
+  provider such as Anthropic's API refuses unknown fields, so do not set
+  ``log_probs`` for an artifact that a provider serves. Each call's body grows
+  with one entry for each sampled token.
 
 The answer is 202 with the stored evaluation, whose ``state`` is ``running``.
 ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}`` returns it as
@@ -2416,7 +2434,21 @@ Log probabilities depend on what answers the request:
   only the sampled token. The SGLang backend returns the engine's alternatives
   in SGLang's own format, in ``choices[0].meta_info.output_top_logprobs``; a
   stream sends them in its last chunk. The vLLM backend returns no
-  alternatives. ``/v1/messages`` returns no log probabilities.
+  alternatives.
+- **Reef's SGLang or vLLM backend on ``/v1/messages``.** Anthropic Messages
+  has no log probabilities. Reef extends it: a buffered request with
+  ``"logprobs": true`` gets the same entries in a top-level ``logprobs``
+  (``{"content": [...]}``) of the message. A streamed message has none.
+
+Token IDs follow the same rule. On ``/v1/chat/completions``, a request to
+Reef's SGLang or vLLM backend with ``"return_token_ids": true`` gets the
+rendered prompt's IDs in ``prompt_token_ids`` and the sampled IDs in
+``choices[0].token_ids``, as vLLM's extension returns them. A stream sends both
+in its last chunk. On ``/v1/messages``, a buffered message gets both at its top
+level, as ``prompt_token_ids`` and ``token_ids``. The record holds the same
+fields. A request without the flag gets no token IDs. When Reef stores a record as ATIF, the reply's step keeps
+the token IDs and the ``logprob`` of each entry in its ``metrics``
+(``prompt_token_ids``, ``completion_token_ids`` and ``logprobs``).
 
 The receipt identifies the stored record:
 
