@@ -512,7 +512,8 @@ class RolloutCalls(CaptureObserver):
 
     Values: ``endpoints`` keeps the calls (``CandidateEndpoints.add_call``). ``rollout`` is the rollout, and
     ``attempt`` the 1-based attempt of its work item. ``next_index`` is the number of calls captured so far, which is
-    the index of the next call.
+    the index of the next call. ``answered`` is the number of those calls that answered 200, from 0 to
+    ``next_index``.
 
     Purpose: ``EvaluationRolloutWorker.score`` gives one to the rollout's runner, and closes it when the rollout ends.
     One writer thread keeps the calls in call order, so the agent does not wait for the store. A call that the store
@@ -524,6 +525,7 @@ class RolloutCalls(CaptureObserver):
         self.rollout = rollout
         self.attempt = attempt
         self.next_index = 0
+        self.answered = 0
         self.lock = threading.Lock()
         self.writer = ThreadPoolExecutor(max_workers=1, thread_name_prefix="reef-evaluation-calls")
 
@@ -531,6 +533,7 @@ class RolloutCalls(CaptureObserver):
         with self.lock:
             index = self.next_index
             self.next_index += 1
+            self.answered += turn.status == 200
             self.writer.submit(self.keep, evaluation_call(turn, self.rollout, self.attempt, index))
 
     def keep(self, call: EvaluationCall) -> None:
@@ -663,6 +666,9 @@ class EvaluationRolloutWorker(QueueWorker):
                 concurrency=1,
                 lab=self.lab,
                 capture_observer=calls,
+                # ``calls`` keeps each call as it lands, so the runner keeps no call body: an agent's request holds
+                # the whole conversation so far, and a long rollout's bodies reached hundreds of MiB.
+                keeps_turns=False,
             )
             request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
@@ -685,7 +691,7 @@ class EvaluationRolloutWorker(QueueWorker):
                     result.error,
                 ),
             )
-            if not result.turns:
+            if not calls.answered:
                 # A verifier can write a reward with no call, so that reward says nothing of the candidate's model. A
                 # trial whose sandbox did not start makes no call either, so the attempt fails with the reason, and
                 # the rollout is retried as any other failed attempt.
