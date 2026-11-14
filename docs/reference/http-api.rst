@@ -2418,6 +2418,15 @@ Log probabilities depend on what answers the request:
   stream sends them in its last chunk. The vLLM backend returns no
   alternatives. ``/v1/messages`` returns no log probabilities.
 
+Token IDs follow the same rule. On ``/v1/chat/completions``, a request to
+Reef's SGLang or vLLM backend with ``"return_token_ids": true`` gets the
+rendered prompt's IDs in ``prompt_token_ids`` and the sampled IDs in
+``choices[0].token_ids``, as vLLM's extension returns them. A stream sends both
+in its last chunk. The record holds the same fields. A request without the flag
+gets no token IDs. When Reef stores a record as ATIF, the reply's step keeps
+the token IDs and the ``logprob`` of each entry in its ``metrics``
+(``prompt_token_ids``, ``completion_token_ids`` and ``logprobs``).
+
 The receipt identifies the stored record:
 
 +---------------+-----------------------------------------------------------+

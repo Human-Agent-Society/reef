@@ -892,7 +892,8 @@ and call the engine's native generate route.
 streaming request with the completed turn as one burst of protocol frames.
 The answer is the provider response without training tensors. The handler
 returns token log probabilities only to a client that sends the OpenAI
-``logprobs: true``. Training renders each recorded call itself (see
+``logprobs: true``, and token IDs only to a client that sends vLLM's
+``return_token_ids: true``. Training renders each recorded call itself (see
 `Chat template arguments`_).
 
 Both handlers accept ``tool_call_parser`` (the engine's parser name),
