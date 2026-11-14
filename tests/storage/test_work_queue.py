@@ -5,6 +5,7 @@ from contextlib import closing
 from dataclasses import dataclass
 
 import pytest
+import sqlalchemy
 from tests.support.polling import wait_until
 
 from reef.core.errors import RuntimeConfigError
@@ -22,6 +23,7 @@ from reef.storage.served_models import (
     ServedModelsWriter,
 )
 from reef.storage.sql_coordination import (
+    POLL_INDEXES,
     PostgresCoordinationDatabase,
     SQLControlLease,
     SQLiteCoordinationDatabase,
@@ -61,6 +63,32 @@ def open_coordination(request, tmp_path):
     for database in databases:
         with closing(database):
             pass
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_a_work_queue_that_an_earlier_reef_made_gets_the_indexes_of_its_polls(backend, request, tmp_path):
+    def opened():
+        if backend == "postgres":
+            url, schema = request.getfixturevalue("postgres_config")
+            return PostgresCoordinationDatabase(url, schema=schema)
+        return SQLiteCoordinationDatabase(tmp_path / "c")
+
+    def index_names(database) -> set[str]:
+        with database.connection() as connection:
+            schema = database.tables.work_item.schema
+            return {index["name"] for index in sqlalchemy.inspect(connection).get_indexes("work_item", schema=schema)}
+
+    with closing(opened()) as database:
+        SQLWorkQueue(database).append(job("j1"))
+        # The tables of an earlier Reef: the same work_item, without the indexes of the polls.
+        prefix = "" if database.tables.work_item.schema is None else f"{database.tables.work_item.schema}."
+        with database.connection(write=True) as connection:
+            for name in POLL_INDEXES:
+                connection.exec_driver_sql(f"DROP INDEX {prefix}{name}")
+        assert not POLL_INDEXES & index_names(database)
+    with closing(opened()) as database:
+        assert index_names(database) >= POLL_INDEXES
+        assert SQLWorkQueue(database).take("jobs", "w1", ["training_job:tinker"]).id == "j1"
 
 
 def job(
