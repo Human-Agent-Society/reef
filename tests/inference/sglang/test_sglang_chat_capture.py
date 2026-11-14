@@ -4,6 +4,7 @@ import asyncio
 import json
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import ANY
 
 import pytest
 from aiohttp import ClientPayloadError, web
@@ -521,7 +522,11 @@ def test_chat_facade_parses_tool_calls(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_anthropic_facade_normalizes_messages_and_returns_no_training_block(tmp_path) -> None:
+@pytest.mark.parametrize("asks_for_tokens", [False, True])
+def test_anthropic_facade_normalizes_messages_and_returns_no_training_block(tmp_path, asks_for_tokens) -> None:
+    """Reef's extension of Anthropic Messages: ``logprobs`` and ``return_token_ids`` add the sampled tokens' log
+    probabilities and token IDs at the top level of the message."""
+
     async def run() -> None:
         async def generate(request):
             native = await request.json()
@@ -575,11 +580,23 @@ def test_anthropic_facade_normalizes_messages_and_returns_no_training_block(tmp_
                     "max_tokens": 2,
                     "temperature": 0.4,
                     "stop_sequences": ["DONE"],
+                    **({"logprobs": True, "return_token_ids": True} if asks_for_tokens else {}),
                 },
             )
         finally:
             await server.close()
 
+        tokens = {
+            "logprobs": {
+                "content": [
+                    {"token": "<20>", "bytes": list(b"<20>"), "logprob": -0.2, "top_logprobs": [ANY]},
+                    {"token": "<21>", "bytes": list(b"<21>"), "logprob": -0.4, "top_logprobs": [ANY]},
+                ]
+            },
+            "token_ids": [20, 21],
+            "prompt_token_ids": [10, 11],
+        }
+        assert {key: response[key] for key in tokens if key in response} == (tokens if asks_for_tokens else {})
         canonical_messages = [
             {"role": "system", "content": "Be concise."},
             {"role": "user", "content": "Hello\nthere"},

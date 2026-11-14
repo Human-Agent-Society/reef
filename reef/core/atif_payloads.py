@@ -547,11 +547,14 @@ def reply_skeleton(messages: list[Any], provider: str) -> dict[str, Any]:
 def response_metrics(response: Mapping[str, Any]) -> dict[str, Any] | None:
     """The ATIF metrics of a response, or ``None`` when it has none.
 
-    ``usage`` gives the prompt, completion and cached token counts. A chat completion also gives
-    ``prompt_token_ids`` from its top-level ``prompt_token_ids``, ``completion_token_ids`` from its first choice's
-    ``token_ids`` (vLLM's ``return_token_ids``), and ``logprobs`` from the ``logprob`` of each entry of that
-    choice's ``logprobs.content``. A field whose value is not a list of integers, or of numbers for ``logprobs``,
-    is left out.
+    ``usage`` gives the prompt, completion and cached token counts. The other fields come from where each protocol
+    keeps the sampled tokens. ``prompt_token_ids`` is the top-level ``prompt_token_ids`` (vLLM, Reef) or that of the
+    first choice (SGLang). ``completion_token_ids`` is the first choice's ``token_ids`` (vLLM, Reef) or
+    ``response_token_ids`` (SGLang), or the top-level ``token_ids`` of an Anthropic message (Reef's extension).
+    ``logprobs`` is the ``logprob`` of each entry of the first choice's ``logprobs.content``, of an Anthropic
+    message's top-level ``logprobs.content``, or of the ``logprobs`` of each ``output_text`` part of an OpenAI
+    response, in order. A field whose value is not a non-empty list of integers, or of numbers for ``logprobs``, is
+    left out.
     """
 
     def _integer(value: object) -> bool:
@@ -570,14 +573,29 @@ def response_metrics(response: Mapping[str, Any]) -> dict[str, Any] | None:
         metrics.update((key, value) for key, value in counts.items() if _integer(value))
     choices = response.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else {}
-    for key, token_ids in (
-        ("prompt_token_ids", response.get("prompt_token_ids")),
-        ("completion_token_ids", choice.get("token_ids")),
-    ):
+    sources = {
+        "prompt_token_ids": (response.get("prompt_token_ids"), choice.get("prompt_token_ids")),
+        "completion_token_ids": (choice.get("token_ids"), choice.get("response_token_ids"), response.get("token_ids")),
+    }
+    for key, candidates in sources.items():
+        token_ids = next((value for value in candidates if value is not None), None)
         if isinstance(token_ids, list) and token_ids and all(_integer(token_id) for token_id in token_ids):
             metrics[key] = list(token_ids)
-    logprobs = choice.get("logprobs")
-    entries = logprobs.get("content") if isinstance(logprobs, Mapping) else None
+    logprobs = choice.get("logprobs", response.get("logprobs"))
+    if isinstance(logprobs, Mapping):
+        entries = logprobs.get("content")
+    else:
+        output = response.get("output")
+        entries = [
+            entry
+            for item in (output if isinstance(output, list) else ())
+            if isinstance(item, Mapping) and isinstance(item.get("content"), list)
+            for part in item["content"]
+            if isinstance(part, Mapping)
+            and part.get("type") == "output_text"
+            and isinstance(part.get("logprobs"), list)
+            for entry in part["logprobs"]
+        ]
     values = [entry.get("logprob") if isinstance(entry, Mapping) else None for entry in entries or ()]
     log_probs = [float(value) for value in values if isinstance(value, int | float) and not isinstance(value, bool)]
     if log_probs and len(log_probs) == len(values):
