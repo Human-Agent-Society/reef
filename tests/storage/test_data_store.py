@@ -44,7 +44,7 @@ from reef.storage.record_items import (
     record_item,
     stored_evaluation_call,
 )
-from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
+from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore, prefix_upper_bound
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.task_collections import TaskCollection, collection_benchmarks
 from reef.storage.tasks import LocalTaskFileStore, files_digest
@@ -464,6 +464,22 @@ def test_a_query_keeps_the_items_whose_id_starts_with_a_prefix(store):
     # A SQL pattern gives _ and % a meaning: the prefix matches them as characters only.
     assert [item.item_id for item in store.query("acme", id_prefix="e1_")] == ["e1_1:1:0"]
     assert [item.item_id for item in store.query("acme", id_prefix="e1%")] == ["e1%1:1:0"]
+
+
+def test_a_prefix_query_keeps_the_ids_at_the_edges_of_its_range(store):
+    # The query is the range from the prefix to prefix_upper_bound: "e1;" is the upper bound of "e1:", and an ID
+    # with a character after "e1:" that is larger than any ASCII character is still in the range.
+    item_ids = ("e1", "e1:", "e1:\U0010ffff", "e1;", "e1:\u00e9", "E1:0", "e10")
+    store.create("acme", [trajectory(item_id) for item_id in item_ids])
+    assert [item.item_id for item in store.query("acme", id_prefix="e1:")] == ["e1:", "e1:\U0010ffff", "e1:\u00e9"]
+
+
+@pytest.mark.parametrize(
+    ("prefix", "bound"),
+    [("e1:", "e1;"), ("a\ud7ff", "a\ue000"), ("a\U0010ffff\U0010ffff", "b"), ("\U0010ffff", None), ("", None)],
+)
+def test_the_upper_bound_of_a_prefix_is_the_next_string_after_its_strings(prefix, bound):
+    assert prefix_upper_bound(prefix) == bound
 
 
 def calls(*turns: int) -> list[NewItem]:
@@ -1268,8 +1284,10 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
         schema = store.uses_table.schema
         prefix = "" if schema is None else f"{schema}."
         with store.transaction() as connection:
-            # A database of version 1: the uses are in data_item_scenario, and no table records the version.
+            # A database of version 1: the uses are in data_item_scenario, no table records the version, and
+            # PostgreSQL has no index of the IDs in the "C" collation.
             connection.exec_driver_sql(f"DROP TABLE {prefix}data_schema_version")
+            connection.exec_driver_sql(f"DROP INDEX IF EXISTS {prefix}data_item_by_item_id")
             connection.exec_driver_sql(
                 f"CREATE TABLE {prefix}data_item_scenario (sequence INTEGER PRIMARY KEY, owner TEXT, item_id TEXT,"
                 " scenario TEXT, split VARCHAR(8))"
@@ -1279,14 +1297,18 @@ def test_a_store_upgrades_the_tables_of_the_version_before_holds(open_durable_st
                 " (7, 'acme', 't3', 'coding', 'train'), (9, 'acme', 't1', 'coding', 'train')"
             )
     for _ in range(2):
-        # The second open finds version 2 and changes nothing.
+        # The second open finds version 3 and changes nothing.
         with closing(open_durable_store()) as store:
             assert uses_of(store, "coding", kind="trajectory") == [("t3", "train", None), ("t1", "train", None)]
+            assert [item.item_id for item in store.query("acme", id_prefix="t")] == ["t1", "t2", "t3"]
             with store.transaction(read_only=True) as connection:
-                assert not sqlalchemy.inspect(connection).has_table("data_item_scenario", schema=schema)
+                tables = sqlalchemy.inspect(connection)
+                assert not tables.has_table("data_item_scenario", schema=schema)
+                indexes = {index["name"] for index in tables.get_indexes("data_item", schema=schema)}
+                assert ("data_item_by_item_id" in indexes) == (connection.dialect.name == "postgresql")
                 versions = connection.exec_driver_sql(f"SELECT version FROM {prefix}data_schema_version")
-                assert versions.fetchall() == [(2,)]
+                assert versions.fetchall() == [(3,)]
     with closing(open_durable_store()) as store, store.transaction() as connection:
-        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 3")
+        connection.exec_driver_sql(f"UPDATE {prefix}data_schema_version SET version = 4")
     with pytest.raises(ReefError, match="a later Reef wrote them"):
         open_durable_store()
