@@ -79,7 +79,7 @@ from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.record_items import evaluation_call_item
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, files_digest
-from reef.storage.work_queue import WorkItem
+from reef.storage.work_queue import NewWork, WorkItem
 
 TOKEN = "artifact-evaluation-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -1539,6 +1539,42 @@ def test_a_request_that_the_scenario_cannot_run_is_refused_before_any_rollout(tm
 
 
 @pytest.mark.unit
+def test_a_rollout_settles_its_evaluation_when_its_state_changes_and_not_for_a_lease_or_progress(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue, results = dispatcher.queue, ArtifactEvaluations(dispatcher).results
+    settled: list[str] = []
+    monkeypatch.setattr(results, "settle", lambda scenario, evaluation_id: settled.append(evaluation_id))
+
+    def settles(count: int) -> None:
+        deadline = time.monotonic() + 10
+        while len(settled) < count and time.monotonic() < deadline:
+            time.sleep(0.02)
+        # Three polls of the results thread, so that a settle too many would show.
+        time.sleep(0.6)
+        assert len(settled) == count, settled
+
+    item_id = "evaluation_rollout:e1:00000:00000"
+    queue.append(NewWork(EVALUATIONS_QUEUE, item_id, "s", EVALUATION_ROLLOUT_KIND, {"evaluation_id": "e1"}))
+    results.open()
+    try:
+        settles(1)
+        assert queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND]).id == item_id
+        settles(2)
+        queue.extend_lease(EVALUATIONS_QUEUE, item_id, "w")
+        queue.append_progress(EVALUATIONS_QUEUE, item_id, "w", {"step": 1}, number=0)
+        settles(2)
+        queue.start(EVALUATIONS_QUEUE, item_id, "w")
+        settles(3)
+        queue.finish(EVALUATIONS_QUEUE, item_id, "w", {"score": RolloutScore(1.0).to_json()})
+        settles(4)
+        assert set(settled) == {"e1"}
+    finally:
+        results.close()
+        dispatcher.close()
+
+
 def test_a_changed_rollout_of_a_deleted_scenario_is_no_failure(tmp_path: Path, caplog) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     try:

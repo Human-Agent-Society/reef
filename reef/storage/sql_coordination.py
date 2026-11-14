@@ -73,7 +73,7 @@ from reef.storage.served_models import (
     serving_serial_key,
     without_redeploy,
 )
-from reef.storage.sql_setup import enable_wal, postgres_url, validate_postgres_schema
+from reef.storage.sql_setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
 from reef.storage.work_queue import (
     FINAL_STATES,
     HELD_STATES,
@@ -111,11 +111,12 @@ class CoordinationTables:
 
 
 #: The indexes of ``work_item`` that a database of an earlier Reef can lack (``CoordinationDatabase.create``).
-POLL_INDEXES = frozenset({"work_item_by_state", "work_item_by_lease", "work_item_by_scenario"})
+ADDED_INDEXES = frozenset({"work_item_by_state", "work_item_by_lease", "work_item_by_scenario", "work_item_by_id"})
 
 
-def coordination_tables(metadata: MetaData) -> CoordinationTables:
-    """Define the coordination tables in ``metadata``. Times are seconds since the epoch; JSON is text."""
+def coordination_tables(metadata: MetaData, *, sqlite: bool) -> CoordinationTables:
+    """Define the coordination tables in ``metadata``, for SQLite when ``sqlite``, else for PostgreSQL. Times are
+    seconds since the epoch; JSON is text."""
     sequence = Table(
         "coordination_sequence",
         metadata,
@@ -196,6 +197,10 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         # The items of one scenario of a queue, newest first (``page``), and their counts by state (``counts``).
         Index("work_item_by_scenario", "queue", "scenario", "created_sequence"),
     )
+    if not sqlite:
+        # The items of an ID prefix are a range of IDs in code point order (``WorkQueue.items``). The primary key has
+        # the database's collation, whose order is another one; SQLite's is that order already.
+        Index("work_item_by_id", work_item.c.queue, work_item.c.item_id.collate("C"))
     work_log = Table(
         "work_log",
         metadata,
@@ -277,15 +282,20 @@ class CoordinationDatabase(CoordinationResource):
 
     def create(self, connection: Connection, metadata: MetaData) -> None:
         metadata.create_all(connection)
-        # ``create_all`` makes the missing tables only: a work_item table that an earlier Reef made gets the indexes
-        # of the polls here.
+        # ``create_all`` makes the missing tables only: a work_item table that an earlier Reef made gets the later
+        # indexes here.
         for index in self.tables.work_item.indexes:
-            if index.name in POLL_INDEXES:
+            if index.name in ADDED_INDEXES:
                 index.create(connection, checkfirst=True)
         present = set(connection.execute(select(self.tables.sequence.c.id)).scalars())
         for sequence in (WORK_SEQUENCE, SERVED_SEQUENCE):
             if sequence not in present:
                 connection.execute(insert(self.tables.sequence).values(id=sequence, value=0))
+
+    @abstractmethod
+    def code_point_order(self, column: ColumnElement[str]) -> ColumnElement[str]:
+        """``column`` in code point order, the order of the indexes that find a range of its values
+        (``prefix_range``)."""
 
     @abstractmethod
     def close(self) -> None:
@@ -318,7 +328,7 @@ class SQLiteCoordinationDatabase(CoordinationDatabase):
 
     def __init__(self, directory: Path | None) -> None:
         metadata = MetaData()
-        super().__init__(coordination_tables(metadata))
+        super().__init__(coordination_tables(metadata, sqlite=True))
         if directory is None:
             database = ":memory:"
         else:
@@ -361,6 +371,9 @@ class SQLiteCoordinationDatabase(CoordinationDatabase):
                     self.open.exec_driver_sql("BEGIN IMMEDIATE")
                 yield self.open
 
+    def code_point_order(self, column: ColumnElement[str]) -> ColumnElement[str]:
+        return column
+
     def close(self) -> None:
         with self.lock:
             if self.open is not None:
@@ -375,7 +388,7 @@ class PostgresCoordinationDatabase(CoordinationDatabase):
     def __init__(self, database_url: str, *, schema: str = "reef_coordination") -> None:
         validate_postgres_schema(schema)
         metadata = MetaData(schema=schema)
-        super().__init__(coordination_tables(metadata))
+        super().__init__(coordination_tables(metadata, sqlite=False))
         try:
             self.engine: Engine | None = create_engine(
                 postgres_url(database_url), pool_pre_ping=True, hide_parameters=True
@@ -405,6 +418,9 @@ class PostgresCoordinationDatabase(CoordinationDatabase):
             raise ReefError("the coordination database is closed")
         with self.engine.begin() as connection:
             yield connection
+
+    def code_point_order(self, column: ColumnElement[str]) -> ColumnElement[str]:
+        return column.collate("C")
 
     def close(self) -> None:
         if self.engine is not None:
@@ -1353,12 +1369,18 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
-    def items(self, queue: str, *, scenario: str | None = None, kind: str | None = None) -> tuple[WorkItem, ...]:
+    def items(
+        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+    ) -> tuple[WorkItem, ...]:
         conditions = [self.table.c.queue == queue]
         if scenario is not None:
             conditions.append(self.table.c.scenario == scenario)
         if kind is not None:
             conditions.append(self.table.c.kind == kind)
+        if id_prefix is not None:
+            if not isinstance(id_prefix, str) or not id_prefix:
+                raise ValueError("id_prefix must be a non-empty string")
+            conditions.append(prefix_range(self.database.code_point_order(self.table.c.item_id), id_prefix))
         query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
