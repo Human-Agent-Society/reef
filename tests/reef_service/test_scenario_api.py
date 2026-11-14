@@ -449,6 +449,8 @@ def test_a_selection_between_its_read_and_its_write_when_the_mark_lands_stores_n
     # No training service runs: the sweep stops waiting for its archive soon, and the test answers it below.
     dispatcher.sweeper.deletions.answer_seconds = 2.0
     sweeping: list[threading.Thread] = []
+    # The test joins the sweep only after it started: the list holds the thread before its start.
+    sweep_started = threading.Event()
     original = TrainingPipeline.write_record_samples
 
     def marked_then_written(pipeline, group, record_ids, samples):
@@ -457,6 +459,7 @@ def test_a_selection_between_its_read_and_its_write_when_the_mark_lands_stores_n
             dispatcher.registry.archive_registration("math")
             sweeping.append(threading.Thread(target=dispatcher.sweeper.sweep))
             sweeping[0].start()
+            sweep_started.set()
             # The sweep holds the cleanup item and waits for the selections, the delete selection among them.
             assert became_true(
                 lambda: any(
@@ -474,7 +477,7 @@ def test_a_selection_between_its_read_and_its_write_when_the_mark_lands_stores_n
         root = current.serving_artifact_id()
         dispatcher.accept_record(token_inference("i1", artifact_id=root))
         dispatcher.accept_record(report("r1", "i1"))
-        assert became_true(lambda: bool(sweeping))
+        assert sweep_started.wait(30)
         sweeping[0].join(30)
         assert not sweeping[0].is_alive()
         assert dispatcher.data_store.query("math", kind="trajectory") == ()
