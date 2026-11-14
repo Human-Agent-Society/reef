@@ -44,8 +44,9 @@ from reef.storage.record_items import (
     record_item,
     stored_evaluation_call,
 )
-from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore, prefix_upper_bound
+from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
+from reef.storage.sql_setup import prefix_upper_bound
 from reef.storage.task_collections import TaskCollection, collection_benchmarks
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 

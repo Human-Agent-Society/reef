@@ -189,6 +189,12 @@ def rollout_waits(item: WorkItem) -> bool:
     return item.final and item.metadata.get(RETRY_WAIT_METADATA) is True
 
 
+def settled_state(item: WorkItem) -> tuple[str, int, bool]:
+    """The parts of the rollout item ``item`` that ``settle`` reads: its state, its attempt count and whether it waits
+    for a retry (``rollout_waits``). A result or an error comes with a new state."""
+    return item.state, item.attempt_count, rollout_waits(item)
+
+
 def rollout_ended(item: WorkItem) -> bool:
     """Whether ``item`` is a final rollout that does not wait for a retry (``rollout_waits``)."""
     return item.final and not rollout_waits(item)
@@ -446,24 +452,20 @@ class EvaluationResults:
             self.thread = None
 
     def rollouts(self, evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
-        """The rollout items of one evaluation, in task and repeat order."""
+        """The rollout items of one evaluation, in task and repeat order. The queue reads only the items of this
+        evaluation: their IDs start with one prefix."""
         prefix = rollout_item_id(evaluation_id, 0, 0).rsplit(":", 2)[0] + ":"
-        return tuple(
-            sorted(
-                (
-                    item
-                    for item in self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=EVALUATION_ROLLOUT_KIND)
-                    if item.id.startswith(prefix)
-                ),
-                key=lambda item: item.id,
-            )
-        )
+        found = self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=EVALUATION_ROLLOUT_KIND, id_prefix=prefix)
+        return tuple(sorted(found, key=lambda item: item.id))
 
     def read_results(self) -> None:
         """Fail the evaluations whose rollouts the queue lost (``fail_stopped``), then end each evaluation whose
         rollouts are all final, until ``close``."""
         self.fail_stopped()
         sequence = 0
+        # The state of each rollout that its evaluation was settled with (``settled_state``). A change that leaves it,
+        # such as a lease extension or a progress line, settles nothing: a settle would find what the last one found.
+        settled: dict[str, tuple[str, int, bool]] = {}
         while not self.stopped.is_set():
             try:
                 changes = self.queue.read_changes(EVALUATIONS_QUEUE, sequence)
@@ -473,26 +475,34 @@ class EvaluationResults:
                 self.stopped.wait(RESULT_POLL_SECONDS)
                 continue
             touched: dict[str, str] = {}
+            states: dict[str, dict[str, tuple[str, int, bool]]] = {}
             for item in changes:
                 sequence = item.changed_sequence
-                if item.kind == EVALUATION_ROLLOUT_KIND:
+                if item.kind == EVALUATION_ROLLOUT_KIND and settled.get(item.id) != settled_state(item):
                     # The payload names the evaluation; ``EvaluationRollout`` wrote it (``to_payload``).
-                    touched[str(item.payload["evaluation_id"])] = item.scenario
+                    evaluation_id = str(item.payload["evaluation_id"])
+                    touched[evaluation_id] = item.scenario
+                    states.setdefault(evaluation_id, {})[item.id] = settled_state(item)
             for evaluation_id, scenario in touched.items():
-                self.settle_changed(scenario, evaluation_id)
+                # A failed settle keeps the earlier states, so the next change of a rollout settles again.
+                if self.settle_changed(scenario, evaluation_id):
+                    settled.update(states[evaluation_id])
             if not changes:
                 self.stopped.wait(RESULT_POLL_SECONDS)
 
-    def settle_changed(self, scenario: str, evaluation_id: str) -> None:
+    def settle_changed(self, scenario: str, evaluation_id: str) -> bool:
         """Settle the evaluation ``evaluation_id`` of ``scenario``, whose rollout items changed (``settle``), and log
-        a failure. The queue keeps the rollout items of a deleted scenario until their retention ends, and the
-        evaluation went with the scenario, so an unknown scenario is no failure."""
+        a failure; return whether the settle ended without one. The queue keeps the rollout items of a deleted
+        scenario until their retention ends, and the evaluation went with the scenario, so an unknown scenario is no
+        failure."""
         try:
             self.settle(scenario, evaluation_id)
         except ScenarioNotFoundError:
             logger.debug("evaluation %s: its scenario %s no longer exists", evaluation_id, scenario)
         except Exception:
             logger.exception("could not end evaluation %s of %s", evaluation_id, scenario)
+            return False
+        return True
 
     def settle(self, scenario: str, evaluation_id: str) -> None:
         """Start the evaluation once a worker took one of its rollouts; stop it when too many of its ended rollouts
@@ -1284,13 +1294,13 @@ class ArtifactEvaluations:
 
     def status_json(self, scenario: str, evaluations: Sequence[StoredEvaluation]) -> list[dict[str, object]]:
         """Each of ``evaluations`` as the status routes answer it: ``StoredEvaluation.to_json`` and its
-        ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the queue
-        once for all of them."""
-        rollouts: dict[str, list[WorkItem]] = {}
-        if evaluations:
-            for item in self.queue.items(EVALUATIONS_QUEUE, scenario=scenario, kind=EVALUATION_ROLLOUT_KIND):
-                # The payload names the evaluation; ``EvaluationRollout`` wrote it (``to_payload``).
-                rollouts.setdefault(str(item.payload["evaluation_id"]), []).append(item)
+        ``progress`` (``evaluation_progress``), null when the queue holds none of its rollouts. It reads the rollouts
+        of these evaluations only, not those of the scenario's other evaluations."""
+        rollouts = {
+            stored.evaluation_id: found
+            for stored in evaluations
+            if (found := self.results.rollouts(stored.evaluation_id, scenario))
+        }
         now = time.time()
         return [
             {

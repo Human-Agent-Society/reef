@@ -118,7 +118,7 @@ from reef.storage.sql_records import (
     row_line,
     trajectory_node_table,
 )
-from reef.storage.sql_setup import enable_wal, postgres_url, validate_postgres_schema
+from reef.storage.sql_setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
 from reef.storage.task_collections import TaskCollection
 from reef.storage.tasks import TaskFileStore
 
@@ -153,34 +153,15 @@ def item_evaluation_id(items: Table, *, sqlite: bool) -> ColumnElement[Any]:
     return cast(items.c.metadata_json, JSONB).op("->>")(literal_column("'evaluation_id'"))
 
 
-def prefix_upper_bound(prefix: str) -> str | None:
-    """The least string that is greater than every string that starts with ``prefix``, in code point order; None when
-    no string is (``prefix`` is empty or has only U+10FFFF, the largest code point).
-
-    Code point order is the byte order of UTF-8: the order of SQLite's BINARY collation and of PostgreSQL's "C"
-    collation.
-    """
-    kept = prefix.rstrip(chr(0x10FFFF))
-    if not kept:
-        return None
-    following = ord(kept[-1]) + 1
-    # The surrogates U+D800 to U+DFFF are not characters: the code point after U+D7FF is U+E000.
-    return kept[:-1] + chr(0xE000 if following == 0xD800 else following)
-
-
 def item_id_prefix(items: Table, prefix: str, *, sqlite: bool) -> ColumnElement[bool]:
     """The condition that the ``item_id`` of an item row starts with ``prefix``, in the form of an index: on SQLite
     the unique index of (``owner``, ``item_id``), on PostgreSQL ``data_item_by_item_id``.
 
-    The condition is the range of the IDs from ``prefix`` to ``prefix_upper_bound(prefix)`` in code point order, not
+    The condition is the range of the IDs that start with ``prefix`` in code point order (``prefix_range``), not
     ``LIKE``: PostgreSQL uses an index for ``LIKE`` only under the "C" collation, and SQLite only when ``LIKE`` is
     case-sensitive. Without an index, a query of one prefix reads every row of the table.
     """
-    item_id = items.c.item_id if sqlite else items.c.item_id.collate("C")
-    upper = prefix_upper_bound(prefix)
-    if upper is None:
-        return item_id >= prefix
-    return and_(item_id >= prefix, item_id < upper)
+    return prefix_range(items.c.item_id if sqlite else items.c.item_id.collate("C"), prefix)
 
 
 def data_tables(

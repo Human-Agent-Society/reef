@@ -23,7 +23,7 @@ from reef.storage.served_models import (
     ServedModelsWriter,
 )
 from reef.storage.sql_coordination import (
-    POLL_INDEXES,
+    ADDED_INDEXES,
     PostgresCoordinationDatabase,
     SQLControlLease,
     SQLiteCoordinationDatabase,
@@ -66,7 +66,7 @@ def open_coordination(request, tmp_path):
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
-def test_a_work_queue_that_an_earlier_reef_made_gets_the_indexes_of_its_polls(backend, request, tmp_path):
+def test_a_work_queue_that_an_earlier_reef_made_gets_the_later_indexes(backend, request, tmp_path):
     def opened():
         if backend == "postgres":
             url, schema = request.getfixturevalue("postgres_config")
@@ -80,15 +80,29 @@ def test_a_work_queue_that_an_earlier_reef_made_gets_the_indexes_of_its_polls(ba
 
     with closing(opened()) as database:
         SQLWorkQueue(database).append(job("j1"))
-        # The tables of an earlier Reef: the same work_item, without the indexes of the polls.
+        # The tables of an earlier Reef: the same work_item, without the later indexes. SQLite has no index of the IDs
+        # in code point order: its primary key is in that order.
+        added = {index.name for index in database.tables.work_item.indexes} & ADDED_INDEXES
+        assert ("work_item_by_id" in added) == (backend == "postgres")
         prefix = "" if database.tables.work_item.schema is None else f"{database.tables.work_item.schema}."
         with database.connection(write=True) as connection:
-            for name in POLL_INDEXES:
+            for name in added:
                 connection.exec_driver_sql(f"DROP INDEX {prefix}{name}")
-        assert not POLL_INDEXES & index_names(database)
+        assert not added & index_names(database)
     with closing(opened()) as database:
-        assert index_names(database) >= POLL_INDEXES
+        assert index_names(database) >= added
         assert SQLWorkQueue(database).take("jobs", "w1", ["training_job:tinker"]).id == "j1"
+
+
+@pytest.mark.unit
+def test_the_items_of_an_id_prefix_are_the_items_whose_id_starts_with_it(open_coordination):
+    queue = open_coordination().queue
+    for item_id in ("rollout:e1:0", "rollout:e1:1", "rollout:e10:0", "rollout:e1;0", "Rollout:e1:2"):
+        queue.append(job(item_id, serial_key=None))
+    assert [item.id for item in queue.items("jobs", id_prefix="rollout:e1:")] == ["rollout:e1:0", "rollout:e1:1"]
+    assert [item.id for item in queue.items("jobs", scenario="other", id_prefix="rollout:e1:")] == []
+    with pytest.raises(ValueError, match="id_prefix"):
+        queue.items("jobs", id_prefix="")
 
 
 def job(
