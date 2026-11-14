@@ -26,6 +26,27 @@ from reef.inference.interfaces import InferenceArtifact, InferenceRuntime
 #: The model call routes that the endpoint answers, as Reef's own inference routes do.
 MODEL_CALL_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
 
+#: The request fields that ask an engine for the sampled tokens' log probabilities and token IDs, by route. Chat
+#: Completions takes OpenAI's ``logprobs`` and the ``return_token_ids`` of vLLM, SGLang and Reef's own handlers, with
+#: SGLang's ``return_prompt_token_ids``. Anthropic Messages has no such fields: Reef's token-native handlers take the
+#: same two as an extension. OpenAI Responses asks for log probabilities in ``include``.
+LOG_PROB_FIELDS: dict[str, dict[str, Any]] = {
+    "/v1/chat/completions": {"logprobs": True, "return_token_ids": True, "return_prompt_token_ids": True},
+    "/v1/messages": {"logprobs": True, "return_token_ids": True},
+}
+RESPONSES_LOG_PROBS = "message.output_text.logprobs"
+
+
+def log_prob_request(path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """The call ``payload`` to ``path``, one of ``MODEL_CALL_PATHS``, that also asks for log probabilities and token
+    IDs: the fields of ``LOG_PROB_FIELDS`` over the caller's, or for ``/v1/responses`` ``RESPONSES_LOG_PROBS`` added
+    to its ``include``. The other fields keep the caller's values."""
+    if path != "/v1/responses":
+        return {**payload, **LOG_PROB_FIELDS[path]}
+    include = payload.get("include")
+    included = list(include) if isinstance(include, list) else []
+    return {**payload, "include": included if RESPONSES_LOG_PROBS in included else [*included, RESPONSES_LOG_PROBS]}
+
 
 class ArtifactEndpoint:
     """An OpenAI endpoint on loopback that answers every call from ``artifact`` with ``runtime``'s handler.
@@ -34,23 +55,35 @@ class ArtifactEndpoint:
     the materialized artifact that every call samples. ``served`` is the value that reaches an engine that answers
     for the artifact, or None for the runtime's own handler. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
     body that is not a JSON object 400, a runtime that admits no call 503, a handler refusal its own status, and
-    any other handler failure 502 with the reason. Purpose: the artifact evaluation service points its rollouts
+    any other handler failure 502 with the reason. With ``log_probs``, each call asks the engine for log
+    probabilities and token IDs (``log_prob_request``); the engine must accept those fields, as Reef's token-native
+    handlers and SGLang's and vLLM's OpenAI servers do. Purpose: the artifact evaluation service points its rollouts
     at ``url``. Use it as a context manager: it binds its loopback port and sets ``url`` when it is entered, and
     closes the port when it exits. Raise ``ValueError`` at construction when the runtime cannot serve
     ``artifact`` on request.
     """
 
-    def __init__(self, runtime: InferenceRuntime, artifact: Artifact, served: ServedArtifact | None = None) -> None:
+    def __init__(
+        self,
+        runtime: InferenceRuntime,
+        artifact: Artifact,
+        served: ServedArtifact | None = None,
+        *,
+        log_probs: bool = False,
+    ) -> None:
         if not runtime.serves_any_artifact:
             raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.revision!r}")
         self.runtime = runtime
         self.artifact = artifact
         self.served = served
+        self.log_probs = log_probs
         self.server: ThreadingHTTPServer | None = None
         self.url = ""
 
     async def answer(self, path: str, payload: dict[str, Any]) -> tuple[int, Mapping[str, Any]]:
         """The status and the body that answer the call ``payload`` to ``path``."""
+        if self.log_probs:
+            payload = log_prob_request(path, payload)
         try:
             admission = await self.runtime.acquire_inference()
         except InferenceUnavailableError as exc:
@@ -152,4 +185,4 @@ class CandidateArtifacts(ABC):
     ) -> None: ...
 
 
-__all__ = ["ArtifactEndpoint", "CandidateArtifacts"]
+__all__ = ["ArtifactEndpoint", "CandidateArtifacts", "log_prob_request"]

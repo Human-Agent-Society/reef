@@ -116,6 +116,27 @@ def test_a_call_reaches_an_engine_that_another_process_started_with_the_engines_
 
 
 @pytest.mark.unit
+def test_an_endpoint_with_log_probs_asks_each_protocol_for_log_probabilities_and_token_ids() -> None:
+    artifact = Artifact(
+        SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"
+    )
+    runtime = StartedElsewhereRuntime()
+    served = ServedArtifact("artifact:r7", "https://engine.invalid", "engine-model")
+    chat = {"messages": [{"role": "user", "content": "ok"}], "logprobs": False, "top_logprobs": 3}
+    messages = {"messages": [{"role": "user", "content": "ok"}], "max_tokens": 8}
+    responses = {"input": "ok", "include": ["reasoning.encrypted_content"]}
+    with ArtifactEndpoint(runtime, artifact, served, log_probs=True) as endpoint:
+        for path, body in (("/v1/chat/completions", chat), ("/v1/messages", messages), ("/v1/responses", responses)):
+            assert call(endpoint.url, path, body)[0] == 200
+    engine = {"model": "engine-model", "temperature": 0.2}
+    assert runtime.engine.bodies == [
+        {**chat, **engine, "logprobs": True, "return_token_ids": True, "return_prompt_token_ids": True},
+        {**messages, **engine, "logprobs": True, "return_token_ids": True},
+        {**engine, "input": "ok", "include": ["reasoning.encrypted_content", "message.output_text.logprobs"]},
+    ]
+
+
+@pytest.mark.unit
 def test_the_endpoint_answers_every_call_from_its_artifact_and_maps_each_failure_to_a_status() -> None:
     artifact = Artifact(
         SnapshotRef(revision="storage:checkpoint", parent_revision=None), None, artifact_id="artifact:r7"

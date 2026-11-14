@@ -169,7 +169,8 @@ class EvaluationRollout:
     service serves for the candidate; ``agent`` is the Harbor agent configuration, or None when ``tree`` is the
     harness; ``environment`` is the Harbor environment type; ``selection`` is the artifact selection that serves the
     candidate, as ``ArtifactSelection.to_dict`` gives it; ``tree`` is the harness tree, or None when ``agent``
-    is the harness. The names are non-empty strings and the two numbers are non-negative integers.
+    is the harness; ``log_probs`` is the evaluation's ``log_probs``. The names are non-empty strings and the two
+    numbers are non-negative integers.
 
     Purpose: control makes it when it adds an evaluation (``to_payload``); a worker reads it (``from_item``).
     """
@@ -186,6 +187,7 @@ class EvaluationRollout:
     environment: str
     selection: Mapping[str, JsonValue]
     tree: TreeHarness | None = None
+    log_probs: bool = False
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -206,6 +208,8 @@ class EvaluationRollout:
             raise ValueError("a rollout's harness is exactly one of agent and tree")
         if self.agent is not None and not isinstance(self.agent, Mapping):
             raise TypeError("agent is a JSON object")
+        if not isinstance(self.log_probs, bool):
+            raise TypeError("log_probs is a bool")
 
     def item_id(self) -> str:
         return rollout_item_id(self.evaluation_id, self.task_index, self.repeat)
@@ -230,6 +234,7 @@ class EvaluationRollout:
                 "environment": self.environment,
                 "selection": dict(self.selection),
                 "tree": None if self.tree is None else self.tree.to_json(),
+                "log_probs": self.log_probs,
             },
         )
 
@@ -249,6 +254,8 @@ class EvaluationRollout:
             payload["environment"],
             payload["selection"],
             None if payload["tree"] is None else TreeHarness.from_json(payload["tree"]),
+            # A rollout that an older Reef queued asks for no log probabilities.
+            payload.get("log_probs", False),
         )
 
 
@@ -315,7 +322,7 @@ class LocalCandidateEndpoints(CandidateEndpoints):
     @contextmanager
     def open(self, rollout: EvaluationRollout, served: ServedArtifact | None) -> Iterator[CandidateEndpoint]:
         runtime, artifact = self.artifacts.candidate(rollout.scenario, rollout.artifact_id, rollout.component)
-        with ArtifactEndpoint(runtime, artifact, served) as endpoint:
+        with ArtifactEndpoint(runtime, artifact, served, log_probs=rollout.log_probs) as endpoint:
             yield CandidateEndpoint(endpoint.url, None)
 
     def add_call(self, rollout: EvaluationRollout, call: EvaluationCall) -> None:
