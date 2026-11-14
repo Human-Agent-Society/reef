@@ -64,18 +64,21 @@ from reef.service.app import create_app
 from reef.service.artifact_evaluations import (
     CANCELLED_ERROR,
     FAILURES_ERROR,
+    READ_CALLS,
     STOPPED_ERROR,
     ArtifactEvaluations,
     NewArtifact,
     NewArtifacts,
+    StoredCalls,
     attempt_trajectories,
 )
 from reef.service.data import DataAccess
 from reef.storage.commits import CommitRecord
-from reef.storage.data import NewItem
+from reef.storage.data import MemoryDataStore, NewItem
 from reef.storage.observer import ObservedScenarioStorage
+from reef.storage.record_items import evaluation_call_item
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import files_digest
+from reef.storage.tasks import LocalTaskFileStore, files_digest
 from reef.storage.work_queue import WorkItem
 
 TOKEN = "artifact-evaluation-test-token"
@@ -1079,6 +1082,48 @@ def test_an_attempt_is_stitched_with_one_call_at_a_time_and_can_leave_out_the_ra
     (full,) = attempt_trajectories("s", "e1", item, calls)
     assert lean["steps"] == full["steps"] and len(full["extra"]["reef"]["records"]) == 50
     assert "records" not in lean["extra"]["reef"] and lean["extra"]["reef"]["reward"] == 1.0
+
+
+class CountedReads(MemoryDataStore):
+    """A memory data store that counts its reads of items."""
+
+    reads = 0
+
+    def read(self, owner, item_id):
+        self.reads += 1
+        return super().read(owner, item_id)
+
+    def read_many(self, owner, item_ids, *, content=True):
+        self.reads += 1
+        return super().read_many(owner, item_ids, content=content)
+
+
+@pytest.mark.unit
+def test_stored_calls_are_read_in_batches_and_stitched_like_calls_in_memory() -> None:
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE, rollout.item_id(), "s", EVALUATION_ROLLOUT_KIND, rollout.to_payload(),
+        state="finished", started_at=1.0, ended_at=2.0, attempt_count=1, result={"score": 1.0},
+    )  # fmt: skip
+    # Two roles take turns for 20 calls each, so the second read adds the calls of both conversations at once.
+    roles = {name: [{"role": "system", "content": f"You are {name}."}] for name in ("Ann", "Ben")}
+    calls = []
+    for index in range(40):
+        name = ("Ann", "Ben")[index % 2]
+        calls.append(chat_call(1, index, list(roles[name]), f"{name} {index}"))
+        roles[name] += [{"role": "assistant", "content": f"{name} {index}"}, {"role": "user", "content": "go on"}]
+    store = CountedReads(LocalTaskFileStore())
+    stored = store.create("o", [evaluation_call_item("s", "a1", "e1", call) for call in calls])
+    store.reads = 0
+    read = attempt_trajectories("s", "e1", item, StoredCalls(store, "o", stored), include_records=False)
+    # Two reads of the 40 calls, 16 calls a read: 3 reads each, not one read for each call.
+    assert store.reads == 2 * math.ceil(40 / READ_CALLS)
+    in_memory = attempt_trajectories("s", "e1", item, calls, include_records=False)
+    assert [trajectory["steps"] for trajectory in read] == [trajectory["steps"] for trajectory in in_memory]
+    # Each role: its system message, 20 replies and the 19 turns between them.
+    assert [len(trajectory["steps"]) for trajectory in read] == [40, 40]
 
 
 @pytest.mark.unit

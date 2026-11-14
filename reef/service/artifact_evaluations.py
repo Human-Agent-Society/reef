@@ -28,7 +28,7 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, cast, overload
@@ -51,7 +51,7 @@ from reef.core.evaluation import (
     mean_score,
 )
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.trajectories import make_trajectory
+from reef.core.trajectories import TrajectoryBuilder
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.dispatcher import Dispatcher
 from reef.evaluation.rollout_worker import (
@@ -256,6 +256,11 @@ def rollout_work(rollout: EvaluationRollout) -> NewWork:
     )
 
 
+#: The calls that one read of the data store gives to ``StoredCalls`` when it is read in order. A batch holds the
+#: bodies of these calls at once, and each body holds its whole conversation.
+READ_CALLS = 16
+
+
 @dataclass(frozen=True)
 class StoredCalls(Sequence[EvaluationCall]):
     """The kept calls of one rollout, which the data store reads one at a time.
@@ -291,6 +296,16 @@ class StoredCalls(Sequence[EvaluationCall]):
             raise LookupError(f"the data store no longer keeps call {item_id!r}")
         return stored_evaluation_call(stored)
 
+    def __iter__(self) -> Iterator[EvaluationCall]:
+        """The calls in order, read ``READ_CALLS`` at a time: one read of the data store for each batch."""
+        for start in range(0, len(self.items), READ_CALLS):
+            batch = [item.item_id for item in self.items[start : start + READ_CALLS]]
+            read = {stored.item_id: stored for stored in self.data.read_many(self.owner, batch)}
+            for item_id in batch:
+                if item_id not in read:
+                    raise LookupError(f"the data store no longer keeps call {item_id!r}")
+                yield stored_evaluation_call(read.pop(item_id))
+
 
 def call_record(scenario: str, evaluation_id: str, call: EvaluationCall) -> AgentRecord:
     """The ``AgentRecord`` of the evaluation call ``call`` of ``scenario``: its ID is the call's
@@ -318,7 +333,7 @@ def attempt_trajectories(
 
     Each 200 call of an attempt is one ``AgentRecord`` (``call_record``). ``TrajectoryIndex`` links the calls of one
     attempt into conversations, as it links the records of training samples: an agent that plays several roles, each
-    with its own messages, has one conversation for each. ``make_trajectory`` stitches each conversation, without the
+    with its own messages, has one conversation for each. ``TrajectoryBuilder`` stitches each conversation, without the
     calls that a retry replaced; the conversations are in the order of their first calls. With ``include_records``
     false, a trajectory has no ``extra.reef.records``. The attempt that the rollout's score came from is the last
     attempt of a finished rollout: each of its agent trajectories has the score's value as its reward, null for a
@@ -326,45 +341,51 @@ def attempt_trajectories(
     ``{evaluation_id, task, task_index, repeat, attempt, caller, conversation, scored}``, where ``conversation``
     counts from 0 in its attempt.
 
-    It reads each element of ``calls`` once to link the calls, and once more to stitch its conversation, and keeps
-    no element between two reads. So with ``StoredCalls`` it holds the bodies of one call at a time, and the
-    trajectories that it returns.
+    It reads ``calls`` twice, in order: once to link the calls, and once to add each call to its conversation
+    (``TrajectoryBuilder``). It keeps no call between two reads. So with ``StoredCalls`` it holds the bodies of one
+    batch of calls at a time, and the trajectories that it returns.
     """
     rollout = EvaluationRollout.from_item(item)
     finished = item.state == "finished" and item.result is not None
     score = RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"]).value if finished else None
     indexes: dict[int, TrajectoryIndex] = {}
     record_ids: dict[int, list[str]] = {}
-    positions: dict[str, int] = {}
-    for position, call in enumerate(calls):
+    for call in calls:
         if call.summary.status != 200:
             continue
         record = call_record(scenario, evaluation_id, call)
         indexes.setdefault(call.summary.attempt, TrajectoryIndex()).add(record)
         record_ids.setdefault(call.summary.attempt, []).append(record.agent_record_id)
-        positions[record.agent_record_id] = position
-    trajectories = []
+    # Each conversation of each attempt, by the ID of each of its calls; a call that a retry replaced is in none.
+    builders: dict[tuple[int, int], TrajectoryBuilder] = {}
+    conversation_of: dict[str, tuple[int, int]] = {}
     for attempt in sorted(record_ids):
-        scored = caller == "agent" and finished and attempt == item.attempt_count
         for conversation, linked in enumerate(indexes[attempt].conversations(record_ids[attempt])):
-            records = (call_record(scenario, evaluation_id, calls[positions[record_id]]) for record_id in linked)
-            trajectory = make_trajectory(
-                records, reward=score if scored else None, include_records=include_records
-            ).trajectory
-            evaluation = {
-                "evaluation_id": evaluation_id,
-                "task": rollout.task_name,
-                "task_index": rollout.task_index,
-                "repeat": rollout.repeat,
-                "attempt": attempt,
-                "caller": caller,
-                "conversation": conversation,
-                "scored": scored,
-            }
-            extra = trajectory["extra"]
-            trajectories.append(
-                {**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}}
-            )
+            builders[attempt, conversation] = TrajectoryBuilder(include_records)
+            conversation_of.update(dict.fromkeys(linked, (attempt, conversation)))
+    for call in calls:
+        if call.summary.status != 200:
+            continue
+        record = call_record(scenario, evaluation_id, call)
+        place = conversation_of.get(record.agent_record_id)
+        if place is not None:
+            builders[place].add(record)
+    trajectories = []
+    for (attempt, conversation), builder in builders.items():
+        scored = caller == "agent" and finished and attempt == item.attempt_count
+        trajectory = builder.sample(reward=score if scored else None).trajectory
+        evaluation = {
+            "evaluation_id": evaluation_id,
+            "task": rollout.task_name,
+            "task_index": rollout.task_index,
+            "repeat": rollout.repeat,
+            "attempt": attempt,
+            "caller": caller,
+            "conversation": conversation,
+            "scored": scored,
+        }
+        extra = trajectory["extra"]
+        trajectories.append({**trajectory, "extra": {**extra, "reef": {**extra["reef"], "evaluation": evaluation}}})
     return trajectories
 
 
