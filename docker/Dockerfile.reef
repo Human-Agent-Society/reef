@@ -6,10 +6,12 @@
 # Transformer Engine 2.18, flash-attention and ray, all pinned by the
 # constraints file that the base's PIP_CONSTRAINT names for every pip install.
 # Reef installs its reviewed Slime pin over the
-# image copy and keeps all Reef-specific behavior in its own adapter package.
+# image copy, adds vLLM as the second serving engine, and keeps all
+# Reef-specific behavior in its own adapter package.
 #
 # One image serves every role (pick by command):
 #   sglang         python -m sglang.launch_server --model-path <M> ...
+#   vllm           python -m vllm.entrypoints.cli.main serve <M> ...
 #   reef           python -m reef.service (internal config-driven child;
 #                  Slime trains in this process)
 #   inference      python -m reef.inference.remote (the serving engines)
@@ -71,6 +73,25 @@ RUN pip uninstall -y flashinfer-cubin flashinfer-jit-cache flashinfer-python && 
     grep -q "numeric_limits<float>::infinity()" \
         "$(python -c 'import flashinfer, pathlib; print(pathlib.Path(flashinfer.__file__).parent)')/data/include/flashinfer/math.cuh"
 
+# vLLM, the second serving engine Reef can run on this image (inference.backend:
+# vllm). The release wheel pins torch 2.13.0, the base's version; flashinfer stays
+# at the 0.7 line installed above, which vLLM accepts at runtime although its
+# metadata names 0.6.18. --no-deps keeps the base's CUDA stack; the missing
+# pure-Python dependencies then install under the base's constraints, and openai
+# moves to the first release with the response types vLLM's OpenAI server
+# imports (SGLang's own server still imports and serves with it). The asserts
+# turn a torch or transformers move into a build failure. Kept above COPY so
+# repo changes do not re-download vLLM.
+ARG VLLM_VERSION=0.29.0
+RUN PIP_CONSTRAINT= pip install --no-cache-dir --no-deps "vllm==${VLLM_VERSION}" && \
+    pip install --no-cache-dir cachetools cbor2 depyf fastsafetensors instanttensor lm-format-enforcer \
+        model-hosting-container-standards nvtx opentelemetry-semantic-conventions-ai \
+        prometheus-fastapi-instrumentator py-cpuinfo pynvvideocodec python-json-logger "openai>=2.25,<3" && \
+    python -c "import torch, transformers, openai; \
+               assert torch.__version__ == '2.13.0+cu130', torch.__version__; \
+               assert transformers.__version__ == '5.12.1', transformers.__version__; \
+               print('openai', openai.__version__)"
+
 COPY . .
 
 # Replace the image's Slime distribution with Reef's exact pin. Install Slime
@@ -100,6 +121,11 @@ ENV PYTHONUNBUFFERED=1 \
 # it here turns that class of drift into a build failure.
 RUN python -c "from sglang.srt.server_args import ServerArgs; import transformers, scipy.linalg, importlib.util; \
                assert importlib.util.find_spec('megatron.training'), 'megatron.training is not importable'"
+# The vLLM entry points Reef's engine integration launches and loads: the
+# server CLI, the OpenAI server's request types and Reef's KV connector.
+RUN python -c "import vllm.entrypoints.cli.main, vllm.entrypoints.openai.api_server; \
+               from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest; \
+               import reef.inference.vllm.connector"
 
 # `reef serve --help` loads the CLI, the deployment config and the record
 # storage modules without a GPU. A missing core dependency fails the build here.
