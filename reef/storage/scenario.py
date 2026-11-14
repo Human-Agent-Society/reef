@@ -212,11 +212,13 @@ class ScenarioStorage(Plugin, ABC):
 
     @abstractmethod
     def write_settings(self, scenario: str, settings: ScenarioSettings) -> None:
-        """Replace the scenario's settings durably; the caller serializes writers of one scenario."""
+        """Replace the scenario's settings durably; the caller serializes writers of one scenario. Raise
+        ``ScenarioDeletedError`` for a scenario that ``archive`` archived."""
 
     @abstractmethod
     def open(self, scenario: str) -> ScenarioStore:
-        """Open an independently owned session for this scenario."""
+        """Open an independently owned session for this scenario. Raise ``ScenarioDeletedError`` for a scenario
+        that ``archive`` archived, so that no late writer makes a new store of a deleted scenario."""
 
     def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
         """The data items that ``scenario`` trains on, with the training state of its open ``session`` (RFC #1140).
