@@ -5,7 +5,7 @@ Local inference needs no YAML file:
 
 .. code:: bash
 
-   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+   reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 
 This starts SGLang on an automatically selected loopback port, waits for its
 health endpoint, then starts Reef on ``127.0.0.1:8900``. Use
@@ -838,7 +838,7 @@ For managed SGLang, use:
 
 .. code:: bash
 
-   uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
+   reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct \
      --inference.options.mem-fraction-static 0.8 \
      --inference.options.trust-remote-code true
 
@@ -1703,7 +1703,7 @@ that plays task directories (an npm ``install``) and
        cap the runs that the method's ``services.evaluate`` runs in one job; reused runs and the evaluation's own runs do not count; 0 disables the limit
 
    ``evolution.executor`` : local
-       ``local`` runs tasks as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` and ``modal`` create a cloud sandbox per run and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
+       ``local`` runs tasks as a plain subprocess; ``sandbox`` uses the host's local sandbox, a bubblewrap jail on Linux or a Seatbelt profile on macOS; ``e2b`` and ``modal`` create a cloud sandbox per run and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
 
    ``execution.evolution.workers`` : 1
        fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
@@ -1715,7 +1715,7 @@ that plays task directories (an npm ``install``) and
        ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
 
    ``evolution.sandbox``
-       for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
+       for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``; macOS refuses ``memory_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
 
    ``evolution.agent``
        the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its jobs (``services.run_agent``, or ``services.agent`` for a method that starts the agent itself); unset, no agent runs, and such a method is refused at startup unless it also runs without an agent (``runs_without_agent``)
@@ -1727,7 +1727,7 @@ that plays task directories (an npm ``install``) and
        the agent's binary; unset, backend construction installs the adapter's pinned version, as for ``evolution.binary``
 
    ``evolution.agent.sandbox`` : ``REEF_AGENT_SANDBOX``
-       ``bwrap`` jails the agent, with the internet but no host port except its gateway's; ``e2b`` or ``modal`` runs it in a cloud sandbox that reaches the gateway through a tunnel, with that provider's options in the section, as in ``evolution.sandbox``; ``none`` runs it with the service's own privileges and must be chosen. Unset, the agent is jailed where the host can run bwrap and pasta, and off where it cannot
+       ``bwrap`` jails the agent, with the internet but no host port except its gateway's; ``seatbelt`` does the same on macOS, but the host's LAN addresses stay reachable; ``e2b`` or ``modal`` runs it in a cloud sandbox that reaches the gateway through a tunnel, with that provider's options in the section, as in ``evolution.sandbox``; ``none`` runs it with the service's own privileges and must be chosen. Unset, the agent is jailed in the host's local sandbox (bwrap and pasta on Linux, sandbox-exec on macOS) where the host can run it, and off where it cannot
 
    ``evolution.agent.timeout_s`` : 1800
        seconds one agent run may take
@@ -2034,27 +2034,13 @@ A scenario can replace keys of ``pipeline.record2sample.config`` for itself
 with its ``record2sample_config`` setting (`Record-to-sample config
 <http-api.rst#record-to-sample-config>`__).
 
-Every built-in record-to-sample stage that holds units reads
-``max_staleness``, Reef's staleness filter. Reef drops held training data
-whose producing artifact is more than this many served artifacts behind the
-artifact that the scenario serves. The limit is a record-to-sample setting,
-not a recipe setting: ``recipe.config.max_staleness`` is an error.
-
-.. container:: config
-
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       the artifacts that training data may lag behind the served artifact and still train, a non-negative int; 0 trains only data of the served artifact
-
-.. code:: yaml
-
-   pipeline:
-     record2sample:
-       config:
-         max_staleness: 2
-
-``NoSamples`` and ``SFTSamples`` refuse the key: the first holds no unit, and
-the second never drops an SFT target as stale. A training
-framework's own off-policy limit goes in that backend's
+Each record-to-sample stage decides which of its samples are stale, and the
+samples service applies that rule; no setting chooses it. Most built-in stages
+are on-policy: only data of the artifact that the scenario serves trains. An
+SFT stage and the harness trace stages never drop a sample. SAO accepts a
+bounded lag, its own ``max_artifact_lag`` (`SAO <../user-guide/recipes/sao.rst>`__).
+A ``pipeline.record2sample.config.max_staleness`` key is refused at startup:
+remove it. A training framework's own off-policy limit goes in that backend's
 ``training.options``. No built-in backend has one now. See `Staleness
 <../developer-guide/processors.rst#staleness>`__.
 

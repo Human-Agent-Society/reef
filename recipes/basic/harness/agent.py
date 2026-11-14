@@ -32,6 +32,8 @@ SCENARIO = "basic-arithmetic"
 #: Where the basic task's instruction says to put the answer
 #: (see ``harbor/instruction.md``).
 ANSWER_PATH = "/workspace/answer.txt"
+#: The seconds that ``setup`` waits for inference to serve the scenario's model.
+INFERENCE_TIMEOUT_S = 300.0
 
 
 class HarborAgent(BaseAgent):
@@ -57,8 +59,20 @@ class HarborAgent(BaseAgent):
         return None
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        """Create the scenario if it does not exist yet: the inference routes serve only a scenario that exists."""
+        """Create the scenario if it does not exist yet, then wait until inference serves its model.
+
+        The inference routes serve only a scenario that exists, and scenario creation does not wait for the model.
+        """
         await asyncio.to_thread(self._client.post, "/reef/scenarios", SCENARIO, {"name": SCENARIO})
+        deadline = time.monotonic() + INFERENCE_TIMEOUT_S
+        while time.monotonic() < deadline:
+            startup = await asyncio.to_thread(self._client.get, f"/reef/scenarios/{SCENARIO}/inference/status")
+            if startup["state"] == "ready":
+                return
+            if startup["state"] == "failed":
+                raise RuntimeError(f"inference did not start: {startup['error']}")
+            await asyncio.sleep(0.5)
+        raise RuntimeError(f"inference did not start within {INFERENCE_TIMEOUT_S:.0f}s")
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         response, receipt = await asyncio.to_thread(self._ask_reef, instruction)

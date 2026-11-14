@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.errors import InternalError
-from reef.execution.sandbox.process import TOOL_ISOLATION as ISOLATION
+from reef.execution.sandbox.bwrap import TOOL_ISOLATION as ISOLATION
 from reef.execution.sandbox.process import ProgramLaunchError, run_process
 
 ENFORCE_ENV = "REEF_NATIVE_ENFORCE"

@@ -31,7 +31,7 @@ from tests.support.stored_checkpoints import store_checkpoints
 from tests.support.trajectories import policy_trajectory
 
 from recipes.sao import SAORecipe
-from recipes.sao.processor import SAOJobData, SAOSamples
+from recipes.sao.processor import SAOJobData, SAOSamples, SAOSettings
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
@@ -43,7 +43,6 @@ from reef.dispatcher import Dispatcher
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.loading import build_recipe, load_recipe
 from reef.recipe.registry import recipe_class_for
-from reef.record2sample.assembly import SampleAssemblySettings
 from reef.scenario.live_objects import LiveObjects
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
@@ -64,7 +63,7 @@ EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 def sao_processor(context: PipelineContext, job_samples: int | None = None) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2sample=SAOSamples(context, SampleAssemblySettings()),
+        record2sample=SAOSamples(context, SAOSettings()),
         sample2job=SAOJobData(context, None, job_samples),
     )
 
@@ -184,7 +183,7 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
         ({"sample2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
         ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         ({"record2sample": {"config": {"batch_size": 2}}}, "SAOSamples: unknown config fields: batch_size"),
-        ({"record2sample": {"config": {"max_staleness": -1}}}, "max_staleness must be a non-negative int"),
+        ({"record2sample": {"config": {"max_artifact_lag": -1}}}, "max_artifact_lag must be a non-negative int"),
     ],
 )
 def test_sao_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(

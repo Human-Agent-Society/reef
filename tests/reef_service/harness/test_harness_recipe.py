@@ -75,6 +75,7 @@ from reef.evaluation.harness import (
 )
 from reef.evaluation.harness.runner import run_task
 from reef.execution.executor.config import ExecutorSettings
+from reef.execution.sandbox.bwrap import BwrapExecutor
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, ModelBindings
@@ -84,7 +85,6 @@ from reef.inference.http import InferenceProxyRuntime, resolve_proxy_runtime
 from reef.inference.interfaces import InferenceRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import RecipeConfigError
-from reef.recipe.deployment import scenario_state_dirs
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.loading import load_recipe
 from reef.recipe.registry import recipe_class_for
@@ -342,11 +342,9 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
         runtime=runtime(),
     )
     state = tmp_path.resolve() / "state"
-    # The paths come from the ``evolution`` settings alone. Only the training component reads them: control
-    # archives no directory of a harness recipe.
+    # The paths come from the ``evolution`` settings alone. Only the training component reads them.
     assert built.evolution.scenario_state_dir("demo") == state / "demo"
     assert built.evolution.component_state_dir("demo", "harness") == state / "demo" / "harness"
-    assert scenario_state_dirs(built, "demo") == ()
     records = memory_records("demo")
     for scenario in ("demo", "other"):
         trainer = recipe_trainer(built, live, scenario, records, artifacts=artifacts_for(built), root=seed_root(built))
@@ -571,7 +569,8 @@ def test_recipe_selects_the_run_executor(monkeypatch: pytest.MonkeyPatch) -> Non
     assert type(harness_component(from_config(evolution_config())[1]).executor).__name__ == "LocalExecutor"
     local = harness_component(from_config(evolution_config(executor="local"))[1])
     assert type(local.executor).__name__ == "LocalExecutor"
-    monkeypatch.setattr("reef.execution.sandbox.process.shutil.which", lambda name: None)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
+    monkeypatch.setattr("reef.execution.sandbox.bwrap.shutil.which", lambda name: None)
     with pytest.raises(ConfigError, match="bubblewrap"):
         from_config(evolution_config(executor="sandbox"))
 

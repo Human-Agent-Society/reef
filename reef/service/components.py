@@ -36,7 +36,7 @@ from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
 from reef.recipe.composite import CompositeRecipe
 from reef.recipe.deployment import harness_adapter
-from reef.scenario.live_objects import ServedEndpoint, close_runtimes
+from reef.scenario.live_objects import RecipeChecks, ServedEndpoint, close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
@@ -266,6 +266,7 @@ class TrainingApp(ComponentApp):
                     coordination.work_queue,
                     data_store,
                     backends,
+                    checks=RecipeChecks(recipe),
                     worker_id=instance_id(f"training-{component.name}"),
                     local_artifact_dir=local_artifact_dir,
                     slots=settings.training_max_jobs,

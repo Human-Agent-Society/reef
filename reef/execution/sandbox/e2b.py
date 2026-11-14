@@ -43,6 +43,7 @@ from reef.execution.sandbox.process import (
     ProgramTimeoutError,
     SandboxProgram,
     SandboxUnavailableError,
+    parse_env_from,
 )
 from reef.execution.sandbox.remote import (
     SANDBOX_MARGIN_S,
@@ -50,7 +51,6 @@ from reef.execution.sandbox.remote import (
     RemoteExecutor,
     RemoteSession,
     check_options,
-    parse_env_from,
     parse_forward_ports,
     probe_command,
     protected_command,

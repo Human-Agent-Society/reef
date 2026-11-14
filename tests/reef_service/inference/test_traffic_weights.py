@@ -497,14 +497,14 @@ def test_an_activation_keeps_the_split_and_a_deletion_removes_it(tmp_path) -> No
 
 
 @pytest.mark.unit
-def test_the_trainer_learns_which_artifacts_serve_beside_from_the_commit_history(tmp_path) -> None:
+def test_the_samples_service_learns_which_artifacts_serve_beside_from_the_commit_history(tmp_path) -> None:
     value, _, _, newest, older = two_artifacts(tmp_path)
     try:
         serving_both(value, newest["artifact_id"], older["artifact_id"])
         scenario = value.get_or_create_scenario("math")
         assert older["artifact_id"] in scenario.served_beside()
-        scenario.prepare_job(None, scenario.serving_artifact_id())
-        served = scenario.trainers[0].trainer.pipeline.served_artifacts
+        served = scenario.served_artifacts()
+        assert served.artifact_ids[-1] == scenario.serving_artifact_id()
         assert older["artifact_id"] in served.beside_artifact_ids
     finally:
         value.close()

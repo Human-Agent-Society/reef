@@ -174,7 +174,9 @@ Implementation
   - ``parameters_schema(kind)``: the JSON Schema of a job's parameters.
   - ``check_root_start(root)`` and ``check_import_start(artifact_dir)``: raise
     ``ValueError`` exactly when the component's ``root_start`` and
-    ``import_start`` raise, with the same message. They write nothing.
+    ``import_start`` raise, with the same message. They write nothing, and
+    they read only the files that ``start_files`` names (``None``: the whole
+    component). Control makes only those files local.
   - ``check_artifact(files)``: check an import's files. The default checks
     ``artifact_format`` and returns ``None``. Override it when the snapshots
     have another layout. Return a JSON object when something must also
@@ -313,7 +315,11 @@ snapshot-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   ``ConfigurableRepositoryBackendFactory``. Every backend implements the five
   operations on stored content (``store_content``, ``materialize_content``,
   ``discard_content``, ``discard_all_content`` and ``publish_parts``): the training service stores a
-  checkpoint with them and control commits it by name. See `Artifact
+  checkpoint with them and control commits it by name. A factory that
+  inherits ``CachedRepositoryBackendFactory`` implements
+  ``has_archived_registration(scenario)``: true exactly when a delete
+  archived the scenario in any process that shares the store, and never false
+  again after that, because a deleted scenario's ID is never used again. See `Artifact
   backends <../reference/python-api.rst#artifact-backends>`__.
 - Put weight loading in ``InferenceRuntime.activate_checkpoint`` under
   ``reef/inference/``, and client-pull delivery in a

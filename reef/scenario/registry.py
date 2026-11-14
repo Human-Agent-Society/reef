@@ -31,6 +31,7 @@ from reef.artifact.repository import (
 )
 from reef.core.activation import ActivationRule
 from reef.core.errors import ReefError, ScenarioCapacityFullError, ScenarioNotFoundError
+from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import EvaluatedActivation, activation_setting, scenario_activation_reference
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
@@ -375,11 +376,17 @@ class ScenarioRegistry:
         again. ``config`` replaces the stored mapping as a whole; an empty mapping goes back to the deployment's
         config. Raise ``ValueError`` when ``config`` names a component that has no trainer, or when a stage refuses
         its config; then the stored setting and the loaded instance stay as they were.
+
+        A scenario whose stored config no longer loads, such as one that sets a removed key, loads with ``config``
+        in its place, so this call repairs it.
         """
         with self.lock_for(scenario):
-            current = self.require(scenario)
             settings = self._storage.read_settings(scenario)
             changed = replace(settings, record2sample_config=config)
+            try:
+                current = self.require(scenario)
+            except (PluginConfigError, RecipeConfigError):
+                return self.replace_refused_record2sample_config(scenario, settings, changed)
             trainers = {component_trainer.component for component_trainer in current.trainers}
             unknown = sorted(set(changed.record2sample_config) - trainers)
             if unknown:
@@ -398,6 +405,31 @@ class ScenarioRegistry:
                 if isinstance(exc, RecipeConfigError):
                     raise ValueError(f"scenario {scenario!r} refused record2sample_config: {exc}") from exc
                 raise
+
+    def replace_refused_record2sample_config(
+        self, scenario: str, settings: ScenarioSettings, changed: ScenarioSettings
+    ) -> Scenario:
+        """Store ``changed`` in place of ``settings``, whose record-to-sample config the scenario refuses to load
+        with, and load the scenario with it. Raise ``ValueError``, and store ``settings`` again, when the scenario
+        refuses ``changed`` too or when it names a component that has no trainer. The caller holds the scenario's
+        lock."""
+        self._storage.write_settings(scenario, changed)
+        try:
+            current = self.require(scenario)
+        except (PluginConfigError, RecipeConfigError) as exc:
+            self._storage.write_settings(scenario, settings)
+            raise ValueError(f"scenario {scenario!r} refused record2sample_config: {exc}") from exc
+        trainers = {component_trainer.component for component_trainer in current.trainers}
+        unknown = sorted(set(changed.record2sample_config) - trainers)
+        if unknown:
+            self._storage.write_settings(scenario, settings)
+            dropped = self.remove(scenario)
+            if dropped is not None:
+                dropped.close()
+            raise ValueError(
+                f"record2sample_config names {unknown}; scenario {scenario!r} has trainers for {sorted(trainers)}"
+            )
+        return current
 
     def set_serves(self, scenario: str, serves: bool) -> Scenario:
         """Store ``serves`` for an existing scenario (``ScenarioSettings.serves``) and apply it to the loaded

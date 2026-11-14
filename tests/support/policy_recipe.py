@@ -23,8 +23,8 @@ class TestPolicyRecipe(WeightTrainingRecipe):
 
     _: KW_ONLY
     min_score: float = float("-inf")
-    #: The staleness limit of the record stage.
-    max_staleness: int = 0
+    #: The artifacts that a sample of the record stage may lag behind the served one.
+    max_artifact_lag: int = 0
     name: str = "test_policy"
 
     def __post_init__(self) -> None:
@@ -32,7 +32,7 @@ class TestPolicyRecipe(WeightTrainingRecipe):
             # One report is one job, and a report of several model calls trains as one sample.
             section = {
                 "record2sample": {
-                    "config": {"accept_multi_turn_policy_samples": True, "max_staleness": self.max_staleness}
+                    "config": {"accept_multi_turn_policy_samples": True, "max_artifact_lag": self.max_artifact_lag}
                 },
                 "sample2job": {"config": {"job_samples": 1}},
             }

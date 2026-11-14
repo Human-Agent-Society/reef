@@ -108,6 +108,10 @@ class LocalFacts(TrainingBackendFacts):
     def parameters_schema(self, kind):
         return None
 
+    @property
+    def start_files(self):
+        return ()
+
     def check_root_start(self, root):
         return None
 

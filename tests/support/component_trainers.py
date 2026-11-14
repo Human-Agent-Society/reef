@@ -220,7 +220,7 @@ HELD = "held"
 
 #: How many artifacts behind the served one a row may be and still train. A test appends rows before the jobs that
 #: it waits for move the served artifact, so its rows stay trainable until it ends.
-MAX_STALENESS = 100
+MAX_ARTIFACT_LAG = 100
 
 
 def component_stages(
@@ -230,9 +230,9 @@ def component_stages(
     record2sample_config: Mapping[str, Any] | None = None,
 ) -> PipelineSettings:
     """The stages of one trainer of the two trainer recipe: ``record2sample`` with ``record2sample_config``, by
-    default the threshold stage with the staleness limit ``MAX_STALENESS``, and ``sample2job`` with jobs of one
+    default the threshold stage with the lag bound ``MAX_ARTIFACT_LAG``, and ``sample2job`` with jobs of one
     sample."""
-    config = {"max_staleness": MAX_STALENESS} if record2sample_config is None else dict(record2sample_config)
+    config = {"max_artifact_lag": MAX_ARTIFACT_LAG} if record2sample_config is None else dict(record2sample_config)
     return job_sized_stages(PipelineSpec(record2sample, sample2job), {"record2sample": {"config": config}})
 
 

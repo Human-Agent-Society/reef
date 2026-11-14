@@ -44,7 +44,7 @@ def sft_inference(agent_record_id: str, artifact_id: str) -> AgentRecord:
     """An inference record from the artifact that served the scenario when it was created.
 
     Accepts race with commits, so no record can name the artifact that serves
-    it. The tests set ``max_staleness`` to their job count instead: every
+    it. The tests set ``max_artifact_lag`` to their job count instead: every
     record stays within the window of every later artifact.
     """
     return token_inference(agent_record_id, artifact_id=artifact_id)
@@ -120,7 +120,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
     pairs_per_thread = 4
     thread_count = 4
     dispatcher = Dispatcher(
-        TestPolicyRecipe(max_staleness=pairs_per_thread * thread_count),
+        TestPolicyRecipe(max_artifact_lag=pairs_per_thread * thread_count),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",
@@ -162,7 +162,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     component = CountingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
-        TestPolicyRecipe(max_staleness=4),
+        TestPolicyRecipe(max_artifact_lag=4),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         live=live_objects(component),
         local_artifact_dir=tmp_path / "staged",

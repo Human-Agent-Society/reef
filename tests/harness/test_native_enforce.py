@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 from tests.support.harness_render import native_tool
 
-from reef.execution.sandbox.process import SandboxExecutor, SandboxUnavailableError
+from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.process import SandboxUnavailableError
 from reef.harness.runners.native import LoadError, ToolModule, ToolRunner, _invoke, _ModuleRun, load_tools
 from reef.harness.runners.native.enforce import (
     CHILD,
@@ -452,7 +453,7 @@ def require_nested_jail() -> None:
         reason = "bubblewrap (bwrap) is not on PATH"
     else:
         try:
-            SandboxExecutor().preflight()
+            BwrapExecutor().preflight()
             return
         except SandboxUnavailableError as exc:
             reason = str(exc)
@@ -469,11 +470,11 @@ def test_nested_jail_requirement_handles_host_availability(
     monkeypatch.setenv("REEF_REQUIRE_SANDBOX", "1" if required else "0")
     monkeypatch.setattr(shutil, "which", lambda name: None if availability == "missing" else "/usr/bin/bwrap")
 
-    def _preflight(executor: SandboxExecutor) -> None:
+    def _preflight(executor: BwrapExecutor) -> None:
         if availability == "refused":
             raise SandboxUnavailableError("nested namespaces unavailable")
 
-    monkeypatch.setattr(SandboxExecutor, "preflight", _preflight)
+    monkeypatch.setattr(BwrapExecutor, "preflight", _preflight)
     if availability == "available":
         require_nested_jail()
         return

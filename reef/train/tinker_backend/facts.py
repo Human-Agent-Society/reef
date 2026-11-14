@@ -124,6 +124,11 @@ class TinkerFacts(TrainingBackendFacts):
             base.check_inputs(self.default_start_inputs)
         return base
 
+    @property
+    def start_files(self) -> tuple[str, ...]:
+        """The base root's file and the checkpoint's manifest: a Tinker checkpoint holds no weights."""
+        return (BASE_FILE, MANIFEST)
+
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.check_import_start(root.local_directory())
 
@@ -236,6 +241,11 @@ class SpindleFullFacts(TrainingBackendFacts):
         revision = read_reference(directory)
         if revision is not None and revision != self.base:
             raise ValueError(f"the {self.name} training component starts only from its base {self.base.uri}")
+
+    @property
+    def start_files(self) -> tuple[str, ...]:
+        """The checkpoint's manifest and the reference to the weights' revision: never the weights."""
+        return (MANIFEST, REFERENCE_FILE)
 
     def check_root_start(self, root: ScenarioRoot) -> None:
         self.check_import_start(root.local_directory())

@@ -50,7 +50,7 @@ def test_settings_default_replace_and_stay_per_scenario(open_storage):
         artifact_evaluation=EVALUATION,
         activation={"module": "evaluated", "config": {"min_mean_score": 0.5}},
         serving_config=ServingConfig({"weights": {"temperature": 0.6, "min_replicas": 1}}),
-        record2sample_config={"records": {"max_staleness": 2, "steps": [{"keep_score": {"min": 1.0}}]}},
+        record2sample_config={"records": {"window": 2, "steps": [{"keep_score": {"min": 1.0}}]}},
     )
     storage.write_settings("math", settings)
     assert open_storage().read_settings("math") == settings
@@ -61,7 +61,7 @@ def test_settings_default_replace_and_stay_per_scenario(open_storage):
 
 @pytest.mark.parametrize(
     "config",
-    [[], {"": {}}, {"records": "max_staleness=2"}, {"records": {"limit": float("nan")}}],
+    [[], {"": {}}, {"records": "window=2"}, {"records": {"limit": float("nan")}}],
 )
 def test_settings_refuse_a_record2sample_config_that_is_not_json_objects_by_component(config):
     with pytest.raises(ValueError, match="record2sample_config"):

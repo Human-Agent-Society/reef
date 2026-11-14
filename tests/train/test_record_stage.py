@@ -36,10 +36,14 @@ from reef.record2sample import (
     SingleRecordSet,
     SkippedReport,
 )
+from reef.record2sample.service import Selection
+from reef.record2sample.staleness import ServedArtifacts
+from reef.record2sample.traces import TraceSamples
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.commits import CommitRecord
 from reef.storage.data import MAX_QUERY_LIMIT, NewItem
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
+from reef.storage.work_queue import WorkLeaseLostError
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
@@ -341,20 +345,85 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     assert not processor.record2sample.set_samples
 
 
+class LostLease(Selection):
+    """A selection whose worker lost its item once ``lost`` is True: as a worker whose lease ran out while another
+    worker took the trainer's next selection."""
+
+    def __init__(self) -> None:
+        super().__init__("selection")
+        self.lost = False
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        return
+
+    def check_lease(self) -> None:
+        if self.lost:
+            raise WorkLeaseLostError("lost")
+
+
 @pytest.mark.unit
-def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_version() -> None:
+def test_a_samples_step_whose_worker_lost_its_lease_writes_nothing() -> None:
+    """Two workers overlap on one trainer: the first started at artifact e:1, and the second judged e:2. The first
+    must not store samples that it judged against e:1, nor a judgment, once its lease is gone."""
     processor = threshold_pipeline(PipelineContext("s"))
-    processor.observe_serving_artifact_id("e:1")
+    selection = LostLease()
+    processor.selection = selection
+    processor.mark_stale(ServedArtifacts(("e:1",), commit_number=1))
+    selection.lost = True
+    processor.push(inference("i1", version="e:1"))
+    with pytest.raises(WorkLeaseLostError):
+        processor.push(report("r1", "i1"))
+    assert processor.store.page() == ()
+    with pytest.raises(WorkLeaseLostError):
+        processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=2))
+    assert processor.store.judged_commit(processor.staleness_rule) == 1
+
+
+@pytest.mark.unit
+def test_a_stage_that_never_goes_stale_is_judged_without_reading_the_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    context = PipelineContext("s")
+    processor = TrainingPipeline(
+        context, record2sample=TraceSamples(context), sample2job=UploadJobData(context, 1, None)
+    )
     processor.push(inference("i1", version="e:1"))
     processor.push(report("r1", "i1"))
-    processor.observe_serving_artifact_id("e:2")
+
+    def refused(*args: object, **kwargs: object) -> None:
+        raise AssertionError("a stage that never goes stale reads no listing")
+
+    monkeypatch.setattr(SampleStore, "listing", refused)
+    assert processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=1))
+    assert processor.judged(ServedArtifacts(("e:1", "e:2"), commit_number=1))
+    assert [stored.stale for stored in processor.store.page()] == [False]
+
+
+@pytest.mark.unit
+def test_a_sample_that_the_samples_service_marks_stale_stays_stored_and_never_trains_automatically() -> None:
+    processor = threshold_pipeline(PipelineContext("s"))
+    processor.push(inference("i1", version="e:1"))
+    processor.push(report("r1", "i1"))
     processor.push(inference("i2", version="e:2"))
     processor.push(report("r2", "i2"))
+    assert processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=3))
     batch = processor.build_job_data(1)
     assert [item.source_agent_record_ids for item in batch.samples] == [("i2", "r2")]
-    # The stale report ended with the inference that it owns, and its tasks are gone.
+    # The stale sample stays in the store with its mark, and the records that made it stay consumed.
+    assert [(stored.sample_id, stored.stale) for stored in processor.store.page()] == [
+        (stage_item_id("s", "r1:0"), True),
+        (stage_item_id("s", "r2:0"), False),
+    ]
     assert {"r1", "i1"} <= processor.record2sample.releasable_record_ids()
-    assert "r1" not in processor.record2sample.set_samples
+    # The judgment is stored once; judging again against the same artifacts changes nothing.
+    assert processor.store.judged_commit(processor.staleness_rule) == 3
+    assert not processor.mark_stale(ServedArtifacts(("e:1", "e:2"), commit_number=3))
+    # A sample stored after the judgment is judged as it is stored: no reader sees it unmarked.
+    processor.push(inference("i3", version="e:1"))
+    processor.push(report("r3", "i3"))
+    assert [stored.stale for stored in processor.store.read([stage_item_id("s", "r3:0")])] == [True]
+    # A request can still name the stale sample: the client chose it.
+    assert [
+        stored.sample_id for stored, _ in processor.request_entries(training_request(stage_item_id("s", "r1:0")))
+    ] == [stage_item_id("s", "r1:0")]
 
 
 @pytest.mark.unit
@@ -557,11 +626,10 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     assert len(processor.store.page()) == 2
     assert processor.record2sample.releasable_record_ids() == {"i1", "i2"}
     # Trajectories without a producing artifact become stale once the served artifact is known.
-    processor.observe_serving_artifact_id("e:1")
-    processor.advance()
+    processor.mark_stale(ServedArtifacts(("e:1",)))
+    assert not processor.ready(1)
     assert processor.status()["ready_samples"] == 0
     assert len(processor.store.page()) == 2, "a stale sample stays in the store untrained"
-    assert not processor.ready(1)
 
 
 @pytest.mark.unit
@@ -574,12 +642,11 @@ def test_the_records_of_an_artifact_served_beside_train_while_it_serves() -> Non
         "i1", SampleResult.ready((policy_trajectory("i1", [1], [1], [0.0], 1.0, artifact_id="beside"),))
     )
     processor.produce()
-    processor.observe_serving_artifact_id("active")
-    assert auto_ids(processor) == (), "an artifact outside the served history is stale"
-    processor.served_artifacts.restore_beside(("beside",))
-    assert len(auto_ids(processor)) == 1
-    processor.served_artifacts.restore_beside(())
-    assert auto_ids(processor) == ()
+    processor.mark_stale(ServedArtifacts(("active",), frozenset({"beside"}), commit_number=1))
+    assert processor.ready(1) and len(auto_ids(processor)) == 1
+    # Once the artifact no longer serves beside the active one, its sample is stale.
+    processor.mark_stale(ServedArtifacts(("active",), commit_number=2))
+    assert not processor.ready(1) and auto_ids(processor) == ()
 
 
 @pytest.mark.unit

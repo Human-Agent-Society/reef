@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -41,12 +40,11 @@ from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorker
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.recipe.deployment import scenario_state_dirs
 from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
-from reef.scenario.factory import ItemStart, with_record2sample_configs
-from reef.scenario.live_objects import LiveObjects, check_recipe_objects, close_runtimes, scenario_components
+from reef.scenario.factory import ItemStart
+from reef.scenario.live_objects import LiveObjects, RecipeChecks, check_recipe_objects, close_runtimes
 from reef.scenario.registry import InstanceState, ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
@@ -228,6 +226,7 @@ class Dispatcher(
                         self.queue,
                         self.job_directory_store,
                         backend_factory,
+                        checks=RecipeChecks(recipe),
                         worker_id=instance_id(f"training-{component.name}"),
                         local_artifact_dir=local_artifact_dir,
                         slots=training_max_jobs,
@@ -420,7 +419,8 @@ class Dispatcher(
           checkpoint that no commit took (``RepositoryBackend.discard_all_content``).
         - The storage archives the records, the commits and the settings.
         - The recipe's own directories move to an ``archived`` sibling.
-        - The repository registration is archived, so the name is free again.
+        - The repository registration is archived. The archive also records that the scenario ID is never used
+          again (``CachedRepositoryBackendFactory.has_archived_registration``).
 
         Artifacts that other scenarios share stay.
 
@@ -448,7 +448,10 @@ class Dispatcher(
                     component_trainer.trainer.cancel_job()
                 dropped.close()
             # A trainer adds a job to the queue before the commit that records it. Such a job is in no trainer's
-            # state, so the queue is asked: no job of the scenario runs on and stores files after the delete.
+            # state, so the queue is asked: no job of the scenario runs on and stores files after the delete. A job
+            # that a cycle adds after this look, and that the cycle cannot cancel because its process stopped, is
+            # cancelled by the training worker, which finds the registration archived below
+            # (``TrainingJobWorker.refuses_deleted_scenario``).
             cancel_scenario_jobs(self.queue, scenario)
             self.local_workers.close_replaced_instances(scenario)
             # The discard can fail when the artifact store does not answer. It runs before the scenario's storage
@@ -587,23 +590,11 @@ class Dispatcher(
                 self.unload_if_idle(name)
 
     def archive_scenario_state(self, scenario: str) -> list[str]:
-        """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be
-        deleted twice, and ask each training service to do the same with what its component keeps for the scenario
-        (``JobQueueComponent.archive_scenario``): this process moves no directory of a training service."""
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        # The stages may keep their state where the scenario's own record2sample config says; the archive retires it.
-        configs = self.storage.read_settings(scenario).record2sample_config
-        recipe = with_record2sample_configs(
-            self.recipe, scenario_components(self.recipe, self.live, scenario), configs
-        )
-        directories = scenario_state_dirs(recipe, scenario)
+        """Move the scenario's storage under an ``archived`` sibling (``ScenarioRegistry.archive_store``), and ask
+        each training service to do the same with what its component keeps for the scenario
+        (``JobQueueComponent.archive_scenario``). This process moves no directory of another service, and no
+        record-to-sample stage keeps a directory of its own."""
         moved = list(self.registry.archive_store(scenario))
-        for directory in directories:
-            if directory.exists():
-                destination = directory.parent / "archived" / f"{directory.name}-{stamp}"
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(directory), str(destination))
-                moved.append(str(destination))
         for component in self.live.job_components():
             component.archive_scenario(scenario)
         return moved

@@ -53,7 +53,6 @@ from reef.scenario.live_objects import (
     declared_components,
     default_start,
     harness_served_model,
-    scenario_components,
 )
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
@@ -288,6 +287,10 @@ class _RootFiles(StubTrainingComponent):
         super().__init__(name=name)
         self.required = required
         self.checked: list[list[str]] = []
+
+    @property
+    def start_files(self) -> None:
+        return None
 
     def root_start(self, root: ScenarioRoot) -> str:
         names = sorted(path.name for path in root.local_directory().iterdir())
@@ -948,7 +951,7 @@ def test_a_recipe_serving_no_component_admits_the_whole_snapshot_through_its_val
         evolved.mkdir()
         (evolved / "notes.txt").write_text("unvetted")
         with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.components.validate(Artifact.local(evolved))
+            scenario.components.validate(evolved)
         with pytest.raises(ValueError, match="validator refused the artifact"):
             scenario.commit(TrainingCommit(state={}, artifact=Artifact.local(evolved)))
         assert scenario.current_snapshot() == head
@@ -1008,53 +1011,6 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
         assert scenario.current_snapshot() != seed
 
 
-def check_whole_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Give every scenario that the factory builds the snapshot's own check ``_RefuseUnvetted``, beside each
-    component's. A composite declares no such check; a recipe that declares several components itself can."""
-
-    def checked_components(recipe: Recipe, live: LiveObjects, scenario: str) -> ScenarioComponents:
-        return replace(scenario_components(recipe, live, scenario), validator=_RefuseUnvetted())
-
-    monkeypatch.setattr("reef.scenario.factory.scenario_components", checked_components)
-
-
-@pytest.mark.unit
-def test_a_commit_runs_the_snapshot_check_an_activation_of_that_snapshot_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The snapshot's own check runs on the composed snapshot a step publishes, as an activation of it runs it: a
-    snapshot the commit admits can be activated again, and one the activation would refuse is never published."""
-    check_whole_snapshots(monkeypatch)
-    composite = CompositeRecipe(
-        components={
-            "harness": _TreeRecipe(seed={"AGENTS.md": "seed"}),
-            "config": _ConfigRecipe(),
-        }
-    )
-    with closing(_serve(composite, tmp_path / "svc")) as dispatcher:
-        scenario = dispatcher.get_or_create_scenario("agent")
-        assert scenario is not None
-        seed = scenario.current_snapshot()
-        with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="harness")
-        assert scenario.current_snapshot() == seed
-        scenario.commit(TrainingCommit(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
-        published = scenario.current_snapshot()
-        assert published != seed
-        # The root snapshot made the creation's artifacts, under its own revision.
-        seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.revision)["harness"]
-        assert (
-            seed_harness
-            == scenario.repository.resolve(scenario.repository.start_artifact).component("harness").artifact_id
-        )
-        scenario.activate(seed_harness, "harness")
-        scenario.activate(scenario.repository.resolve(published).component("harness").artifact_id, "harness")
-        served = scenario.repository.materialize(scenario.current_snapshot()).components
-        made = scenario.repository.materialize(published).components
-        assert served is not None and made is not None
-        assert served.artifact_ids("served") == made.artifact_ids("made")
-
-
 class _CountedChecks(_RefuseUnvetted):
     """Refuse what the parent refuses, and count the trees it judged."""
 
@@ -1088,8 +1044,8 @@ class _UnseededConfigRecipe(_ConfigRecipe):
 @pytest.mark.unit
 def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
     """A component whose recipe seeds nothing starts empty, and the other component's steps carry it as it is. An
-    activation of one of those steps, or of a held one, runs only the snapshot's own check: each component was
-    admitted when its step published it, and judging the carried one would refuse snapshots their commits admitted."""
+    activation of one of those steps, or of a held one, runs no check: each component was admitted when its step
+    published it, and judging the carried one would refuse snapshots their commits admitted."""
     checks = _CountedChecks()
     composite = CompositeRecipe(
         components={

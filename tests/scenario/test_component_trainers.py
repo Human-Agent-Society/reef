@@ -6,7 +6,7 @@ import asyncio
 import socket
 import threading
 import time
-from collections.abc import Hashable, Iterator, Mapping
+from collections.abc import Hashable, Iterator, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from functools import partial
@@ -17,7 +17,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 from tests.support.component_trainers import (
     HARNESS,
-    MAX_STALENESS,
+    MAX_ARTIFACT_LAG,
     WEIGHTS,
     ComponentJobs,
     JudgedAtOnce,
@@ -43,7 +43,7 @@ from tests.support.component_trainers import (
 )
 from tests.support.polling import became_true
 from tests.support.records import memory_records, report
-from tests.support.runtime_stubs import StubInferenceRuntime, harness_live_objects
+from tests.support.runtime_stubs import StubInferenceRuntime, harness_live_objects, job_sized_stages
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
@@ -58,15 +58,19 @@ from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.samples import LocalSampleProducers
 from reef.execution.jobs import SupportsReceipt
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.record2sample.assembly import SampleAssemblySettings
-from reef.record2sample.service import SAMPLES_QUEUE
+from reef.record2sample.service import SAMPLES_QUEUE, Selection
+from reef.record2sample.staleness import ServedArtifacts, lags_behind
+from reef.record2sample.traces import TraceSamples
+from reef.sample2job.traces import TraceJobData
 from reef.scenario import Scenario
-from reef.scenario.live_objects import LiveObjects
+from reef.scenario.live_objects import LiveObjects, RecipeChecks
 from reef.scenario.scenario import validate_component_trainers
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
@@ -80,9 +84,16 @@ from reef.storage.commits import (
 from reef.storage.samples import consumed_sample_id, stage_item_id
 from reef.train import ComponentTrainer, Trainer
 from reef.train.component import JobStatus, SnapshotStart, TrainingJob
-from reef.train.job_queue import CHECKS_QUEUE, JOBS_QUEUE, TrainingCheckWorker
+from reef.train.job_queue import (
+    CHECKS_QUEUE,
+    JOBS_QUEUE,
+    SCENARIO_DELETED_ERROR,
+    TrainingCheckWorker,
+    TrainingJobWorker,
+    job_records_content,
+)
 from reef.train.jobs import JobLoopState
-from reef.train.pipeline import TrainingPipeline
+from reef.train.pipeline import PipelineSpec, TrainingPipeline
 from reef.train.types import JobData, Sample
 
 
@@ -687,11 +698,9 @@ def test_a_recipe_serving_fewer_components_than_registered_is_refused(
 def test_a_weights_job_commits_while_the_harness_cycle_fails(
     tmp_path: Path, dispatchers: _Dispatchers, held_cycle: type[_HeldJobData]
 ) -> None:
-    """The harness cycle fails and the failure shows; the weights job still lands. Then the harness's rows are
-    stale, since the job's checkpoint serves, so the harness stops trying them.
-
-    Each wake before then costs one attempt, and the job's commits and queue changes each wake the scenario, so
-    the count of attempts depends on how the wakes group."""
+    """The harness cycle fails and the failure shows; the weights job still lands. A harness trace never goes
+    stale, so the harness keeps its rows and tries again, but each failed cycle in a row waits longer before the
+    next one (``failed_cycle_delay_seconds``): a reload after the failure does not run the cycle again at once."""
     away = held_cycle
     away.fails = True
     training = HeldJobs(tmp_path / "checkpoints")
@@ -705,18 +714,12 @@ def test_a_weights_job_commits_while_the_harness_cycle_fails(
         lambda: "finished" in [job_event(row) for row in _scenario(dispatcher).store.history()],
         timeout_seconds=15,
     )
-    # A wake that was already due can still land after the job finishes, so the test waits for the count to hold
-    # still for a second; a harness that keeps trying never lets it.
-    assert away.attempts >= 1
-    held_since, attempts = time.monotonic(), away.attempts
-
-    def settled() -> bool:
-        nonlocal held_since, attempts
-        if away.attempts != attempts:
-            held_since, attempts = time.monotonic(), away.attempts
-        return time.monotonic() - held_since >= 1.0
-
-    assert became_true(settled)
+    # The waits grow: 2, 4, 8 seconds after the failures in a row, so three seconds see at most two more attempts.
+    # Without them, each failure reloads the scenario and the new worker fails again at once, many times a second.
+    attempts = away.attempts
+    assert attempts >= 1
+    time.sleep(3.0)
+    assert away.attempts - attempts <= 2
 
 
 @pytest.mark.unit
@@ -941,7 +944,10 @@ class _RetiringRetriesSamples(JudgedSamples):
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(_RetiringRetriesJudging(), JudgedAtOnce(), max_staleness=MAX_STALENESS)
+        return cls(_RetiringRetriesJudging(), JudgedAtOnce())
+
+    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
+        return lags_behind(samples, served, MAX_ARTIFACT_LAG)
 
     def make_sample(self, record: AgentRecord, judgment: Judgment) -> Any:
         return policy_trajectory(
@@ -1209,6 +1215,159 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
         consumed_sample_id(stage_item_id("agent", f"{WEIGHTS}:r1:0")),
     }
     assert reloaded.records.count("agent") == 2
+
+
+@pytest.mark.unit
+def test_a_weights_step_marks_the_older_weights_samples_stale_and_the_harness_still_trains_them(
+    dispatchers: _Dispatchers,
+) -> None:
+    """Weights and harness train from one stream of records. The weights stage is on-policy; the harness stage reads
+    traces, which never go stale. Once a weights step activates new weights, the samples service marks the weights'
+    sample of a row that the old weights answered stale, and the harness still trains that row."""
+    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={}))
+    harness = harness_recipe(job_sized_stages(PipelineSpec(TraceSamples, TraceJobData)))
+    recipe = two_trainer_recipe(weights=weights, harness=harness)
+    dispatcher, _ = dispatchers.open(recipe=recipe, hold_local_cycles=True)
+    scenario = loaded(dispatcher, 1, 2)
+    root = scenario.serving_artifact_id()
+    assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
+    assert scenario.serving_artifact_id() != root
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+
+    make_samples(scenario)
+    stale = {stored.sample_id: stored.stale for stored in scenario.trainer_for(WEIGHTS).pipeline.store.store.page()}
+    assert stale[stage_item_id("agent", f"{WEIGHTS}:r2:0")], "the old weights answered row 2"
+    assert not stale[stage_item_id("agent", f"{HARNESS}:r2:0")], "a trace never goes stale"
+    assert append_commit(scenario, WEIGHTS) is None
+    assert append_commit(scenario, HARNESS) is not None
+    assert append_commit(scenario, HARNESS) is not None
+    assert scenario.trainer_for(HARNESS).state["finished_jobs"] == 2
+
+
+class NoSelectionProgress(Selection):
+    """A selection whose progress nobody reads."""
+
+    def progress(self, records_read: int, samples_created: int) -> None:
+        return
+
+
+def on_policy_weights(
+    dispatchers: _Dispatchers, *, max_artifact_lag: int = 0, **options: Any
+) -> tuple[Dispatcher, Scenario]:
+    """A dispatcher whose weights trainer accepts ``max_artifact_lag`` (0: on-policy) and that runs no samples
+    service: the test makes the samples. Its scenario serves, and holds no row yet."""
+    config = {"max_artifact_lag": max_artifact_lag}
+    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config=config))
+    dispatcher, _ = dispatchers.open(
+        recipe=two_trainer_recipe(weights=weights),
+        hold_local_cycles=True,
+        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
+        **options,
+    )
+    scenario = _scenario(dispatcher)
+    wait_for_serving(dispatcher, "agent")
+    return dispatcher, scenario
+
+
+@pytest.mark.unit
+def test_a_rollback_to_an_artifact_judged_before_waits_for_a_new_judgment(dispatchers: _Dispatchers) -> None:
+    """A serves; a weights step activates B; row 2, answered by B, is judged fresh. An activation of A makes the
+    history A, B, A: row 2 is one artifact behind. No automatic job takes it before the samples service judges the
+    new history, and that judgment marks it stale."""
+    dispatcher, scenario = on_policy_weights(dispatchers)
+    root = scenario.serving_artifact_id()
+    _append_records(scenario, 1)
+    assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
+    _append_records(scenario, 2)
+    make_samples(scenario)
+    pipeline = scenario.trainer_for(WEIGHTS).pipeline
+    row_two = stage_item_id("agent", f"{WEIGHTS}:r2:0")
+    assert [stored.stale for stored in pipeline.store.read([row_two])] == [False]
+
+    dispatcher.activate("agent", root, WEIGHTS)
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+    assert not pipeline.judged(scenario.served_artifacts())
+    assert checked_commit(scenario, WEIGHTS) is None, "no job before the new judgment"
+    make_samples(scenario)
+    assert [stored.stale for stored in pipeline.store.read([row_two])] == [True]
+    assert checked_commit(scenario, WEIGHTS) is None, "row 2 is stale and nothing else waits"
+
+
+@pytest.mark.unit
+def test_a_stricter_staleness_rule_judges_the_stored_samples_again(dispatchers: _Dispatchers) -> None:
+    """Rows 1 and 2 are answered by A; a weights step on row 1 activates B. With a lag of 1, row 2 still trains.
+    A scenario config with a lag of 0 is a new rule at the same served commit: the samples service judges again
+    and marks row 2 stale, and no automatic job takes it before that."""
+    dispatcher, scenario = on_policy_weights(dispatchers, max_artifact_lag=1)
+    _append_records(scenario, 1, 2)
+    assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+    make_samples(scenario)
+    row_two = stage_item_id("agent", f"{WEIGHTS}:r2:0")
+    assert [stored.stale for stored in scenario.trainer_for(WEIGHTS).pipeline.store.read([row_two])] == [False]
+
+    dispatcher.set_record2sample_config("agent", {WEIGHTS: {"max_artifact_lag": 0}})
+    stricter = dispatcher.registry.require("agent")
+    pipeline = stricter.trainer_for(WEIGHTS).pipeline
+    assert not pipeline.judged(stricter.served_artifacts())
+    assert checked_commit(stricter, WEIGHTS) is None, "no job before the judgment under the new rule"
+    make_samples(stricter)
+    assert [stored.stale for stored in pipeline.store.read([row_two])] == [True]
+    assert checked_commit(stricter, WEIGHTS) is None
+
+
+@pytest.mark.unit
+def test_a_new_pipeline_judges_the_stored_samples_once_under_the_same_config(
+    dispatchers: _Dispatchers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stage whose code changed under the same class and config, as after an upgrade, judges the stored samples
+    again: a reload builds a new pipeline, which judges once whatever the stored judgments say."""
+    dispatcher, scenario = on_policy_weights(dispatchers, max_artifact_lag=1)
+    _append_records(scenario, 1, 2)
+    assert append_commit(scenario, WEIGHTS) == [("i1", "r1")]
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+    make_samples(scenario)
+    row_two = stage_item_id("agent", f"{WEIGHTS}:r2:0")
+    stage_class = type(scenario.trainer_for(WEIGHTS).pipeline.record2sample)
+    assert [stored.stale for stored in scenario.trainer_for(WEIGHTS).pipeline.store.read([row_two])] == [False]
+
+    monkeypatch.setattr(stage_class, "is_stale", lambda self, samples, served: True)
+    upgraded = dispatcher.registry.reload("agent")
+    pipeline = upgraded.trainer_for(WEIGHTS).pipeline
+    make_samples(upgraded)
+    assert [stored.stale for stored in pipeline.store.read([row_two])] == [True]
+    assert checked_commit(upgraded, WEIGHTS) is None
+
+
+@pytest.mark.unit
+def test_a_samples_service_in_its_own_process_judges_control_activations(dispatchers: _Dispatchers) -> None:
+    """Control and a samples-only process share the storage. After a weights commit in control activates new
+    weights, the samples process judges the new history without a reload, and control's next automatic job runs."""
+    repository = _repository(dispatchers.tmp_path)
+    _, scenario = on_policy_weights(dispatchers, backend_factory=repository)
+    # The two processes read one deployment, so their stages have one config and one staleness rule.
+    weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={"max_artifact_lag": 0}))
+    samples_process, _ = dispatchers.open(
+        recipe=two_trainer_recipe(weights=weights),
+        hold_local_cycles=True,
+        components=frozenset({"samples"}),
+        backend_factory=repository,
+    )
+    producers = LocalSampleProducers(samples_process.registry, None)
+
+    def produce() -> None:
+        producers.produce("agent", WEIGHTS, NoSelectionProgress("selection"))
+
+    _append_records(scenario, 1)
+    produce()
+    assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
+    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
+    pipeline = scenario.trainer_for(WEIGHTS).pipeline
+    assert not pipeline.judged(scenario.served_artifacts())
+    _append_records(scenario, 2)
+    produce()
+    assert pipeline.judged(scenario.served_artifacts())
+    assert append_commit(scenario, WEIGHTS, make=False) == [("i2", "r2")]
 
 
 @pytest.mark.unit
@@ -1855,6 +2014,64 @@ def test_a_job_that_was_submitted_and_not_committed_is_cancelled_when_its_scenar
 
 
 @pytest.mark.unit
+def test_a_job_queued_after_the_delete_does_not_run_when_the_cycle_stops_before_its_cancel(
+    tmp_path: Path, dispatchers: _Dispatchers
+) -> None:
+    """The cycle adds its job to the queue after the delete cancelled the scenario's jobs, and its process stops
+    before the cycle cancels the job: here the cycle waits until the test ends. The job stays queued, and the
+    training worker that takes it finds no registration of the scenario: it cancels the job before the component
+    runs it."""
+    training = WeightsJobComponent(tmp_path / "checkpoints")
+    factory = _repository(tmp_path)
+    dispatcher, _ = dispatchers.open(
+        training=training,
+        hold_local_cycles=True,
+        backend_factory=factory,
+        components=frozenset(SERVICE_COMPONENTS) - {"training"},
+    )
+    scenario = loaded(dispatcher, 1)
+    checks = TrainingCheckWorker(
+        training, dispatcher.queue, dispatcher.job_directory_store, factory, worker_id="checks", poll_seconds=0.01
+    )
+    checks.start()
+    queued = scenario.trainer_for(WEIGHTS).job_loop_required().component
+    submit = queued.submit
+    submitted, stopped = threading.Event(), threading.Event()
+
+    def delete_submit_and_stop(job: TrainingJob) -> None:
+        dispatcher.delete_scenario("agent")
+        submit(job)
+        submitted.set()
+        stopped.wait(30)
+
+    try:
+        wait_for_job_check(scenario, WEIGHTS)
+        queued.submit = delete_submit_and_stop  # type: ignore[method-assign]
+        dispatcher.open_local_cycles()
+        assert submitted.wait(30)
+        (job,) = dispatcher.queue.items(JOBS_QUEUE)
+        assert job.state == "queued"
+
+        worker = TrainingJobWorker(
+            training,
+            dispatcher.queue,
+            dispatcher.job_directory_store,
+            factory,
+            checks=RecipeChecks(Recipe()),
+            worker_id="training",
+        )
+        assert worker.run_once()
+        cancelled = dispatcher.queue.read(JOBS_QUEUE, job.id)
+        assert (cancelled.state, cancelled.error, cancelled.progress) == ("failed", SCENARIO_DELETED_ERROR, ())
+        assert training.submitted == []
+        with pytest.raises(ArtifactNotFoundError):
+            factory("agent").materialize_content(job_records_content(job.id))
+    finally:
+        stopped.set()
+        checks.stop()
+
+
+@pytest.mark.unit
 def test_a_job_that_waits_for_its_check_holds_nothing_of_the_scenario(
     tmp_path: Path, dispatchers: _Dispatchers
 ) -> None:
@@ -1883,7 +2100,9 @@ def test_a_job_that_waits_for_its_check_holds_nothing_of_the_scenario(
     scenario.train_from(root, WEIGHTS)
     assert scenario.store.history()[-1].operation == "train_from"
     assert all(record.training_job_id is None for record in scenario.store.history())
-    # The job now starts from another start, so it is another job with a check of its own.
+    # The job now starts from another start, so it is another job with a check of its own. The samples service
+    # judges the samples against the activation first, as it does after each commit.
+    make_samples(scenario)
     assert scenario.next_commit(WEIGHTS) is None
     first, second = dispatcher.queue.items(CHECKS_QUEUE)
     assert first.id == check.id and second.state == "queued"

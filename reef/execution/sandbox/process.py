@@ -8,12 +8,13 @@ development run and a hosted one, so that step is the seam:
 * :class:`LocalExecutor` runs the binary as a plain subprocess in its own
   session, exactly as before. It is the default, used for development and the
   hermetic tests.
-* :class:`SandboxExecutor` runs the same binary inside a bubblewrap jail: a
-  fresh non-root namespace, a read-only base filesystem with only the run
-  root exposed (its workspace and declared runtime state writable, rendered
-  inputs read-only), only explicitly forwarded deployment environment, resource limits,
-  network disabled unless an egress allowlist is configured, and death with
-  the parent.
+* :class:`SandboxExecutor` runs the same binary in a sandbox that the host's
+  kernel enforces: a read-only base filesystem with only the run root exposed
+  (its workspace and declared runtime state writable, rendered inputs
+  read-only), only explicitly forwarded deployment environment, resource
+  limits, and network disabled unless an egress allowlist is configured.
+  :class:`BwrapExecutor` is the bubblewrap jail on Linux; ``SeatbeltExecutor``
+  in :mod:`reef.execution.sandbox.seatbelt` is the Seatbelt profile on macOS.
 
 A deployment selects the executor by config; a hosted deployment that requires
 the sandbox refuses to start when the sandbox runtime is unavailable, through
@@ -25,13 +26,13 @@ from __future__ import annotations
 import os
 import resource
 import shutil
-import subprocess
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import ClassVar, Self
 
 from reef.core.errors import InternalError, ReefError
 from reef.execution.processes import (
@@ -290,25 +291,6 @@ class LocalExecutor(ProgramExecutor):
         return run_process(argv, cwd=workspace, env={**inherited_environment(), **env}, timeout=timeout)
 
 
-#: What every jail unshares and mounts before its binds; the run jail and the nesting probe share it.
-ISOLATION: tuple[str, ...] = (
-    "--unshare-user",
-    "--unshare-ipc",
-    "--unshare-pid",
-    "--unshare-uts",
-    "--unshare-cgroup-try",
-    "--die-with-parent",
-    "--new-session",
-    "--proc",
-    "/proc",
-    "--dev",
-    "/dev",
-    "--tmpfs",
-    "/tmp",
-    "--clearenv",
-)
-
-
 #: Resource limits every sandboxed run gets unless the config overrides one.
 @dataclass(frozen=True)
 class SandboxLimits(ProcessSetup):
@@ -345,68 +327,74 @@ class SandboxLimits(ProcessSetup):
                 resource.setrlimit(kind, (value, value))
 
 
+def parse_env_from(section: Mapping[str, object], environ: Mapping[str, str]) -> dict[str, str]:
+    """``sandbox.env_from``: the named host variables and their values; each must be set and non-empty."""
+    names = section.get("env_from", [])
+    if not isinstance(names, (list, tuple)) or not all(
+        isinstance(name, str) and name.isidentifier() for name in names
+    ):
+        raise SandboxUnavailableError("sandbox.env_from must list environment variable names")
+    env = {}
+    for name in names:
+        if not environ.get(name):
+            raise SandboxUnavailableError(f"sandbox.env_from requires environment variable {name!r}")
+        env[name] = environ[name]
+    return env
+
+
 @dataclass(frozen=True)
 class SandboxExecutor(ProgramExecutor):
-    """Run the binary inside a bubblewrap jail.
+    """Run the binary on the Reef host inside a sandbox that the host's kernel enforces.
 
-    bubblewrap (``bwrap``) is an unprivileged, daemonless sandbox: it builds a
-    new mount/pid/user namespace, binds a read-only base filesystem, exposes
-    only the run root (workspace writable), clears the environment, and
-    dies with its parent. Network is unshared (no egress) unless
-    ``egress_hosts`` lists the model endpoint the run must reach, in which
-    case the network namespace is shared so the endpoint is reachable; a
-    single-host firewall is the follow-up (issue #18). The jail also carries
-    ``REEF_NATIVE_ENFORCE=bwrap``, so the native loop runs each tool call in
-    a nested jail derived from the tool's declared capabilities; preflight
-    proves the host can nest one.
+    Values: ``egress_hosts`` are the endpoints a run must reach; empty, the ``default`` network allows no network
+    access, and nonempty, it opens the network. ``network`` is ``default`` or ``isolated``: ``isolated`` opens the
+    internet and allows no host loopback port except ``forward_ports``, which are distinct TCP ports. ``limits`` bound
+    each run's resources. ``base_paths`` are the host directories a run may read so its binary and runtime resolve.
+    ``env`` is the deployment's explicit environment for every run; a run inherits no other host variable.
+
+    Each subclass enforces these values with one host mechanism, which its ``kind`` names, and implements
+    :meth:`preflight` and :meth:`launch`.
+    Purpose: :mod:`reef.execution.sandbox.config` builds one with :meth:`from_config` from a deployment's sandbox
+    section, as it builds a ``RemoteExecutor``; a caller binds it to a program with :meth:`for_program`.
     """
 
+    #: The host mechanism's name, as a deployment selects it.
+    kind: ClassVar[str] = ""
+
     egress_hosts: tuple[str, ...] = ()
-    #: ``isolated`` runs the jail in a network namespace of its own that pasta connects to the internet: no
-    #: host address is reachable (``--no-map-gw``) except the loopback ports in ``forward_ports``, which pasta
-    #: forwards to the host's loopback. The default leaves the network to ``egress_hosts``.
     network: str = "default"
     forward_ports: tuple[int, ...] = ()
     limits: SandboxLimits = field(default_factory=SandboxLimits)
-    #: Base directories bound read-only so the binary and its runtime resolve.
-    base_paths: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/etc/alternatives", "/etc/ssl", "/opt")
+    base_paths: tuple[str, ...] = ()
     #: Explicit deployment credentials/settings; never inherited from the candidate tree.
     env: Mapping[str, str] = field(default_factory=dict, repr=False)
 
-    def preflight(self) -> None:
-        if shutil.which("bwrap") is None:
-            raise SandboxUnavailableError(
-                "the sandbox executor requires bubblewrap (bwrap) on PATH; install it or set "
-                "evolution.executor: local for development"
-            )
-        if self.network not in ("default", "isolated"):
-            raise SandboxUnavailableError(f"unknown sandbox network {self.network!r}; use 'default' or 'isolated'")
-        if self.network == "isolated":
-            self.preflight_pasta()
-        # The native loop nests one jail per tool call inside the run's, so a host that refuses a user namespace
-        # inside another fails here instead of ending every call in SANDBOX_FAILED and tying every pairing.
-        try:
-            done = subprocess.run(
-                self.nested_probe_argv(),
-                env={"PATH": os.environ.get("PATH", "")},
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SandboxUnavailableError(
-                f"the sandbox executor cannot nest a bubblewrap jail on this host: {exc}"
-            ) from exc
-        if done.returncode != 0:
-            raise SandboxUnavailableError(
-                "the sandbox executor cannot nest a bubblewrap jail on this host, which every sandboxed native "
-                f"tool call needs: {done.stderr.strip()[-600:]}"
-            )
+    @classmethod
+    def from_config(cls, section: Mapping[str, object], environ: Mapping[str, str]) -> Self:
+        """The sandbox that ``section``'s ``egress_hosts``, ``limits`` and ``env_from`` describe.
+
+        ``env_from`` names variables of ``environ``. Raise ``ReefError`` for a malformed option.
+        """
+        egress_hosts = section.get("egress_hosts") or ()
+        if not isinstance(egress_hosts, (list, tuple)):
+            raise ReefError("evolution.sandbox.egress_hosts must be a list")
+        limits = section.get("limits") or {}
+        if not isinstance(limits, Mapping):
+            raise ReefError("evolution.sandbox.limits must be a mapping")
+        return cls(
+            egress_hosts=tuple(str(host) for host in egress_hosts),
+            limits=SandboxLimits(
+                cpu_seconds=int(limits.get("cpu_seconds", 0)),
+                memory_bytes=int(limits.get("memory_bytes", 0)),
+                processes=int(limits.get("processes", 0)),
+                file_bytes=int(limits.get("file_bytes", 0)),
+            ),
+            env=parse_env_from(section, environ),
+        )
 
     def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
-        """Bind the whole install of a binary Reef installed: npm launchers are symlinks into packages, and git
-        installs need both their editable source and their venv."""
+        """Let a run read the whole install of a binary Reef installed: npm launchers are symlinks into packages,
+        and git installs need both their editable source and their venv."""
         if binary is not None:
             return self, binary
         resolved = program.host_binary()
@@ -416,149 +404,8 @@ class SandboxExecutor(ProgramExecutor):
         return replace(self, base_paths=(*self.base_paths, str(install_dir))), resolved
 
     def open_session(self, *, forward_ports: tuple[int, ...] = (), timeout_s: float) -> ProgramExecutor:
-        """An isolated network forwards the run's ports; the default network already reaches the host."""
+        """An isolated network adds the run's ports; the default network already reaches the host."""
         ports = tuple(dict.fromkeys((*self.forward_ports, *forward_ports)))
         if self.network != "isolated" or ports == self.forward_ports:
             return self
         return replace(self, forward_ports=ports)
-
-    def preflight_pasta(self) -> None:
-        """An isolated network is one pasta sets up: prove it can on this host, as this user.
-
-        pasta cannot map users under root (it drops to nobody), and a container may deny it the namespaces it
-        needs; either way the jail would never start, so the host is refused here with pasta's own reason.
-        """
-        if shutil.which("pasta") is None:
-            raise SandboxUnavailableError(
-                "an isolated sandbox network requires pasta (the passt package) on PATH; install it, or run "
-                "without isolation where that is allowed"
-            )
-        if os.geteuid() == 0:
-            raise SandboxUnavailableError(
-                "pasta cannot map users when started as root; run the Reef service as a non-root user with user "
-                "namespaces allowed to isolate the network"
-            )
-        probe = ["pasta", "--config-net", "--no-map-gw", "--quiet", "-t", "none", "-u", "none", "-T", "none"]
-        try:
-            done = subprocess.run(
-                [*probe, "-U", "none", "--", "/bin/true"],
-                env={"PATH": os.environ.get("PATH", "")},
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SandboxUnavailableError(f"pasta cannot set up an isolated network on this host: {exc}") from exc
-        if done.returncode != 0:
-            raise SandboxUnavailableError(
-                "pasta cannot set up an isolated network on this host (run the Reef service as a non-root user "
-                f"with user namespaces allowed): {(done.stderr or done.stdout).strip()[-600:]}"
-            )
-
-    def nested_probe_argv(self) -> list[str]:
-        """A run jail with a tool jail inside it around ``true``: the shape every sandboxed tool call takes."""
-        bwrap = shutil.which("bwrap") or "bwrap"
-        binds = [token for base in self.base_paths if Path(base).exists() for token in ("--ro-bind", base, base)]
-        task_run = [bwrap, *ISOLATION, "--unshare-net", *binds]
-        tool = [bwrap, *TOOL_ISOLATION, "--unshare-net", *binds]
-        return [*task_run, "--", *tool, "--", "/bin/true"]
-
-    def bwrap_argv(
-        self,
-        argv: Sequence[str],
-        *,
-        root: Path,
-        workspace: Path,
-        env: Mapping[str, str],
-        writable_paths: Sequence[Path] = (),
-        readonly_paths: Sequence[Path] = (),
-    ) -> list[str]:
-        cmd = ["bwrap", *ISOLATION]
-        isolated = self.network == "isolated"
-        if isolated:
-            # pasta made the network namespace; bwrap stays in it rather than unsharing a disconnected one.
-            ports = ",".join(str(port) for port in self.forward_ports) or "none"
-            # Every forward is explicit: pasta's default ("auto") would expose each port the host listens on.
-            forwards = ["-t", "none", "-u", "none", "-T", ports, "-U", "none"]
-            cmd = ["pasta", "--config-net", "--no-map-gw", "--quiet", *forwards, "--", *cmd]
-        elif not self.egress_hosts:
-            cmd.append("--unshare-net")
-        for base in self.base_paths:
-            if Path(base).exists():
-                cmd += ["--ro-bind", base, base]
-        if self.egress_hosts or isolated:
-            for dns_path in ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
-                if Path(dns_path).exists():
-                    cmd += ["--ro-bind", dns_path, dns_path]
-        # Mount the root read-only, then open only the workspace and the
-        # declared runtime-state directories. Rendered inputs inside those
-        # directories are rebound read-only so a run cannot mutate the
-        # admitted composition, as a remote sandbox's command does.
-        cmd += ["--ro-bind", str(root), str(root)]
-        opened = (workspace, *writable_paths)
-        for path in opened:
-            cmd += ["--bind", str(path), str(path)]
-        for path in readonly_paths:
-            if any(path == writable or writable in path.parents for writable in opened):
-                cmd += ["--ro-bind", str(path), str(path)]
-        cmd += ["--chdir", str(workspace)]
-        for key, value in {
-            **inherited_environment(),
-            **env,
-            **self.env,
-            "REEF_NATIVE_ENFORCE": "bwrap",
-            ISOLATION_ENV: "bwrap",
-        }.items():
-            cmd += ["--setenv", key, value]
-        cmd += ["--", *argv]
-        return cmd
-
-    def launch(
-        self,
-        argv: Sequence[str],
-        *,
-        root: Path,
-        workspace: Path,
-        env: Mapping[str, str],
-        timeout: float,
-        writable_paths: Sequence[Path] = (),
-        readonly_paths: Sequence[Path] = (),
-    ) -> ProcessOutcome:
-        self.preflight()
-        full = self.bwrap_argv(
-            argv,
-            root=root,
-            workspace=workspace,
-            env=env,
-            writable_paths=writable_paths,
-            readonly_paths=readonly_paths,
-        )
-        return run_process(
-            full,
-            cwd=workspace,
-            env={"PATH": os.environ.get("PATH", "")},
-            timeout=timeout,
-            limits=self.limits,
-        )
-
-
-#: Nested tool jails bind the run's proc filesystem instead of mounting another one.
-TOOL_ISOLATION: tuple[str, ...] = (
-    "--unshare-user",
-    "--unshare-ipc",
-    "--unshare-pid",
-    "--unshare-uts",
-    "--unshare-cgroup-try",
-    "--die-with-parent",
-    "--new-session",
-    "--ro-bind",
-    "/proc",
-    "/proc",
-    "--dev",
-    "/dev",
-    "--tmpfs",
-    "/tmp",
-    "--clearenv",
-)

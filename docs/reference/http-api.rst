@@ -1366,7 +1366,8 @@ score, rewards, error, calls, verifier_calls}``.
 
 - ``state`` is the rollout's state in the evaluations queue: ``queued``,
   ``assigned``, ``running``, ``finished`` or ``failed``. It is ``waiting``
-  while ``max_concurrent_rollouts`` keeps the rollout out of the queue.
+  while ``max_concurrent_rollouts`` keeps the rollout out of the queue, also
+  when a retry runs the rollout again.
 - ``attempt_count`` is how many times a worker took the rollout.
 - ``started_at`` is when a worker first took the rollout, and ``ended_at``
   when it finished or failed, in epoch seconds. Each is null until then.
@@ -1426,6 +1427,9 @@ the rollouts of an evaluation that ended with no score once more. It answers
   evaluation ended it, or when it finished with a failed score. Each of them
   goes back to the queue. Its earlier attempts stay, so its ``attempt_count``
   goes on and the calls of each attempt stay readable.
+- A retry keeps ``max_concurrent_rollouts``. When the evaluation has fewer free
+  places than rollouts to run again, the others are ``waiting`` and go back to
+  the queue as earlier rollouts end.
 - A rollout that has a score keeps it. A rollout that has not ended stays as
   it is.
 - An evaluation that runs goes on, with those rollouts in the queue again.
@@ -1990,19 +1994,25 @@ Deleting a scenario
 -------------------
 
 ``DELETE /reef/scenarios/{scenario}`` removes the scenario from the running
-service and frees its name. Nothing is destroyed: the record store and commit
+service. Nothing is destroyed: the record store and commit
 log move under ``<agent_record_dir>/archived/``, the recipe's own directories
 (a harness scenario's history and step records) move under an
 ``archived/`` sibling, and the
 scenario's ref in the artifact repository is renamed into
 ``refs/reef/archived/``, so every snapshot it published stays reachable. A
-later create of the same name writes a new root snapshot. A local step in flight for the scenario ends without a
+scenario ID is never used again after its delete: a create with the ID, and a
+record that would create the scenario implicitly, answer 409. A new scenario
+needs a new ID. A local step in flight for the scenario ends without a
 commit. Only a local artifact repository can be archived; a remote one
 answers 501.
 
 For a scenario that trains weights, the delete also cancels the scenario's
 running training job at its training component, since nothing would read the
-job's checkpoints afterwards. On a runtime that serves per-scenario adapters,
+job's checkpoints afterwards. The training service also cancels a job of the
+scenario that reaches the queue after the delete, also when control stopped
+before it could cancel it: the service finds no registration of the scenario
+when it takes the job or stores a checkpoint, and it discards what the job
+stored. On a runtime that serves per-scenario adapters,
 the scenario's adapter stays resident in the serving engines until the
 adapter residency evicts it.
 
@@ -2132,7 +2142,7 @@ the trainer of that component. The stage class stays the deployment's:
 
 .. code:: json
 
-   {"record2sample_config": {"weights": {"max_staleness": 2}}}
+   {"record2sample_config": {"weights": {"accept_multi_turn_policy_samples": true}}}
 
 The request replaces the stored mapping as a whole. Send ``{}`` to use the
 deployment's config again. The response holds the stored
@@ -2204,7 +2214,7 @@ replica.
 
 The record names the artifact that answered in ``artifact_id``, and holds the
 bucket and the weights in ``metadata.traffic``. While the scenario serves an
-artifact, the staleness check does not refuse its records, whatever its weight
+artifact, the samples service does not mark its records' samples stale, whatever its weight
 (`Call one served artifact`_). A job can then hold samples of several
 artifacts. Each sample keeps its own ``artifact_id`` and recorded log
 probabilities.
@@ -2226,7 +2236,7 @@ scenario:
      "serving_config": {"weights": {"temperature": 0.6}},
      "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}},
      "served": {"weights": {"artifact:a": 95, "artifact:b": 5}},
-     "record2sample_config": {"weights": {"max_staleness": 2}},
+     "record2sample_config": {"weights": {"accept_multi_turn_policy_samples": true}},
      "job_parameters": {"trajectory": {"objective": "sft", "save_interval": 50}}
    }
 
@@ -2460,8 +2470,8 @@ Artifact of a recorded response
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 An inference record holds the provider exchange and ``artifact_id``, the
-artifact that answered: the same ID as ``x-reef-artifact-id``. The staleness
-check reads it (see `Staleness
+artifact that answered: the same ID as ``x-reef-artifact-id``. The samples
+service's staleness check reads it (see `Staleness
 <../developer-guide/processors.rst#staleness>`__). Serving returns no training
 tensors. Reef removes any ``training`` block that an engine handler returns
 from the record, from the client's answer, and from rollout and evaluation
@@ -3119,11 +3129,11 @@ The activation rule and a restore change the active artifact alone. The
 artifacts served beside it stay served. Training continues from each
 trainer's independently selected training start.
 
-The staleness check of a recipe does not refuse a sample while the scenario
-serves the artifact that produced it beside the active one. After that
-artifact stops serving, the check counts only the artifacts that the scenario
-served as active: it refuses a sample whose artifact was not active within
-``max_staleness`` artifacts.
+The samples service does not mark a sample stale while the scenario serves the
+artifact that produced it beside the active one. After that artifact stops
+serving, the check counts only the artifacts that the scenario served as
+active: an on-policy stage marks a sample whose artifact is not the active
+one.
 
 The runtime limits how many weight artifacts a scenario serves together
 (`Runtime limits <../user-guide/operate.rst#set-what-a-scenario-serves>`__).

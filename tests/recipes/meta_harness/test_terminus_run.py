@@ -24,7 +24,9 @@ from pathlib import Path
 import pytest
 from reef_terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV, trial_record
 
-from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, SandboxExecutor
+from reef.execution.sandbox.bwrap import BwrapExecutor
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError
+from reef.execution.sandbox.seatbelt import SeatbeltExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskRunError, run_task
@@ -166,7 +168,7 @@ def test_the_run_root_is_under_the_home_directory_on_macos_only_and_removed(
 
 
 @dataclass(frozen=True)
-class RecordingSandbox(SandboxExecutor):
+class RecordingSandbox(BwrapExecutor):
     """A sandbox that records the root and the environment it is handed instead of starting bwrap."""
 
     launched: list[tuple[Path, dict[str, str]]] = field(default_factory=list)
@@ -253,9 +255,10 @@ def test_an_executor_other_than_the_local_one_gets_no_service_settings(tmp_path:
 
 
 @pytest.mark.unit
-def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path) -> None:
+@pytest.mark.parametrize("sandbox", [BwrapExecutor, SeatbeltExecutor])
+def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path, sandbox) -> None:
     # terminus isolates runs in Harbor's container, which cannot nest in
-    # bubblewrap. Every caller of run_task is told, not just one backend.
+    # a local sandbox. Every caller of run_task is told, not just one backend.
     descriptor = get_adapter("terminus")
     with pytest.raises(TaskRunError, match=r"cannot run under evolution\.executor: sandbox"):
         run_task(
@@ -264,7 +267,7 @@ def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path
             "hello-world",
             binary=sys.executable,
             timeout=60.0,
-            executor=SandboxExecutor(),
+            executor=sandbox(),
         )
 
 
@@ -300,7 +303,7 @@ def test_an_extension_cannot_reach_a_local_process(tmp_path: Path) -> None:
 )
 def test_remote_terminus_requires_explicit_network_and_credentials(egress, credentials, message) -> None:
     descriptor = get_adapter("terminus")
-    executor = SandboxExecutor(egress_hosts=egress, env=credentials)
+    executor = BwrapExecutor(egress_hosts=egress, env=credentials)
     with pytest.raises(TaskRunError, match=message):
         run_task(descriptor, render(TREE), "task", executor=executor)
 

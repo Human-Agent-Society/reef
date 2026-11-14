@@ -254,6 +254,15 @@ class _InMemoryRepositoryBackendFactory(CachedRepositoryBackendFactory):
         super().__init__()
         self._backend_type = backend_type
         self._directory = None if directory is None else Path(directory)
+        #: The scenarios whose registration this factory archived. The store lives in this process only.
+        self.archived: set[str] = set()
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
         return self._backend_type(scenario, directory=self._directory)
+
+    def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
+        self.archived.add(scenario)
+        return ()
+
+    def has_archived_registration(self, scenario: str) -> bool:
+        return scenario in self.archived

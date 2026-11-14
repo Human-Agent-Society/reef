@@ -85,8 +85,8 @@ Slime computes adaptive-beta entropic leave-one-out advantages within each
 group. The loss uses the old-policy log probabilities without PPO clipping and
 adds centered token KL against the frozen base model. The training component
 computes the old-policy log probabilities with the weights of the step's
-start; with the default ``max_staleness`` of 0, these are the weights that
-sampled the grid. Slime refuses ``--use-rollout-logprobs``. Megatron updates rank-32 LoRA
+start. The stage is on-policy, so these are the weights that sampled the
+grid. Slime refuses ``--use-rollout-logprobs``. Megatron updates rank-32 LoRA
 matrices on the attention and MLP projections. Reef publishes the adapter to
 SGLang after the optimizer step succeeds.
 
@@ -124,9 +124,6 @@ the record-to-sample stage. ``TTTDJobData`` reads the grid from
 
    ``pipeline.record2sample.config.rollouts_per_group`` : 64
        siblings per group; at least two, since a group of one has no relative reward.
-
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
    ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
        train a report's trajectory of several model calls as one multi-turn sample; otherwise the report trains only the trajectory's last call.
@@ -205,7 +202,7 @@ following commands from the repository root:
 
    git submodule update --init third_party/reef-client
    python -m pip install -e ./third_party/reef-client
-   python -m pip install -e . "reef-eval[harbor]"
+   python -m pip install -e .
    cd recipes/tttd/examples/tttd
 
 ``run.sh`` downloads ``Qwen/Qwen3-8B`` into ``work/model`` on its first run,

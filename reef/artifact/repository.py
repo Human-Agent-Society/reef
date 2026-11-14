@@ -218,10 +218,10 @@ class RepositoryBackend(ArtifactRepository):
                 continue
         return snapshots
 
-    def resolve_artifact(self, artifact_id: str) -> Artifact:
+    def resolve_artifact(self, artifact_id: str, paths: tuple[str, ...] | None = None) -> Artifact:
         """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path,
         and without the files of the other components of that snapshot where the backend can
-        (``materialize_component``).
+        (``materialize_component_files``): all its files, or at least those of ``paths``.
 
         Raise ``ArtifactNotFoundError`` when this repository has no binding for the ID.
         """
@@ -233,9 +233,9 @@ class RepositoryBackend(ArtifactRepository):
         component = components[artifact_id]
         manifest = snapshot.components
         if component is None or manifest is None or manifest.single:
-            return self.materialize(ref)
+            return self.materialize_component_files(ref, None, paths)
         # Only the files of this artifact are made local, not the other components of its snapshot.
-        return self.materialize_component(ref, component)
+        return self.materialize_component_files(ref, component, paths)
 
     @abstractmethod
     def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
@@ -349,6 +349,13 @@ class StagedSnapshotRepositoryBackend(RepositoryBackend):
 class RepositoryBackendFactory(ABC):
     @abstractmethod
     def __call__(self, scenario: str) -> RepositoryBackend: ...
+
+    def reclaim_discarded(self) -> None:
+        """Free the storage that discarded content still holds. Control's sweep calls it on its schedule
+        (``EndedWorkSweeper``). The default frees nothing: it fits a store whose discard frees the content's
+        storage at once. A store that keeps the files of discarded content after the discard, such as Git LFS
+        objects or a local cache, frees them here."""
+        return
 
 
 class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
@@ -490,15 +497,25 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
     def archive_registration(self, scenario: str) -> tuple[str, ...]:
         """Forget the scenario's backend and move its durable registration aside; what was archived, by name.
 
-        After this the factory answers ``has_registration`` false and
-        ``list_registrations`` without the name, so a later create under the
-        same name registers a new root snapshot. Content-addressed storage
+        After this the factory answers ``has_registration`` false,
+        ``list_registrations`` without the name, and ``has_archived_registration`` true, so
+        no later create registers the ID again. Content-addressed storage
         the scenario shared with others stays.
         """
         with self._lock:
             self._backends.pop(scenario, None)
             self._registration_misses.pop(scenario, None)
         return self._archive_persisted_registration(scenario)
+
+    @abstractmethod
+    def has_archived_registration(self, scenario: str) -> bool:
+        """True exactly when ``archive_registration(scenario)`` has completed in any process that shares this
+        store, and never False again after that.
+
+        A deleted scenario's ID is never used again: the scenario factory refuses to register a scenario for which
+        this is true (``ScenarioDeletedError``). A backend whose store lives in one process answers for that
+        process; a durable backend reads its archive, so that every process refuses the ID.
+        """
 
     @abstractmethod
     def _build_backend(self, scenario: str) -> RepositoryBackend: ...
@@ -737,6 +754,23 @@ class Repository(ArtifactRepository):
             raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {name!r}")
         # A view of a selection that is not composed here: only the artifact of this component is made local.
         return self.backend.resolve_artifact(selection.components[name])
+
+    def materialize_component_files(
+        self, ref: SnapshotRef, name: str | None, paths: tuple[str, ...] | None
+    ) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` with at least the files ``paths`` local
+        (``ArtifactRepository.materialize_component_files``). A snapshot of this host is local as a whole; of a
+        selection view, the artifact of ``name`` is read; of a stored snapshot, the backend reads only ``paths``
+        where it can."""
+        if ref.revision in self._local_artifacts:
+            local = self.materialize(ref)
+            return local if name is None else local.component(name)
+        selection = self.selections.get(ref.revision)
+        if selection is None:
+            return self.backend.materialize_component_files(ref, name, paths)
+        if name is None or name not in selection.components:
+            raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {name!r}")
+        return self.backend.resolve_artifact(selection.components[name], paths)
 
     def snapshot(self, ref: SnapshotRef) -> Artifact:
         """The snapshot ``ref`` with its metadata and without its files: ``materialize`` or ``component`` of the

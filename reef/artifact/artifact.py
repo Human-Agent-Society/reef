@@ -87,9 +87,33 @@ class ArtifactRepository(ABC):
         """
         return self.materialize(ref).component(name)
 
+    def materialize_component_files(
+        self, ref: SnapshotRef, name: str | None, paths: tuple[str, ...] | None
+    ) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` (the snapshot itself for None) in a local directory that
+        holds at least each file of ``paths``, relative to the component, that the component has: all its files
+        when ``paths`` is None. Other files may be missing, so a reader reads only ``paths``.
+
+        This default makes the whole component local (``materialize_component``). A repository whose snapshots
+        hold large files makes only ``paths`` local, so a reader of a few small files fetches no weights.
+        """
+        return self.materialize(ref) if name is None else self.materialize_component(ref, name)
+
 
 class ArtifactValidator(ABC):
-    """Artifact admission checks selected for one scenario."""
+    """An admission check of the artifacts of one component of a scenario.
+
+    ``validate(artifact)`` returns when the check admits ``artifact``, and raises ``ValueError`` or a ``ReefError``
+    that names what does not hold. ``artifact`` is ``Artifact.local(directory)`` of the directory that holds the
+    files of one component alone: it has no metadata and an artifact ID of its own, so the check reads the files
+    only. Every caller gives it so (``ScenarioComponents.validate``), whichever operation stores the artifact.
+
+    Purpose: a recipe binds it on ``ComponentSpec.validator`` or ``ScenarioComponents.validator``. The process that
+    holds an artifact's files for its own work runs the check once, before the artifact is stored: the training
+    service on each checkpoint of a job (``reef.train.job_queue.TrainingJobWorker``), and control on an import, a
+    sync and the artifact item that starts a scenario, whose files it copies. A stored artifact does not change, so
+    an activation, a restore, a serve and a train-from run no check, and no process fetches files to check them.
+    """
 
     @abstractmethod
     def validate(self, artifact: Artifact) -> None: ...
@@ -286,6 +310,14 @@ class Artifact:
             artifact_id=self._artifact_id,
             content=self.content,
         )
+
+    def component_files(self, name: str | None, paths: tuple[str, ...] | None) -> Artifact:
+        """The component ``name`` of this snapshot (the snapshot itself for None) in a local directory that holds
+        at least each file of ``paths`` that the component has, or all its files for None
+        (``ArtifactRepository.materialize_component_files``). A local snapshot gives its local component."""
+        if self.local_path is not None or self.repository is None:
+            return self if name is None else self.component(name)
+        return self.repository.materialize_component_files(self.ref, name, paths)
 
     def materialize(self) -> Artifact:
         if self.local_path is not None:

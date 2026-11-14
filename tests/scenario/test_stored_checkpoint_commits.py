@@ -206,21 +206,19 @@ def test_a_commit_that_fails_after_the_snapshot_is_stored_commits_once_also_afte
 
 
 @pytest.mark.unit
-def test_an_admission_check_reads_stored_content_and_a_refused_checkpoint_changes_nothing(tmp_path: Path) -> None:
+def test_control_commits_stored_content_by_name_and_reads_none_of_it_to_check_it(tmp_path: Path) -> None:
+    """The training service checks a checkpoint before it stores it (``TrainingJobWorker``), so control runs no check
+    on stored content and makes none of it local: content that the component's check would refuse commits here."""
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "artifacts")
     backend = backends("agent")
-    backend.store_content("bad:0", checkpoint(tmp_path / "bad", {"AGENTS.md": b"unvetted"}))
-    backend.store_content("good:0", checkpoint(tmp_path / "good", {"AGENTS.md": b"vetted"}))
+    backend.store_content("job-1:0", checkpoint(tmp_path / "trained", {"AGENTS.md": b"unvetted"}))
     with control(tmp_path, two_trainer_recipe(harness=checked_harness()), backends) as scenario:
-        seed, commits = scenario.current_snapshot(), scenario.commit_number
-        # The component's check reads the content, which is made local only for it.
-        with pytest.raises(ValueError, match="validator refused the artifact"):
-            scenario.commit(stored_commit(scenario, "bad:0", HARNESS), component=HARNESS)
-        assert (scenario.current_snapshot(), scenario.commit_number) == (seed, commits)
-        assert not scenario.repository.stored_trees
-        scenario.commit(stored_commit(scenario, "good:0", HARNESS), component=HARNESS)
+        commits = scenario.commit_number
+        scenario.commit(stored_commit(scenario, "job-1:0", HARNESS), component=HARNESS)
+        assert scenario.commit_number == commits + 1
+        assert not scenario.repository.materialized_stored
         committed = scenario.repository.materialize(scenario.store.history()[-1].snapshot)
-        assert (committed.local_path / HARNESS / "AGENTS.md").read_text() == "vetted"
+        assert (committed.local_path / HARNESS / "AGENTS.md").read_text() == "unvetted"
         assert (committed.local_path / WEIGHTS / "weights.txt").read_text() == "weights seed"
         # A commit of content that the store does not hold fails, and the scenario stays.
         with pytest.raises(ArtifactNotFoundError):

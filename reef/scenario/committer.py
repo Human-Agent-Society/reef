@@ -427,31 +427,22 @@ class ScenarioCommitter:
             return selected
 
     def snapshot_with(self, active: Artifact, selected: ComponentArtifact, snapshot: Artifact) -> Artifact:
-        """A validated view of ``active`` with one existing artifact replaced; publish nothing. The view has no
-        file until a reader asks (``Repository.select``)."""
-        components = self._binding.components
-        if components.single:
-            components.validate(snapshot)
+        """A view of ``active`` with one existing artifact replaced; publish nothing. The view has no file until a
+        reader asks (``Repository.select``). No check runs: each artifact was admitted when it was stored, and a
+        snapshot of several components has no check of its own (``ScenarioComponents``)."""
+        if self._binding.components.single:
             return snapshot
         repository = self._artifacts.repository
         artifact_ids = dict(repository.selection(active.ref, self.component_names()).components)
         artifact_ids[selected.component] = selected.artifact_id
-        cached = set(repository.selections)
-        target = repository.select(ArtifactSelection(artifact_ids))
-        try:
-            components.validator.validate(target)
-        except BaseException:
-            if target.ref.revision not in cached:
-                repository.discard(target)
-            raise
-        return target
+        return repository.select(ArtifactSelection(artifact_ids))
 
     def restore(self, commit_number: int) -> Mapping[str, str]:
         """Restore the complete active component mapping after ``commit_number`` without changing artifacts or training starts.
 
         Zero selects the scenario's creation. Other commit numbers require enough operation history to reconstruct their
-        active selection. Validation and runtime activation precede the new restore record; recovery reads that
-        record's complete selection.
+        active selection. No check runs, as at an activation (``snapshot_with``). The new restore record lands
+        before the active selection moves; recovery reads that record's complete selection.
         """
         with self._lock, self._publication_lock:
             if not isinstance(commit_number, int) or isinstance(commit_number, bool) or commit_number < 0:
@@ -474,18 +465,7 @@ class ScenarioCommitter:
             current_ref = self._artifacts.current
             if repository.selection(current_ref, self.component_names()).artifact_ids == selection.artifact_ids:
                 return selection.artifact_ids
-            cached = set(repository.selections)
             target = repository.select(selection)
-            try:
-                components = self._binding.components
-                if components.single:
-                    components.validate(target)
-                else:
-                    components.validator.validate(target)
-            except BaseException:
-                if target.ref.selection_view and target.ref.revision not in cached:
-                    repository.discard(target)
-                raise
             record = self.append_operation_record(
                 "restore", target.ref, component=None, components=selection.artifact_ids, selection=selection
             )
@@ -636,9 +616,9 @@ class ScenarioCommitter:
         ``component`` may be left out when the scenario has one component.
         The component's layout (``ComponentSpec.layout``) checks ``files``
         and stores them in the empty ``directory``, outside the locks, since
-        the check can ask a remote service (``ArtifactLayout.stored``). The snapshot's
-        own admission check runs on what is stored, as at a training
-        publication. The imported artifact receives an independent ID,
+        the check can ask a remote service (``ArtifactLayout.stored``). The
+        component's admission checks (``ScenarioComponents.validate``) run on
+        what this process stored there. The imported artifact receives an independent ID,
         including when its bytes match an existing artifact, unless
         the files are those of the artifact item ``item`` with an artifact ID (RFC #1218): the artifact
         keeps that ID, and when ``component`` lists that ID already, this call
@@ -661,17 +641,15 @@ class ScenarioCommitter:
             if any((row["artifact_id"], row["component"]) == (artifact_id, component) for row in listed):
                 return ComponentArtifact(component, artifact_id)
         components = self._binding.components
-        spec = components.components[component]
         imported = layout.stored(files, directory, artifact_id=artifact_id)
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_commit_number = self._commit_number + 1
+            components.validate(directory, component)
             if components.single:
-                components.validate(imported)
                 staged = self._artifacts.stage(next_commit_number, imported, parent=self._artifacts.checkpoint)
                 metadata = dict(staged.metadata)
             else:
-                spec.validator.validate(imported)
                 staged = self.stage_combination(next_commit_number, component, imported)
                 metadata = {**dict(staged.metadata), COMPONENTS_METADATA_KEY: self.snapshot_manifest(staged).to_dict()}
             # Published beside the chain: the chain tip, the backend head and the active selection stay.
@@ -701,7 +679,7 @@ class ScenarioCommitter:
         The snapshot binds ``artifact`` as ``component`` and every other
         component as the active selection binds it. Its parent is the chain
         tip, and it is published beside the chain, as an import is. The
-        snapshot's admission check runs on the staged snapshot first. The
+        component's admission checks run on the local tree first. The
         component's trainer then takes the snapshot as its training start (``Trainer.start_from``).
         The ``"sync"`` record lands with ``metrics``, and inference loads the snapshot after it. The active selection
         moves to it last; a crash before the record leaves the active selection
@@ -791,11 +769,12 @@ class ScenarioCommitter:
 
     def training_start(self, component_trainer: ComponentTrainer, snapshot: Artifact) -> str:
         """The start of a job of ``component_trainer`` that trains from its component of ``snapshot``: the name of
-        the snapshot, after the backend's facts checked the component (``Trainer.import_start``). The training
-        service imports it when it takes the job. Raise ``TrainingStartRefusedError`` when the trainer cannot start
-        from it."""
-        artifact = self._binding.components.component_artifact(snapshot, component_trainer.component).materialize()
-        return component_trainer.trainer.import_start(artifact)
+        the snapshot, after the backend's facts checked the component (``Trainer.import_start``). Only the files
+        that the check reads are made local (``Trainer.start_files``). The training service imports it when it
+        takes the job. Raise ``TrainingStartRefusedError`` when the trainer cannot start from it."""
+        trainer = component_trainer.trainer
+        name = None if self._binding.components.single else component_trainer.component
+        return trainer.import_start(snapshot.component_files(name, trainer.start_files))
 
     def request_start(self, artifact_id: str, component: str) -> str:
         """The start of a job of ``component``'s trainer that trains from ``artifact_id`` (``training_start``). Raise
@@ -1080,10 +1059,11 @@ class ScenarioCommitter:
     def stage_publication(
         self, next_commit_number: int, publication: SavedArtifactPublication, checkpoint: SnapshotRef
     ) -> Artifact:
-        """Admit the published component and stage the snapshot it belongs to, with ``checkpoint`` as its parent.
+        """Stage the snapshot that the published component belongs to, with ``checkpoint`` as its parent.
 
         An artifact of stored content, which a training job's checkpoint is, is staged by name
-        (``stage_stored_publication``). An artifact with local files is staged from them:
+        (``stage_stored_publication``). An artifact with local files, such as a person's synced tree, is admitted
+        here (``ScenarioComponents.validate``) and staged from them:
         a flat scenario stages the artifact as published. A multi-component
         scenario binds the named component to the publication and carries
         every other component from the active selection
@@ -1098,33 +1078,25 @@ class ScenarioCommitter:
             raise ReefError(f"scenario {self.name!r} serves no component {component!r}")
         if publication.artifact.content is not None:
             return self.stage_stored_publication(next_commit_number, publication.artifact, component, checkpoint)
+        local_path = publication.artifact.local_path
+        if local_path is None:
+            raise ReefError(f"scenario {self.name!r}: a published component has stored content or local files")
+        components.validate(local_path, component)
         if components.single:
-            components.validate(publication.artifact)
             return self._artifacts.stage(next_commit_number, publication.artifact, parent=checkpoint)
-        components.components[component].validator.validate(publication.artifact)
         return self.stage_combination(next_commit_number, component, publication.artifact)
 
     def stage_stored_publication(
         self, next_commit_number: int, content: Artifact, component: str, checkpoint: SnapshotRef
     ) -> Artifact:
-        """Stage the snapshot of ``content``, an artifact of stored content, by name: this process copies no file.
+        """Stage the snapshot of ``content``, an artifact of stored content, by name: this process reads no file.
 
         A flat scenario stages the content as the snapshot. A scenario of several components binds ``component``
-        to the content (``stage_stored_combination``). The admission checks run on the staged snapshots, which
-        become local only for a check that reads their files. A refused snapshot is discarded.
+        to the content (``stage_stored_combination``). No check runs here: the training service admitted the
+        checkpoint before it stored it (``reef.train.job_queue.TrainingJobWorker``).
         """
-        components = self._binding.components
-        # The flat view of the content alone: the whole snapshot of a flat scenario, and what the component's own
-        # check reads in a scenario of several.
-        view = self._artifacts.stage(next_commit_number, content, parent=checkpoint)
-        try:
-            if components.single:
-                components.validate(view)
-                return view
-            components.components[component].validator.validate(view)
-        finally:
-            if not components.single:
-                self._artifacts.discard(view)
+        if self._binding.components.single:
+            return self._artifacts.stage(next_commit_number, content, parent=checkpoint)
         return self.stage_stored_combination(next_commit_number, content, component)
 
     def stage_stored_combination(
@@ -1136,9 +1108,8 @@ class ScenarioCommitter:
 
         The other components are named by their artifact IDs, with each artifact's own metadata, so this process
         fetches none of their files; the backend composes the snapshot (``RepositoryBackend.publish_stored``).
-        The snapshot's own check runs on the staged snapshot, which becomes local only when the check reads it. A
-        refused snapshot is discarded. With ``owned``, the content belongs to the staged snapshot and is discarded
-        with it.
+        Each component was admitted alone, and the snapshot has no check of its own. With ``owned``, the content
+        belongs to the staged snapshot and is discarded with it.
         """
         components = self._binding.components
         repository = self._artifacts.repository
@@ -1153,19 +1124,13 @@ class ScenarioCommitter:
             else:
                 entries[name] = repository.stored_entry(active[name])
                 files[name] = StoredFiles(artifact_id=active[name])
-        staged = self._artifacts.stage_stored(
+        return self._artifacts.stage_stored(
             next_commit_number,
             files,
             {COMPONENTS_METADATA_KEY: SnapshotComponents(entries).to_dict()},
             parent=self._artifacts.checkpoint,
             owned_content=content.content if owned else None,
         )
-        try:
-            components.validator.validate(staged)
-        except BaseException:
-            self._artifacts.discard(staged)
-            raise
-        return staged
 
     def stage_combination(self, next_commit_number: int, component: str, content: Artifact) -> Artifact:
         """Stage the snapshot of a scenario of several components with ``component`` bound to ``content``, whose
@@ -1173,7 +1138,7 @@ class ScenarioCommitter:
 
         The files are stored as content of the artifact store, and the snapshot is staged by name
         (``stage_stored_combination``), so the other components' files are not fetched to compose it. The content
-        is discarded with the staged snapshot: when it is published, and when it is refused.
+        is discarded with the staged snapshot: when it is published, and when the staging fails.
         """
         if content.local_path is None:
             raise ReefError(f"scenario {self.name!r}: a staged component needs its local files")

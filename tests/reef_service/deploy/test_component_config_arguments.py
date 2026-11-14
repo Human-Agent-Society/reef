@@ -323,9 +323,9 @@ def test_training_and_serving_runtimes_share_typed_fields_without_allocating_res
     )
     parsed = factory.parse_config({"type": runtime_type, "inference_timeout_s": "5.5", **required}, {})
     assert parsed["inference_timeout_s"] == 5.5
-    # The staleness window is the record-to-record stage's setting; a runtime refuses it.
-    with pytest.raises(RuntimeConfigError, match="unknown config fields: max_staleness"):
-        factory.parse_config({"max_staleness": 2, **required}, {})
+    # A key of the record-to-sample stage is the pipeline's setting; a runtime refuses it.
+    with pytest.raises(RuntimeConfigError, match="unknown config fields: realign_threshold"):
+        factory.parse_config({"realign_threshold": 2, **required}, {})
     with pytest.raises(RuntimeConfigError, match="inference_timeout_s"):
         factory.parse_config({"inference_timeout_s": "nan", **required}, {})
 

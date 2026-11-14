@@ -8,7 +8,8 @@ import shutil
 import tempfile
 import time
 import uuid
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock, RLock
@@ -46,6 +47,12 @@ CONTENT_DIRECTORY = "content"
 FETCH_BATCH_COMMITS = 1000
 _LFS_PATTERNS = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt")
 _LFS_ATTRIBUTES = "".join(f"{pattern} filter=lfs diff=lfs merge=lfs -text\n" for pattern in _LFS_PATTERNS)
+#: The lock file of a local repository's LFS objects (``LocalLFSObjects``).
+OBJECTS_LOCK_FILE = "reef-objects.lock"
+#: The write log of a local repository: each write that makes a ref reference LFS objects adds one byte.
+OBJECTS_WRITES_FILE = "reef-objects.writes"
+#: A marker beside a cache entry ``<commit>`` of discarded content: ``<commit>.discarded``.
+DISCARDED_SUFFIX = ".discarded"
 # Backend instances in one process can share a working directory.
 WORKSPACE_LOCKS: dict[Path, RLock] = {}
 WORKSPACE_LOCKS_LOCK = Lock()
@@ -58,6 +65,14 @@ def _check_tools() -> None:
         git.run(("git", "lfs", "version"), source_error=True)
     except ArtifactSourceError as exc:
         raise ArtifactSourceError(f"{exc}; install the Git LFS system package before starting Reef") from exc
+
+
+def local_directory(repository: str) -> Path | None:
+    """The directory of ``repository`` when it is a local directory, named by its path or by a ``file://`` URL;
+    else None. Git LFS keeps the objects of such a repository under ``<directory>/lfs/objects``."""
+    parts = urlsplit(repository)
+    directory = Path(parts.path) if parts.scheme == "file" else Path(repository)
+    return directory if directory.is_dir() else None
 
 
 def _initialize_local_repository(repository: Path, git: GitClient) -> None:
@@ -76,6 +91,92 @@ def _initialize_local_repository(repository: Path, git: GitClient) -> None:
 
 #: The remote tracking ref naming the snapshot a workspace fetched last, a commit the remote already holds.
 FETCHED_SNAPSHOT_REF = "refs/remotes/origin/reef-fetched"
+
+
+@dataclass(frozen=True)
+class LocalLFSObjects:
+    """The LFS objects of a local repository, with the lock and the write log that make their removal safe.
+
+    Values: ``repository`` is the directory of a local bare repository (``local_directory``). Its objects are the
+    files ``lfs/objects/<aa>/<bb>/<oid>``. The lock file ``OBJECTS_LOCK_FILE`` and the write log
+    ``OBJECTS_WRITES_FILE`` are beside them. The write log holds one byte for each write that started, so its size
+    is the count of started writes; it grows by one byte for each write and is never cut.
+    Purpose: every write that makes a ref reference LFS objects runs inside ``writing``, and ``reclaim`` removes
+    the objects that no ref references.
+
+    The lock is ``fcntl.flock``. It excludes threads of one process and processes of one host on any local
+    filesystem, and processes of several hosts on a Linux NFS mount (such as Amazon EFS), where Linux emulates
+    ``flock`` with NFS byte-range locks. On another shared filesystem (SMB, a FUSE mount of object storage) it does
+    not reach other hosts, so a local repository must not be shared between hosts there. ``fcntl.lockf`` would
+    reach NFS too, but it does not exclude threads of one process.
+    """
+
+    repository: Path
+
+    @contextmanager
+    def writing(self) -> Iterator[None]:
+        """Hold the lock shared and add one byte to the write log, for a write that makes a ref reference LFS
+        objects: a push that uploads them or finds them uploaded, or a commit of trees that another ref holds."""
+        # Reef imports on platforms without fcntl; a local repository needs it.
+        import fcntl
+
+        with open(self.repository / OBJECTS_LOCK_FILE, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            with open(self.repository / OBJECTS_WRITES_FILE, "ab") as writes:
+                writes.write(b".")
+            yield
+
+    @contextmanager
+    def exclusive(self) -> Iterator[bool]:
+        """Hold the lock exclusive and yield True when no write holds it now; else yield False at once."""
+        import fcntl
+
+        with open(self.repository / OBJECTS_LOCK_FILE, "a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+            yield True
+
+    def write_count(self) -> int:
+        """The count of writes that started (``writing``): the size of the write log."""
+        writes = self.repository / OBJECTS_WRITES_FILE
+        return writes.stat().st_size if writes.exists() else 0
+
+    def reclaim(self, git: GitClient) -> tuple[str, ...] | None:
+        """Remove each LFS object that no ref references, and return their IDs, sorted; None when the pass
+        removed nothing because a write ran.
+
+        A ref references the objects whose pointers are in the commits that it reaches (``git lfs ls-files
+        --all``): every snapshot, binding, archived scenario and stored content. The scan runs without the lock, so
+        a write never waits for it. The pass works in three steps:
+
+        1. With the lock exclusive, taken at once, it reads the write count. No write is in progress then.
+        2. Without the lock, it scans the refs and lists the objects that none references.
+        3. With the lock exclusive, taken at once, it removes the listed objects, but only when the write count
+           has not changed. Then no write started during the scan, so no ref moved to a listed object.
+
+        When a write holds the lock in step 1 or 3, or a write started during the scan, the pass removes nothing
+        and returns None; the next pass removes what this one left. A write that starts after step 3 waits only
+        for the removal of the listed files. A file that links a removed object, such as a materialized file,
+        keeps its bytes until it is removed too.
+        """
+        with self.exclusive() as idle:
+            if not idle:
+                return None
+            started = self.write_count()
+        listed = git.run(("git", "lfs", "ls-files", "--all", "--long"), cwd=self.repository)
+        referenced = {line.split(" ", 1)[0] for line in listed.splitlines() if line}
+        unreferenced = [
+            stored for stored in (self.repository / "lfs" / "objects").glob("??/??/*") if stored.name not in referenced
+        ]
+        with self.exclusive() as idle:
+            if not idle or self.write_count() != started:
+                return None
+            for stored in unreferenced:
+                stored.unlink(missing_ok=True)
+        return tuple(sorted(stored.name for stored in unreferenced))
 
 
 @dataclass(frozen=True)
@@ -159,8 +260,10 @@ class _GitWorkspace:
         self.work_dir = Path(work_dir).resolve()
         self.clone_dir = self.work_dir / "repository"
         self._git_client = git_client
-        #: The LFS object directory of a repository that is a local bare directory, else None.
-        self.local_objects = Path(repository) / "lfs" / "objects" if Path(repository).is_dir() else None
+        #: The repository's directory when it is local (``local_directory``), else None.
+        self.local_repository = local_directory(repository)
+        #: The LFS object directory of a local repository, else None.
+        self.local_objects = None if self.local_repository is None else self.local_repository / "lfs" / "objects"
         with WORKSPACE_LOCKS_LOCK:
             self.lock = WORKSPACE_LOCKS.setdefault(self.work_dir, RLock())
 
@@ -438,9 +541,10 @@ class _GitWorkspace:
         for start in range(0, len(ordered), FETCH_BATCH_COMMITS):
             self.git("fetch", "origin", *ordered[start : start + FETCH_BATCH_COMMITS])
 
-    def clone_for_materialize(self, destination: Path, version: str, directory: str | None = None) -> None:
-        """Check out ``version`` in a new clone at ``destination``, with the bytes of its LFS files; with
-        ``directory``, only the files under that directory of the snapshot, so no other file is fetched.
+    def clone_for_materialize(self, destination: Path, version: str, paths: tuple[str, ...] | None = None) -> None:
+        """Check out ``version`` in a new clone at ``destination``, with the bytes of its LFS files; with ``paths``,
+        only those paths of the snapshot, so no other file is fetched. A path that ends with ``/`` names a directory
+        and every file under it; any other path names one file. ``paths`` is None or non-empty.
 
         The checkout leaves an LFS file as its pointer. When the repository is a local directory, each such file
         becomes a hard link to its object in the repository's own LFS storage, or a copy across file systems, so
@@ -454,16 +558,20 @@ class _GitWorkspace:
         self._run(("git", "clone", "--no-checkout", self.repository, str(destination)))
         self._install_lfs(destination)
         self._run(("git", "fetch", "origin", version), cwd=destination)
-        if directory is not None:
-            self._run(("git", "sparse-checkout", "set", "--no-cone", f"/{directory}/"), cwd=destination)
+        if paths is not None:
+            self._run(("git", "sparse-checkout", "set", "--no-cone", *(f"/{path}" for path in paths)), cwd=destination)
         self._run(("git", "checkout", "--detach", "FETCH_HEAD"), cwd=destination)
         pointers = [
             line.split(" ", 2)
             for line in self._run(("git", "lfs", "ls-files", "--long"), cwd=destination).splitlines()
             if line
         ]
-        if directory is not None:
-            pointers = [pointer for pointer in pointers if pointer[2].startswith(f"{directory}/")]
+        if paths is not None:
+            pointers = [
+                pointer
+                for pointer in pointers
+                if any(pointer[2].startswith(path) if path.endswith("/") else pointer[2] == path for path in paths)
+            ]
         missing = bool(pointers)
         if self.local_objects is not None:
             missing = False
@@ -480,8 +588,36 @@ class _GitWorkspace:
                 else:
                     missing = True
         if missing:
-            only = () if directory is None else ("--include", f"{directory}/**")
+            only = (
+                ()
+                if paths is None
+                else ("--include", ",".join(f"{path}**" if path.endswith("/") else path for path in paths))
+            )
             self._run(("git", "lfs", "pull", *only), cwd=destination)
+
+    @contextmanager
+    def writing_objects(self) -> Iterator[None]:
+        """``LocalLFSObjects.writing`` of a local repository; a remote repository has no lock."""
+        if self.local_repository is None:
+            yield
+            return
+        with LocalLFSObjects(self.local_repository).writing():
+            yield
+
+    def drop_objects(self, commit: str) -> None:
+        """Remove from the clone of a local repository the LFS objects of ``commit``, which a push uploaded. The
+        clean filter writes each object into the clone, and the upload links it into the repository, so the clone's
+        link would keep the bytes of a checkpoint after a reclamation removed the repository's object. No later push
+        needs them: a push of a commit whose objects the repository holds succeeds without them, and a new commit
+        cleans its files again. A remote repository's clone keeps its objects. The caller holds the workspace
+        lock."""
+        if self.local_objects is None:
+            return
+        clone_objects = self.clone_dir / ".git" / "lfs" / "objects"
+        for line in self._run(("git", "lfs", "ls-files", "--long", commit), cwd=self.clone_dir).splitlines():
+            oid = line.split(" ", 1)[0]
+            if oid:
+                (clone_objects / oid[:2] / oid[2:4] / oid).unlink(missing_ok=True)
 
     def git(self, *args: str) -> str:
         return self._git_client.git(*args)
@@ -771,14 +907,15 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             )
             # Identical roots registered in the same second still need distinct snapshot revisions.
             commit = self._workspace.commit(f"register scenario {uuid.uuid4().hex}")
-            self.bind_artifact_ids(self.stored_snapshot(commit))
-            try:
-                self._workspace.push(f"{commit}:{self.ref_name}")
-            except ArtifactPublicationError:
-                existing = self._workspace.ls_remote(self.ref_name)
-                if existing is None:
-                    raise
-                return self._manifest.snapshot(existing)
+            with self._workspace.writing_objects():
+                self.bind_artifact_ids(self.stored_snapshot(commit))
+                try:
+                    self._workspace.push(f"{commit}:{self.ref_name}")
+                except ArtifactPublicationError:
+                    existing = self._workspace.ls_remote(self.ref_name)
+                    if existing is None:
+                        raise
+                    return self._manifest.snapshot(existing)
             paths = tuple(
                 path
                 for path in self._workspace.git("ls-files", "-z").split("\0")
@@ -850,7 +987,7 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         if not destination.is_dir():
             temporary = Path(tempfile.mkdtemp(prefix=f".{ref.revision}-", dir=self.cache_dir))
             try:
-                self._workspace.clone_for_materialize(temporary / "artifact", ref.revision, name)
+                self._workspace.clone_for_materialize(temporary / "artifact", ref.revision, (f"{name}/",))
                 # Git keeps no directory for a component with no file.
                 (temporary / "artifact" / name).mkdir(exist_ok=True)
                 try:
@@ -870,6 +1007,60 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             local_path=destination,
             metadata=manifest.entries[name].metadata,
             artifact_id=manifest.artifact_ids(ref.revision)[name],
+        )
+
+    def materialize_component_files(
+        self, ref: SnapshotRef, name: str | None, paths: tuple[str, ...] | None
+    ) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` (the snapshot itself when it is flat) from a sparse
+        checkout of the files ``paths`` alone: no other file, and no other LFS object, is fetched. ``paths`` None is
+        ``materialize_component``. A snapshot that is local as a whole answers from its whole checkout."""
+        if paths is None:
+            return super().materialize_component_files(ref, name, paths)
+        with self._workspace.lock:
+            self._workspace.fetch_version(ref.revision)
+            snapshot = self.stored_snapshot(ref.revision)
+        if (self.cache_dir / ref.revision).is_dir():
+            return super().materialize_component_files(ref, name, paths)
+        manifest = snapshot.components
+        component = None if manifest is None or manifest.single else name
+        if manifest is not None and component is not None and component not in manifest.entries:
+            raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds no component {component!r}")
+        if manifest is not None and not manifest.single and component is None:
+            raise ArtifactNotFoundError(f"snapshot {ref.revision!r} binds several components: name one")
+        prefix = "" if component is None else f"{component}/"
+        digest = hashlib.sha256("\0".join((prefix, *paths)).encode()).hexdigest()[:16]
+        destination = self.cache_dir / f"{ref.revision}.files-{digest}"
+        if not destination.is_dir():
+            temporary = Path(tempfile.mkdtemp(prefix=f".{ref.revision}-", dir=self.cache_dir))
+            try:
+                checkout = temporary / "artifact"
+                if paths:
+                    self._workspace.clone_for_materialize(
+                        checkout, ref.revision, tuple(f"{prefix}{path}" for path in paths)
+                    )
+                # Git keeps no directory for a component whose named files are all missing.
+                (checkout / prefix).mkdir(parents=True, exist_ok=True)
+                shutil.rmtree(checkout / ".git", ignore_errors=True)
+                try:
+                    (checkout / prefix).rename(destination)
+                except OSError:
+                    if not destination.is_dir():
+                        raise
+            except ArtifactPublicationError as exc:
+                raise ArtifactMaterializationError(
+                    f"failed to materialize files {list(paths)} of {ref.revision}: {exc}"
+                ) from exc
+            finally:
+                shutil.rmtree(temporary, ignore_errors=True)
+        if manifest is None or component is None:
+            return Artifact(snapshot.ref, None, local_path=destination, metadata=snapshot.storage_metadata)
+        return Artifact(
+            snapshot.ref,
+            None,
+            local_path=destination,
+            metadata=manifest.entries[component].metadata,
+            artifact_id=manifest.artifact_ids(ref.revision)[component],
         )
 
     def publish(
@@ -913,7 +1104,8 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                     files=files,
                     message="publish artifact",
                 )
-            self.push_snapshot(commit, expected_parent, advance_head)
+            with self._workspace.writing_objects():
+                self.push_snapshot(commit, expected_parent, advance_head)
             if not linked:
                 self._cache_snapshot(commit, artifact.local_path, paths, files)
             return self._manifest.snapshot(commit)
@@ -957,7 +1149,8 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         The files keep every name, also ``.gitattributes`` and the manifest's: the backend's own LFS attributes
         are at the commit's root, outside the content. Weight files go through the LFS clean filter, so Git LFS
         keeps one object for equal bytes, whatever content or snapshot holds them. The push uploads the LFS
-        objects before the ref moves, so content that exists has its objects on the remote.
+        objects before the ref moves, so content that exists has its objects on the remote. Then the clone drops
+        its copies of them (``_GitWorkspace.drop_objects``): the repository holds the bytes.
         """
         ref_name = self.content_ref(name)
         if not directory.is_dir():
@@ -977,7 +1170,9 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                     files={".gitattributes": _LFS_ATTRIBUTES},
                     message="store content",
                 )
-            self._workspace.push(f"+{commit}:{ref_name}")
+            with self._workspace.writing_objects():
+                self._workspace.push(f"+{commit}:{ref_name}")
+            self._workspace.drop_objects(commit)
 
     def content_commit(self, name: str) -> str:
         """The commit of the stored content ``name``; ``ArtifactNotFoundError`` when the repository has none."""
@@ -997,9 +1192,13 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         return path / CONTENT_DIRECTORY
 
     def discard_content(self, name: str) -> None:
+        """Delete the content's ref, and mark its cache entry discarded (``mark_discarded``). The discard removes
+        no file: the LFS objects that only this content held, and its cache entry, stay until control's sweep
+        removes them (``GitLFSRepositoryBackendFactory.reclaim_discarded``)."""
         ref_name = self.content_ref(name)
         with self._workspace.lock:
-            if self._workspace.ls_remote(ref_name) is None:
+            commit = self._workspace.ls_remote(ref_name)
+            if commit is None:
                 return
             try:
                 self._workspace.push(f":{ref_name}")
@@ -1007,13 +1206,29 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
                 # Another process can remove the ref between the two calls.
                 if self._workspace.ls_remote(ref_name) is not None:
                     raise
+            self.mark_discarded((commit,))
 
     def discard_all_content(self) -> None:
-        """Delete every content ref of the scenario, in groups that fit on a command line."""
+        """Delete every content ref of the scenario, in groups that fit on a command line, and mark their cache
+        entries discarded (``mark_discarded``). Then remove the LFS objects of a local repository that no ref
+        references (``LocalLFSObjects.reclaim``), as control's sweep does: the scenario's delete calls this, so its
+        checkpoints do not wait for the next sweep. When a write runs meanwhile, the next sweep removes them."""
         with self._workspace.lock:
-            names = sorted(self._workspace.ls_remote_prefix(self.content_ref_prefix))
+            stored = self._workspace.ls_remote_prefix(self.content_ref_prefix)
+            names = sorted(stored)
             for start in range(0, len(names), FETCH_BATCH_COMMITS):
                 self._workspace.push(*(f":{name}" for name in names[start : start + FETCH_BATCH_COMMITS]))
+            self.mark_discarded(stored.values())
+        if self._workspace.local_repository is not None:
+            LocalLFSObjects(self._workspace.local_repository).reclaim(self._git_client)
+
+    def mark_discarded(self, commits: Collection[str]) -> None:
+        """Write the marker ``<commit>.discarded`` beside each cache entry of the discarded content ``commits``.
+        Another process that shares the cache directory can still read the entry, so the discard does not remove
+        it: a later sweep does (``GitLFSRepositoryBackendFactory.reclaim_discarded``)."""
+        for commit in commits:
+            if (self.cache_dir / commit).is_dir():
+                (self.cache_dir / f"{commit}{DISCARDED_SUFFIX}").touch()
 
     def publish_parts(
         self,
@@ -1029,9 +1244,10 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
         commits of those trees, not their LFS objects, and it uploads none: the push of the content
         (``store_content``), or of the snapshot that bound an artifact, uploaded them before its ref moved. A
         component's tree is carried byte for byte. At the root of a flat snapshot, the backend's own two files
-        replace files of their names, as ``publish`` does.
+        replace files of their names, as ``publish`` does. From the read of the trees to the push, the objects
+        lock is held shared, so a reclamation does not take the objects of content discarded meanwhile.
         """
-        with self._workspace.lock:
+        with self._workspace.lock, self._workspace.writing_objects():
             trees: dict[str | None, str | None] = {}
             removed: list[str] = []
             for directory, part in parts.items():
@@ -1124,9 +1340,11 @@ class GitLFSRepositoryBackend(StagedSnapshotRepositoryBackend):
             if current != expected_parent.revision:
                 raise ArtifactConflictError("repository head changed before the staged snapshot was committed")
             try:
+                # The push of the staged snapshot uploaded its objects, and the clone may hold none of them.
                 self._workspace.force_push_with_lease(
                     f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
                     f"{ref.revision}:{self.ref_name}",
+                    uploads_lfs=False,
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
@@ -1179,11 +1397,14 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
     ) -> None:
         super().__init__()
         self._backend_type = backend_type
-        self._repository = repository
+        # Git reads a relative remote path from the top of the work tree that holds the working directory.
+        self._repository = repository.absolute() if isinstance(repository, Path) else repository
         self._work_dir = Path(work_dir)
         self._cache_dir = Path(cache_dir)
         self._refs = refs
         self._git_config = dict(git_config or {})
+        #: When the last ``reclaim_discarded`` started, in seconds since the epoch, or None before the first.
+        self.reclaimed_at: float | None = None
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: RepositoryBackendContext) -> Self:
@@ -1260,6 +1481,52 @@ class GitLFSRepositoryBackendFactory(CachedRepositoryBackendFactory, Configurabl
             shutil.rmtree(work_dir, ignore_errors=True)
             archived.append(str(work_dir))
         return tuple(archived)
+
+    def reclaim_discarded(self) -> None:
+        """Free what discarded content holds on this host, in two steps.
+
+        - Remove each cache entry whose marker (``GitLFSRepositoryBackend.mark_discarded``) is older than the start
+          of the previous call of this factory, unless a content ref names the entry's commit again. So an entry
+          that a discard marked before one sweep goes in the next sweep, and a process that reads the entry has at
+          least one sweep interval to finish. The first call after a start removes no entry.
+        - With a local repository, remove the LFS objects that no ref references (``LocalLFSObjects.reclaim``).
+
+        Control's sweep calls it (``EndedWorkSweeper``), so the objects of discarded content stay until the next
+        sweep, and a cache entry stays until the sweep after the one that follows its discard. A remote
+        repository keeps its objects: its server decides when an object with no ref goes.
+        """
+        previous, self.reclaimed_at = self.reclaimed_at, time.time()
+        client = GitClient(self._work_dir / ".registration-check", self._git_config)
+        repository_exists = not (isinstance(self._repository, Path) and not self._repository.exists())
+        if previous is not None:
+            named: set[str] = set()
+            if repository_exists:
+                output = client.run(
+                    ("git", "ls-remote", str(self._repository), f"{self._refs.moving}contents/*"), source_error=True
+                )
+                named = {line.split()[0] for line in output.splitlines() if line}
+            for marker in self._cache_dir.glob(f"*{DISCARDED_SUFFIX}"):
+                if marker.stat().st_mtime >= previous:
+                    continue
+                commit = marker.name.removesuffix(DISCARDED_SUFFIX)
+                if commit not in named:
+                    shutil.rmtree(self._cache_dir / commit, ignore_errors=True)
+                marker.unlink(missing_ok=True)
+        local = local_directory(str(self._repository))
+        if local is not None:
+            LocalLFSObjects(local).reclaim(client)
+
+    def has_archived_registration(self, scenario: str) -> bool:
+        """Whether the repository holds an archived ref of ``scenario`` (``RefLayout.archived``), which
+        ``archive_registration`` writes before it deletes the scenario's ref, and nothing deletes."""
+        if isinstance(self._repository, Path) and not self._repository.exists():
+            return False
+        encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
+        output = GitClient(self._work_dir / ".registration-check", self._git_config).run(
+            ("git", "ls-remote", str(self._repository), self._refs.archived(encoded, "*")),
+            source_error=True,
+        )
+        return bool(output)
 
     def _list_persisted_registrations(self) -> tuple[str, ...]:
         if isinstance(self._repository, Path) and not self._repository.exists():

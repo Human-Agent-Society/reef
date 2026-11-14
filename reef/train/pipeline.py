@@ -34,17 +34,22 @@ sample. It waits in the store with the other samples, in store order.
 A record-to-sample stage can also make samples from no record set, such as the
 generated-task recipe's tasks (``Record2Sample.made_samples``). The pipeline
 stores them like the samples of a unit, and they train like any other sample. The stage reads each job's end (``Record2Sample.job_ended``).
+
+The samples service decides which stored samples are stale (``mark_stale``, with the
+stage's ``Record2Sample.is_stale``) and marks them in the store. The automatic
+jobs leave a marked sample out; the pipeline runs no staleness check of its own.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import time
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping, Sequence, Set
 from dataclasses import dataclass, field, replace
 from itertools import batched
-from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import JobOutcome
@@ -55,6 +60,7 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import NoSamples, Record2Sample, RecordSetUnit
+from reef.record2sample.service import Selection
 from reef.record2sample.staleness import ServedArtifacts
 from reef.sample2job import NoJobData, Sample2Job
 from reef.storage.data import MAX_QUERY_LIMIT
@@ -84,7 +90,8 @@ class PipelineSettings:
 
     Values: ``record2sample`` names a ``Record2Sample`` class and ``sample2job`` a ``Sample2Job`` class, each
     with the config that the class parses. ``environ`` is the environment that the stages read. The constructor
-    refuses a reference to another class with ``PluginConfigError``.
+    refuses a reference to another class, and a record-to-sample config that sets the removed
+    ``max_staleness``, with ``PluginConfigError``.
 
     It comes from the deployment's ``pipeline`` section over the recipe's
     ``PipelineSpec``. Each key of the section is ``{module, config}``; a key
@@ -101,6 +108,13 @@ class PipelineSettings:
     def __post_init__(self) -> None:
         Record2Sample.referenced_class(self.record2sample)
         Sample2Job.referenced_class(self.sample2job)
+        if {"max_staleness", "max-staleness"} & set(self.record2sample.config):
+            raise PluginConfigError(
+                "pipeline.record2sample.config.max_staleness was removed: the samples service asks the "
+                "record-to-sample stage which samples are stale. Remove the key from the deployment file, or from a "
+                "scenario's record2sample_config with POST /reef/scenarios/{scenario}/update. On-policy stages train "
+                "only data of the served artifact; an SAO stage takes its lag bound as max_artifact_lag."
+            )
 
     @classmethod
     def from_setting(cls, value: object, *, spec: PipelineSpec, environ: Mapping[str, str]) -> PipelineSettings:
@@ -126,12 +140,6 @@ class PipelineSettings:
         """The same stages, with each key of ``config`` in place of that key of the record-to-sample stage's config."""
         return replace(self, record2sample=replace(self.record2sample, config={**self.record2sample.config, **config}))
 
-    def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
-        """The directories under which the record-to-sample stage of these settings keeps ``scenario``'s state
-        (``Record2Sample.scenario_state_dirs``). The stage is not built."""
-        stage = self.record2sample
-        return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
-
     def build(self, context: PipelineContext) -> TrainingPipeline:
         """Build the pipeline of one scenario: each stage from its config, the job stage with the sample stage."""
         record2sample = Record2Sample.referenced_class(self.record2sample).from_config(
@@ -140,7 +148,24 @@ class PipelineSettings:
         sample2job = Sample2Job.referenced_class(self.sample2job).from_config(
             self.sample2job.config, context=context, record2sample=record2sample, environ=self.environ
         )
-        return TrainingPipeline(context, record2sample=record2sample, sample2job=sample2job)
+        return TrainingPipeline(
+            context,
+            record2sample=record2sample,
+            sample2job=sample2job,
+            staleness_rule=staleness_rule(self.record2sample),
+        )
+
+
+def staleness_rule(stage: PluginReference) -> str:
+    """The name of the staleness rule of a record-to-sample stage: a digest of its class and its config as
+    canonical JSON. Two stages with one name judge the same samples alike (``Record2Sample.is_stale``)."""
+    stage_class = stage.plugin_class
+    text = json.dumps(
+        {"class": f"{stage_class.__module__}:{stage_class.__qualname__}", "config": stage.config},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 def stage_reference(default: type[Plugin], value: object, stage: str) -> PluginReference | None:
@@ -196,6 +221,7 @@ class TrainingPipeline:
         *,
         record2sample: Record2Sample | None = None,
         sample2job: Sample2Job | None = None,
+        staleness_rule: str | None = None,
     ) -> None:
         self.context = context
         self.scenario = context.scenario
@@ -203,6 +229,19 @@ class TrainingPipeline:
         self.record2sample = NoSamples() if record2sample is None else record2sample
         #: The sample-to-job stage that shapes the samples of a job into its data.
         self.sample2job = NoJobData(context) if sample2job is None else sample2job
+        stage_class = type(self.record2sample)
+        #: The name of the stage's staleness rule (``staleness_rule``); without one, the stage's class. A judgment
+        #: holds for one served commit under one rule.
+        self.staleness_rule = (
+            f"{stage_class.__module__}:{stage_class.__qualname__}" if staleness_rule is None else staleness_rule
+        )
+        #: The selection whose step runs now, which checks that its worker still holds the work before each write;
+        #: None outside a step.
+        self.selection: Selection | None = None
+        #: Whether this pipeline judged the stored samples once. A new pipeline (a process start, a reload) judges
+        #: once whatever the stored judgments say, so a stage whose code changed under the same class and config
+        #: judges the stored samples again.
+        self.judged_once = False
         self.supported_training_modes = self.sample2job.supported_training_modes
         self.training_requests: dict[str, TrainingRequest] = {}
         #: Whether this trainer takes each queued request, by ID. ``count_request_entries`` decides it once: it reads
@@ -239,8 +278,9 @@ class TrainingPipeline:
         self.trained_sample_ids: set[str] = set()
         #: The ended records of the stage that this pipeline stored and no commit named yet.
         self.stored_ended_record_ids: set[str] = set()
-        #: The artifacts that the scenario served, oldest first, for the staleness check.
-        self.served_artifacts = ServedArtifacts()
+        #: The artifacts that the scenario served, as the samples service's last judgment read them: a sample that
+        #: the stage finds stale against them is stored with the stale mark.
+        self.served = ServedArtifacts()
         self.set_training_mode(context.training_mode)
 
     @property
@@ -383,8 +423,15 @@ class TrainingPipeline:
         self, group: str | None, record_ids: tuple[str, ...], samples: tuple[tuple[str, Sample], ...]
     ) -> bool:
         """Save samples (``TrainerSamples.write_record_samples``) with their tasks (``lineage``), count the new ones,
-        and return whether one is new."""
-        added = self.store.write_record_samples(group, record_ids, samples, lineage=self.lineage(record_ids))
+        and return whether one is new. Samples that the stage finds stale against ``served`` are stored with the
+        stale mark, so no reader sees them unmarked."""
+        stale = self.record2sample.goes_stale and self.record2sample.is_stale(
+            tuple(sample for _, sample in samples), self.served
+        )
+        self.check_lease()
+        added = self.store.write_record_samples(
+            group, record_ids, samples, lineage=self.lineage(record_ids), stale=stale
+        )
         self.stored_sample_count += added
         return added > 0
 
@@ -400,13 +447,9 @@ class TrainingPipeline:
         for unit in ready_units:
             stored = self.store_unit(unit) or stored
         made = self.record2sample.made_samples()
-        if made:
-            stored = (
-                self.write_record_samples(
-                    None, (), tuple((f"{self.sample_id_prefix}{name}", sample) for name, sample in made)
-                )
-                or stored
-            )
+        for name, sample in made:
+            # Each made sample trains by itself, so the stage judges each one alone.
+            stored = self.write_record_samples(None, (), ((f"{self.sample_id_prefix}{name}", sample),)) or stored
         if ready_units or made:
             self.read_store()
         self.received_input = self.received_input or stored
@@ -447,9 +490,82 @@ class TrainingPipeline:
         """Give the record-to-sample stage the outcome of a job whose end the trainer committed."""
         self.record2sample.job_ended(outcome)
 
-    def observe_serving_artifact_id(self, artifact_id: str) -> None:
-        """Add the artifact that serves the scenario now to those that served it, for the staleness check."""
-        self.served_artifacts.observe(artifact_id)
+    def mark_stale(self, served: ServedArtifacts) -> bool:
+        """The samples service's staleness check against ``served``; return whether it judged anew.
+
+        A judgment holds for one served commit (``served.commit_number``) under one rule (``staleness_rule``). It does
+        nothing when ``served`` names no artifact, or when this pipeline judged once and the samples were judged at
+        that commit, or a later one, under this rule (``TrainerSamples.judged_commit``). A new pipeline judges once
+        in any case (``judged_once``). Else, for a stage that ``goes_stale``, it asks the stage
+        about each group of this trainer's stored samples that no job trained and that carry no stale mark
+        (``Record2Sample.is_stale``) and marks every sample of a stale group (``TrainerSamples.mark_stale``). Then it
+        stores the judgment (``TrainerSamples.write_judged``). The samples that the pipeline stores later are judged
+        against ``served`` when they are stored (``write_record_samples``), so a sample is judged once when it is
+        written, and again only when the served history or the rule changes.
+
+        A mark is permanent: an artifact that serves again, or a rule that accepts more lag, does not make a marked
+        sample fresh, and its records stay consumed, so a restart reads the same decision. A rule that accepts less
+        lag marks more samples. Memory: one ID and group for each candidate sample, and the content of at most
+        ``MAX_QUERY_LIMIT`` samples (and the rest of one group) at a time. The caller holds the trainer's lock for one
+        listing of the scenario's samples without content and one read of the candidates' content, once for each
+        new served commit or rule. Manual mode judges the same way.
+        """
+        self.served = served
+        if not served.artifact_ids:
+            return False
+        if self.judged_once and self.store.judged_commit(self.staleness_rule) >= served.commit_number:
+            return False
+        if self.record2sample.goes_stale:
+            trainer = self.store.trainer
+            groups: dict[str, list[str]] = {}
+            after_sequence = 0
+            while listed := self.store.store.listing(after_sequence=after_sequence, limit=MAX_QUERY_LIMIT):
+                after_sequence = listed[-1].sequence
+                for entry in listed:
+                    if entry.component == trainer and not entry.stale and not entry.train_counts.get(trainer):
+                        members = groups.setdefault(entry.group or entry.sample_id, [])
+                        if entry.sample_id not in members:
+                            members.append(entry.sample_id)
+            batch: list[list[str]] = []
+            for members in groups.values():
+                batch.append(members)
+                if sum(map(len, batch)) >= MAX_QUERY_LIMIT:
+                    self.mark_stale_groups(batch, served)
+                    batch = []
+            self.mark_stale_groups(batch, served)
+        self.check_lease()
+        self.store.write_judged(served.commit_number, self.staleness_rule)
+        self.judged_once = True
+        return True
+
+    def mark_stale_groups(self, groups: Sequence[Sequence[str]], served: ServedArtifacts) -> None:
+        """Read the samples of ``groups``, each a list of sample IDs of one group, and mark every sample of each group
+        that the stage finds stale against ``served``."""
+        sample_ids = [sample_id for members in groups for sample_id in members]
+        samples = {stored.sample_id: stored.sample for stored in self.store.read(sample_ids)}
+        stale = [
+            sample_id
+            for members in groups
+            if self.record2sample.is_stale(tuple(samples[member] for member in members if member in samples), served)
+            for sample_id in members
+        ]
+        if stale:
+            self.check_lease()
+            self.store.mark_stale(stale)
+
+    def judged(self, served: ServedArtifacts) -> bool:
+        """Whether the samples service judged this trainer's samples at ``served.commit_number`` or later under this
+        pipeline's rule: always for a scenario that serves no artifact. An automatic job waits for it, so that it
+        takes no sample that the samples service would mark stale. A commit number never recurs, so a rollback to an
+        artifact judged before is a new judgment, and so is a new rule."""
+        return not served.artifact_ids or self.store.judged_commit(self.staleness_rule) >= served.commit_number
+
+    def check_lease(self) -> None:
+        """Raise ``WorkLeaseLostError`` when the worker of the selection that runs now no longer holds it, before a
+        write: another worker can then run the next selection of the trainer, and a write of this one could carry a
+        judgment against a served history that the other already replaced (``Selection.check_lease``)."""
+        if self.selection is not None:
+            self.selection.check_lease()
 
     # --------------------------------------------------------- job data cycle
 
@@ -469,7 +585,11 @@ class TrainingPipeline:
             untrainable: list[str] = []
             for stored in stored_samples:
                 self.store_sequence = stored.sequence
-                if stored.train_count(self.store.trainer) > 0 or stored.sample_id in self.trained_sample_ids:
+                if (
+                    stored.train_count(self.store.trainer) > 0
+                    or stored.sample_id in self.trained_sample_ids
+                    or stored.stale
+                ):
                     self.held.pop(stored.sample_id, None)
                     continue
                 sample = self.trainable(stored)
@@ -521,11 +641,10 @@ class TrainingPipeline:
         """The samples that the next automatic job takes, in store order, each with the sample that it trains.
 
         The candidates are the held samples that no job data reserved, of a kind that the recipe gives job parameters
-        (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), of the kind of the first
-        of them, and that are not stale: a sample that the record-to-sample stage made is stale when the stage's
-        staleness check finds its data too many versions behind (``Record2Sample.is_stale``). An artifact that the
-        scenario serves beside its active selection is not behind. Every sample of a stale sample's group is stale. The job takes the first ``buffer_size`` candidates, or all of them without a ``buffer_size``,
-        and the other candidates of every group that those touch, so a group trains whole.
+        (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), and of the kind of the
+        first of them. The held samples carry no stale mark of the samples service (``read_store``, ``ready``). The
+        job takes the first ``buffer_size`` candidates, or all of them without a ``buffer_size``, and the other
+        candidates of every group that those touch, so a group trains whole.
         """
         # A kind that the recipe gives no parameters trains only with a request that gives them.
         kinds = set(self.context.job_parameters) or set(SAMPLE_KINDS)
@@ -535,18 +654,10 @@ class TrainingPipeline:
             if sample_id not in self.reserved_sample_ids and stored.kind in kinds
         ]
         candidates = [(stored, sample) for stored, sample in unreserved if stored.kind == unreserved[0][0].kind]
-        stale_groups = {
-            stored.group or stored.sample_id
-            for stored, sample in candidates
-            if stored.component is not None
-            and not self.served_artifacts.served_beside((sample,))
-            and self.record2sample.is_stale((sample,), self.served_artifacts.artifact_ids)
-        }
-        fresh = [entry for entry in candidates if (entry[0].group or entry[0].sample_id) not in stale_groups]
-        prefix = fresh if self.buffer_size is None else fresh[: self.buffer_size]
+        prefix = candidates if self.buffer_size is None else candidates[: self.buffer_size]
         groups = {stored.group for stored, _ in prefix if stored.group is not None}
         prefix_ids = {stored.sample_id for stored, _ in prefix}
-        return tuple(entry for entry in fresh if entry[0].sample_id in prefix_ids or entry[0].group in groups)
+        return tuple(entry for entry in candidates if entry[0].sample_id in prefix_ids or entry[0].group in groups)
 
     def request_entries(self, request: TrainingRequest) -> tuple[tuple[StoredSample, Sample], ...]:
         """The samples that ``request`` names and the store holds, in store order, each with the sample that it
@@ -663,6 +774,7 @@ class TrainingPipeline:
             self.record2sample.release_records(committed)
         uncommitted = ended - committed - self.stored_ended_record_ids
         if uncommitted:
+            self.check_lease()
             self.store.end_records(uncommitted)
             self.stored_ended_record_ids |= uncommitted
         self.stored_ended_record_ids -= committed
@@ -670,13 +782,15 @@ class TrainingPipeline:
     def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness (``holds_job_data``).
 
-        A held sample that left the scenario, or left its ``train`` split, since the pipeline read it leaves the
-        next automatic job.
+        A held sample that left the scenario, left its ``train`` split, or that the samples service marked stale since
+        the pipeline read it, leaves the next automatic job.
         """
         self.advance()
         while self.pending is None and self.next_request() is None and self.holds_job_data(sample_count):
             ids = [stored.sample_id for stored, _ in self.auto_entries()]
-            used = {stored.sample_id for stored in self.store.read(ids) if stored.split == "train"}
+            used = {
+                stored.sample_id for stored in self.store.read(ids) if stored.split == "train" and not stored.stale
+            }
             left = [sample_id for sample_id in ids if sample_id not in used]
             if not left:
                 return True
