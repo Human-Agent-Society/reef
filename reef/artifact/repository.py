@@ -133,8 +133,10 @@ class RepositoryBackend(ArtifactRepository):
     def discard_all_content(self) -> None:
         """Remove every content of this scenario's repository, whatever its name. Every snapshot keeps its files.
 
-        Reef calls it when the scenario is deleted: content lives no longer than its scenario. Raise
-        ``ArtifactPublicationError`` when the content cannot be removed.
+        Control's sweep calls it after the scenario was deleted, so content lives no longer than its scenario. The
+        scenario's registration is archived then (``CachedRepositoryBackendFactory.archive_registration``), so the
+        call must find the content of a scenario that has no registration; the sweep repeats a call that failed.
+        Raise ``ArtifactPublicationError`` when the content cannot be removed.
         """
 
     def publish_stored(
@@ -357,6 +359,20 @@ class RepositoryBackendFactory(ABC):
         objects or a local cache, frees them here."""
         return
 
+    def forget_scenario(self, scenario: str) -> None:
+        """Drop what this process keeps of ``scenario`` beside the store when the scenario was deleted: its backend
+        and its local state, such as a clone and the cached files of its snapshots. A scenario that was not deleted
+        keeps everything, so a caller may call it on any hint of a delete. Each service calls it when it learns of
+        the delete (``DeletedScenarioCleanup``, the training workers, ``DeletedScenarioFollower``). The default
+        keeps nothing, so it does nothing."""
+        return
+
+    def local_scenarios(self) -> tuple[str, ...]:
+        """The scenarios of which this process keeps something beside the store, such as a cached backend or a
+        clone on disk; a process that starts lists those that an earlier run left. ``DeletedScenarioFollower``
+        forgets the deleted ones when it starts. The default keeps nothing, so it lists none."""
+        return ()
+
 
 class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
     @abstractmethod
@@ -506,6 +522,30 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
             self._backends.pop(scenario, None)
             self._registration_misses.pop(scenario, None)
         return self._archive_persisted_registration(scenario)
+
+    def forget_scenario(self, scenario: str) -> None:
+        """When ``has_archived_registration(scenario)``, drop the cached backend of ``scenario`` and its local state
+        (``forget_local_state``); else nothing (``RepositoryBackendFactory.forget_scenario``)."""
+        if not self.has_archived_registration(scenario):
+            return
+        with self._lock:
+            self._backends.pop(scenario, None)
+        self.forget_local_state(scenario)
+
+    def local_scenarios(self) -> tuple[str, ...]:
+        """The scenarios that have a cached backend, and those of ``persisted_local_scenarios``."""
+        with self._lock:
+            cached = set(self._backends)
+        return tuple(sorted(cached | set(self.persisted_local_scenarios())))
+
+    def persisted_local_scenarios(self) -> tuple[str, ...]:
+        """The scenarios whose local state an earlier run of this process left on disk. The default keeps none."""
+        return ()
+
+    def forget_local_state(self, scenario: str) -> None:
+        """Remove what this process keeps on disk or in memory for the deleted ``scenario`` beside its cached
+        backend. ``forget_scenario`` calls it. The default keeps nothing, so it does nothing."""
+        return
 
     @abstractmethod
     def has_archived_registration(self, scenario: str) -> bool:

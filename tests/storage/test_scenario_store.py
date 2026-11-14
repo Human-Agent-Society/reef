@@ -16,7 +16,7 @@ from threading import Barrier, Event
 import pytest
 from tests.support.records import memory_records
 
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, ScenarioDeletedError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.snapshot import SnapshotRef
 from reef.storage.commit_history import CommitHistoryScenarioStore
@@ -423,7 +423,7 @@ def test_conflicting_processes_have_only_one_winner(tmp_path):
     factory.close()
 
 
-def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_path):
+def test_storage_preserves_paths_archives_and_opens_the_name_no_more(tmp_path):
     key = hashlib.sha256(b"math").hexdigest()
     factory = SQLiteScenarioStorage(tmp_path)
     with closing(factory.open("math")) as session:
@@ -434,12 +434,10 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
     first_archive = factory.archive("math")
     assert [Path(location).name for location in first_archive] == [f"{key}.sqlite3"]
     assert all(Path(location).exists() for location in first_archive)
-    with closing(factory.open("math")) as session:
-        assert session.history() == ()
-        assert session.records.count("math") == 0
-        session.append_commit(expected_commit_number=0, commit=commit())
-    second_archive = factory.archive("math")
-    assert set(first_archive).isdisjoint(second_archive)
+    with pytest.raises(ScenarioDeletedError):
+        factory.open("math")
+    # A second archive finds nothing more to move.
+    assert factory.archive("math") == ()
     assert all(Path(location).exists() for location in first_archive)
     factory.close()
 
@@ -514,3 +512,33 @@ def test_sqlite_storage_does_not_require_posix_locks(tmp_path):
         [sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True, timeout=30, check=False
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("on_disk", [True, False])
+def test_a_record_that_lands_after_the_archive_makes_no_new_store_of_the_deleted_scenario(
+    tmp_path: Path, on_disk: bool
+) -> None:
+    """An agent call in flight at a delete finishes after the cleanup archived the scenario's storage. Its record
+    is refused: no new database and no new data-store generation of the deleted ID (review of the soft delete)."""
+    from tests.support.samples import data_storage
+
+    from reef.service.routed_replica import ReplicaRecords
+
+    directory = tmp_path if on_disk else None
+    storage = data_storage(directory)
+    session = storage.open("math")
+    session.records.append_result(
+        AgentRecord.create(scenario="math", request_type=RequestType.INFERENCE, payload={}, agent_record_id="i1")
+    )
+    session.close()
+    storage.archive("math")
+    late = AgentRecord.create(scenario="math", request_type=RequestType.INFERENCE, payload={}, agent_record_id="i2")
+    with pytest.raises(ScenarioDeletedError):
+        ReplicaRecords(cache=None, storage=storage).accept_record(late)
+    with pytest.raises(ScenarioDeletedError):
+        storage.write_settings("math", storage.read_settings("math"))
+    assert not list(tmp_path.glob("*.sqlite3"))
+    assert storage.data.query("math", kind="record", scenario="math") == ()
+    # Another scenario still opens.
+    storage.open("code").close()
+    storage.close()

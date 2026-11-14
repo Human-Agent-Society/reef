@@ -21,6 +21,7 @@ from sqlalchemy import URL, Column, MetaData, Table, Text, create_engine
 from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
+from reef.core.errors import ScenarioDeletedError
 from reef.core.plugins import NoSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.data import DataStore
@@ -205,6 +206,8 @@ class SQLiteScenarioStorage(ScenarioStorage):
         #: Without a directory: per scenario, the name of its memory database and one open database that keeps it
         #: alive between sessions. An archive drops both, so the next session starts a new database.
         self._memory_anchors: dict[str, tuple[str, SQLiteScenarioDatabase]] = {}
+        #: Without a directory: the keys of the scenarios that ``archive`` archived. Their ID is not opened again.
+        self._memory_archived: set[str] = set()
         if task_files is None:
             task_files = LocalTaskFileStore(None if self._directory is None else self._directory / "task-files")
         self.task_files = task_files
@@ -244,15 +247,31 @@ class SQLiteScenarioStorage(ScenarioStorage):
         with self._lock:
             self._ensure_open()
             key = self._scenario_key(scenario)
+            self.refuse_archived(scenario, key)
             if self._directory is None:
                 self._memory_settings[scenario] = settings
                 return
             self._write_database_settings(self._directory / f"{key}.sqlite3", settings)
 
+    def refuse_archived(self, scenario: str, key: str) -> None:
+        """Raise ``ScenarioDeletedError`` when ``archive`` archived ``scenario`` and no state of it exists, so no
+        late writer makes a new store of a deleted scenario. A scenario ID is never used again after its delete. The
+        caller holds the lock; the look runs only when the scenario has no database, on the path that would create
+        one."""
+        if self._directory is None:
+            archived = key in self._memory_archived and key not in self._memory_anchors
+        else:
+            archived = not (self._directory / f"{key}.sqlite3").exists() and any(
+                (self._directory / "archived").glob(f"{key}-*")
+            )
+        if archived:
+            raise ScenarioDeletedError(f"scenario {scenario!r} was deleted, and its storage is archived")
+
     def open(self, scenario: str) -> CommitHistoryScenarioStore:
         with self._lock:
             self._ensure_open()
             key = self._scenario_key(scenario)
+            self.refuse_archived(scenario, key)
             if self._directory is None:
                 if key not in self._memory_anchors:
                     name = f"reef-{key}-{uuid.uuid4().hex}"
@@ -286,6 +305,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
             archived_files = self.task_files.archive(scenario)
             if self._directory is None:
                 self._memory_settings.pop(scenario, None)
+                self._memory_archived.add(self._scenario_key(scenario))
                 anchor = self._memory_anchors.pop(self._scenario_key(scenario), None)
                 if anchor is not None:
                     anchor[1].close()
