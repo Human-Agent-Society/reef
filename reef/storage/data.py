@@ -540,9 +540,10 @@ class DataStore(Plugin, JobDataReader, ABC):
       call stored.
     * ``read(owner, item_id)`` returns the item, or None.
     * ``query(owner, kind, scenario, origin, request_type, after, limit, content, group, benchmark, trajectory_set,
-      id_prefix)`` returns the
+      id_prefix, before)`` returns the
       items of ``owner`` with ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario``
-      when those are given. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those
+      when those are given. With ``before``, a positive int, it returns the items with ``after < sequence < before``
+      newest first: the last ``limit`` of them, so that a reader pages backward. ``origin`` and ``request_type`` keep only the record items that ``origin`` made and those
       of ``request_type``; they need ``kind="record"``. ``group``, a pair ``(key, value)``, keeps only the items of
       that group of ``groups``: the items with the string ``value`` under ``key`` in their metadata, or with no
       string there when ``value`` is None. ``benchmark`` keeps only the task items whose ``benchmarks`` metadata has
@@ -709,6 +710,7 @@ class DataStore(Plugin, JobDataReader, ABC):
         benchmark: str | None = None,
         trajectory_set: str | None = None,
         id_prefix: str | None = None,
+        before: int | None = None,
     ) -> tuple[StoredItem, ...]: ...
 
     @abstractmethod
@@ -979,8 +981,11 @@ def check_query(
     benchmark: object = None,
     trajectory_set: object = None,
     id_prefix: object = None,
+    before: object = None,
 ) -> None:
     """Raise ``ValueError`` unless the arguments of ``DataStore.query`` are valid."""
+    if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 1):
+        raise ValueError("before must be a positive int")
     check_filters(owner, kind, scenario, origin, request_type, after)
     if benchmark is not None and (not isinstance(benchmark, str) or not benchmark):
         raise ValueError("benchmark must be a non-empty benchmark name")
@@ -1252,6 +1257,7 @@ class MemoryDataStore(DataStore):
         benchmark: str | None = None,
         trajectory_set: str | None = None,
         id_prefix: str | None = None,
+        before: int | None = None,
     ) -> tuple[StoredItem, ...]:
         check_query(
             owner,
@@ -1265,6 +1271,7 @@ class MemoryDataStore(DataStore):
             benchmark=benchmark,
             trajectory_set=trajectory_set,
             id_prefix=id_prefix,
+            before=before,
         )
         wanted_sets = {
             set_kind: name
@@ -1278,8 +1285,10 @@ class MemoryDataStore(DataStore):
                 if (group is None or group_value(item.metadata, group[0]) == group[1])
                 and all(in_set(item.metadata, set_kind, name) for set_kind, name in wanted_sets.items())
                 and (id_prefix is None or item.item_id.startswith(id_prefix))
+                and (before is None or item.sequence < before)
             ),
             key=lambda item: item.sequence,
+            reverse=before is not None,
         )
         return tuple(item if content else replace(item, content=None) for item in matched[:limit])
 

@@ -1079,6 +1079,7 @@ class SQLDataStore(DataStore):
         benchmark: str | None = None,
         trajectory_set: str | None = None,
         id_prefix: str | None = None,
+        before: int | None = None,
     ) -> tuple[StoredItem, ...]:
         check_query(
             owner,
@@ -1092,6 +1093,7 @@ class SQLDataStore(DataStore):
             benchmark=benchmark,
             trajectory_set=trajectory_set,
             id_prefix=id_prefix,
+            before=before,
         )
         items = self.items_table
         # Without content, read only the columns of the metadata: content_json can be large.
@@ -1121,8 +1123,12 @@ class SQLDataStore(DataStore):
                 )
         if id_prefix is not None:
             statement = statement.where(self.has_id_prefix(id_prefix))
+        # A page before a sequence reads backward from it, newest first.
+        order = items.c.sequence if before is None else items.c.sequence.desc()
+        if before is not None:
+            statement = statement.where(items.c.sequence < before)
         with self.transaction(read_only=True) as connection:
-            found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
+            found = connection.execute(statement.order_by(order).limit(limit)).mappings().all()
             return self.stored_items(connection, owner, found, content=content)
 
     def count(

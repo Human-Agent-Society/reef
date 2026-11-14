@@ -189,6 +189,8 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             group=None if group_key is None else (group_key, request.query.get("group_value")),
             benchmark=request.query.get("benchmark") or None,
             trajectory_set=request.query.get("trajectory_set") or None,
+            id_prefix=request.query.get("id_prefix") or None,
+            before=query_int(request, "before", 0) or None,
         )
         return web.json_response(listing)
 
