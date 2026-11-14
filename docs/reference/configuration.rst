@@ -2249,8 +2249,8 @@ Set ``rollout.environment`` to ``e2b`` for an E2B-compatible service such as
 AgentENV, or ``modal`` for Modal. For a self-hosted E2B service, set
 ``E2B_API_URL``, ``E2B_SANDBOX_URL`` and ``E2B_API_KEY`` in the process that
 runs the rollouts. The first two select the service's API and sandbox
-endpoints. Slime does not forward these endpoint variables from its driver
-to Ray workers; configure them in the workers' environment too.
+endpoints. The Slime training component applies these settings to its
+workers automatically.
 
 Harbor deletes the sandbox when the rollout ends. If the rollout process is
 killed before cleanup, the sandbox's lifetime limits how long it can remain.
