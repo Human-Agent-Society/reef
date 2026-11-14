@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from reef.core.atif_payloads import (
@@ -69,15 +69,23 @@ def recorded_payload(item: TrajectorySample) -> Mapping[str, Any]:
 
 
 def make_trajectory(
-    records: Sequence[AgentRecord],
+    records: Iterable[AgentRecord],
     reward: float | None = None,
     feedback: str | Mapping[str, Any] | None = None,
+    *,
+    include_records: bool = True,
 ) -> TrajectorySample:
-    """Encode ordered inference records as ATIF, retaining all raw provider fields."""
-    if not records:
-        raise ValueError("an ATIF trajectory requires at least one inference record")
+    """Encode ordered inference records as ATIF, retaining all raw provider fields.
+
+    It reads ``records`` once, in order, and keeps only the messages of the previous record, so an iterator that
+    reads each record when asked holds one record at a time. With ``include_records`` false, ``extra.reef`` has no
+    ``records``: the trajectory then holds no raw provider body, and its size is that of its messages."""
     entries: list[list[dict[str, Any]]] = []
     history: list[Mapping[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    record_ids: list[str] = []
+    first: AgentRecord | None = None
+    last: AgentRecord | None = None
     for record in records:
         provider = payload_provider(record.payload) or OPENAI_CHAT
         request, responses = exchange_messages(record.payload)
@@ -89,42 +97,44 @@ def make_trajectory(
         entries.extend(message_entry(message, provider, copied=True) for message in request[shared:])
         entries.extend(message_entry(message, provider, copied=False) for message in responses)
         history = [*request, *responses]
+        record_ids.append(record.agent_record_id)
+        if include_records:
+            kept.append(
+                {
+                    "agent_record_id": record.agent_record_id,
+                    "created_at": record.created_at,
+                    "artifact_id": record.artifact_id,
+                    "payload": dict(record.payload),
+                }
+            )
+        if first is None:
+            first = record
+        last = record
+    if first is None or last is None:
+        raise ValueError("an ATIF trajectory requires at least one inference record")
     steps = folded_steps(entries)
     if not steps:
         steps.append({"step_id": 1, "source": "agent", "message": "", "extra": {"reef": {"text_available": False}}})
-    primary = records[-1].agent_record_id
+    primary = last.agent_record_id
     agent: dict[str, Any] = {"name": "recorded-agent", "version": "unknown"}
-    model = records[-1].payload.get("model")
+    model = last.payload.get("model")
     if isinstance(model, str):
         agent["model_name"] = model
-    last = records[-1].payload
-    if "tools" in last:
-        agent.update(atif_agent(last["tools"], payload_provider(last) or OPENAI_CHAT))
+    if "tools" in last.payload:
+        agent.update(atif_agent(last.payload["tools"], payload_provider(last.payload) or OPENAI_CHAT))
+    reef: dict[str, Any] = {"source_agent_record_id": primary, "reward": reward, "feedback": feedback}
+    if include_records:
+        reef["records"] = kept
     return TrajectorySample(
         {
             "schema_version": "ATIF-v1.7",
-            "session_id": records[0].agent_record_id,
+            "session_id": first.agent_record_id,
             "trajectory_id": primary,
             "agent": agent,
             "steps": steps,
-            "extra": {
-                "reef": {
-                    "source_agent_record_id": primary,
-                    "reward": reward,
-                    "feedback": feedback,
-                    "records": [
-                        {
-                            "agent_record_id": record.agent_record_id,
-                            "created_at": record.created_at,
-                            "artifact_id": record.artifact_id,
-                            "payload": dict(record.payload),
-                        }
-                        for record in records
-                    ],
-                }
-            },
+            "extra": {"reef": reef},
         },
-        source_agent_record_ids=tuple(record.agent_record_id for record in records),
+        source_agent_record_ids=tuple(record_ids),
     )
 
 

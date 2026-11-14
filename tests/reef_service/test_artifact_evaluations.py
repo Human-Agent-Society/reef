@@ -12,7 +12,8 @@ import tarfile
 import time
 import urllib.request
 import uuid
-from collections.abc import Iterator, Mapping
+import weakref
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1020,6 +1021,64 @@ def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_att
         None,
         None,
     ]
+
+
+class Messages(list):
+    """A request's message list that a weak reference can follow."""
+
+
+class CountedCalls(Sequence[EvaluationCall]):
+    """Calls whose bodies are made each time they are asked for, as ``StoredCalls`` reads them, with the most
+    request message lists that were alive at once: what a reader of a rollout keeps of its calls."""
+
+    def __init__(self, calls: list[EvaluationCall]) -> None:
+        self.calls, self.live, self.most = calls, 0, 0
+
+    def __len__(self) -> int:
+        return len(self.calls)
+
+    def __getitem__(self, index):
+        call = self.calls[index]
+        messages = Messages(call.request["messages"])
+        self.live += 1
+        self.most = max(self.most, self.live)
+        weakref.finalize(messages, self.release)
+        return replace(call, request={**call.request, "messages": messages})
+
+    def release(self) -> None:
+        self.live -= 1
+
+
+@pytest.mark.unit
+def test_an_attempt_is_stitched_with_one_call_at_a_time_and_can_leave_out_the_raw_bodies() -> None:
+    rollout = EvaluationRollout(
+        "s", "e1", "a1", "weights", 2, "add", 0, PolicyModel("m"), {"name": "terminus-2"}, "docker", {}
+    )
+    item = WorkItem(
+        EVALUATIONS_QUEUE,
+        rollout.item_id(),
+        "s",
+        EVALUATION_ROLLOUT_KIND,
+        rollout.to_payload(),
+        state="finished",
+        started_at=1.0,
+        ended_at=2.0,
+        attempt_count=1,
+        result={"score": 1.0},
+    )
+    # Each call sends the whole conversation again, as an agent does.
+    messages: list[dict[str, str]] = [{"role": "user", "content": "solve add"}]
+    calls = []
+    for index in range(50):
+        calls.append(chat_call(1, index, list(messages), f"step {index}"))
+        messages += [{"role": "assistant", "content": f"step {index}"}, {"role": "user", "content": f"out {index}"}]
+    counted = CountedCalls(calls)
+    (lean,) = attempt_trajectories("s", "e1", item, counted, include_records=False)
+    # A few calls at once (the one read now and the one before it, in each loop), not one per call: 50 before.
+    assert counted.most <= 4, counted.most
+    (full,) = attempt_trajectories("s", "e1", item, calls)
+    assert lean["steps"] == full["steps"] and len(full["extra"]["reef"]["records"]) == 50
+    assert "records" not in lean["extra"]["reef"] and lean["extra"]["reef"]["reward"] == 1.0
 
 
 @pytest.mark.unit
