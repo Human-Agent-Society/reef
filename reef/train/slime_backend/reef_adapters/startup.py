@@ -178,6 +178,8 @@ def stamp_loss_family_reference(args: SlimeArguments, reference: str) -> None:
 
 #: The credentials of Harbor's cloud task environments, which Ray's actors do not inherit from this process.
 TASK_ENVIRONMENT_CREDENTIALS = ("E2B_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
+#: The endpoints of a self-hosted service for the ``e2b`` task environment, which Ray's actors do not inherit either.
+TASK_ENVIRONMENT_ENDPOINTS = ("E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DOMAIN")
 
 
 def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -189,7 +191,10 @@ def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     ``PYTHONPATH``: cookbook loss families resolve inside the workers, so
     without it the first actor fails to import ``recipes``. A task job's
     Harbor rollouts run in Slime's rollout manager, an actor too, so it gets the
-    credentials of a cloud task environment that this process sets.
+    non-empty credentials of a cloud task environment that this process sets.
+    It also gets each ``TASK_ENVIRONMENT_ENDPOINTS`` variable that this process
+    sets, with its value unchanged, even when it is empty, so the rollouts
+    reach the same E2B service as this process.
     """
     source = os.environ if environ is None else environ
     env_vars = {
@@ -200,6 +205,7 @@ def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     if pythonpath:
         env_vars["PYTHONPATH"] = pythonpath
     env_vars.update({name: source[name] for name in TASK_ENVIRONMENT_CREDENTIALS if source.get(name)})
+    env_vars.update({name: source[name] for name in TASK_ENVIRONMENT_ENDPOINTS if name in source})
     return {"env_vars": env_vars}
 
 

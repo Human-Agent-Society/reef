@@ -19,7 +19,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from reef.execution.sandbox.e2b import E2BExecutor, E2BSession, template_alias
+from reef.execution.sandbox.e2b import TRAFFIC_ACCESS_TOKEN_HEADER, E2BExecutor, E2BSession, template_alias
 from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramLaunchError,
@@ -117,18 +117,21 @@ def free_port() -> int:
 
 class Gateway:
     """The Reef-side port the tunnel reaches: a JSON answer, a stream held open between pieces, and a request that
-    waits for another to arrive, as a trial waits on the model calls it makes."""
+    waits for another to arrive, as a trial waits on the model calls it makes. ``received`` holds the headers of each
+    request, with lowercase names."""
 
     def __init__(self) -> None:
         self.release = threading.Event()
         self.waiting = threading.Event()
         self.arrived = threading.Event()
+        self.received: list[dict[str, str]] = []
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
 
             def do_POST(self) -> None:
+                gateway.received.append({name.lower(): value for name, value in self.headers.items()})
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 if self.path == "/echo":
                     data = json.dumps({"body": json.loads(body), "auth": self.headers.get("Authorization")}).encode()
@@ -222,6 +225,18 @@ def post(url: str, body: dict, headers: dict | None = None) -> urllib.request.Re
     return urllib.request.Request(
         url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", **(headers or {})}
     )
+
+
+def serve(handler: type[BaseHTTPRequestHandler]) -> ThreadingHTTPServer:
+    """``handler`` on a free loopback port, served on a daemon thread."""
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+#: The traffic access token of a private sandbox in these tests.
+TRAFFIC_TOKEN = "traffic-token"
 
 
 @pytest.mark.unit
@@ -342,6 +357,147 @@ def test_a_relay_that_answers_after_a_refused_poll_starts_the_pump() -> None:
         tunnel_server.shutdown()
         tunnel_server.server_close()
         gateway.close()
+
+
+@pytest.mark.unit
+def test_a_private_port_gets_the_token_on_each_relay_request_and_the_reef_port_never_does() -> None:
+    # The relay behind a private E2B port: the provider refuses a request without the sandbox's token.
+    gateway = Gateway()
+    relay = Relay("test-secret")
+    seen: list[tuple[str, str | None, str | None]] = []
+
+    class PrivatePort(relay.tunnel_handler()):
+        def allowed(self) -> bool:
+            token = self.headers.get(TRAFFIC_ACCESS_TOKEN_HEADER)
+            seen.append((self.path.split("/")[1], token, self.headers.get("x-relay-secret")))
+            if token != TRAFFIC_TOKEN:
+                self.answer(403)
+                return False
+            return super().allowed()
+
+    local_server, tunnel_server = serve(relay.local_handler()), serve(PrivatePort)
+    pump = TunnelPump(
+        f"http://127.0.0.1:{tunnel_server.server_port}",
+        "test-secret",
+        gateway.port,
+        pollers=1,
+        tunnel_headers={TRAFFIC_ACCESS_TOKEN_HEADER: TRAFFIC_TOKEN},
+    )
+    try:
+        pump.start(timeout=10)
+        request = post(f"http://127.0.0.1:{local_server.server_port}/echo", {"x": 1}, {"Authorization": "Bearer in"})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            assert json.loads(response.read()) == {"body": {"x": 1}, "auth": "Bearer in"}
+    finally:
+        pump.stop()
+        for server in (local_server, tunnel_server):
+            server.shutdown()
+            server.server_close()
+        gateway.close()
+    assert {path for path, _, _ in seen} == {"ready", "next", "reply"}
+    assert all(token == TRAFFIC_TOKEN and secret == "test-secret" for _, token, secret in seen)
+    # The Reef port gets the process's request only: neither the provider's token nor the relay's secret.
+    (received,) = gateway.received
+    assert received["authorization"] == "Bearer in"
+    assert TRAFFIC_ACCESS_TOKEN_HEADER not in received and "x-relay-secret" not in received
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("redirected_path", ["ready", "next", "reply"])
+def test_a_relay_request_never_follows_a_redirect(redirected_path: str) -> None:
+    """A redirect from the relay's address fails the one request it answers. Neither the provider's token nor the
+    relay's secret reaches the redirect's target, and an answer the relay did not take never counts as delivered."""
+    gateway = Gateway()
+    relay = Relay("test-secret")
+    redirected: list[str] = []
+    stolen: list[dict[str, str]] = []
+
+    class Target(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def collect(self) -> None:
+            stolen.append(dict(self.headers.items()))
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            self.collect()
+
+        def do_POST(self) -> None:
+            self.collect()
+
+        def log_message(self, *args) -> None:
+            pass
+
+    target = serve(Target)
+
+    class RedirectOnce(relay.tunnel_handler()):
+        def allowed(self) -> bool:
+            if self.path.split("/")[1] != redirected_path or redirected:
+                return super().allowed()
+            redirected.append(self.path)
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_port}/collect")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+
+    local_server, tunnel_server = serve(relay.local_handler()), serve(RedirectOnce)
+    pump = TunnelPump(
+        f"http://127.0.0.1:{tunnel_server.server_port}",
+        "test-secret",
+        gateway.port,
+        pollers=1,
+        tunnel_headers={TRAFFIC_ACCESS_TOKEN_HEADER: TRAFFIC_TOKEN},
+    )
+    request = post(f"http://127.0.0.1:{local_server.server_port}/echo", {"x": 1})
+    try:
+        pump.start(timeout=10)
+        if redirected_path == "reply":
+            # The relay did not take the answer's first piece, so the process gets an error and not the answer.
+            with pytest.raises(urllib.error.HTTPError) as failed:
+                urllib.request.urlopen(request, timeout=10)
+            assert failed.value.code == 502
+            failed.value.close()
+        else:
+            # A refused /ready or /next is tried again, and the tunnel still answers.
+            with urllib.request.urlopen(request, timeout=10) as response:
+                assert json.loads(response.read())["body"] == {"x": 1}
+    finally:
+        pump.stop()
+        for server in (local_server, tunnel_server, target):
+            server.shutdown()
+            server.server_close()
+        gateway.close()
+    assert len(redirected) == 1 and redirected[0].startswith(f"/{redirected_path}")
+    assert stolen == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tunnel_headers", "message"),
+    [
+        ({"X-Relay-Secret": "replacement-secret"}, "cannot replace x-relay-secret"),
+        ({"x-relay-secret": "replacement-secret"}, "cannot replace x-relay-secret"),
+        (
+            {TRAFFIC_ACCESS_TOKEN_HEADER: "first-token", "E2B-Traffic-Access-Token": "second-token"},
+            "occurs twice, ignoring case",
+        ),
+        ({"bad name": "header-value"}, "is not an HTTP token"),
+        ({"": "header-value"}, "is not an HTTP token"),
+        ({TRAFFIC_ACCESS_TOKEN_HEADER: "token-value\r\nx-relay-secret: injected"}, "is not visible ASCII text"),
+        ({TRAFFIC_ACCESS_TOKEN_HEADER: ""}, "is not visible ASCII text"),
+        ({TRAFFIC_ACCESS_TOKEN_HEADER: None}, "is not visible ASCII text"),
+    ],
+)
+def test_a_tunnel_header_cannot_replace_the_relay_secret_or_break_a_request(
+    tunnel_headers: dict, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message) as refused:
+        TunnelPump("https://relay.example", "test-secret", 9000, tunnel_headers=tunnel_headers)
+    # The message names the header and never its value.
+    assert not any(value and value in str(refused.value) for value in tunnel_headers.values())
 
 
 @pytest.mark.unit
@@ -494,3 +650,63 @@ def test_a_run_longer_than_e2bs_ceiling_opens_within_it_and_keeps_its_sandbox_al
     plain = E2BSession(Sandbox())
     plain.close()
     assert plain.keeper.stopped.is_set()
+
+
+class CreatedSandbox:
+    """An E2B sandbox as ``Sandbox.create`` returns it: with the traffic access token of a private sandbox, or None
+    for a public one."""
+
+    def __init__(self, traffic_access_token: str | None) -> None:
+        self.traffic_access_token = traffic_access_token
+        self.files = Mock()
+        self.commands = Mock()
+
+    def get_host(self, port: int) -> str:
+        # E2B's wildcard host of a sandbox port; no other header routes the request.
+        return f"{port}-sandbox-id.agentenv.example"
+
+    def set_timeout(self, seconds: int) -> None:
+        pass
+
+    def kill(self) -> bool:
+        return True
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("traffic_access_token", [TRAFFIC_TOKEN, None])
+def test_an_e2b_relay_gets_the_sandboxs_traffic_token_when_the_service_returns_one(
+    monkeypatch, traffic_access_token: str | None
+) -> None:
+    e2b = pytest.importorskip("e2b")
+
+    import reef.execution.sandbox.remote as remote_executor
+
+    created: list[dict] = []
+    started: list[tuple[str, dict[str, str]]] = []
+
+    def create(**options):
+        created.append(options)
+        return CreatedSandbox(traffic_access_token)
+
+    class RecordingPump:
+        """Stands in for ``TunnelPump`` in ``RemoteSession.forward``: records the relay's address and the session's
+        tunnel headers, and starts no thread. The relay tests above run the real pump."""
+
+        def __init__(self, url: str, secret: str, port: int, *, tunnel_headers: dict[str, str]) -> None:
+            started.append((url, tunnel_headers))
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(e2b.Sandbox, "create", staticmethod(create))
+    monkeypatch.setattr(remote_executor, "TunnelPump", RecordingPump)
+    E2BExecutor(api_key="fleet-api-key", template="reef-pi", forward_ports=(9000,)).open().close()
+    # Reef creates an ordinary sandbox: the service decides whether its ports are private.
+    (options,) = created
+    assert "network" not in options
+    # The relay at the sandbox's wildcard host gets the token when there is one, and nothing else: never the API key.
+    tunnel_headers = {TRAFFIC_ACCESS_TOKEN_HEADER: TRAFFIC_TOKEN} if traffic_access_token else {}
+    assert started == [("https://21080-sandbox-id.agentenv.example", tunnel_headers)]

@@ -12,7 +12,9 @@ A port in ``forward_ports`` is reachable inside the sandbox at the same loopback
 so no URL handed to a process changes. The sandbox runs :mod:`reef.execution.sandbox.relay` on that port; a
 :class:`TunnelPump` on the Reef host polls the relay over the provider's public address for each request a
 process made, sends it to the local port, and streams the answer back. Only the forwarded ports are reachable
-this way, and every credential stays on the Reef side of them.
+this way, and every credential stays on the Reef side of them. A request to the relay carries its secret and the
+headers that the provider requires at that address (:meth:`RemoteSession.tunnel_headers`), and never follows a
+redirect.
 
 A sandbox carries its deployment as ``owner``; a Reef that stopped mid run never closed its sandbox, so before a
 process starts its first sandbox it stops the ones its deployment left (:meth:`RemoteExecutor.reap_once`), and
@@ -30,6 +32,7 @@ import base64
 import hashlib
 import io
 import logging
+import re
 import secrets
 import shlex
 import shutil
@@ -74,6 +77,12 @@ REAP_LOCK = threading.Lock()
 HOP_BY_HOP = frozenset(
     {"connection", "content-length", "host", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade"}
 )
+#: The header with the relay's secret; :mod:`reef.execution.sandbox.relay` reads it.
+RELAY_SECRET_HEADER = "x-relay-secret"
+#: An HTTP header name: an RFC 9110 token.
+HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+#: A header value of the tunnel: visible ASCII characters, with spaces only between them.
+HEADER_VALUE = re.compile(r"[!-~]+(?: +[!-~]+)*")
 #: The Harbor environment types that run a task's containers on a cloud provider, each with the environment
 #: variables its credentials come from. A process that runs Harbor tasks in one of them needs these variables.
 REMOTE_TASK_ENVIRONMENTS: Mapping[str, tuple[str, ...]] = {
@@ -350,7 +359,8 @@ class RemoteSession(ProgramExecutor):
 
     ``env`` is the deployment's explicit environment; every process gets it over the caller's. A subclass
     implements the provider's primitives (:meth:`write_file`, :meth:`read_file`, :meth:`run`, :meth:`start`,
-    :meth:`public_url`, :meth:`stop`) and :meth:`launch`; this class forwards ports, copies roots and closes.
+    :meth:`public_url`, :meth:`stop`) and :meth:`launch`, and overrides :meth:`tunnel_headers` for a provider that
+    requires headers at a public address; this class forwards ports, copies roots and closes.
     """
 
     #: The provider's name, for messages.
@@ -385,6 +395,15 @@ class RemoteSession(ProgramExecutor):
     def stop(self) -> None:
         """Stop the sandbox."""
 
+    def tunnel_headers(self) -> dict[str, str]:
+        """The headers that the provider requires on each request to a :meth:`public_url`, besides the relay's
+        secret; none by default.
+
+        :meth:`forward` gives them to the port's :class:`TunnelPump`, which sends them to the relay only, never to
+        the Reef host's port. They must hold no credential of the deployment, such as the provider's API key.
+        """
+        return {}
+
     def preflight(self) -> None:
         return None
 
@@ -404,10 +423,9 @@ class RemoteSession(ProgramExecutor):
                 f"python3 /root/reef-relay.py --port {port} --tunnel-port {tunnel_port} --secret-file {secret_file}",
                 as_root=True,
             )
-            url = self.public_url(tunnel_port)
+            pump = TunnelPump(self.public_url(tunnel_port), secret, port, tunnel_headers=self.tunnel_headers())
         except Exception as exc:
             raise ProgramLaunchError(f"the {self.provider} relay for port {port} did not start: {exc}") from exc
-        pump = TunnelPump(url, secret, port)
         pump.start()
         self.pumps.append(pump)
 
@@ -450,13 +468,44 @@ class RemoteSession(ProgramExecutor):
 
 class TunnelPump:
     """Answer the relay's requests from the Reef host: poll ``/next``, send each to the local port, stream the
-    answer back as ``/reply`` pieces. Runs its own event loop on a thread."""
+    answer back as ``/reply`` pieces. Runs its own event loop on a thread.
 
-    def __init__(self, url: str, secret: str, port: int, *, pollers: int = POLLERS) -> None:
+    Values: ``url`` is the relay's public address and ``port`` the Reef host's loopback port. ``headers`` holds
+    ``tunnel_headers`` and the relay's ``secret`` in :data:`RELAY_SECRET_HEADER`. In ``tunnel_headers``, each name
+    is an HTTP token and each value visible ASCII text (:data:`HEADER_VALUE`). No two names are equal ignoring case,
+    and no name is :data:`RELAY_SECRET_HEADER`. The constructor raises ``ValueError`` for other headers; its message
+    names a header and never its value.
+    Purpose: :meth:`RemoteSession.forward` makes one for each forwarded port. Each request to the relay (``/ready``,
+    ``/next``, ``/reply``) carries ``headers`` and never follows a redirect: a redirect fails the request, so no
+    header reaches another address. A request to the local port carries only the headers that the sandbox's process
+    sent.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        secret: str,
+        port: int,
+        *,
+        pollers: int = POLLERS,
+        tunnel_headers: Mapping[str, str] | None = None,
+    ) -> None:
+        folded_names: set[str] = set()
+        for name, value in (tunnel_headers or {}).items():
+            if not isinstance(name, str) or not HEADER_NAME.fullmatch(name):
+                raise ValueError(f"the tunnel header name {name!r} is not an HTTP token")
+            if not isinstance(value, str) or not HEADER_VALUE.fullmatch(value):
+                raise ValueError(f"the value of the tunnel header {name} is not visible ASCII text")
+            folded_name = name.lower()
+            if folded_name == RELAY_SECRET_HEADER:
+                raise ValueError(f"a tunnel header cannot replace {RELAY_SECRET_HEADER}")
+            if folded_name in folded_names:
+                raise ValueError(f"the tunnel header {name} occurs twice, ignoring case")
+            folded_names.add(folded_name)
         self.url = url
         self.port = port
         self.pollers = pollers
-        self.headers = {"x-relay-secret": secret}
+        self.headers = {**(tunnel_headers or {}), RELAY_SECRET_HEADER: secret}
         self.ready = threading.Event()
         self.failure: str | None = None
         self.loop = asyncio.new_event_loop()
@@ -495,7 +544,7 @@ class TunnelPump:
         deadline = self.loop.time() + RELAY_READY_S
         while self.loop.time() < deadline:
             try:
-                async with tunnel.get(f"{self.url}/ready", headers=self.headers) as response:
+                async with tunnel.get(f"{self.url}/ready", headers=self.headers, allow_redirects=False) as response:
                     if response.status == 200:
                         # A poll made before the relay listened failed; the tunnel is up now.
                         self.failure = None
@@ -510,7 +559,7 @@ class TunnelPump:
         while True:
             try:
                 async with tunnel.get(
-                    f"{self.url}/next", headers=self.headers, timeout=ClientTimeout(total=60)
+                    f"{self.url}/next", headers=self.headers, allow_redirects=False, timeout=ClientTimeout(total=60)
                 ) as response:
                     if response.status == 204:
                         continue
@@ -537,12 +586,21 @@ class TunnelPump:
                         reply,
                         json={**piece, "sequence": sequence},
                         headers=self.headers,
+                        allow_redirects=False,
                         timeout=ClientTimeout(total=30),
                     ) as response:
                         # A final piece can reach the client before its acknowledgement is lost.
                         if response.status == 410 and piece.get("end") and attempt:
                             return
-                        response.raise_for_status()
+                        # A redirect fails as an error status does: the relay did not take the piece.
+                        if response.status >= 300:
+                            raise ClientResponseError(
+                                response.request_info,
+                                response.history,
+                                status=response.status,
+                                message=response.reason or "",
+                                headers=response.headers,
+                            )
                         await response.read()
                     sequence += 1
                     return

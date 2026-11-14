@@ -179,8 +179,22 @@ def fake_modal(monkeypatch, sandboxes: list[Any]) -> list[dict[str, Any]]:
 def test_a_session_starts_a_tagged_sandbox_with_a_tunnel_for_each_forwarded_port(monkeypatch) -> None:
     sandbox = Sandbox()
     created = fake_modal(monkeypatch, [sandbox])
-    started: list[tuple[str, int]] = []
-    monkeypatch.setattr(remote.TunnelPump, "start", lambda self, timeout=60.0: started.append((self.url, self.port)))
+    started: list[tuple[str, int, dict[str, str]]] = []
+
+    class RecordingPump:
+        """Stands in for ``TunnelPump`` in ``RemoteSession.forward``: records each relay's address, the Reef port and
+        the session's tunnel headers, and starts no thread. tests/harness/test_e2b_tunnel.py runs the real pump."""
+
+        def __init__(self, url: str, secret: str, port: int, *, tunnel_headers: dict[str, str]) -> None:
+            started.append((url, port, tunnel_headers))
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(remote, "TunnelPump", RecordingPump)
     executor = ModalExecutor(npm_package="pi@1.0.0", timeout_s=600, owner="team")
     session = executor.open_session(forward_ports=(8900, 8901), timeout_s=60)
     assert isinstance(session, ModalSession)
@@ -190,7 +204,8 @@ def test_a_session_starts_a_tagged_sandbox_with_a_tunnel_for_each_forwarded_port
     assert (
         options["image"].steps[0] == modal_sandbox.NODE_IMAGE and "npm install -g pi@1.0.0" in options["image"].steps
     )
-    assert started == [("https://tunnel-21080.modal.test", 8900), ("https://tunnel-21081.modal.test", 8901)]
+    # Modal requires no header at a tunnel's address, so each relay request carries only the relay's secret.
+    assert started == [("https://tunnel-21080.modal.test", 8900, {}), ("https://tunnel-21081.modal.test", 8901, {})]
     assert "/root/reef-relay.py" in sandbox.filesystem.files
     relays = [args[-1] for args, _ in sandbox.commands if "reef-relay.py --port" in args[-1]]
     assert len(relays) == 2 and "--tunnel-port 21081" in relays[1]

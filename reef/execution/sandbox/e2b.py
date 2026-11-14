@@ -13,6 +13,9 @@ so AgentENV deletes an abandoned sandbox instead of pausing it. The shared ``env
 class for Reef's Harbor rollouts and generator checks through ``import_path``. A standalone Harbor trial that
 selects only ``e2b`` uses Harbor's own class.
 
+A service can keep a sandbox's ports private and return a traffic access token for them. An :class:`E2BSession`
+then sends that token with each request to the sandbox's relays (:meth:`E2BSession.tunnel_headers`).
+
 This module can load without the optional E2B SDK. Opening a sandbox requires the SDK; the Harbor subclass also
 requires Harbor 0.25, installed through ``reef-infra[e2b]``.
 """
@@ -59,6 +62,8 @@ logger = logging.getLogger(__name__)
 SANDBOX_MAX_TIMEOUT_S = 3600
 #: How long before that deadline the keeper asks for it again, so a slow extension still lands in time.
 SANDBOX_RENEW_MARGIN_S = 300
+#: The header that carries a sandbox's traffic access token to a port of a private sandbox.
+TRAFFIC_ACCESS_TOKEN_HEADER = "e2b-traffic-access-token"
 
 
 def template_alias(adapter: str, version: str) -> str:
@@ -259,6 +264,12 @@ class E2BSession(RemoteSession):
     def public_url(self, port: int) -> str:
         return f"https://{self.sandbox.get_host(port)}"
 
+    def tunnel_headers(self) -> dict[str, str]:
+        """The sandbox's traffic access token, when the service returned a non-empty one; a private sandbox's ports
+        require it. The E2B API key is never one of these headers."""
+        token = self.sandbox.traffic_access_token
+        return {TRAFFIC_ACCESS_TOKEN_HEADER: token} if token else {}
+
     def stop(self) -> None:
         self.keeper.stop()
         self.sandbox.kill()
@@ -359,6 +370,7 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
 
 
 __all__ = [
+    "TRAFFIC_ACCESS_TOKEN_HEADER",
     "E2BExecutor",
     "E2BSession",
     "KillOnTimeoutE2BEnvironment",
