@@ -178,7 +178,9 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/cancel``                                                | cancel one evaluation                             |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``                                                 | run the rollouts without a score again            |
+| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry``                                                 | run the failed rollouts again                     |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/resume``                                                | run the cancelled and the unstarted rollouts      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations``                                                                        | artifact evaluations, newest first                |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -1456,37 +1458,60 @@ cancels one evaluation. It answers the evaluation after the cancel, as ``GET
   request``. Each of its rollouts that did not end fails with the same error.
 - A worker that runs one of these rollouts stops its trial and the trial's
   sandbox within seconds.
-- The rollouts that wait for ``max_concurrent_rollouts`` never start. They
-  stay ``waiting`` in the rollouts list.
+- The rollouts that wait for ``max_concurrent_rollouts`` do not start. They
+  stay ``waiting`` in the rollouts list until a resume.
 - An evaluation that ended stays as it is, so a second cancel changes nothing.
 
 An unknown scenario or evaluation returns 404. Control answers this route.
 
-``POST /reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry`` runs
-the rollouts of an evaluation that ended with no score once more. It answers
-202 with the evaluation, which runs:
+Two routes run rollouts of an evaluation again. Each one answers 202 with the
+evaluation, which is ``running``:
 
-- A rollout has no score when it failed, when a cancel or a stop of the
-  evaluation ended it, or when it finished with a failed score. Each of them
-  goes back to the queue. Its earlier attempts stay, so its ``attempt_count``
-  goes on and the calls of each attempt stay readable.
-- A retry keeps ``max_concurrent_rollouts``. When the evaluation has fewer free
-  places than rollouts to run again, the others are ``waiting`` and go back to
-  the queue as earlier rollouts end.
++------------+----------------------------------------------------------------+
+| Route      | Rollouts that it runs again                                    |
++============+================================================================+
+| ``retry``  | The failed rollouts: the rollouts whose own run ended with no  |
+|            | score. The run failed, or it finished with a failed score.     |
++------------+----------------------------------------------------------------+
+| ``resume`` | The rollouts that a cancel or a ``max_failed_fraction`` stop   |
+|            | ended, also in the middle of their run, and the rollouts that  |
+|            | never started.                                                 |
++------------+----------------------------------------------------------------+
+
+The routes are ``POST
+/reef/scenarios/{scenario}/evaluations/{evaluation_id}/retry`` and ``POST
+/reef/scenarios/{scenario}/evaluations/{evaluation_id}/resume``. Both work in
+the same way:
+
+- Each rollout runs from the start of its task. A rollout that a cancel
+  stopped in its run does not continue from where it stopped.
+- Its earlier attempts stay, so its ``attempt_count`` goes on and the calls of
+  each attempt stay readable.
+- Both keep ``max_concurrent_rollouts``. When the evaluation has fewer free
+  places than rollouts to run, the others are ``waiting`` and go back to the
+  queue as earlier rollouts end.
 - A rollout that has a score keeps it. A rollout that has not ended stays as
   it is.
 - An evaluation that runs goes on, with those rollouts in the queue again.
 - An evaluation that ended is ``running`` again, with no result and no error.
-  The rollouts that waited for ``max_concurrent_rollouts`` start as the
-  others end.
 - When the rollouts are final, Reef ends the evaluation as it ends a first
   run: it stores the scores, and it gives a finished evaluation to the
   scenario's activation rule, which can activate the artifact.
 
-It returns 409 for an evaluation with no rollout to run again, and for an
-ended one whose rollouts Reef no longer keeps: Reef deletes the rollouts of an
-ended evaluation after their retention. An unknown scenario or evaluation
-returns 404. Control answers this route.
+A retry of a cancelled or stopped evaluation does not run its cancelled
+rollouts and does not start its other rollouts. When the failed rollouts end,
+the evaluation fails again with the error of the cancel or the stop. While a
+cancelled rollout waits for a resume, ``max_failed_fraction`` does not count
+it. To finish an evaluation that too many failures stopped, retry it first,
+and then resume it. A resume first counts the same failures, so it can stop
+again.
+
+``retry`` returns 409 for an evaluation with no failed rollout. ``resume``
+returns 409 for an evaluation with no cancelled rollout and no rollout that
+never started. Both return 409 for an ended evaluation whose rollouts Reef no
+longer keeps: Reef deletes the rollouts of an ended evaluation after their
+retention. An unknown scenario or evaluation returns 404. Control answers
+both routes.
 
 Model calls of a rollout
 ~~~~~~~~~~~~~~~~~~~~~~~~

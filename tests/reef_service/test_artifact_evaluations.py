@@ -887,30 +887,61 @@ def test_a_retry_keeps_max_concurrent_rollouts_and_queues_the_others_as_rollouts
     asyncio.run(run())
 
 
-def test_a_retry_of_a_cancelled_evaluation_also_starts_the_rollouts_that_waited(tmp_path: Path) -> None:
+def test_a_retry_runs_the_failed_rollouts_and_a_resume_runs_the_cancelled_and_unstarted_ones(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
     queue = dispatcher.queue
 
+    async def taken() -> WorkItem:
+        # A rollout enters the queue when the results thread settles the evaluation after a rollout ended.
+        for _ in range(200):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            if item is not None:
+                return item
+            await asyncio.sleep(0.05)
+        raise AssertionError("no rollout entered the queue")
+
     async def run() -> None:
+        # No worker runs: the test takes each rollout and ends it.
         server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
         async with TestClient(server) as client:
             artifact_id = await created(client, tmp_path, "add", "sort")
-            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "max_concurrent_rollouts": 1}
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 2,
+                "max_concurrent_rollouts": 1,
+            }
             accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
             route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            # The first rollout fails in its sandbox, the cancel stops the second in its run, and two never start.
+            first = await taken()
+            queue.fail(EVALUATIONS_QUEUE, first.id, "w", "the sandbox stopped", retryable=False)
+            second = await taken()
+            queue.start(EVALUATIONS_QUEUE, second.id, "w")
             assert (await (await client.post(f"{route}/cancel", headers=AUTH)).json())["state"] == "failed"
 
+            # A retry runs the failed rollout only: the cancelled rollout stays, and no other rollout starts.
             assert (await (await client.post(f"{route}/retry", headers=AUTH)).json())["state"] == "running"
-            for value in (1.0, 0.0):
-                # The second rollout enters the queue when the first one ends.
-                for _ in range(200):
-                    item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
-                    if item is not None:
-                        break
-                    await asyncio.sleep(0.05)
+            item = await taken()
+            assert (item.id, item.attempt_count) == (first.id, 2)
+            queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            answer = await finished(client, accepted["evaluation_id"])
+            assert (answer["state"], answer["error"]) == ("failed", CANCELLED_ERROR)
+            progress = answer["progress"]
+            assert (progress["ended"], progress["scored"], progress["cancelled"]) == (1, 1, 1)
+            assert len(queue.items(EVALUATIONS_QUEUE, scenario="s")) == 2
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 409, "no rollout failed"
+
+            # A resume runs the cancelled rollout again and starts the two others, one at a time.
+            assert (await (await client.post(f"{route}/resume", headers=AUTH)).json())["state"] == "running"
+            for value in (0.0, 1.0, 0.0):
+                item = await taken()
+                assert sum(not other.final for other in queue.items(EVALUATIONS_QUEUE, scenario="s")) == 1
                 queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(value).to_json()})
             answer = await finished(client, accepted["evaluation_id"])
             assert (answer["state"], answer["mean_score"], answer["error"]) == ("finished", 0.5, None)
+            assert (await client.post(f"{route}/resume", headers=AUTH)).status == 409
+            assert (await client.post("/reef/scenarios/s/evaluations/unknown/resume", headers=AUTH)).status == 404
 
     asyncio.run(run())
 
@@ -951,6 +982,54 @@ def test_a_retry_of_an_evaluation_that_too_many_failures_stopped_runs_on(tmp_pat
             assert (answer["state"], answer["error"]) == ("running", None)
             states = {item.state for item in queue.items(EVALUATIONS_QUEUE, scenario="s")}
             assert states == {"queued"}
+
+    asyncio.run(run())
+
+
+def test_after_a_failure_stop_a_retry_runs_the_failed_rollouts_and_a_resume_the_stopped_ones(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+
+    def ended_all(error: str | None) -> None:
+        for _ in range(len(queue.items(EVALUATIONS_QUEUE, scenario="s"))):
+            item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            if item is None:
+                return
+            if error is None:
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            else:
+                queue.fail(EVALUATIONS_QUEUE, item.id, "w", error, retryable=False)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher)))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {
+                "artifact_id": artifact_id,
+                "harness": {"name": "terminus-2"},
+                "rollouts_per_task": 6,
+                "max_failed_fraction": 0.5,
+            }
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}"
+            # Ten of the twelve rollouts fail, and the failure check stops the other two.
+            for item in queue.items(EVALUATIONS_QUEUE, scenario="s")[:10]:
+                queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.fail(EVALUATIONS_QUEUE, item.id, "w", "the sandbox refused the task", retryable=False)
+            stopped = (await finished(client, accepted["evaluation_id"]))["progress"]
+            assert (stopped["failed"], stopped["cancelled"]) == (10, 2)
+
+            # The retried rollouts score; the two stopped rollouts do not count as failed, and do not run.
+            assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
+            ended_all(None)
+            answer = await finished(client, accepted["evaluation_id"])
+            assert (answer["state"], answer["error"]) == ("failed", FAILURES_ERROR)
+            assert (answer["progress"]["scored"], answer["progress"]["cancelled"]) == (10, 2)
+
+            assert (await client.post(f"{route}/resume", headers=AUTH)).status == 202
+            ended_all(None)
+            answer = await finished(client, accepted["evaluation_id"])
+            assert (answer["state"], answer["mean_score"]) == ("finished", 1.0)
 
     asyncio.run(run())
 
