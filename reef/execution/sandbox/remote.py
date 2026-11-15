@@ -48,6 +48,7 @@ from typing import Any, ClassVar, Self
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, ClientSession, ClientTimeout
 
+from reef.execution.sandbox.bwrap import TOOL_ISOLATION
 from reef.execution.sandbox.process import (
     ISOLATION_ENV,
     ProcessOutcome,
@@ -62,6 +63,28 @@ logger = logging.getLogger(__name__)
 RELAY_SCRIPT = Path(__file__).with_name("relay.py")
 #: Where a process's root lands in the sandbox: one directory per root, named as the local one.
 REMOTE_BASE = "/home/user/reef"
+#: What every remote run jail unshares and mounts before the run's binds; the startup probe shares it.
+#: The root is bound first, so that the later mounts stay visible.
+REMOTE_ISOLATION: tuple[str, ...] = (
+    "--unshare-user",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--die-with-parent",
+    "--new-session",
+    "--ro-bind",
+    "/",
+    "/",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+    "--clearenv",
+)
+#: The PATH in a remote run jail, which clears the sandbox's environment.
+REMOTE_PATH = "/usr/local/bin:/usr/bin:/bin"
 #: The first sandbox port a relay's tunnel listens on; the provider exposes it at a public address.
 TUNNEL_PORT_BASE = 21080
 #: Concurrent polls per forwarded port: a long request (a trial) must not hold up the calls it makes itself.
@@ -122,25 +145,7 @@ def protected_command(
     The PID namespace retires tool children when the command is stopped. Bubblewrap
     also prevents privilege escalation, so sudo cannot undo the read-only mounts.
     """
-    arguments = [
-        "bwrap",
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--die-with-parent",
-        "--new-session",
-        "--ro-bind",
-        "/",
-        "/",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--clearenv",
-    ]
+    arguments = ["bwrap", *REMOTE_ISOLATION]
     remote = remote_root(root)
     for path in (workspace, *writable_paths):
         target = f"{remote}/{path.relative_to(root).as_posix()}"
@@ -149,7 +154,7 @@ def protected_command(
         target = f"{remote}/{path.relative_to(root).as_posix()}"
         arguments.extend(("--ro-bind", target, target))
     for name, value in {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PATH": REMOTE_PATH,
         **env,
         ISOLATION_ENV: "bwrap",
         "REEF_NATIVE_ENFORCE": "bwrap",
@@ -195,9 +200,14 @@ def unpack(data: bytes, directory: Path) -> None:
 
 
 def probe_command(binary: str) -> str:
-    """The startup check of a remote sandbox: a nested bubblewrap jail starts, and ``binary`` is on ``PATH``."""
-    jail = "bwrap --unshare-user --unshare-pid --ro-bind / / --proc /proc --dev /dev --"
-    command = f"{jail} {jail} /bin/true"
+    """The startup check of a remote sandbox: a tool jail starts inside the run jail, and ``binary`` is on ``PATH``.
+
+    The run jail is :func:`protected_command`'s. The tool jail is the native enforcer's (``TOOL_ISOLATION``)
+    without network, over a read-only root that comes before its /proc bind.
+    """
+    run_jail = ["bwrap", *REMOTE_ISOLATION, "--setenv", "PATH", REMOTE_PATH, "--"]
+    tool_jail = ["bwrap", "--ro-bind", "/", "/", *TOOL_ISOLATION, "--unshare-net", "--", "/bin/true"]
+    command = shlex.join([*run_jail, *tool_jail])
     if binary:
         command += f" && command -v {shlex.quote(binary)} >/dev/null"
     return command

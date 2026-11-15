@@ -3,15 +3,17 @@
 import json
 import shlex
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
 
+from reef.execution.sandbox.bwrap import TOOL_ISOLATION
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import ProgramLaunchError, SandboxUnavailableError
-from reef.execution.sandbox.remote import protected_command, remote_root, unpack
+from reef.execution.sandbox.remote import probe_command, protected_command, remote_root, unpack
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.run import run_task
 from reef.harness.tasks.vendor_install import AdapterProgram
@@ -111,6 +113,21 @@ def test_remote_command_mounts_inputs_readonly_inside_writable_state(tmp_path):
     assert args[args.index(state) - 1 : args.index(state) + 2] == ["--bind", state, state]
     assert args[args.index(config) - 1 : args.index(config) + 2] == ["--ro-bind", config, config]
     assert "--unshare-pid" in args and "--clearenv" in args
+
+
+def test_startup_probe_starts_a_tool_jail_inside_the_run_jail(tmp_path: Path) -> None:
+    run = shlex.split(protected_command("pi", {}, tmp_path, tmp_path, (), ()))
+    probe = shlex.split(probe_command("my agent"))
+    run_end = probe.index("--")
+    tool_end = probe.index("--", run_end + 1)
+    # The run jail is protected_command's before the run's binds, with the PATH it sets.
+    assert probe[:run_end] == [*run[1 : run.index("--bind")], "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin"]
+    # The tool jail is the native enforcer's without network. Its root comes before its /proc bind.
+    assert probe[run_end + 1 : tool_end] == ["bwrap", "--ro-bind", "/", "/", *TOOL_ISOLATION, "--unshare-net"]
+    # Only the run jail mounts a proc filesystem.
+    assert probe.count("--proc") == 1
+    assert probe[tool_end + 1 :] == ["/bin/true", "&&", "command", "-v", "my agent", ">/dev/null"]
+    assert shlex.split(probe_command(""))[tool_end + 1 :] == ["/bin/true"]
 
 
 def test_failed_copy_back_cannot_be_scored_as_a_success(tmp_path, monkeypatch):
