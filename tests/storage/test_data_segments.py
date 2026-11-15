@@ -228,3 +228,20 @@ def test_the_deployment_gives_its_segment_store_to_the_data_store(tmp_path):
     assert len(list((tmp_path / "records" / "segments").glob("*/*.jsonl"))) == 1
     with pytest.raises(ValueError, match="segment_backend"):
         ServiceSettings(recipe="recipe", segment_backend="unknown")
+
+
+def test_a_replaced_trajectory_goes_to_a_new_segment_and_maintain_deletes_the_old_one(
+    open_store, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(sql_data, "UNUSED_SEGMENT_SECONDS", -1)
+    with closing(open_store()) as store:
+        store.create("acme", [trajectory("t1", "a long copy")])
+        (old_segment,) = segment_files(tmp_path)
+        replaced = {**ATIF, "steps": [{"step_id": 1, "message": "short"}]}
+        store.replace_trajectory("acme", "t1", replaced)
+        assert store.read("acme", "t1").content == replaced
+        assert waiting_rows(store) == (0, 0)
+        store.maintain()
+        # No row uses the old segment, so maintain deletes it; the new one stays.
+        assert old_segment not in segment_files(tmp_path) and len(segment_files(tmp_path)) == 1
+        assert store.read("acme", "t1").content == replaced

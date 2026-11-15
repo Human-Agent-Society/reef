@@ -104,6 +104,7 @@ from reef.storage.data import (
     prepared_items,
     record_link_scope,
     replaced_task_digest,
+    replaced_trajectory_digest,
 )
 from reef.storage.item_kinds import task_partition
 from reef.storage.schema_upgrades import SchemaStep, upgrade_schema
@@ -1840,29 +1841,75 @@ class SQLDataStore(DataStore):
             digest = replaced_task_digest(owner, stored, directory, self.task_files)
             if digest == stored.digest:
                 return stored
-            items, uses = self.items_table, self.uses_table
+            items = self.items_table
             connection.execute(
                 update(items).where(items.c.owner == owner, items.c.item_id == item_id).values(digest=digest)
             )
-            # Each use begins again with a new sequence, so that a trainer that pages by use sequence reads the task.
-            where = (uses.c.owner == owner, uses.c.item_id == item_id)
-            begun = [
-                {
-                    "owner": owner,
-                    "item_id": item_id,
-                    "scenario": use.scenario,
-                    "held_set": use.held_set,
-                    "split": use.split,
-                    "item_sequence": stored.sequence,
-                }
-                for use in connection.execute(
-                    select(uses.c.scenario, uses.c.held_set, uses.c.split).where(*where).order_by(uses.c.sequence)
-                )
-            ]
-            connection.execute(delete(uses).where(*where))
-            if begun:
-                connection.execute(insert(uses), begun)
+            self.begin_uses_again(connection, owner, stored)
             return replace(stored, digest=digest)
+
+    def replace_trajectory(self, owner: str, item_id: str, content: Mapping[str, Any]) -> StoredItem:
+        check_owner(owner)
+        with self.transaction() as connection:
+            row = self.rows(connection, owner, [item_id]).get(item_id)
+        if row is None:
+            raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
+        found = StoredItem(row["sequence"], owner, item_id, json.loads(row["metadata_json"]), row["digest"])
+        digest = replaced_trajectory_digest(found, content, self.task_files)
+        if digest == found.digest:
+            return found
+        text = canonical_json(content)
+        # Large content goes to a new segment before the transaction, as a create's does; ``maintain`` deletes the
+        # segment when no row comes to use it, and the old segment line when no row uses its segment any more.
+        partition = self.partition(owner)
+        place = None
+        if partition is not None and len(text.encode("utf-8")) >= CREATE_SEGMENT_BYTES:
+            (place,) = self.write_segment(partition, [text])
+        with self.transaction() as connection:
+            # The locks order this write with the other writes of the item's scenarios, as an update does.
+            self.lock_uses(connection, owner, [found.metadata])
+            row = self.rows(connection, owner, [item_id], lock=True).get(item_id)
+            if row is None:
+                raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
+            stored = StoredItem(row["sequence"], owner, item_id, json.loads(row["metadata_json"]), row["digest"])
+            if digest == stored.digest:
+                return stored
+            items = self.items_table
+            connection.execute(
+                update(items)
+                .where(items.c.owner == owner, items.c.item_id == item_id)
+                .values(
+                    digest=digest,
+                    content_json=text if place is None else None,
+                    segment_id=None if place is None else place.segment_id,
+                    segment_offset=None if place is None else place.offset,
+                    segment_length=None if place is None else place.length,
+                )
+            )
+            self.begin_uses_again(connection, owner, stored)
+            return replace(stored, digest=digest)
+
+    def begin_uses_again(self, connection: Connection, owner: str, stored: StoredItem) -> None:
+        """Give each use of the item ``stored`` a new use sequence, in the order of the uses, so that a trainer that
+        pages by use sequence reads the item again after a replace."""
+        uses = self.uses_table
+        where = (uses.c.owner == owner, uses.c.item_id == stored.item_id)
+        begun = [
+            {
+                "owner": owner,
+                "item_id": stored.item_id,
+                "scenario": use.scenario,
+                "held_set": use.held_set,
+                "split": use.split,
+                "item_sequence": stored.sequence,
+            }
+            for use in connection.execute(
+                select(uses.c.scenario, uses.c.held_set, uses.c.split).where(*where).order_by(uses.c.sequence)
+            )
+        ]
+        connection.execute(delete(uses).where(*where))
+        if begun:
+            connection.execute(insert(uses), begun)
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
