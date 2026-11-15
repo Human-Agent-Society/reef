@@ -466,7 +466,8 @@ def test_a_reload_leaves_the_harness_cycle_in_flight_its_instance(
     worker.join(10)
     assert not worker.is_alive()
     assert errors == [] and outcome == [True]
-    assert closed_under_the_cycle == [False]
+    # Another worker can hold the cycle lock as this cycle ends; it closes the old instance when its own cycle ends.
+    assert became_true(lambda: closed_under_the_cycle == [False])
     assert dispatcher.build_training_status()["error"] is None
     # The rows the cycle held train on the rebuilt instance.
     drain(dispatcher, HARNESS)
@@ -565,7 +566,8 @@ def test_an_instance_parked_while_its_cycle_lock_is_held_closes_when_the_holder_
         assert closed == []
         if cycle_fails:
             raise RuntimeError("cycle failed")
-    assert closed == [True]
+    # Another worker can hold the cycle lock as this cycle ends; it closes the old instance when its own cycle ends.
+    assert became_true(lambda: closed == [True])
     with dispatcher.local_workers.lock:
         assert dispatcher.local_workers.scenarios["agent"].replaced == []
 
