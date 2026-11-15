@@ -29,7 +29,7 @@ from reef.service.deploy.routing.deployment_controller import RoutingDeploymentC
 from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, RoutingControlError
 from reef.service.deploy.routing.registry import DeploymentOwnership
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
+from reef.service.deploy.service_config import ServiceSettings
 from reef.service.lifecycle import REQUEST_ACCEPTANCE
 
 pytestmark = pytest.mark.unit
@@ -122,7 +122,7 @@ def test_startup_stop_joins_slow_create_before_cleanup_and_second_signal_is_forc
         deployment_id="test-managed", drain_timeout_seconds=0.03, finalization_timeout_seconds=0.03
     )
     controller = RoutingDeploymentController(
-        ServiceConfig(recipe="base", routing_deployment=policy), runtime, registry_root=tmp_path / "registry"
+        ServiceSettings(recipe="base", routing_deployment=policy), runtime, registry_root=tmp_path / "registry"
     )
     controller.registry.acquire()
     controller.directory = tmp_path / "generation"

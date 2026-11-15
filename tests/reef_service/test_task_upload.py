@@ -6,24 +6,26 @@ import asyncio
 import io
 import json
 import tarfile
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_steps import evolution_config, runtime
+from tests.support.harness_jobs import configured_live, evolution_config
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import dispatcher_for
 
+from reef.core.plugins import PluginReference
 from reef.core.tasks import write_harbor_task
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
-from reef.train import JobData, Trainer
-from reef.train.pipeline import TrainingPipeline
+from reef.train import JobData
+from reef.train.pipeline import PipelineSettings
 
 TOKEN = "task-upload-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -33,6 +35,10 @@ GZIP = {**AUTH, "Content-Type": "application/gzip"}
 class TaskReadingJobData(Sample2Job):
     accepts_imported_tasks = True
 
+    @classmethod
+    def from_config(cls, config, *, context, record2sample, environ):
+        return cls(context, None, None)
+
     def make_job_data(self, samples, data_id):
         return JobData(data_id, samples)
 
@@ -41,34 +47,13 @@ class RecordOnlyJobData(TaskReadingJobData):
     accepts_imported_tasks = False
 
 
-@dataclass(frozen=True, kw_only=True)
-class TaskRecipe(Recipe):
-    batch_stage: type[Sample2Job] = TaskReadingJobData
-
-    def build(
-        self,
-        scenario,
-        records,
-        *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        artifacts=None,
-        samples=None,
-        root=None,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=lambda context: TrainingPipeline(
-                context, record2sample=NoSamples(), sample2job=self.batch_stage(context, None, None)
-            ),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            task_storage=task_storage,
-            samples=samples,
-            root=root,
+def task_recipe(sample2job: type[Sample2Job] = TaskReadingJobData) -> Recipe:
+    """A recipe that trains nothing, whose sample-to-job stage is ``sample2job``."""
+    return Recipe(
+        pipeline_stages=PipelineSettings(
+            record2sample=PluginReference(NoSamples, {}), sample2job=PluginReference(sample2job, {})
         )
+    )
 
 
 def tasks_url(split: str | None = "train", scenario: str = "s", **metadata: object) -> str:
@@ -107,7 +92,7 @@ def entry(name: str, kind: bytes = tarfile.REGTYPE, size: int = 1, link: str = "
 
 
 def test_task_items_join_the_split_and_a_retry_changes_nothing(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, TaskRecipe())
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
@@ -146,8 +131,42 @@ def test_task_items_join_the_split_and_a_retry_changes_nothing(tmp_path: Path) -
         dispatcher.close()
 
 
+def test_a_task_items_files_are_replaced_in_place_and_a_bad_replace_changes_nothing(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await create_scenario(client)
+            assert (await client.post(tasks_url("eval"), headers=GZIP, data=archive(tmp_path, "task-a"))).status == 201
+            created = dispatcher.data_store.read("s", "task-a")
+            url = "/reef/namespaces/s/data/tasks/task-a"
+
+            response = await client.put(url, headers=GZIP, data=archive(tmp_path, "task-a", port=9200))
+            assert response.status == 200, await response.text()
+            receipt = await response.json()
+            replaced = dispatcher.data_store.read("s", "task-a")
+            assert receipt["item"]["id"] == "task-a" and receipt["item"]["digest"] == replaced.digest
+            assert replaced.digest != created.digest and replaced.metadata == created.metadata
+            assert dispatcher.data_store.task_path(replaced) != dispatcher.data_store.task_path(created)
+
+            # Another name, several tasks, an unknown item or another content type change nothing.
+            for target, body, status in (
+                (url, archive(tmp_path, "task-b"), 400),
+                (url, archive(tmp_path, "task-a", "task-b", port=9300), 400),
+                ("/reef/namespaces/s/data/tasks/missing", archive(tmp_path, "missing"), 404),
+            ):
+                assert (await client.put(target, headers=GZIP, data=body)).status == status
+            assert (await client.put(url, headers=AUTH, data=b"{}")).status == 415
+            assert dispatcher.data_store.read("s", "task-a").digest == replaced.digest
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
 def test_a_train_use_needs_a_recipe_that_reads_imported_tasks_and_an_eval_use_does_not(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, TaskRecipe(batch_stage=RecordOnlyJobData))
+    dispatcher = dispatcher_for(tmp_path, task_recipe(RecordOnlyJobData))
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
@@ -184,8 +203,8 @@ def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_
     evaluation = {"tasks": [], "imported_tasks": True}
     config = {**evolution_config(evaluation=evaluation, state_dir=str(tmp_path / "state")), **pipeline}
     # In manual mode no train task starts a step while the test runs.
-    recipe = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
-    dispatcher = dispatcher_for(tmp_path, replace(recipe, training_mode="manual"))
+    recipe = load_recipe(HarnessEvolutionRecipe, config, {})
+    dispatcher = dispatcher_for(tmp_path, replace(recipe, training_mode="manual"), live=configured_live(recipe))
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
@@ -205,7 +224,7 @@ def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_
 
 
 def test_an_invalid_task_create_is_refused_and_stores_nothing(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, TaskRecipe())
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
     good = archive(tmp_path, "task-a")
 
     async def run() -> None:
@@ -246,7 +265,7 @@ def test_an_invalid_task_create_is_refused_and_stores_nothing(tmp_path: Path) ->
 
 def test_a_body_over_the_unpacked_limit_is_refused_before_it_unpacks(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("reef.service.routes.data.MAX_UNPACKED_BYTES", 64)
-    dispatcher = dispatcher_for(tmp_path, TaskRecipe())
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:

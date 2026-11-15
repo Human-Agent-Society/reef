@@ -1,8 +1,58 @@
-"""Wait for the inference worker when a test needs the selected snapshot to serve."""
+"""Serving backend doubles and waits for the inference worker's published routes."""
 
 import time
 
 from reef.dispatcher import Dispatcher
+from reef.inference.interfaces import InferenceBackend
+
+
+class Engines(InferenceBackend):
+    """Serving engines that record each control call.
+
+    ``misreport`` names a version they report after a load; ``dead`` is the
+    number of engines the next ``recover`` replaces.
+    """
+
+    def __init__(self) -> None:
+        self.events: list = []
+        self.versions = ["boot"]
+        self.misreport: str | None = None
+        self.dead = 0
+
+    def load_weight_files(self, files, *, adapter_name, runtime_load_id):
+        self.events.append(("load", files.layout, adapter_name, runtime_load_id, files.path))
+        self.versions = [runtime_load_id if self.misreport is None else self.misreport]
+
+    def initialize_version(self, runtime_load_id):
+        self.events.append(("initialize", runtime_load_id))
+        self.versions = [runtime_load_id]
+
+    def inference_url(self):
+        return "http://component.example"
+
+    def runtime_load_ids(self):
+        return list(self.versions)
+
+    def pause(self):
+        self.events.append("pause")
+
+    def resume(self):
+        self.events.append("resume")
+
+    def recover(self):
+        replaced, self.dead = self.dead, 0
+        self.events.append(("recover", replaced))
+        return replaced
+
+    def abort(self):
+        self.events.append("abort")
+        self.dead = 2
+
+    def unload_adapter(self, name):
+        self.events.append(("unload", name))
+
+    def loads(self) -> list:
+        return [event for event in self.events if event[0] == "load"]
 
 
 def wait_for_serving(dispatcher: Dispatcher, scenario: str = "math") -> None:

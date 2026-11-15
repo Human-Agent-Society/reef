@@ -1,14 +1,15 @@
-"""TTT-Discover's training signal, which each backend's objective trains: grouped adaptive-entropic advantages."""
+"""TTT-Discover's grouped adaptive-entropic advantages, which each backend's objective trains.
+
+This module names no training backend: ``recipes.tttd.slime`` and ``recipes.tttd.tinker`` each put its result in
+their own backend's training signal.
+"""
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
 from typing import Any
 
 from reef.core.trajectories import trajectory_reward
-from reef.train.algos.helpers import next_steps
-from reef.train.algos.signals import TrainingSignal
 from reef.train.types import JobData, trajectory_groups
 
 
@@ -81,8 +82,8 @@ def adaptive_entropic_advantages(rewards: list[float]) -> tuple[tuple[float, ...
     return advantages, beta
 
 
-def tttd_signal(data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
-    """The adaptive-entropic advantages of each comparison set of ``data``, which each backend's objective trains."""
+def tttd_advantages(data: JobData) -> tuple[tuple[float, ...], dict[str, Any]]:
+    """The adaptive-entropic advantages of each comparison set of ``data``, one per trajectory, and their metrics."""
     comparison_sets = trajectory_groups(data)
     advantages: list[float] = []
     betas: list[float] = []
@@ -90,19 +91,12 @@ def tttd_signal(data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
         group_advantages, beta = adaptive_entropic_advantages([trajectory_reward(sample) for sample in comparison_set])
         advantages.extend(group_advantages)
         betas.append(beta)
-    steps = next_steps(state)
     normalized = tuple(advantages)
     # The processor drops constant-reward groups but keeps one when every
     # group is constant; flag that job's data (its advantages carry no signal).
     constant_groups = all(len({trajectory_reward(sample) for sample in group}) == 1 for group in comparison_sets)
-    return TrainingSignal(
-        "train",
-        {"steps": steps},
-        {
-            "advantages": normalized,
-            "adaptive_betas": tuple(betas),
-            "constant_groups_retained": int(constant_groups),
-            "steps": steps,
-        },
-        normalized,
-    )
+    return normalized, {
+        "advantages": normalized,
+        "adaptive_betas": tuple(betas),
+        "constant_groups_retained": int(constant_groups),
+    }

@@ -22,7 +22,7 @@ Startup creates the initial Tinker checkpoint and fetches tokenizer files before
 python tutorials/tinker/smoke.py
 ```
 
-The service owns one training scenario. Run the smoke once per fresh service/state directory; keep that state directory to inspect or resume the resulting release. The randomly named scenario prevents old reports from being reused accidentally, but does not enable concurrent scenarios.
+The service owns one training scenario. Run the smoke once per fresh service/state directory; keep that state directory to inspect or resume the resulting snapshot. The randomly named scenario prevents old reports from being reused accidentally, but does not enable concurrent scenarios.
 
 The model name is sent to Tinker; Reef downloads only the tokenizer resources needed by the SDK, not the full model. Select a model available to your account. In a wheel-only installation, supply your own recipe package; this checkout's `recipes.tttd` is not bundled in `reef-infra`.
 

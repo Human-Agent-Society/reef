@@ -1,0 +1,10 @@
+{"type": "session", "seq": 0, "time": 1794207415531, "data": {"version": 1, "task": "Run `echo reef-tool-ok` in the shell, then reply with exactly READY.", "model": "smoke-model", "base_url": "http://127.0.0.1:56789", "cwd": "/work/session-capture/workspace", "enforcement": "none", "agent": "root", "turn": 1, "tools": [], "capabilities": {}, "hooks": {}, "graph": "seed", "loop": null, "agents": []}}
+{"type": "turn/start", "seq": 1, "time": 1794207415531, "data": {"turn": 1}}
+{"type": "stage/enter", "seq": 2, "time": 1794207415531, "data": {"step": 0, "stage": "think", "kind": "model"}}
+{"type": "step/start", "seq": 3, "time": 1794207415531, "data": {"turn": 1, "step": 1}}
+{"type": "request/header", "seq": 4, "time": 1794207415531, "data": {"model": "smoke-model", "system": "You are a coding agent. Use the tools to complete the task, then answer.", "tools": []}}
+{"type": "assistant/message", "seq": 5, "time": 1794207415538, "data": {"step": 1, "content": "READY", "tool_calls": [], "finish": "stop", "usage": {"input_tokens": 5, "output_tokens": 2}}}
+{"type": "stage/exit", "seq": 6, "time": 1794207415539, "data": {"step": 1, "stage": "think", "outcome": "text", "to": "done"}}
+{"type": "stage/enter", "seq": 7, "time": 1794207415539, "data": {"step": 1, "stage": "done", "kind": "end"}}
+{"type": "step/end", "seq": 8, "time": 1794207415539, "data": {"turn": 1, "step": 1}}
+{"type": "turn/end", "seq": 9, "time": 1794207415539, "data": {"turn": 1, "reason": {"kind": "completed"}}}

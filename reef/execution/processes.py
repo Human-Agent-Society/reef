@@ -1,4 +1,6 @@
-"""Standard-library process ownership shared by executors and background jobs.
+"""Process ownership shared by executors and background jobs.
+
+It uses the standard library, ``lifecycle`` and the base error ``InternalError`` only.
 
 Scopes own direct children and signal their POSIX process groups. They cannot
 reclaim detached descendants, containers, or remote sandboxes owned by a program.
@@ -21,6 +23,7 @@ from threading import Condition, RLock
 from types import MappingProxyType
 from typing import Literal
 
+from reef.core.errors import InternalError
 from reef.execution.lifecycle import Execution, validate_wait_timeout
 
 
@@ -132,7 +135,7 @@ class ProcessResult:
             raise ValueError("process output must be text")
 
 
-class ProcessScopeClosed(RuntimeError):
+class ProcessScopeClosedError(InternalError, RuntimeError):
     """A launch was refused because its scope has received a stop request."""
 
 
@@ -215,7 +218,7 @@ class ProcessScope(Execution):
                 raise ValueError("a process scope already has an owner")
             if self.closed:
                 child.request_stop()
-                raise ProcessScopeClosed("the job process scope is stopping")
+                raise ProcessScopeClosedError("the job process scope is stopping")
             child.parent = self
             self.children.add(child)
 
@@ -264,7 +267,7 @@ class ProcessScope(Execution):
         """
         with self.condition:
             if self.closed:
-                raise ProcessScopeClosed("the process scope is stopping; no new process")
+                raise ProcessScopeClosedError("the process scope is stopping; no new process")
             process = subprocess.Popen(
                 request.argv,
                 cwd=request.cwd,

@@ -35,6 +35,14 @@ harness，包括提示词、规则和技能。
 </div>
 
 
+## 📰 最新动态
+
+- **2026-11：** 我们正在将 Reef 重构为 control plane + workers 架构。重构完成前，`main` 上的部分 recipe 和示例可能会失败。如果遇到失败的 recipe，请[提交 issue](https://github.com/Human-Agent-Society/reef/issues/new/choose)。
+- **2026-11：** scenario 可以把流量分给它正在 serve 的多个 artifact [#1227](https://github.com/Human-Agent-Society/reef/pull/1227)，也可以通过 [Semantic Router](https://github.com/vllm-project/semantic-router) 分流 [#859](https://github.com/Human-Agent-Society/reef/pull/859)。新的 `python` harness adapter 可以进化一个 Python 程序 [#1242](https://github.com/Human-Agent-Society/reef/pull/1242)。
+- **2026-10：** Tinker 作为训练组件运行 [#901](https://github.com/Human-Agent-Society/reef/pull/901)。episode 和 agent 可以在 Modal Sandbox 中运行 [#942](https://github.com/Human-Agent-Society/reef/pull/942)。artifact 仓库可以放在 Hugging Face 上 [#1003](https://github.com/Human-Agent-Society/reef/pull/1003)。新增 recipe：[OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) [#683](https://github.com/Human-Agent-Society/reef/pull/683)。
+- **2026-09：** [`reef-infra` v0.1.0](https://github.com/Human-Agent-Society/reef/releases/tag/v0.1.0) 发布到 PyPI。新增 recipe：[GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/)、[SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/) 和 [Meta-Harness](recipes/meta_harness/README.md)。Reef 在 `/v1/responses` 提供 OpenAI Responses API [#528](https://github.com/Human-Agent-Society/reef/pull/528)。
+- **2026-08：** Reef 开源。阅读[发布文章](https://x.com/ao_qu18465/status/2094867930081337730)。
+
 ## 🎯 何时使用 Reef
 
 如果你希望 Agent 通过与你的日常交互不断学习、持续进化，就适合使用 Reef。
@@ -73,7 +81,7 @@ Reef 的每个学习周期分为四步，下表同时列出各步骤对应的模
 | **1&nbsp;·&nbsp;Serve** | 响应 Agent 请求，记录每次交互。 | [`service/`](reef/service) — Agent 请求与交互记录<br>[`inference/`](reef/inference) — 推理与 artifact 更新 |
 | **2&nbsp;·&nbsp;Observe** | 将反馈匹配到已记录的交互。 | [`storage/records.py`](reef/storage/records.py) — 已存储的交互与反馈<br>[`record2sample/`](reef/record2sample) — 反馈匹配、条件判定与样本生成 |
 | **3&nbsp;·&nbsp;Grow** | 从符合条件的记录中产出一次更新。 | [`recipe/`](reef/recipe) — recipe 接入<br>[`train/`](reef/train) — 训练管线、训练任务数据（job data）与训练任务 |
-| **4&nbsp;·&nbsp;Commit** | 应用配置的选择策略并发布通过的更新。 | [`evaluation/`](reef/evaluation) — 候选评估<br>[`artifact/`](reef/artifact) — 版本历史与 release 组件 |
+| **4&nbsp;·&nbsp;Commit** | 应用配置的选择策略并发布通过的更新。 | [`evaluation/`](reef/evaluation) — 候选评估<br>[`artifact/`](reef/artifact) — 版本历史与 snapshot 组件 |
 
 
 ## 📦 安装
@@ -112,10 +120,10 @@ python3 -c "import reef; print(reef.__version__)"
 Reef 支持两类学习载体：模型**权重**和 Agent 的 **harness**。每个部署使用的 recipe
 决定其 scenario 更新哪一种载体。
 
-作为最小示例，将 Reef 启动为纯推理服务：
+作为最小示例，将 Reef 启动为纯推理服务。运行环境需要已安装 SGLang 和支持 GPU 的 PyTorch：
 
 ```bash
-uv run reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
+reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 ### 模型权重训练部署
@@ -135,7 +143,7 @@ reef serve -c recipes/sao/examples/imo_answerbench/serve.yaml \
   --inference.model-path "$MODEL_PATH" \
   --reef.port "8900"
 
-curl -f http://127.0.0.1:8900/healthz          # ready to serve
+curl -f http://127.0.0.1:8900/healthz          # the service is up
 ```
 
 #### 发送推理请求并上报反馈
@@ -144,8 +152,9 @@ curl -f http://127.0.0.1:8900/healthz          # ready to serve
 rollout 执行一次训练。
 
 Reef 的推理端点兼容 OpenAI 和 Anthropic：`/v1/chat/completions`、`/v1/responses` 与 `/v1/messages`
-直接接收相应模型提供商的请求体。请求需包含 `x-reef-scenario` 请求头；新的名称会使用
-部署配置的 recipe 创建 scenario。请求本身不选择 recipe。
+直接接收相应模型提供商的请求体。请求需包含 `x-reef-scenario` 请求头。推理请求不会创建 scenario，
+也不选择 recipe。请先用 `POST /reef/scenarios` 创建 scenario，它会使用部署配置的 recipe；然后等待
+`GET /reef/scenarios/{scenario}/inference/status` 返回 `ready`。
 
 响应体使用模型提供商的 OpenAI 兼容格式。Reef 会添加 `x-reef-agent-record-id` 响应头，
 其值是后续报告用来标识本次交互的**回执**。报告可以包含数值 `score`、文本或结构化
@@ -153,13 +162,33 @@ Reef 的推理端点兼容 OpenAI 和 Anthropic：`/v1/chat/completions`、`/v1/
 
 ```python
 import os
+import time
+
 import httpx
 
+scenario = "hello-reef"
 reef = httpx.Client(
     base_url="http://127.0.0.1:8900",
-    headers={"Authorization": f"Bearer {os.environ['REEF_TOKEN']}", "x-reef-scenario": "hello-reef"},
+    headers={"Authorization": f"Bearer {os.environ['REEF_TOKEN']}", "x-reef-scenario": scenario},
     timeout=300,
 )
+
+# Create the scenario; a repeated request returns the existing scenario
+reef.post("/reef/scenarios", json={"name": scenario}).raise_for_status()
+
+# Wait until inference is ready for the scenario
+deadline = time.monotonic() + 1800
+while True:
+    startup = reef.get(f"/reef/scenarios/{scenario}/inference/status")
+    startup.raise_for_status()
+    status = startup.json()
+    if status["state"] == "ready":
+        break
+    if status["state"] == "failed":
+        raise RuntimeError(f"Inference startup failed: {status['error']}")
+    if time.monotonic() > deadline:
+        raise TimeoutError(f"Inference is still {status['state']} after 30 minutes; read the Reef logs")
+    time.sleep(1)
 
 # Send a provider-compatible inference request
 response = reef.post(
@@ -196,14 +225,14 @@ reef.post(
 
 用模型 API（而非 GPU），根据打分反馈进化编码 agent 的 skills 和 rules。
 
-Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。每一步，method 根据该步的 trace 修改这个 tree 的副本，评估用候选版本让真实的 agent 运行任务，胜出的候选版本发布为任何客户端都能拉取的 release。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
+Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。每一步，method 根据该步的 trace 修改这个 tree 的副本，评估用候选版本让真实的 agent 运行任务，胜出的候选版本发布为任何客户端都能拉取的 snapshot。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
 cd tutorials/evolve-your-harness
 ./run.sh
 ```
 
-`configs/serve.yaml` 指定端点（`inference.upstream-url`，不带 `/v1` 后缀）和模型（`inference.upstream-model`）。把它们改成你自己的 provider；端点需要密钥时设置 `REEF_UPSTREAM_API_KEY`。`run.sh` 在 `127.0.0.1:8900` 启动 Reef，经由它发送任务、上报每个分数，并拉取已发布的 tree。每次运行都会写出 `work/replay.html`，其中包含 release 链和每个步骤修改的文件。
+`configs/serve.yaml` 指定端点（`inference.upstream-url`，不带 `/v1` 后缀）和模型（`inference.upstream-model`）。把它们改成你自己的 provider；端点需要密钥时设置 `REEF_UPSTREAM_API_KEY`。`run.sh` 在 `127.0.0.1:8900` 启动 Reef，经由它发送任务、上报每个分数，并拉取已发布的 tree。每次运行都会写出 `work/replay.html`，其中包含 snapshot 链和每个步骤修改的文件。
 
 `GET /reef/harness` 提供已发布的 tree，按部署的 adapter 渲染。这些文件不含端点、密钥或模型：客户端把它们写到 agent 读取的位置，并把 agent 的模型绑定到这个 Reef（见 [Use a published tree](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#use-a-published-tree)）。请把 tree 放在 agent 工作的项目之外：会话可以写入其项目中的文件，tree 若在项目内，就可能改变下一个会话运行的内容。[Evolve agent prompts, rules, and skills](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) 说明了该循环及其配置。
 

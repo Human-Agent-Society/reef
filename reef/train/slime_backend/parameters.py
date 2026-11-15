@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.storage.job_data import JobDataKind
-from reef.train.algos.schedule import StepScheduling
 from reef.train.learning_rate import LEARNING_RATE_DECAY_STYLES, LearningRateSchedule
 from reef.train.slime_backend.dataset import DatasetSettings
-from reef.train.slime_backend.objectives import resolve_slime_objective
+from reef.train.slime_backend.objectives import resolve_objective
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.task_rollouts import HarborSettings
 
 
@@ -29,7 +29,7 @@ def harbor_settings(parameters: Mapping[str, Any]) -> HarborSettings:
 class SlimeJobParameters:
     """The parameters of one Slime job.
 
-    Values: ``objective`` is a non-empty name or dotted reference that ``resolve_slime_objective`` resolves.
+    Values: ``objective`` is a non-empty name or dotted reference that ``resolve_objective`` resolves.
     ``learning_rate_schedule`` is the schedule that the job selects, or None to keep the active one. ``scheduling``
     is the cut of the job's data into optimizer steps, which the objective accepts. ``save_interval`` is a positive
     int: the optimizer steps between two saved checkpoints, in rollouts for a dataset job, or None for one checkpoint
@@ -50,7 +50,7 @@ class SlimeJobParameters:
         interval = self.save_interval
         if interval is not None and (isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0):
             raise ValueError("save_interval must be a positive int")
-        resolve_slime_objective(self.objective).validate_scheduling(self.scheduling)
+        resolve_objective(self.objective).validate_scheduling(self.scheduling)
 
     @classmethod
     def from_parameters(cls, parameters: Mapping[str, Any]) -> SlimeJobParameters:

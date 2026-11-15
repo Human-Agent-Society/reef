@@ -407,6 +407,70 @@ def test_a_routed_stream_records_an_explicit_abort_apart_from_its_delivery(
     asyncio.run(run())
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("streaming", [False, True])
+def test_routed_provider_logprobs_reach_the_client_and_the_record_unchanged(tmp_path: Path, streaming: bool) -> None:
+    """A routed external target is no Reef artifact: Reef sends it no artifact identity or model pin, and it keeps
+    the provider's own log probabilities, alternatives included."""
+    logprobs = {
+        "content": [
+            {
+                "token": "yes",
+                "logprob": -0.25,
+                "top_logprobs": [{"token": "yes", "logprob": -0.25}, {"token": "no", "logprob": -1.5}],
+            }
+        ]
+    }
+    choice = {"index": 0, "logprobs": logprobs, "finish_reason": "stop"}
+    answer = {"choices": [{**choice, "message": {"role": "assistant", "content": "yes"}}]}
+    frame = f'data: {json.dumps({"choices": [{**choice, "delta": {"content": "yes"}}]})}\n\n'.encode()
+    payload = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "x"}],
+        "logprobs": True,
+        "top_logprobs": 2,
+        "stream": streaming,
+    }
+
+    async def run() -> None:
+        received = []
+
+        async def upstream(request: web.Request) -> web.Response:
+            received.append((await request.json(), {name.lower() for name in request.headers}))
+            if streaming:
+                return web.Response(body=frame + b"data: [DONE]\n\n", content_type="text/event-stream")
+            return web.json_response(answer)
+
+        async with provider_server(("POST", "/v1/chat/completions", upstream)) as provider:
+            adapter = routing_adapter(tmp_path, str(provider.make_url("")).rstrip("/"))
+            dispatcher = routing_dispatcher(tmp_path)
+            try:
+                async with running_router(adapter.snapshot) as router:
+                    app = create_app(dispatcher, tokens=SERVICE_TOKEN, routing=adapter, preview=router.settings)
+                    async with TestClient(TestServer(app)) as client:
+                        response = await client.post("/v1/chat/completions", headers=routing_headers(), json=payload)
+                        assert response.status == 200
+                        body = await response.read()
+                        assert "x-reef-artifact-id" not in response.headers
+                [(sent, header_names)] = received
+                assert sent == {**payload, "model": "student-v1"}
+                assert not header_names & {"x-reef-artifact-id", "x-reef-served-model", "x-reef-artifact-path"}
+                [record] = dispatcher.get_or_create_scenario("coding").records.replay("coding")
+                assert record.artifact_id is None
+                assert (record.payload["logprobs"], record.payload["top_logprobs"]) == (True, 2)
+                if streaming:
+                    # The provider's frame reaches the client and the stored stream byte for byte.
+                    assert frame in body
+                    assert frame.decode() in record.payload["response"]["body"]
+                else:
+                    assert json.loads(body) == answer
+                    assert record.payload["response"]["choices"][0]["logprobs"] == logprobs
+            finally:
+                dispatcher.close()
+
+    asyncio.run(run())
+
+
 def publish_direct_model(dispatcher: Dispatcher, scenario: str, url: str, model: str) -> None:
     """Publish the row from which upstream's inference replica reads the direct model."""
     current = dispatcher.get_or_create_scenario(scenario)

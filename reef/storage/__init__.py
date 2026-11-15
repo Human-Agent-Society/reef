@@ -14,10 +14,9 @@ and scenario settings all go through that service.
 ``sql_records`` implements shared SQLAlchemy record operations. ``sql_tasks``,
 ``sql_samples`` and ``sql_commits`` define the task, training sample and commit
 tables and implement their operations in the same database. ``sqlite``
-supplies SQLite connections, schema upgrades, and file retention. ``postgres``
+supplies SQLite connections, table creation, and file retention. ``postgres``
 supplies PostgreSQL tables, a shared connection pool, and SQL retention.
 ``commit_history`` defines the commit history contract and combines a commit
-history with any record store. ``migrations``
-holds one-time upgrades of older schemas and files. ``sqlite`` and ``postgres``
+history with any record store. ``sqlite`` and ``postgres``
 also assemble their scenario storage services. Database-specific code stays here.
 """

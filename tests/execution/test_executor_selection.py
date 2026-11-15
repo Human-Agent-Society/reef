@@ -115,12 +115,12 @@ def test_train_group_auto_resolves_before_create(gpus):
     group = SlimeTrainGroup(
         SimpleNamespace(reef_executor_backend="auto", reef_train_executor_options={}), 1, gpus, pg=None
     )
-    assert group._executor_config.backend is SlimeRayExecutor
+    assert group._executor_launch.backend is SlimeRayExecutor
     assert group._executor is None
 
 
 def test_unknown_service_backend_does_not_fall_back(tmp_path):
-    with pytest.raises(ValueError, match="invalid class import path"):
+    with pytest.raises(ValueError, match="unknown executor backend 'nonexistent'; use one of: mp, ray, uni"):
         service_executor_config({}, {"executor": "nonexistent"}, tmp_path, 30, tmp_path / "config.yaml")
 
 
@@ -209,5 +209,5 @@ def test_fractional_gpu_reservations_require_ray():
 
 
 def test_removed_backend_uses_normal_unknown_backend_resolution():
-    with pytest.raises(ValueError, match="invalid class import path"):
+    with pytest.raises(ValueError, match="unknown executor backend 'local'"):
         Executor.get_class("local")

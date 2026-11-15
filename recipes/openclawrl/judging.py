@@ -31,8 +31,9 @@ from recipes.openclawrl.prm import (
 from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS, SessionIndex
 from recipes.openclawrl.turns import TurnJob, TurnJudgment, main_turn_message, turn_job, turn_request_messages
 from reef.core.config import config_option
+from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
-from reef.record2sample import JudgedSamples, Record2SampleSettings, RecordJudging
+from reef.record2sample import JudgedSamples, RecordJudging
 
 logger = logging.getLogger(__name__)
 
@@ -53,12 +54,11 @@ def session_tag(payload: Any) -> str | None:
 
 
 @dataclass(frozen=True)
-class OpenClawRLJudgingSettings(Record2SampleSettings):
-    """The config of ``OpenClawRLSamples``: session correlation, the PRM judge, and the staleness limit.
+class OpenClawRLJudgingSettings(PluginSettings):
+    """The config of ``OpenClawRLSamples``: session correlation and the PRM judge.
 
     An empty ``prm_url`` is correlate-only mode: sessions resolve, nothing is
-    judged, and nothing trains. ``max_staleness`` is as in
-    ``Record2SampleSettings``.
+    judged, and nothing trains.
     """
 
     session_ttl_s: float = config_option(900.0, help="The idle time in seconds before a session expires.")
@@ -78,7 +78,6 @@ class OpenClawRLJudgingSettings(Record2SampleSettings):
     prm_max_hint_candidates: int = config_option(3, help="The hint candidates collected for each turn, at most.")
 
     def __post_init__(self) -> None:
-        super().__post_init__()
         if self.session_ttl_s <= 0:
             raise ValueError("session_ttl_s must be positive")
         if self.max_open_sessions <= 0:

@@ -21,10 +21,10 @@ from reef.record2sample.generator.service import (
 from reef.service.deploy.config_utils import DeployConfigError, load_config
 from reef.service.deploy.generator import GeneratorSettings
 from reef.service.deploy.inference import local_service_url
-from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, service_config_from_mapping
 
 
-def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> GeneratorService:
+def generator_service(settings: ServiceSettings, generator: GeneratorSettings) -> GeneratorService:
     """The service the deployment describes: the designer through Reef, Harbor's checks, the rollout runner."""
     reef_url = local_service_url(settings)
     token = settings.tokens[0] if settings.tokens else None

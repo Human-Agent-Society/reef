@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
+from tests.recipes.autoenvscaling.support import (
     USER_REQUEST,
     NoChecks,
     ScriptedSession,

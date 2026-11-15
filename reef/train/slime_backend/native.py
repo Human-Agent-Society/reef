@@ -8,15 +8,16 @@ customize the rest, for example ``--rollout-data-postprocess-path``, which sees
 the rollout data after the advantages and before the loss. A task job
 (``reef.train.slime_backend.harbor_rollouts``) differs only in its prompts and its
 generate step: a Harbor rollout gives each sample and the verifier its reward.
-The built-in dataset recipe (``reef.recipe.dataset``) registers this family by
-reference, so only the training driver and the workers import the Slime code.
+``reef.train.slime_backend.loss_families`` knows this family by reference, so
+only the training driver and the workers import the Slime code.
 """
 
 from __future__ import annotations
 
 from argparse import Namespace
 
-from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
+from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.loss_families import register_loss_family
 
 #: The data source that serves a dataset job's or a task job's prompts to Slime's rollout manager.
 DATASET_SOURCE_PATH = "reef.train.slime_backend.dataset_source.ReefDatasetSource"

@@ -16,19 +16,34 @@ Another scenario ``t`` of ``o`` uses a record item ``i`` whose ``scenarios`` nam
 the data store as ``copied_record(i, t)``, with the record ID ``i.item_id``, and each reference ``x`` of ``i`` becomes
 ``<origin>/x`` (``used_records``). Nothing is stored in ``t``, so when ``i`` leaves ``t``, the read stops
 giving it (RFC #1219).
+
+An evaluation of ``s`` keeps each model call of its rollouts as an evaluation call: a record item of ``o`` whose
+origin source is ``evaluation`` (``evaluation_call_item``). It is the data of no scenario, so its ``scenarios`` stays
+empty, and no record store, trainer or record route of ``s`` reads it. It links only to the calls of the same
+evaluation attempt and caller (``reef.storage.data.record_link_scope``), and ``prune_records`` keeps it. A trajectory
+that the verifier of a rollout wrote is a trajectory item of ``o`` with empty ``scenarios``
+(``evaluation_trajectory_item``, RFC #1293).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import replace
-from typing import Any
+from collections.abc import Iterator, Sequence
+from dataclasses import asdict, replace
+from typing import Any, cast
 
+from reef.core.evaluation import EvaluationCall, EvaluationCallSummary, EvaluationTrajectory
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 from reef.core.trajectory_index import trajectory_calls
-from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflict, NewItem, StoredItem, item_digest_matches
-from reef.storage.item_kinds import copied_record, record_digest
-from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
+from reef.core.values import JsonValue
+from reef.storage.data import MAX_QUERY_LIMIT, DataStore, ItemConflictError, NewItem, StoredItem, record_source
+from reef.storage.item_kinds import (
+    copied_record,
+    evaluation_call_id,
+    evaluation_rollout_id_prefix,
+    evaluation_trajectory_id,
+    record_digest,
+)
+from reef.storage.records import AppendResult, RecordConflictError, RecordStore, StoredRecord
 
 #: The most record items that one ``used_records`` call reads.
 RECORD_PAGE_SIZE = 256
@@ -63,19 +78,126 @@ def record_item(record: AgentRecord) -> NewItem:
     )
 
 
+def evaluation_call_item(scenario: str, artifact_id: str, evaluation_id: str, call: EvaluationCall) -> NewItem:
+    """The record item of ``call``, a call of evaluation ``evaluation_id`` of ``scenario`` to the candidate
+    ``artifact_id``.
+
+    Its ID is ``<scenario>/<evaluation_call_id>``, with the call's caller. Its content is the record of an inference:
+    the payload is the request body with ``response``, the response body or null, and ``created_at`` is the call's
+    start. Its metadata is ``kind: record``, empty ``scenarios``, the ``evaluation_id``, and the origin ``{scenario,
+    artifact_id, source: evaluation, evaluation}``, where ``evaluation`` holds the ``evaluation_id`` and every field
+    of the call's summary.
+    """
+    summary = call.summary
+    record_id = evaluation_call_id(
+        evaluation_id, summary.task_index, summary.repeat, summary.attempt, summary.index, summary.caller
+    )
+    payload = {**(call.request or {}), "response": None if call.response is None else dict(call.response)}
+    record = AgentRecord(
+        record_id, scenario, RequestType.INFERENCE, payload, summary.started_at, artifact_id=artifact_id
+    )
+    return NewItem(
+        f"{scenario}/{record_id}",
+        record_content(record),
+        {
+            "kind": "record",
+            "scenarios": {},
+            "evaluation_id": evaluation_id,
+            "origin": {
+                "scenario": scenario,
+                "artifact_id": artifact_id,
+                "source": "evaluation",
+                "evaluation": {"evaluation_id": evaluation_id, **asdict(summary)},
+            },
+        },
+    )
+
+
+def evaluation_call_summary(item: StoredItem) -> EvaluationCallSummary:
+    """The summary of the evaluation call ``item``, from its metadata alone, so the item can be read without its
+    content. ``ValueError`` for an item that is no evaluation call."""
+    if item.kind != "record" or record_source(item.metadata) != "evaluation":
+        raise ValueError(f"item {item.item_id!r} is no evaluation call")
+    location = dict(item.metadata["origin"]["evaluation"])
+    location.pop("evaluation_id")
+    return EvaluationCallSummary(**location)
+
+
+def stored_evaluation_call(item: StoredItem) -> EvaluationCall:
+    """The ``EvaluationCall`` that ``evaluation_call_item`` stored as ``item``, read with its content."""
+    if item.content is None:
+        raise ValueError(f"item {item.item_id!r} was read without its content")
+    payload = dict(item.content["payload"])
+    response = payload.pop("response")
+    # The item keeps an absent request as an empty payload, so an empty request reads as None too.
+    return EvaluationCall(evaluation_call_summary(item), cast(dict[str, JsonValue], payload) or None, response)
+
+
+def evaluation_trajectory_item(scenario: str, evaluation_id: str, trajectory: EvaluationTrajectory) -> NewItem:
+    """The trajectory item of ``trajectory``, which the verifier of a rollout of evaluation ``evaluation_id`` of
+    ``scenario`` wrote. Its ID is ``<scenario>/<evaluation_trajectory_id>``, and its content the ATIF document. Its
+    metadata is ``kind: trajectory``, empty ``scenarios``, the ``evaluation_id``, and ``evaluation``: the
+    ``evaluation_id`` and every field of ``trajectory`` but ``document``."""
+    location = {name: value for name, value in asdict(trajectory).items() if name != "document"}
+    item_id = evaluation_trajectory_id(
+        evaluation_id, trajectory.task_index, trajectory.repeat, trajectory.attempt, trajectory.index
+    )
+    return NewItem(
+        f"{scenario}/{item_id}",
+        dict(trajectory.document),
+        {
+            "kind": "trajectory",
+            "scenarios": {},
+            "evaluation_id": evaluation_id,
+            "evaluation": {"evaluation_id": evaluation_id, **location},
+        },
+    )
+
+
+def evaluation_trajectory_items(
+    data: DataStore, owner: str, scenario: str, evaluation_id: str, *, content: bool
+) -> Iterator[StoredItem]:
+    """The trajectory items that the verifiers of evaluation ``evaluation_id`` of ``scenario`` wrote, in sequence
+    order, a page at a time (``evaluation_trajectory_item``)."""
+    after = 0
+    while page := data.query(
+        owner, kind="trajectory", group=("evaluation_id", evaluation_id), after=after, content=content
+    ):
+        yield from (item for item in page if item.item_id.startswith(f"{scenario}/") and "evaluation" in item.metadata)
+        after = page[-1].sequence
+
+
+def evaluation_call_items(
+    data: DataStore,
+    owner: str,
+    scenario: str,
+    evaluation_id: str,
+    *,
+    content: bool,
+    rollout: tuple[int, int] | None = None,
+) -> Iterator[StoredItem]:
+    """The evaluation calls of evaluation ``evaluation_id`` of ``scenario``, in sequence order, a page at a time: one
+    query of the record items of ``scenario`` with that ``evaluation_id`` for each page. With ``rollout``, a pair
+    ``(task_index, repeat)``, only the calls of that rollout: the query keeps only the IDs that start with the
+    rollout's (``evaluation_rollout_id_prefix``), so the store does not return the other calls of the evaluation."""
+    id_prefix = None if rollout is None else f"{scenario}/{evaluation_rollout_id_prefix(evaluation_id, *rollout)}"
+    after = 0
+    while page := data.query(
+        owner,
+        kind="record",
+        origin=scenario,
+        group=("evaluation_id", evaluation_id),
+        after=after,
+        content=content,
+        id_prefix=id_prefix,
+    ):
+        yield from (item for item in page if record_source(item.metadata) == "evaluation")
+        after = page[-1].sequence
+
+
 def origin_of(item: StoredItem) -> str:
     """The scenario that made the record item ``item``."""
     return item.metadata["origin"]["scenario"]
-
-
-def old_record_copied(data: DataStore, owner: str, scenario: str, record_id: str) -> bool:
-    """Whether the record ``record_id`` of the old record store of ``scenario`` is in ``data``: as its own record item,
-    or, for a copy of another scenario's record item from before RFC #1219, as that item."""
-    for item_id in (f"{scenario}/{record_id}", record_id):
-        item = data.read(owner, item_id)
-        if item is not None and item.kind == "record":
-            return True
-    return False
 
 
 def used_records(
@@ -88,10 +210,10 @@ def used_records(
     uses = data.scenario_items(
         owner, scenario, kinds=("record",), after=after_sequence, limit=limit, excluding_origin=scenario
     )
-    records = tuple(read_as(item, scenario) for _, item in uses)
+    records = tuple(read_as(use.item, scenario) for use in uses)
     if len(uses) == limit:
-        return uses[-1][0], records
-    return max(newest, uses[-1][0] if uses else after_sequence), records
+        return uses[-1].sequence, records
+    return max(newest, uses[-1].sequence if uses else after_sequence), records
 
 
 def used_record(data: DataStore, owner: str, scenario: str, record_id: str) -> AgentRecord | None:
@@ -181,13 +303,13 @@ class ItemRecordStore(RecordStore):
         for item in items:
             earlier = first.setdefault(item.agent_record_id, item)
             if record_digest(record_content(earlier)) != record_digest(record_content(item)):
-                raise RecordConflict(f"record {item.agent_record_id!r} is given twice with other content")
+                raise RecordConflictError(f"record {item.agent_record_id!r} is given twice with other content")
         try:
             created = self.data.create(
                 self.owner, [record_item(item) for item in first.values()], generation=self.generation
             )
-        except ItemConflict as error:
-            raise RecordConflict(str(error)) from error
+        except ItemConflictError as error:
+            raise RecordConflictError(str(error)) from error
         stored = dict(zip(first, created, strict=True))
         retried = {
             item.item_id: self.record(item)
@@ -207,11 +329,11 @@ class ItemRecordStore(RecordStore):
         stored = self.stored(item.scenario, item.agent_record_id)
         if stored is None:
             return None
-        if not item_digest_matches(stored, record_digest(record_content(item))):
-            raise RecordConflict(f"record {item.agent_record_id!r} is stored with other content")
+        if stored.digest != record_digest(record_content(item)):
+            raise RecordConflictError(f"record {item.agent_record_id!r} is stored with other content")
         return self.record(stored)
 
-    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+    def read(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
         stored = self.stored(scenario, agent_record_id)
         return None if stored is None else self.record(stored)
 
@@ -250,7 +372,7 @@ class ItemRecordStore(RecordStore):
             return 0
         return self.data.last_sequence(self.owner, kind="record", scenario=scenario, origin=scenario)
 
-    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+    def read_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         stored = self.stored(scenario, agent_record_id)
         return None if stored is None else StoredRecord(stored.sequence, self.record(stored))
 
@@ -293,9 +415,14 @@ class ItemRecordStore(RecordStore):
 __all__ = [
     "RECORD_PAGE_SIZE",
     "ItemRecordStore",
-    "old_record_copied",
+    "evaluation_call_item",
+    "evaluation_call_items",
+    "evaluation_call_summary",
+    "evaluation_trajectory_item",
+    "evaluation_trajectory_items",
     "record_content",
     "record_item",
+    "stored_evaluation_call",
     "used_record",
     "used_records",
 ]

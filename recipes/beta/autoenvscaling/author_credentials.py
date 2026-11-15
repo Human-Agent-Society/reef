@@ -17,7 +17,7 @@ TOKEN_REFUSAL = (
 )
 
 
-class CredentialHeld(AuthorError):
+class CredentialHeldError(AuthorError):
     """The agent's task held the run's Claude Code token, so it is not admitted.
 
     Values: the message names no token. Purpose: :meth:`ClaudeCodeAuthor.author` raises it once the run's directory

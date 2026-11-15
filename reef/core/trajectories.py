@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.atif_payloads import (
@@ -19,10 +20,11 @@ from reef.core.atif_payloads import (
     folded_steps,
     message_entry,
     payload_provider,
+    response_metrics,
 )
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
-from reef.core.trajectory_index import comparable_message
+from reef.core.trajectory_index import atif_form
 
 
 def source_record_id(item: TrajectorySample) -> str:
@@ -68,64 +70,113 @@ def recorded_payload(item: TrajectorySample) -> Mapping[str, Any]:
     return recorded_payloads(item)[-1]
 
 
-def make_trajectory(
-    records: Sequence[AgentRecord],
-    reward: float | None = None,
-    feedback: str | Mapping[str, Any] | None = None,
-) -> TrajectorySample:
-    """Encode ordered inference records as ATIF, retaining all raw provider fields."""
-    if not records:
-        raise ValueError("an ATIF trajectory requires at least one inference record")
-    entries: list[list[dict[str, Any]]] = []
-    history: list[Mapping[str, Any]] = []
-    for record in records:
+@dataclass
+class TrajectoryBuilder:
+    """An ATIF trajectory that grows by one inference record at a time, oldest first.
+
+    Values: ``include_records`` says whether the trajectory keeps each record's raw provider body in
+    ``extra.reef.records``. ``entries`` holds the message entries so far: each new request message once
+    (``copied``) and each response (not copied). ``history`` is the request and the responses of the last record
+    added, the only messages that a new record is compared with. ``kept`` holds the raw records when
+    ``include_records`` is true and is empty otherwise. ``record_ids`` holds the ID of each record added, in order;
+    ``first`` and ``last`` are the first and the last record added, both None exactly when none was added.
+
+    Purpose: ``make_trajectory`` adds a list of records, and a reader of a stored rollout adds the records of each
+    of its conversations as it reads them, so that it holds one record's body at a time (``add``). ``sample`` gives
+    the trajectory.
+    """
+
+    include_records: bool = True
+    entries: list[list[dict[str, Any]]] = field(default_factory=list)
+    history: list[Mapping[str, Any]] = field(default_factory=list)
+    kept: list[dict[str, Any]] = field(default_factory=list)
+    record_ids: list[str] = field(default_factory=list)
+    first: AgentRecord | None = None
+    last: AgentRecord | None = None
+
+    def add(self, record: AgentRecord) -> None:
+        """Add the messages of ``record`` that the last record did not have, and its responses. The last agent step
+        of the responses carries the ATIF ``metrics`` of the record's response (``response_metrics``): its token
+        counts, and its token IDs and log probabilities when the response has them."""
         provider = payload_provider(record.payload) or OPENAI_CHAT
         request, responses = exchange_messages(record.payload)
         shared = 0
-        for previous, current in zip(history, request, strict=False):
-            if canonical_json(comparable_message(previous)) != canonical_json(comparable_message(current)):
+        for previous, current in zip(self.history, request, strict=False):
+            if canonical_json(atif_form(previous, provider)) != canonical_json(atif_form(current, provider)):
                 break
             shared += 1
-        entries.extend(message_entry(message, provider, copied=True) for message in request[shared:])
-        entries.extend(message_entry(message, provider, copied=False) for message in responses)
-        history = [*request, *responses]
-    steps = folded_steps(entries)
-    if not steps:
-        steps.append({"step_id": 1, "source": "agent", "message": "", "extra": {"reef": {"text_available": False}}})
-    primary = records[-1].agent_record_id
-    agent: dict[str, Any] = {"name": "recorded-agent", "version": "unknown"}
-    model = records[-1].payload.get("model")
-    if isinstance(model, str):
-        agent["model_name"] = model
-    last = records[-1].payload
-    if "tools" in last:
-        agent.update(atif_agent(last["tools"], payload_provider(last) or OPENAI_CHAT))
-    return TrajectorySample(
-        {
-            "schema_version": "ATIF-v1.7",
-            "session_id": records[0].agent_record_id,
-            "trajectory_id": primary,
-            "agent": agent,
-            "steps": steps,
-            "extra": {
-                "reef": {
-                    "source_agent_record_id": primary,
-                    "reward": reward,
-                    "feedback": feedback,
-                    "records": [
-                        {
-                            "agent_record_id": record.agent_record_id,
-                            "created_at": record.created_at,
-                            "artifact_id": record.artifact_id,
-                            "payload": dict(record.payload),
-                        }
-                        for record in records
-                    ],
+        self.entries.extend(message_entry(message, provider, copied=True) for message in request[shared:])
+        reply = [message_entry(message, provider, copied=False) for message in responses]
+        response = record.payload.get("response")
+        metrics = response_metrics(response) if isinstance(response, Mapping) else None
+        if metrics and reply and reply[-1] and reply[-1][-1].get("source") == "agent":
+            reply[-1][-1] = {**reply[-1][-1], "metrics": metrics}
+        self.entries.extend(reply)
+        self.history = [*request, *responses]
+        self.record_ids.append(record.agent_record_id)
+        if self.include_records:
+            self.kept.append(
+                {
+                    "agent_record_id": record.agent_record_id,
+                    "created_at": record.created_at,
+                    "artifact_id": record.artifact_id,
+                    "payload": dict(record.payload),
                 }
+            )
+        if self.first is None:
+            self.first = record
+        self.last = record
+
+    def sample(self, reward: float | None = None, feedback: str | Mapping[str, Any] | None = None) -> TrajectorySample:
+        """The ATIF trajectory of the records added, with ``reward`` and ``feedback``. ``ValueError`` when no record
+        was added."""
+        first, last = self.first, self.last
+        if first is None or last is None:
+            raise ValueError("an ATIF trajectory requires at least one inference record")
+        steps = folded_steps(self.entries)
+        if not steps:
+            steps.append(
+                {"step_id": 1, "source": "agent", "message": "", "extra": {"reef": {"text_available": False}}}
+            )
+        primary = last.agent_record_id
+        agent: dict[str, Any] = {"name": "recorded-agent", "version": "unknown"}
+        model = last.payload.get("model")
+        if isinstance(model, str):
+            agent["model_name"] = model
+        if "tools" in last.payload:
+            agent.update(atif_agent(last.payload["tools"], payload_provider(last.payload) or OPENAI_CHAT))
+        reef: dict[str, Any] = {"source_agent_record_id": primary, "reward": reward, "feedback": feedback}
+        if self.include_records:
+            reef["records"] = list(self.kept)
+        return TrajectorySample(
+            {
+                "schema_version": "ATIF-v1.7",
+                "session_id": first.agent_record_id,
+                "trajectory_id": primary,
+                "agent": agent,
+                "steps": steps,
+                "extra": {"reef": reef},
             },
-        },
-        source_agent_record_ids=tuple(record.agent_record_id for record in records),
-    )
+            source_agent_record_ids=tuple(self.record_ids),
+        )
+
+
+def make_trajectory(
+    records: Iterable[AgentRecord],
+    reward: float | None = None,
+    feedback: str | Mapping[str, Any] | None = None,
+    *,
+    include_records: bool = True,
+) -> TrajectorySample:
+    """Encode ordered inference records as ATIF, retaining all raw provider fields (``TrajectoryBuilder``).
+
+    It reads ``records`` once, in order, and keeps only the messages of the previous record, so an iterator that
+    reads each record when asked holds one record at a time. With ``include_records`` false, ``extra.reef`` has no
+    ``records``: the trajectory then holds no raw provider body, and its size is that of its messages."""
+    builder = TrajectoryBuilder(include_records)
+    for record in records:
+        builder.add(record)
+    return builder.sample(reward, feedback)
 
 
 def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:

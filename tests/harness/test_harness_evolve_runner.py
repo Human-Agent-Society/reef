@@ -17,6 +17,12 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from reef_client import ReefClientError
+from tests.support import records
+from tests.support.conversations import conversation
+
+from reef.record2sample import ReportSamples
+from reef.train import PipelineContext
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TUTORIAL = REPO_ROOT / "tutorials" / "evolve-your-harness"
@@ -36,6 +42,11 @@ PUBLISHED = {"selected": True, "wins": 1, "losses": 0, "ties": 2, "candidate_sco
 #: The snapshot a fresh scenario serves before any step publishes, and the one a publishing step leaves behind.
 SEED_ARTIFACT = "artifact:seed"
 PUBLISHED_ARTIFACT = "artifact:published"
+#: The scenario the runner creates, and the route that reports whether inference serves its model yet.
+SCENARIO = "harness-evolve-demo"
+STARTUP_STATUS = f"/reef/scenarios/{SCENARIO}/inference/status"
+#: The error the status route answers for a failed startup, word for word as the service sends it.
+STARTUP_FAILED = "The inference engine did not start. Check the service logs."
 
 
 class StubReefClient:
@@ -55,13 +66,30 @@ class StubReefClient:
 
     ``posts`` is every low-level ``post`` the run makes, in order, as ``(path, scenario, payload)``; the run uses it
     to create its scenario.
+
+    ``startup`` holds the startup states the status route answers, one per read; the last one repeats. Until the
+    run has created its scenario, the status route answers HTTP 404, as the service does for a scenario with no
+    startup request. Until a read has answered ``ready``, a model call is HTTP 503, as it is while the service
+    starts the model. Status reads are in ``reads`` as ``("startup", state)``.
+
+    Each model call returns its own receipt, kept in ``receipts``. A report whose ID is stored with other content
+    is HTTP 409, as it is in the service.
     """
 
     def __init__(
-        self, *args: object, results: tuple[dict, ...] = (), head: str = PUBLISHED_ARTIFACT, **kwargs: object
+        self,
+        *args: object,
+        results: tuple[dict, ...] = (),
+        head: str = PUBLISHED_ARTIFACT,
+        startup: tuple[str, ...] = ("ready",),
+        **kwargs: object,
     ) -> None:
         self.results = list(results)
+        self.startup = list(startup)
+        self.created = False
+        self.is_inference_ready = False
         self.head = head
+        self.receipts: list[str] = []
         self.reports: list[dict] = []
         self.references: list[list[str]] = []
         self.posts: list[tuple[str, str, dict]] = []
@@ -79,29 +107,56 @@ class StubReefClient:
 
     def post(self, path: str, scenario: str, payload: dict, **kwargs: object) -> tuple[dict, dict[str, str]]:
         self.posts.append((path, scenario, payload))
+        if path == "/reef/scenarios":
+            self.created = True
         return {"scenario": payload["name"]}, {}
 
     def inference_with_record(self, scenario: str, path: str, payload: dict, **kwargs: object) -> tuple[dict, str]:
-        return {"choices": [{"message": {"content": "9592"}}]}, "receipt-1"
+        if not self.is_inference_ready:
+            body = {"error": {"type": "inference_starting", "message": "The inference engine is starting."}}
+            raise ReefClientError(503, json.dumps(body), "application/json")
+        self.receipts.append(f"receipt-{len(self.receipts) + 1}")
+        return {"choices": [{"message": {"content": "9592"}}]}, self.receipts[-1]
 
     def report(self, scenario: str, payload: dict, references: list[str], **kwargs: object) -> dict:
+        record_id = payload["agent_record_id"]
+        stored = {
+            report["agent_record_id"]: (report, graded)
+            for report, graded in zip(self.reports, self.references, strict=True)
+        }
+        if record_id in stored and stored[record_id] != (payload, references):
+            raise ReefClientError(409, f"record {record_id!r} is stored with other content", "text/plain")
         self.reports.append(payload)
         self.references.append(references)
-        return {"agent_record_id": payload["agent_record_id"], "scenario": scenario, "request_type": "report"}
+        return {"agent_record_id": record_id, "scenario": scenario, "request_type": "report"}
 
     def get(self, path: str, **kwargs: object) -> dict:
         self.requested.append(path)
+        if path == STARTUP_STATUS:
+            if not self.created:
+                raise ReefClientError(404, f"scenario {SCENARIO!r} has no inference startup request", "text/plain")
+            state = self.startup.pop(0) if len(self.startup) > 1 else self.startup[0]
+            self.reads.append(("startup", state))
+            self.is_inference_ready = state == "ready"
+            return {
+                "artifact_id": SEED_ARTIFACT,
+                "state": state,
+                "error": STARTUP_FAILED if state == "failed" else None,
+                "engine": "warm" if state == "ready" else None,
+                "engine_detail": None,
+                "startup": None,
+            }
         if path == "/reef/harness/artifacts":
             rows = self._step_rows()
             published = any(row["metrics"].get("selected") for row in rows)
             self.published_seen = self.published_seen or published
             self.reads.append(("catalog", {"rows": len(rows), "published": published}))
-            return {"releases": rows}
+            return {"scenario": SCENARIO, "artifacts": rows}
         if path == "/reef/harness":
-            release = self.head if self.published_seen else SEED_ARTIFACT
-            self.reads.append(("manifest", release))
+            artifact_id = self.head if self.published_seen else SEED_ARTIFACT
+            self.reads.append(("manifest", artifact_id))
             return {
-                "artifact_id": release,
+                "artifact_id": artifact_id,
                 "parent_artifact_id": SEED_ARTIFACT,
                 "evaluation": {},
                 "files": {},
@@ -132,12 +187,13 @@ def _stage(
     scores: tuple[float, ...],
     results: tuple[dict, ...],
     head: str = PUBLISHED_ARTIFACT,
+    startup: tuple[str, ...] = ("ready",),
 ) -> StubReefClient:
     """Point the runner at ``scores``, one per task, and at ``results`` for the steps those reports trigger."""
     tasks_file = tmp_path / "tasks.json"
     tasks_file.write_text(json.dumps(list(TASKS[: len(scores)])), encoding="utf-8")
     monkeypatch.setattr(runner, "TASKS_FILE", tasks_file)
-    client = StubReefClient(results=results, head=head)
+    client = StubReefClient(results=results, head=head, startup=startup)
     monkeypatch.setattr(runner, "ReefClient", lambda *args, **kwargs: client)
     graded = iter(scores)
 
@@ -164,20 +220,21 @@ def _record_waits(runner: ModuleType, monkeypatch: pytest.MonkeyPatch) -> list[i
 def _stage_native(runner: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, client: StubReefClient) -> None:
     """The native form's surroundings: a pulled seed tree, and the serve process's turns stubbed out.
 
-    Each turn returns the receipts of its model calls, and the runner reports the score against them through
-    the client: the step rows the catalog answers with appear once the run has reported a turn, as they do in
-    the service.
+    Each turn returns the receipts of its two model calls, a tool call and then the answer, and the runner reports
+    the score through the client: the step rows the catalog answers with appear once the run has reported a turn,
+    as they do in the service.
     """
     tree = tmp_path / "tree"
     tree.mkdir()
-    (tree / runner.RELEASE_FILE).write_text(json.dumps({"artifact_id": SEED_ARTIFACT}), encoding="utf-8")
+    (tree / runner.SNAPSHOT_FILE).write_text(json.dumps({"artifact_id": SEED_ARTIFACT}), encoding="utf-8")
     monkeypatch.setattr(runner, "TREE_DIR", tree)
     monkeypatch.setattr(runner, "SCRATCH_DIR", tmp_path / "scratch")
 
     def turn(prompt, session=None):
         client.turns.append(prompt)
         number = len(client.turns)
-        return [], {"text": "9592", "session": "session-1", "turn": number, "exit": 0, "receipts": [f"r{number}"]}
+        receipts = [f"r{number}-tool", f"r{number}"]
+        return [], {"text": "9592", "session": "session-1", "turn": number, "exit": 0, "receipts": receipts}
 
     def mount_events(artifact_id):
         client.mounts.append(artifact_id)
@@ -224,6 +281,22 @@ def test_the_expected_step_count_is_the_reports_submitted_not_the_failures(
     assert "3 report(s) batched (1 of them failing)" in printed
 
 
+def test_a_rerun_on_the_same_state_reports_under_new_record_ids(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``work/`` keeps the reports of a run, so a rerun must not reuse their IDs: the service answers that with 409."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 0.0, 1.0), NO_PUBLISH + NO_PUBLISH)
+
+    runner.main()
+    runner.main()
+
+    record_ids = [report["agent_record_id"] for report in client.reports]
+    assert len(set(record_ids)) == 6, f"each of the six reports needs its own record ID: {record_ids}"
+    assert client.references == [[receipt] for receipt in client.receipts], "each score goes against its own receipt"
+
+
 def test_completed_steps_that_publish_nothing_end_the_run_without_reading_the_head(
     runner: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
@@ -267,6 +340,77 @@ def test_a_publishing_step_still_reaches_the_manifest(
     assert "published: artifact artifact:published" in printed
 
 
+def test_the_run_sends_no_task_before_inference_serves_the_model(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Creating the scenario does not wait for its model to start: the run waits for ``ready`` before its first task.
+
+    The stub answers a model call with HTTP 503 until a status read says ``ready``, so a run that sends a task
+    straight after creating the scenario fails here as it fails against the service.
+    """
+    client = _stage(
+        runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH, startup=("pending", "starting", "ready")
+    )
+    _record_waits(runner, monkeypatch)
+
+    runner.main()
+
+    assert client.posts[0][0] == "/reef/scenarios", "the run creates its scenario before it reads the status"
+    startup_reads = [read[1] for read in client.reads if read[0] == "startup"]
+    assert startup_reads == ["pending", "starting", "ready"], f"the run stops polling at ready: {startup_reads}"
+    assert len(client.reports) == 3
+
+
+def test_a_failed_inference_startup_stops_the_run_before_any_task(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A model that fails to start ends the run with the log to read, not a 503 on the first task."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH, startup=("starting", "failed"))
+    # Shortened so a run that misses the failed state fails here instead of waiting out the real deadline.
+    monkeypatch.setattr(runner, "INFERENCE_TIMEOUT_S", 2.0)
+
+    with pytest.raises(SystemExit, match=r"^inference did not start: check work/reef\.log$"):
+        runner.main()
+
+    assert client.reports == [], "no task is sent to a model that did not start"
+
+
+def test_an_inference_startup_past_the_deadline_stops_the_run_before_any_task(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A model that is still starting at ``INFERENCE_TIMEOUT_S`` ends the run with the deadline and the log to read."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH, startup=("starting",))
+    monkeypatch.setattr(runner, "INFERENCE_TIMEOUT_S", 1.0)
+
+    with pytest.raises(SystemExit, match=r"^inference did not start within 1s; check work/reef\.log$"):
+        runner.main()
+
+    assert client.reports == [], "no task is sent to a model that did not start"
+
+
+def test_the_pull_waits_for_inference_before_the_serve_process_starts(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``run.py pull`` creates the scenario the serve process then calls, so it also waits until the model serves."""
+    client = StubReefClient(startup=("starting", "ready"))
+    monkeypatch.setattr(runner, "ReefClient", lambda *args, **kwargs: client)
+    monkeypatch.setattr(runner, "TREE_DIR", tmp_path / "tree")
+    monkeypatch.setattr(runner, "SCRATCH_DIR", tmp_path / "scratch")
+
+    runner.pull()
+
+    kinds = [read[0] for read in client.reads]
+    assert kinds == ["startup", "startup", "manifest"], f"the pull reads the head once the model serves: {kinds}"
+
+
 def test_the_native_run_stops_on_the_results_of_steps_that_publish_nothing(
     runner: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
@@ -290,7 +434,7 @@ def test_the_native_run_stops_on_the_results_of_steps_that_publish_nothing(
     assert "/reef/harness" not in client.requested, "no step published, so the run must not follow the head"
 
 
-def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
+def test_the_native_run_follows_a_published_snapshot_through_to_the_second_pass(
     runner: ModuleType,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -359,8 +503,31 @@ def test_the_native_run_waits_for_every_step_of_an_all_passing_run(
     runner.native_main()
 
     printed = capsys.readouterr().out
-    assert len(client.reports) == 3, "three turns, three scores reported against their receipts"
-    assert client.references == [["r1"], ["r2"], ["r3"]], "each score goes against the receipts its own turn returned"
+    assert len(client.reports) == 3, "three turns, three scores reported"
+    assert client.references == [["r1"], ["r2"], ["r3"]], "each score goes against the last receipt of its own turn"
     assert waits == [3], f"three accepted reports batch three steps; the native runner asked for {waits}"
     assert "nothing batched" not in printed and "no evolve step runs" not in printed
     assert "3 report(s) batched (0 of them failing)" in printed
+
+
+def test_reef_trains_each_native_report_of_a_turn_with_a_tool_call(
+    runner: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The two model calls of a turn are one trajectory. Reef ends a report that references both of them."""
+    client = _stage(runner, monkeypatch, tmp_path, (1.0, 1.0, 1.0), NO_PUBLISH)
+    _stage_native(runner, monkeypatch, tmp_path, client)
+    _record_waits(runner, monkeypatch)
+
+    runner.native_main()
+
+    stage = ReportSamples(PipelineContext(scenario="math"))
+    for number in (1, 2, 3):
+        # The answer call continues the tool call. A different filler keeps the turns in different trajectories.
+        stage.push(conversation(f"r{number}-tool", 1, filler=f" turn {number}"))
+        stage.push(conversation(f"r{number}", 2, filler=f" turn {number}"))
+    for payload, references in zip(client.reports, client.references, strict=True):
+        stage.push(records.report(payload["agent_record_id"], *references, score=payload["score"]))
+    trained = [set_id for unit in stage.take_ready_units() for set_id in unit.set_ids()]
+    assert trained == ["native-session-1-1", "native-session-1-2", "native-session-1-3"]

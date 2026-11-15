@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import stat
@@ -10,11 +12,12 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.reef_service.routing.routing_fakes import DOMAIN_LABELS, write_domain_classifier
+from tests.reef_service.routing.routing_fakes import DOMAIN_LABELS, FakeRuntime, write_domain_classifier
 
-from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
+from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
+from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate, render_external
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
-from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
 from reef.service.routing import RoutingSnapshot
 
 pytestmark = pytest.mark.unit
@@ -220,6 +223,119 @@ def test_snapshot_tracks_router_settings_but_not_the_output_directory(
     assert first.version == moved.version
     # Preview worker limits are part of the frozen configuration; changing one needs a restart.
     assert len({first.version, wider.version, slower.version}) == 3
+
+
+RESOLVED_IMAGE = "sha256:" + "c" * 64
+
+
+def without_image(manifest: Path) -> Path:
+    """Remove ``deployment.semantic_router_image`` from the JSON manifest at ``manifest``."""
+    content = json.loads(manifest.read_text(encoding="utf-8"))
+    del content["deployment"]["semantic_router_image"]
+    manifest.write_text(json.dumps(content), encoding="utf-8")
+    return manifest
+
+
+@pytest.mark.parametrize("named", [True, False])
+def test_a_generation_runs_the_named_image_or_the_one_resolved_for_a_source_without_one(
+    deployment_manifest: Path, tmp_path: Path, named: bool
+) -> None:
+    named_image = json.loads(deployment_manifest.read_text())["deployment"]["semantic_router_image"]
+    source = deployment_manifest if named else without_image(deployment_manifest)
+    policy = RoutingDeploymentSettings(deployment_id="test-routing")
+    output = tmp_path / "generated"
+    snapshot = generate(
+        source, output, ManagedRoutingRender(policy, "test-routing", "test-owner", "test-generation", RESOLVED_IMAGE)
+    )
+    # A named image stays; the resolved one fills only an omitted image.
+    expected = named_image if named else RESOLVED_IMAGE
+    compose = yaml.safe_load((output / "compose.yaml").read_text())
+    assert compose["services"]["semantic-router"]["image"] == expected
+    generated = RoutingSnapshot.load(output / "manifest.yaml")
+    assert generated.semantic_router_image == snapshot.semantic_router_image == expected
+    # The generated version names the image that runs.
+    assert generated.version == snapshot.version
+    assert yaml.safe_load(source.read_text())["deployment"].get("semantic_router_image") == (
+        named_image if named else None
+    )
+
+
+QWEN_EXAMPLE = Path(__file__).resolve().parents[3] / "tutorials/semantic-router/qwen2.5"
+NAMED_IMAGE = "example/router@sha256:" + "a" * 64
+
+
+@pytest.mark.parametrize("image", [None, NAMED_IMAGE, RESOLVED_IMAGE])
+def test_the_qwen_check_expects_the_versions_that_its_generation_renders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image: str | None
+) -> None:
+    # The example's check imports its sibling module hot_update.
+    monkeypatch.syspath_prepend(str(QWEN_EXAMPLE))
+    spec = importlib.util.spec_from_file_location("reef_tutorial_qwen_check", QWEN_EXAMPLE / "check.py")
+    if spec is None or spec.loader is None:
+        raise RuntimeError("the Qwen example's check is missing")
+    check = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(check)
+    run = tmp_path / "run"
+    ports_and_revisions = {
+        "student_port": 8101,
+        "teacher_port": 8102,
+        "student_revision": "s",
+        "teacher_revision": "t",
+    }
+    check.write_manifests(argparse.Namespace(output_directory=run, image=image, **ports_and_revisions))
+    initial, updated = (run / "manifest.yaml").read_bytes(), (run / "manifest.updated.yaml").read_bytes()
+    # As reef serve renders them: startup resolves the image when the source omits one, and SIGHUP renders the
+    # updated source in the same deployment with the image that startup froze.
+    policy = RoutingDeploymentSettings(deployment_id="qwen-routing")
+    managed = ManagedRoutingRender(policy, "qwen-routing", "owner", "generation", image or RESOLVED_IMAGE)
+    serving = generate(run / "manifest.yaml", tmp_path / "generation", managed)
+    reloaded = generate(run / "manifest.updated.yaml", tmp_path / "candidate", managed)
+    generation = (tmp_path / "generation" / "manifest.yaml").read_bytes()
+    # A fresh check of the default (no image) and of a named image gets past its first check, with the versions
+    # that the owner's events report.
+    assert check.expected_versions(initial, updated, generation) == (serving.version, reloaded.version)
+    # A source that names another image than the generation runs is a different policy.
+    renamed = tmp_path / "renamed"
+    other_image = RESOLVED_IMAGE if image == NAMED_IMAGE else NAMED_IMAGE
+    check.write_manifests(argparse.Namespace(output_directory=renamed, image=other_image, **ports_and_revisions))
+    with pytest.raises(RuntimeError, match="fresh owner"):
+        check.expected_versions(
+            (renamed / "manifest.yaml").read_bytes(), (renamed / "manifest.updated.yaml").read_bytes(), generation
+        )
+
+
+def test_the_image_build_timeout_bounds_preparation_only_and_leaves_the_generation_unchanged(
+    deployment_manifest: Path, tmp_path: Path
+) -> None:
+    default = render(deployment_manifest, tmp_path / "default")
+    longer_build = render(deployment_manifest, tmp_path / "longer-build", image_build_timeout_seconds=7200.0)
+    longer_ready = render(deployment_manifest, tmp_path / "longer-ready", ready_timeout_seconds=240.0)
+    assert longer_build.version == default.version != longer_ready.version
+    assert (tmp_path / "longer-build" / "compose.yaml").read_text() == (
+        tmp_path / "default" / "compose.yaml"
+    ).read_text()
+
+
+def test_a_source_without_an_image_renders_only_with_a_resolved_one(deployment_manifest: Path, tmp_path: Path) -> None:
+    source = without_image(deployment_manifest)
+    with pytest.raises(ValueError, match="no image was resolved"):
+        render(source, tmp_path / "generated")
+    assert not (tmp_path / "generated").exists()
+    policy = RoutingDeploymentSettings(deployment_id="test-routing")
+    for image in ("router:latest", "sha256:" + "A" * 64, ""):
+        with pytest.raises(ValueError, match="image"):
+            ManagedRoutingRender(policy, "test-routing", "owner", "generation", image)
+
+
+def test_an_external_router_needs_a_named_image_and_reef_never_builds_one(
+    deployment_manifest: Path, tmp_path: Path
+) -> None:
+    settings = RoutingDeploymentSettings(lifecycle="external")
+    rendered = render_external(deployment_manifest, tmp_path / "named.yaml", settings)
+    assert rendered.semantic_router_image is not None and (tmp_path / "named.yaml").exists()
+    with pytest.raises(ValueError, match="managed deployment"):
+        render_external(without_image(deployment_manifest), tmp_path / "omitted.yaml", settings)
+    assert not (tmp_path / "omitted.yaml").exists()
 
 
 def test_renderer_does_not_follow_output_symlinks(deployment_manifest: Path, tmp_path: Path) -> None:
@@ -500,6 +616,8 @@ def test_unknown_routing_settings_are_named_without_their_values() -> None:
         {"restart_backoff_seconds": [float("nan")]},
         {"ready_timeout_seconds": 0},
         {"drain_timeout_seconds": -1},
+        {"image_build_timeout_seconds": 0},
+        {"image_build_timeout_seconds": float("inf")},
         {"sr_cpus": 0},
         {"sr_memory_bytes": -1},
         {"sr_management_port": 65536},
@@ -528,15 +646,24 @@ def test_directly_made_routing_values_keep_their_definitions() -> None:
     assert ManagedRoutingRender(policy, "test-routing", "validation", "validation").owner_id == "validation"
 
 
+@pytest.mark.parametrize("named", [True, False])
 def test_the_documented_validate_command_reads_a_public_configuration_without_docker(
-    deployment_manifest: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    deployment_manifest: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    named: bool,
 ) -> None:
     from reef.service.deploy.routing import cli
 
     def no_docker(*args: object, **kwargs: object) -> None:
         pytest.fail("validate must not use Docker")
 
-    monkeypatch.setattr(cli.DockerComposeRuntime, "ensure_available", no_docker)
+    # Validation stays offline whether or not the source names the image: no CLI call, cache lookup or build.
+    for method in ("ensure_available", "run", "resolve_image", "build_image"):
+        monkeypatch.setattr(cli.DockerComposeRuntime, method, no_docker)
+    if not named:
+        without_image(deployment_manifest)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("REEF_TOKEN", "validate-test-token")
     config = tmp_path / "reef.yaml"
@@ -556,5 +683,36 @@ def test_the_documented_validate_command_reads_a_public_configuration_without_do
     )
     cli.main(["validate", "--config", str(config)])
     result = json.loads(capsys.readouterr().out)
+    if named:
+        # Unchanged for a named image: the version a start with this configuration renders.
+        assert set(result) == {"valid", "snapshot_version", "docker_mutations"}
+        assert result["snapshot_version"].startswith("sha256:")
+    else:
+        # The version names the image that only a start resolves; validation reports that instead of guessing.
+        assert result == {
+            "valid": True,
+            "snapshot_version": None,
+            "docker_mutations": 0,
+            "image_resolution_required": True,
+        }
     assert result["valid"] is True and result["docker_mutations"] == 0
     assert not (tmp_path / "state").exists()
+
+
+def test_validate_checks_a_source_without_an_image_as_fully_as_a_render(tmp_path: Path) -> None:
+    classifier = write_domain_classifier(tmp_path / "vela-domain")
+    manifest = policy_manifest(tmp_path / "manifest.json", classifier)
+    without_image(manifest)
+    (tmp_path / "vela-domain" / "model.safetensors").write_text("other weights")
+    settings = ServiceSettings(
+        recipe="base",
+        host="127.0.0.1",
+        tokens=("unit-token",),
+        routing_manifest=str(manifest),
+        routing_deployment=RoutingDeploymentSettings(deployment_id="validate-test"),
+    )
+    actions: list[str] = []
+    controller = RoutingDeploymentController(settings, FakeRuntime(actions), registry_root=tmp_path / "registry")
+    with pytest.raises(ValueError, match="sha256 digest"):
+        controller.validate_candidate()
+    assert actions == []

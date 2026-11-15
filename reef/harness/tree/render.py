@@ -42,6 +42,7 @@ def render_tree(
     overlays: Sequence[tuple[str, Mapping[str, Any]]] = (),
     *,
     layer: bool = False,
+    task_overlays: Sequence[tuple[str, Mapping[str, Any]]] = (),
 ) -> dict[str, str]:
     """The files ``descriptor``'s binary reads for ``tree``, by path relative to the run or install root.
 
@@ -59,6 +60,10 @@ def render_tree(
     checks keep runs deterministic, and the tree passed the checks when it
     was published. ``reef.harness.sync.layer_install`` makes the layer from
     these files. RenderError when the adapter has no layer.
+
+    ``task_overlays`` are ``(config target, data)`` pairs that Reef writes for one task, such as the task's MCP
+    servers. They merge after the targets' checks, which are conditions on the tree and the binding, so a check
+    can refuse from a tree a key that Reef writes for a task.
     """
     if layer and descriptor.layer is None:
         raise RenderError(f"adapter {descriptor.name!r} does not run on a person's machine: it declares no layer")
@@ -95,22 +100,34 @@ def render_tree(
         configs[target_name] = deep_merge(configs[target_name], data)
     for name, target in descriptor.config_targets.items():
         files[target.path] = json.dumps(configs[name], indent=2, sort_keys=True) + "\n"
-    return apply_adapter_renderer(descriptor, files, formats, checks=not layer)
+    for target_name, _ in task_overlays:
+        if target_name not in configs:
+            raise RenderError(f"adapter {descriptor.name!r} declares no config target {target_name!r}")
+    return apply_adapter_renderer(descriptor, files, formats, checks=not layer, task_overlays=task_overlays)
 
 
 def apply_adapter_renderer(
-    descriptor: AdapterDescriptor, files: dict[str, str], formats: Mapping[str, Format], *, checks: bool = True
+    descriptor: AdapterDescriptor,
+    files: dict[str, str],
+    formats: Mapping[str, Format],
+    *,
+    checks: bool = True,
+    task_overlays: Sequence[tuple[str, Mapping[str, Any]]] = (),
 ) -> dict[str, str]:
     """Run the adapter's renderer steps over the laid-out files, whose config files are JSON objects.
 
     ``formats`` maps each rendered path that is not a config file to its part's format. ``checks`` runs the config
-    targets' checks; a layer's render skips them.
+    targets' checks; a layer's render skips them. ``task_overlays`` are ``(config target, data)`` pairs that merge
+    into the config files after the checks.
     """
     renderer = descriptor.renderer
     merged = {target.path: json.loads(files[target.path]) for target in descriptor.config_targets.values()}
     check_model_route(descriptor, merged)
     if checks:
         check_config(descriptor, merged)
+    for target_name, data in task_overlays:
+        path = descriptor.config_targets[target_name].path
+        merged[path] = deep_merge(merged[path], data)
     configs = {path: renderer.process_config(path, config) for path, config in merged.items()}
     skills = {
         path: renderer.process_skill(path, files[path]) for path, format in formats.items() if format is Format.SKILL

@@ -66,9 +66,12 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
 
 
 def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]:
-    """The scenario's imported tasks in arrival order: ``{scenario, tasks: [{name, split, files_digest, trained}]}``.
+    """The scenario's uses of imported tasks in the order that they began: ``{scenario, tasks: [{name, split,
+    benchmark, files_digest, trained}]}``.
 
-    ``trained`` is whether a committed job of any trainer of the scenario trained the task.
+    ``benchmark`` is the held benchmark that gives the use, or null for the task's own mark; a task that the scenario
+    uses more than once is listed once for each use (RFC #1420). ``trained`` is whether a committed job of any
+    trainer of the scenario trained the task. The listing reads no task files.
     """
     return {
         "scenario": scenario,
@@ -76,9 +79,10 @@ def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]
             {
                 "name": task.sample_id,
                 "split": task.split,
-                "files_digest": task.sample.metadata["task"]["files_digest"],
+                "benchmark": task.held_set,
+                "files_digest": task.digest,
                 "trained": bool(task.train_counts),
             }
-            for task in dispatcher.imported_tasks(scenario)
+            for task in dispatcher.listed_imported_tasks(scenario)
         ],
     }

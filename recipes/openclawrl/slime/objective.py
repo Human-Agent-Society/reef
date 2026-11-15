@@ -29,7 +29,7 @@ from slime.backends.megatron_utils.loss import get_log_probs_and_entropy, get_re
 from slime.utils.ppo_utils import compute_approx_kl, compute_policy_loss
 
 from recipes.openclawrl.slime.selection import select_teacher_topk
-from reef.train.slime_backend.algorithm import objective
+from reef.train.slime_backend.algorithm import worker_hook
 
 logger = logging.getLogger(__name__)
 
@@ -355,7 +355,7 @@ def _opd_one_sample(
 # stabilizing the training".
 
 
-@objective("custom_advantage_function_path")
+@worker_hook("custom_advantage_function_path")
 def openclawrl_advantages(args: Namespace, rollout_data: dict) -> None:
     """Keep Reef's advantages through Slime's old-policy preparation pass."""
     advantages = rollout_data.get("advantages")
@@ -367,7 +367,7 @@ def openclawrl_advantages(args: Namespace, rollout_data: dict) -> None:
     rollout_data.setdefault("returns", advantages)
 
 
-@objective("custom_loss_function_path")
+@worker_hook("custom_loss_function_path")
 def openclawrl_loss(
     args: Namespace,
     batch: dict,
@@ -673,7 +673,7 @@ def openclawrl_loss(
     return loss, reported
 
 
-@objective("reef_actor_init_hook_path")
+@worker_hook("reef_actor_init_hook_path")
 def openclawrl_actor_init(actor: Any) -> None:
     """Back up the frozen base weights as the Megatron teacher.
 
@@ -724,7 +724,7 @@ def _same_weights(backuper: Any, left: str, right: str) -> bool:
     return all(torch.equal(left_weights[name], right_weights[name]) for name in left_weights)
 
 
-@objective("reef_actor_pre_train_hook_path")
+@worker_hook("reef_actor_pre_train_hook_path")
 def openclawrl_actor_pre_train(actor: Any, rollout_data: dict) -> None:
     """Compute the student's top-K S^q and ell_old on it with the weights the step starts from, then run the
     frozen-teacher K-loop over the batch's hint candidates at S^q."""

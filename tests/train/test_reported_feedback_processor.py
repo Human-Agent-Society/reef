@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Hashable
 from dataclasses import replace
 import pytest
+from tests.support.records import inference, report
 from tests.support.samples import made_task
 
 from reef.core import AgentRecord, RequestType
@@ -14,21 +15,6 @@ from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, Rep
 from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TrajectorySample
-
-
-def inference(record_id: str) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math", request_type=RequestType.INFERENCE, payload={}, agent_record_id=record_id
-    )
-
-
-def report(record_id: str, *references: str, score: float = 1.0) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.REPORT,
-        payload={"score": score, "references": list(references)},
-        agent_record_id=record_id,
-    )
 
 
 class NamedReportSamples(ReportSamples):
@@ -120,7 +106,7 @@ def test_a_report_shaped_for_another_component_is_released_not_raised() -> None:
     """Ingress of a scenario with several components admits what any accepts; this trainer keeps only its own."""
     from recipes.tttd.report import TTTDGroupedRolloutReport
     from reef.core.reports import ScoredRolloutReport
-    from reef.recipe.composite import any_component_report
+    from reef.core.reports.any_component import any_component_report
 
     processor = SamplePipeline(report_type=TTTDGroupedRolloutReport)
     processor.push(inference("i1"))

@@ -5,7 +5,7 @@ import asyncio
 from aiohttp import web
 
 from reef.service.request_service import RequestService
-from reef.service.sample_processing import get_processing, list_processing
+from reef.service.sample_processing import get_processing, list_processing, read_processing_log
 from reef.service.samples import MAX_SAMPLES_PER_PAGE, list_samples, read_next_job
 
 
@@ -30,6 +30,9 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
             limit = int(request.query.get("limit", "50"))
         except ValueError:
             raise web.HTTPBadRequest(text="before and limit must be integers") from None
+        changed = request.query.get("changed", "false")
+        if changed not in ("true", "false"):
+            raise web.HTTPBadRequest(text="changed must be true or false")
         listing = await asyncio.to_thread(
             list_processing,
             dispatcher,
@@ -37,6 +40,7 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
             state=request.query.get("state"),
             before=before,
             limit=limit,
+            changed=changed == "true",
         )
         return web.json_response(listing)
 
@@ -48,9 +52,30 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
             raise web.HTTPNotFound(text="sample processing task not found")
         return web.json_response(task)
 
+    async def processing_log(request: web.Request) -> web.Response:
+        try:
+            attempt = int(request.query["attempt"]) if "attempt" in request.query else None
+            after = int(request.query.get("after", "-1"))
+            limit = int(request.query.get("limit", "500"))
+        except ValueError:
+            raise web.HTTPBadRequest(text="attempt, after and limit must be integers") from None
+        log = await asyncio.to_thread(
+            read_processing_log,
+            dispatcher,
+            request.match_info["scenario"],
+            request.match_info["task_id"],
+            attempt=attempt,
+            after=after,
+            limit=limit,
+        )
+        if log is None:
+            raise web.HTTPNotFound(text="sample processing task not found")
+        return web.json_response(log)
+
     app.router.add_get("/reef/scenarios/{scenario}/samples", samples)
     app.router.add_get("/reef/scenarios/{scenario}/sample-processing", processing)
     app.router.add_get("/reef/scenarios/{scenario}/sample-processing/{task_id}", processing_detail)
+    app.router.add_get("/reef/scenarios/{scenario}/sample-processing/{task_id}/logs", processing_log)
 
 
 def register_next_job_route(app: web.Application, *, request_service: RequestService) -> None:

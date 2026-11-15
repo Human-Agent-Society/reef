@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import tarfile
 import tempfile
 import urllib.error
 import urllib.request
 from collections.abc import Mapping, Sequence
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Self
 from urllib.parse import quote, urlencode
 
-from reef.core.weight_layout import WeightFiles
-from reef.execution.executor.placement import DeploymentResources
-from reef.inference.deployment import InferenceConnection, InferenceService
-from reef.inference.interfaces import InferenceBackend
-from reef.inference.remote.config import CONTROL_PATH, CONTROL_PROTOCOL, RemoteInferenceSettings
+from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightFiles, WeightLayout
+from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
+from reef.inference.interfaces import InferenceBackend, InferenceOwnerLostError
+from reef.inference.remote.config import CONTROL_PATH, OWNER_SEQUENCE_HEADER, RemoteInferenceSettings
 
 #: Bound on one control call other than an engine start; a full-weight upload legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400
@@ -29,8 +29,11 @@ class RemoteControl:
     ``url`` is the component's base URL and ``token`` its control token. Each
     call sends one request under ``CONTROL_PATH`` and returns the decoded JSON
     answer; an HTTP error or an unreachable component raises ``RuntimeError``
-    with the component's message. Values hold only strings, so they cross
-    process boundaries to Reef's serving runtime.
+    with the component's message. ``owner_sequence`` is None, or the positive serving-owner sequence that
+    ``RemoteInferenceService.set_owner_sequence`` checked and set for pinned serving. When it is set, each call
+    sends it in ``OWNER_SEQUENCE_HEADER``, and a component that knows a newer owner answers 412, which raises
+    ``InferenceOwnerLostError``. The fields are plain strings and an int, so a value crosses process boundaries to
+    Reef's serving runtime.
     """
 
     def __init__(self, url: str, token: str) -> None:
@@ -38,6 +41,7 @@ class RemoteControl:
             raise ValueError("a remote control client needs the component URL and its control token")
         self.url = url.rstrip("/")
         self.token = token
+        self.owner_sequence: int | None = None
 
     def call(
         self,
@@ -52,6 +56,8 @@ class RemoteControl:
     ) -> Any:
         """Send one control request with a JSON ``payload`` or a streamed ``upload`` of ``upload_bytes``."""
         headers = {"Authorization": f"Bearer {self.token}"}
+        if self.owner_sequence is not None:
+            headers[OWNER_SEQUENCE_HEADER] = str(self.owner_sequence)
         body: bytes | BinaryIO | None = None
         if upload is not None:
             body = upload
@@ -68,6 +74,8 @@ class RemoteControl:
                 return json.loads(response.read() or b"null")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:1000]
+            if exc.code == 412:
+                raise InferenceOwnerLostError(f"remote inference owner was superseded: {detail}") from exc
             raise RuntimeError(f"remote inference {method} {route} returned {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(f"remote inference component at {self.url} is unreachable: {exc.reason}") from exc
@@ -109,12 +117,20 @@ class RemoteInferenceBackend(InferenceBackend):
         # A component that lost the engines runs none that generate; ``recover`` starts them paused.
         if self.service.engines_lost():
             return
+        if self.service.request_pinning:
+            health = self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
+            if health.get("binding_uncertain") is True:
+                return
         self.control.call("POST", "pause")
 
     def resume(self) -> None:
         self.control.call("POST", "resume")
 
     def recover(self) -> int:
+        if self.service.request_pinning:
+            health = self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
+            if health.get("binding_uncertain") is True:
+                self.abort()
         if self.service.engines_lost():
             engines = self.service.restart_engines()
             if self.initial_version is not None:
@@ -124,10 +140,21 @@ class RemoteInferenceBackend(InferenceBackend):
         replaced = answer.get("replaced") if isinstance(answer, Mapping) else None
         if isinstance(replaced, bool) or not isinstance(replaced, int) or replaced < 0:
             raise RuntimeError(f"remote inference returned an invalid replaced-engine count: {answer!r}")
+        if self.service.request_pinning and replaced:
+            # A fresh component-owned stack has a fresh upstream route; old engine survivors cannot join it.
+            self.abort()
+            engines = self.service.restart_engines()
+            if self.initial_version is not None:
+                self.initialize_version(self.initial_version)
+            return engines
         return replaced
 
     def abort(self) -> None:
-        self.control.call("POST", "abort")
+        """Stop generation: a pinning component retires its whole engine stack, any other aborts the requests."""
+        if self.service.request_pinning:
+            self.control.call("DELETE", "engines")
+        else:
+            self.control.call("POST", "abort")
 
     def unload_adapter(self, name: str) -> None:
         self.control.call("DELETE", f"adapters/{quote(name, safe='')}")
@@ -143,7 +170,9 @@ class RemoteInferenceBackend(InferenceBackend):
         if runtime_load_id is not None:
             query["runtime_load_id"] = runtime_load_id
         with tempfile.TemporaryFile() as archive:
-            with tarfile.open(fileobj=archive, mode="w") as tar:
+            # A Hugging Face snapshot directory, such as the base model's, links each file into its cache: the
+            # archive holds the files themselves, since the component refuses a link that leaves its directory.
+            with tarfile.open(fileobj=archive, mode="w", dereference=True) as tar:
                 for entry in sorted(files.path.iterdir()):
                     tar.add(entry, arcname=entry.name)
             size = archive.tell()
@@ -162,9 +191,18 @@ class RemoteInferenceService(InferenceService):
     are lost when the component reports another process or no engines
     (``engines_lost``), and ``restart_engines`` starts them again.
     ``close`` stops the engines.
-    """
 
-    connection_protocol = CONTROL_PROTOCOL
+    ``request_pinning`` separates weight serving from uses that claim no artifact binding. Serving of published
+    weights always sets it
+    (``RemoteServingRuntimeFactory``): the component then keeps each admitted request on the weights that the
+    request selected. Startup requires the positive serving-owner sequence set by ``set_owner_sequence``, sends
+    the pinning configuration to the component, and fails unless the component confirms it. A training
+    deployment's rollout engines (``from_config``) leave it false, because the trainer synchronizes its own
+    rollouts with its weight updates. Plain endpoints also leave it false and claim no artifact binding.
+    ``request_pinning`` is a bool, ``weight_layout`` is "full" or "adapter", and ``drain_timeout_s`` is a positive,
+    finite drain bound in seconds; construction raises ``ValueError`` for any other value. Only pinned startup
+    sends the last two values, and the component checks them again.
+    """
 
     def __init__(
         self,
@@ -174,11 +212,25 @@ class RemoteInferenceService(InferenceService):
         engine_config: Mapping[str, Any],
         num_gpus: int,
         control_token: str,
+        request_pinning: bool = False,
+        weight_layout: WeightLayout = "full",
+        drain_timeout_s: float = 300.0,
     ) -> None:
         if not engine:
             raise ValueError("remote inference needs the engine backend that the component starts")
         if isinstance(num_gpus, bool) or not isinstance(num_gpus, int) or num_gpus <= 0:
             raise ValueError("remote inference needs a positive num_gpus")
+        if not isinstance(request_pinning, bool):
+            raise ValueError("request_pinning must be a bool")
+        if weight_layout not in WEIGHT_LAYOUTS:
+            raise ValueError(f"weight_layout must be one of {WEIGHT_LAYOUTS}, not {weight_layout!r}")
+        if (
+            isinstance(drain_timeout_s, bool)
+            or not isinstance(drain_timeout_s, (int, float))
+            or not math.isfinite(drain_timeout_s)
+            or drain_timeout_s <= 0
+        ):
+            raise ValueError("drain_timeout_s must be a positive, finite number of seconds")
         self.settings = settings
         self.engine = engine
         self.engine_config = dict(engine_config)
@@ -187,39 +239,70 @@ class RemoteInferenceService(InferenceService):
         self.started = False
         self.closed = False
         self.instance: str | None = None
+        self.request_pinning = request_pinning
+        self.weight_layout = weight_layout
+        self.drain_timeout_s = drain_timeout_s
 
-    def attach(self) -> InferenceConnection | None:
-        """Take over the engines that the component runs, without a restart, so requests in flight go on; None
-        when it runs none. A control restart attaches to the engines that the previous control started."""
-        if self.started or self.closed:
-            raise RuntimeError("inference service can only be started once")
-        answer = self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
-        instance = answer.get("instance") if isinstance(answer, Mapping) else None
-        if not isinstance(answer, Mapping) or answer.get("engines") is not True or not isinstance(instance, str):
-            return None
-        self.started = True
-        self.instance = instance
-        return InferenceConnection(self.connection_protocol, None)
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> Self:
+        """Build the service from a training deployment's inference input.
 
-    def start(self, resources: DeploymentResources | None = None) -> InferenceConnection:
+        ``config`` has ``remote`` (the ``inference.remote`` section), ``engine``
+        (the ``inference.backend`` name), ``engine_config`` (that backend's own
+        input) and ``num_gpus``. The control token is read from this process's
+        environment. The service does not request ``request_pinning``: these are a trainer's rollout engines, which
+        serve no published weights. They run on the one component at ``url``, so a section with ``slot_urls`` raises
+        ``ValueError`` before anything reads a token or starts an engine.
+        """
+        settings = RemoteInferenceSettings.from_mapping(config["remote"])
+        if settings.slot_urls:
+            raise ValueError(
+                "inference.remote.slot-urls names components that serve published full-weight checkpoints; a "
+                "trainer's rollout engines run on the one component at inference.remote.url, so remove slot-urls"
+            )
+        return cls(
+            settings,
+            engine=config["engine"],
+            engine_config=config["engine_config"],
+            num_gpus=config["num_gpus"],
+            control_token=settings.token(settings.control_token_env, os.environ),
+        )
+
+    def set_owner_sequence(self, sequence: int) -> None:
+        """Set the store's ordered ownership fence; only production serving enables it."""
+        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence <= 0:
+            raise ValueError("the serving-owner sequence must be positive")
+        if self.request_pinning:
+            self.control.owner_sequence = sequence
+
+    def start(self, resources: InferenceResources | None = None) -> InferenceConnection:
         """Start the engines; ``resources`` are unused, since the component reserves its own GPUs."""
         if self.started or self.closed:
             raise RuntimeError("inference service can only be started once")
-        self.started = True
         self.restart_engines()
-        return InferenceConnection(self.connection_protocol, None)
+        self.started = True
+        return InferenceConnection(None)
 
     def restart_engines(self) -> int:
         """Start the engines on the component, replacing any it runs; return the number of engines."""
+        payload: dict[str, Any] = {"backend": self.engine, "config": self.engine_config, "num_gpus": self.num_gpus}
+        if self.request_pinning:
+            if self.control.owner_sequence is None:
+                raise RuntimeError("request pinning needs a serving-owner sequence before engine startup")
+            payload.update(
+                request_pinning=True, weight_layout=self.weight_layout, drain_timeout_s=self.drain_timeout_s
+            )
         answer = self.control.call(
             "PUT",
             "engines",
-            payload={"backend": self.engine, "config": self.engine_config, "num_gpus": self.num_gpus},
+            payload=payload,
             timeout_s=self.settings.startup_timeout_s,
         )
         instance = answer.get("instance") if isinstance(answer, Mapping) else None
         if not isinstance(instance, str) or not instance:
             raise RuntimeError(f"remote inference started engines without naming its process: {answer!r}")
+        if self.request_pinning and answer.get("request_pinning") is not True:
+            raise RuntimeError("the inference component did not confirm request pinning")
         self.instance = instance
         return max(1, self.num_gpus // int(self.engine_config.get("gpus_per_engine") or self.num_gpus))
 
@@ -233,12 +316,15 @@ class RemoteInferenceService(InferenceService):
         return answer.get("instance") != self.instance or not answer["engines"]
 
     def backend(self, connection: InferenceConnection) -> InferenceBackend:
-        self.require_connection(connection)
         return RemoteInferenceBackend(self.control, self)
 
     def check_health(self) -> None:
         if self.engines_lost():
             raise RuntimeError("the remote inference component restarted and runs none of this service's engines")
+        if self.request_pinning:
+            answer = self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
+            if answer.get("request_pinning") is not True or answer.get("binding_uncertain") is not False:
+                raise RuntimeError("the inference component needs binding recovery")
 
     def poll(self) -> None:
         self.check_health()
@@ -249,25 +335,3 @@ class RemoteInferenceService(InferenceService):
         self.closed = True
         if self.started:
             self.control.call("DELETE", "engines", timeout_s=HEALTH_TIMEOUT_S)
-
-    def require_connection(self, connection: InferenceConnection) -> None:
-        if connection.protocol != self.connection_protocol:
-            raise ValueError(f"incompatible remote inference connection: {connection.protocol!r}")
-
-
-def create_inference(config: Mapping[str, Any]) -> RemoteInferenceService:
-    """Build the service from a training deployment's inference input.
-
-    ``config`` has ``remote`` (the ``inference.remote`` section), ``engine``
-    (the ``inference.backend`` name), ``engine_config`` (that backend's own
-    input) and ``num_gpus``. The control token is read from this process's
-    environment.
-    """
-    settings = RemoteInferenceSettings.from_mapping(config["remote"])
-    return RemoteInferenceService(
-        settings,
-        engine=config["engine"],
-        engine_config=config["engine_config"],
-        num_gpus=config["num_gpus"],
-        control_token=settings.token(settings.control_token_env, os.environ),
-    )

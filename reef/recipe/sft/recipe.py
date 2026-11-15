@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe
-from reef.recipe.errors import RecipeConfigError
 from reef.recipe.sft.processor import SFTJobData, SFTSamples
 from reef.storage.samples import SampleKind
 from reef.train.pipeline import PipelineSpec
@@ -46,6 +45,9 @@ class SFTRecipe(WeightTrainingRecipe):
     """
 
     name: str = "sft"
+    refused_sections: ClassVar[Mapping[str, str]] = {
+        "optimization": "SFT has no objective options; configure the optimizer with training.options"
+    }
 
     @property
     def report_type(self) -> type[ReportBase]:
@@ -63,8 +65,3 @@ class SFTRecipe(WeightTrainingRecipe):
     def configured_parameters(cls, job_parameters: Mapping[str, Any] | None) -> Mapping[SampleKind, Mapping[str, Any]]:
         """SFT trains trajectories: a task job takes its parameters from its request."""
         return {"trajectory": super().configured_parameters(job_parameters)["trajectory"]}
-
-    @classmethod
-    def _validate_config(cls, settings: Mapping[str, Any]) -> None:
-        if settings.get("optimization"):
-            raise RecipeConfigError("SFT has no objective options; configure the optimizer with training.options")

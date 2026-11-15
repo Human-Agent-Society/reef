@@ -23,7 +23,7 @@ my_example/
     report.py             optional: post a trainable verifier reward to Reef
   my_example.yaml         Reef config (recipe, inference, training, HTTP settings)
   run.sh                  starts reef serve, then runs reef-eval with the harness
-  pyproject.toml          makes harness/ importable by reef-eval's uvx environment
+  pyproject.toml          makes harness/ importable by reef-eval
   README.md               what the example demonstrates and how to run it
 ```
 
@@ -38,7 +38,8 @@ The example directory is **not** a Python package. There is no
 requires-python = ">=3.12"
 dependencies = [
     "reef-client",
-    "reef-eval[harbor]",
+    "reef-eval",
+    "harbor",
 ]
 
 [tool.setuptools.packages.find]
@@ -49,8 +50,12 @@ include = ["harness*"]
 Only examples that do not use reef-eval (for example, a direct
 `reef_client` campaign driver) should omit the reef-eval dependency.
 
-`run.sh` installs it into reef-eval's ephemeral environment with
-`--with-editable "$PWD"`.
+Examples that run in Reef's environment use `reef-eval` and `harbor` directly,
+so Reef controls the compatible Harbor version. The `reef-eval[harbor]` extra
+currently pins Harbor 0.20, which is incompatible with Reef.
+
+Examples that use a separate ephemeral `uvx` environment can use that extra
+and install the harness there with `--with-editable "$PWD"`.
 
 ## harness/`__init__.py`
 

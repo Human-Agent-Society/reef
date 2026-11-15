@@ -54,11 +54,11 @@ class StubMessages(ThreadingHTTPServer):
     """A canned Anthropic Messages endpoint that records every request body it is sent."""
 
     def __init__(self) -> None:
-        super().__init__(("127.0.0.1", 0), StubHandler)
+        super().__init__(("127.0.0.1", 0), MessagesHandler)
         self.bodies: list[str] = []
 
 
-class StubHandler(BaseHTTPRequestHandler):
+class MessagesHandler(BaseHTTPRequestHandler):
     server: StubMessages
 
     def log_message(self, format: str, *args: Any) -> None:

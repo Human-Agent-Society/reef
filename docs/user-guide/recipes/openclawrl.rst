@@ -162,9 +162,6 @@ one optimizer step.
    ``pipeline.record2sample.config.prm_max_hint_candidates`` : 3
        hint candidates collected per turn
 
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
-
    ``pipeline.sample2job.config.job_samples`` : required
        judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
 
@@ -247,4 +244,4 @@ Related guides
 - `Train model weights from agent feedback <../evolve-your-model.rst>`__:
   set up the GPU stack and inspect published updates.
 - `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
-  and query feedback, scenarios, and releases.
+  and query feedback, scenarios, and artifacts.

@@ -92,7 +92,7 @@ BINDINGS = {"claude": "anthropic", "codex": "responses", "opencode": "openai", "
 
 
 @pytest.mark.parametrize("adapter", sorted(BINDINGS))
-def test_a_layer_installs_the_release_as_the_agents_plugin_with_the_token_off_the_command_line(adapter) -> None:
+def test_a_layer_installs_the_artifact_as_the_agents_plugin_with_the_token_off_the_command_line(adapter) -> None:
     descriptor = get_adapter(adapter)
     served = ModelBinding(base_url="http://upstream.invalid", model="m1", api=BINDINGS[adapter])
     tree = HarnessTree({"skills/fix/SKILL.md": SKILL})

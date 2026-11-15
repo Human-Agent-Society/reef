@@ -7,7 +7,6 @@ records are record items in the storage's data store (RFC #1219).
 from __future__ import annotations
 
 import hashlib
-import logging
 import shutil
 import time
 import uuid
@@ -18,26 +17,21 @@ from threading import RLock
 from typing import Any, Self
 from weakref import WeakValueDictionary
 
-from sqlalchemy import URL, Column, MetaData, Table, Text, create_engine, inspect
+from sqlalchemy import URL, Column, MetaData, Table, Text, create_engine
 from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
+from reef.core.errors import ScenarioDeletedError
 from reef.core.plugins import NoSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.data import DataStore
-from reef.storage.migrations import (
-    migrate_manual_buffers,
-    migrate_published_tasks,
-    migrate_scenario_settings,
-    migrate_training_samples,
-)
-from reef.storage.record_items import ItemRecordStore, old_record_copied
+from reef.storage.record_items import ItemRecordStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import ScopedTable, SQLScenarioDatabase
-from reef.storage.sql_samples import SQLTrainingState, sample_train_count_table, stage_record_table
+from reef.storage.sql_samples import SQLTrainingState, stage_record_table
 from reef.storage.sql_setup import enable_wal
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
@@ -54,13 +48,9 @@ _SCENARIO_SETTING = Table(
     Column("value_json", Text, nullable=False),
 )
 TASK_TABLES = task_tables(_METADATA)
-SAMPLE_TRAIN_COUNT_TABLE = ScopedTable(sample_train_count_table(_METADATA))
 STAGE_RECORD_TABLE = ScopedTable(stage_record_table(_METADATA))
 EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
-#: The record tables of a version before the record items (RFC #1219); the newest of them is ``agent_record``.
-OLD_RECORD_TABLES = ("record_node", "consumed_agent_record", "record_consumption", "record_eviction", "agent_record")
-logger = logging.getLogger(__name__)
 
 
 class SQLiteScenarioDatabase(SQLScenarioDatabase):
@@ -136,14 +126,9 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
                 self._connection.exec_driver_sql("PRAGMA synchronous = FULL")
                 self._connection.commit()
             with self._connection.begin():
-                # Keep Alembic's column upgrades and the Core backfill in one
-                # SQLite transaction, serialized across concurrent openers.
+                # Serialize the table creation across concurrent openers.
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
                 _METADATA.create_all(self._connection)
-                migrate_training_samples(self._connection, SAMPLE_TRAIN_COUNT_TABLE.table)
-                migrate_scenario_settings(self._connection, _SCENARIO_SETTING)
-                migrate_manual_buffers(self._connection, None)
-                migrate_published_tasks(self._connection, None)
 
     @contextmanager
     def _transaction(self, *, write: bool) -> Iterator[Connection]:
@@ -153,7 +138,7 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
             self._connection.exec_driver_sql("BEGIN IMMEDIATE" if write else "BEGIN")
             yield self._connection
 
-    def _insert_if_absent(
+    def _write_if_absent(
         self,
         connection: Connection,
         table: Table,
@@ -167,7 +152,7 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
 
     def training_state(self) -> SQLTrainingState:
         """Open the training state of the scenario in this database."""
-        return SQLTrainingState(self, SAMPLE_TRAIN_COUNT_TABLE, STAGE_RECORD_TABLE)
+        return SQLTrainingState(self, COMMIT_TABLE, STAGE_RECORD_TABLE)
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations in this database."""
@@ -178,7 +163,6 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
         return SQLCommitHistory(
             self,
             COMMIT_TABLE,
-            SAMPLE_TRAIN_COUNT_TABLE,
             label=f"{self._database}#scenario_commit",
             durable=self._database != ":memory:",
         )
@@ -187,22 +171,6 @@ class SQLiteScenarioDatabase(SQLScenarioDatabase):
         with self.transaction_lock:
             self._connection.close()
             self._engine.dispose()
-
-    def drop_copied_records(self, data: DataStore, owner: str, scenario: str) -> bool:
-        """Drop the ``OLD_RECORD_TABLES`` when the record item of their newest record is in ``data``; return whether
-        the database has none of them then. A version from before the record items copied each record at the first
-        open of its scenario, in record order, so the newest record shows that the copy is complete."""
-        with self._transaction(write=True) as connection:
-            if not inspect(connection).has_table("agent_record"):
-                return True
-            newest = connection.exec_driver_sql(
-                "SELECT agent_record_id FROM agent_record ORDER BY sequence DESC LIMIT 1"
-            ).scalar_one_or_none()
-            if newest is not None and not old_record_copied(data, owner, scenario, newest):
-                return False
-            for table in OLD_RECORD_TABLES:
-                connection.exec_driver_sql(f"DROP TABLE IF EXISTS {table}")
-            return True
 
     def __enter__(self) -> SQLiteScenarioDatabase:
         return self
@@ -222,9 +190,6 @@ class SQLiteScenarioStorage(ScenarioStorage):
     ``directory/task-files``; without a directory, it uses a temporary directory. ``data`` is the data store. The
     default is a ``SQLiteDataStore`` in ``directory/data``, or in memory without a directory; the storage closes a
     default data store with itself.
-
-    The first open of a scenario whose database still has the record tables of an older version drops them when its
-    records are record items (``SQLiteScenarioDatabase.drop_copied_records``). Else it keeps them and logs a warning.
     """
 
     def __init__(
@@ -241,8 +206,8 @@ class SQLiteScenarioStorage(ScenarioStorage):
         #: Without a directory: per scenario, the name of its memory database and one open database that keeps it
         #: alive between sessions. An archive drops both, so the next session starts a new database.
         self._memory_anchors: dict[str, tuple[str, SQLiteScenarioDatabase]] = {}
-        #: The scenarios whose databases have no record tables of an older version.
-        self._checked: set[str] = set()
+        #: Without a directory: the keys of the scenarios that ``archive`` archived. Their ID is not opened again.
+        self._memory_archived: set[str] = set()
         if task_files is None:
             task_files = LocalTaskFileStore(None if self._directory is None else self._directory / "task-files")
         self.task_files = task_files
@@ -282,15 +247,31 @@ class SQLiteScenarioStorage(ScenarioStorage):
         with self._lock:
             self._ensure_open()
             key = self._scenario_key(scenario)
+            self.refuse_archived(scenario, key)
             if self._directory is None:
                 self._memory_settings[scenario] = settings
                 return
             self._write_database_settings(self._directory / f"{key}.sqlite3", settings)
 
+    def refuse_archived(self, scenario: str, key: str) -> None:
+        """Raise ``ScenarioDeletedError`` when ``archive`` archived ``scenario`` and no state of it exists, so no
+        late writer makes a new store of a deleted scenario. A scenario ID is never used again after its delete. The
+        caller holds the lock; the look runs only when the scenario has no database, on the path that would create
+        one."""
+        if self._directory is None:
+            archived = key in self._memory_archived and key not in self._memory_anchors
+        else:
+            archived = not (self._directory / f"{key}.sqlite3").exists() and any(
+                (self._directory / "archived").glob(f"{key}-*")
+            )
+        if archived:
+            raise ScenarioDeletedError(f"scenario {scenario!r} was deleted, and its storage is archived")
+
     def open(self, scenario: str) -> CommitHistoryScenarioStore:
         with self._lock:
             self._ensure_open()
             key = self._scenario_key(scenario)
+            self.refuse_archived(scenario, key)
             if self._directory is None:
                 if key not in self._memory_anchors:
                     name = f"reef-{key}-{uuid.uuid4().hex}"
@@ -302,15 +283,6 @@ class SQLiteScenarioStorage(ScenarioStorage):
             try:
                 if self._directory is not None:
                     owner = database.read_settings().owner or scenario
-                    if scenario not in self._checked:
-                        if database.drop_copied_records(self.data, owner, scenario):
-                            self._checked.add(scenario)
-                        else:
-                            logger.warning(
-                                "the records of scenario %r are not all record items: its database keeps them in "
-                                "the record tables. Run Reef 83a6f3ab once to copy them.",
-                                scenario,
-                            )
                 records = ItemRecordStore(self.data, owner, scenario, self.data.scenario_generation(owner, scenario))
                 return CommitHistoryScenarioStore(
                     scenario,
@@ -328,11 +300,12 @@ class SQLiteScenarioStorage(ScenarioStorage):
     def archive(self, scenario: str) -> tuple[str, ...]:
         with self._lock:
             self._ensure_open()
-            self.data.remove_scenario(self.read_settings(scenario).owner or scenario, scenario)
+            self.data.delete_scenario(self.read_settings(scenario).owner or scenario, scenario)
             paths = self.state_paths(scenario)
             archived_files = self.task_files.archive(scenario)
             if self._directory is None:
                 self._memory_settings.pop(scenario, None)
+                self._memory_archived.add(self._scenario_key(scenario))
                 anchor = self._memory_anchors.pop(self._scenario_key(scenario), None)
                 if anchor is not None:
                     anchor[1].close()

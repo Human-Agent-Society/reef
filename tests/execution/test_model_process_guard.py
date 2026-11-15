@@ -5,21 +5,13 @@ import os
 import signal
 import subprocess
 import sys
-import time
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from tests.support.polling import wait_until
 
 from reef.execution.executor.process_guard import DEPLOYMENT_ENV, _directory, retire
-
-
-def wait_for(path):
-    deadline = time.monotonic() + 10
-    while not path.exists():
-        if time.monotonic() >= deadline:
-            raise TimeoutError(f"missing {path}")
-        time.sleep(0.01)
 
 
 @pytest.mark.parametrize("forced", [False, True])
@@ -45,7 +37,7 @@ else:
     owner = subprocess.Popen([sys.executable, "-c", script, str(info)], env={**os.environ, DEPLOYMENT_ENV: token})
     unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
     try:
-        wait_for(info)
+        wait_until(info.exists, message=f"missing {info}")
         child = json.loads(info.read_text())["child"]
         if forced:
             os.kill(owner.pid, signal.SIGKILL)

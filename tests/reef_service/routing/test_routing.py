@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 from collections.abc import Callable
@@ -226,7 +227,6 @@ def test_request_headers_name_one_configured_scenario(adapter: RoutingAdapter) -
         (client_headers("code-opd", ("x-reef-routing-version", "sha256:forged")), CHAT, "reserved_header", 400),
         (client_headers("code-opd", ("X-Selected-Model", "code-teacher")), CHAT, "reserved_header", 400),
         (client_headers("code-opd", ("x-reef-sr-decision", "default")), CHAT, "reserved_header", 400),
-        (client_headers("code-opd", ("x-reef-release-id", "reef-release")), CHAT, "release_pin", 400),
         (client_headers(), "/v1/responses", "unsupported_route", 400),
     ],
 )
@@ -266,6 +266,23 @@ def test_snapshot_digest_is_order_independent_but_tracks_manifest_changes(manife
     generated = json.loads(json.dumps(manifest))
     generated["deployment"]["configuration_digest"] = "sha256:" + "c" * 64
     assert RoutingSnapshot.from_mapping(generated).version != original.version
+
+
+@pytest.mark.parametrize("image", ["example/router@sha256:" + "a" * 64, "sha256:" + "a" * 64, None])
+def test_the_router_image_may_be_named_by_digest_or_local_id_or_omitted_and_is_hashed_as_given(
+    manifest: dict[str, object], image: str | None
+) -> None:
+    deployment = manifest["deployment"]
+    assert isinstance(deployment, dict)
+    if image is None:
+        del deployment["semantic_router_image"]
+    else:
+        deployment["semantic_router_image"] = image
+    snapshot = RoutingSnapshot.from_mapping(manifest)
+    assert snapshot.semantic_router_image == image
+    # The version hashes the manifest as given: nothing fills in, rewrites or normalizes the image.
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    assert snapshot.version == "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def test_snapshot_and_handlers_are_immutable_and_do_not_reload(adapter: RoutingAdapter, manifest_path: Path) -> None:
@@ -314,6 +331,13 @@ def test_handler_lookup_rejects_foreign_decision(adapter: RoutingAdapter) -> Non
         (("scenarios", "math-opd", "rules"), [{"name": "old", "keywords": ["x"], "target": "retired-teacher"}]),
         (("deployment", "envoy_image"), "envoy:latest"),
         (("deployment", "configuration_digest"), "not-a-digest"),
+        # The router image may be omitted, but a given one is a digest reference or a full local image ID.
+        (("deployment", "semantic_router_image"), None),
+        (("deployment", "semantic_router_image"), "example/router:latest"),
+        (("deployment", "semantic_router_image"), "example/router@sha256:" + "a" * 63),
+        (("deployment", "semantic_router_image"), "sha256:" + "A" * 64),
+        (("deployment", "semantic_router_image"), "a" * 64),
+        (("deployment", "semantic_router_image"), "router:sha256:" + "a" * 64),
         (("targets", "code-teacher", "revision"), 1),
         (("targets", "code-teacher", "url"), "file:///tmp/provider"),
         (("targets", "code-teacher", "url"), "http://user:secret@localhost"),
@@ -411,6 +435,7 @@ def replaced_scenario(snapshot: RoutingSnapshot, scenario: RoutingScenario, vers
         ),
         lambda snapshot: replaced_scenario(snapshot, snapshot.scenarios["code-opd"], "old-snapshot"),
         lambda snapshot: RoutingSnapshot("code-student", snapshot.targets, snapshot.scenarios, snapshot.version),
+        lambda snapshot: replace(snapshot, semantic_router_image="example/router:latest"),
         # The three decision reasons and what each one implies.
         lambda snapshot: automatic(snapshot, reason="explicit_pin", original_selector="code-student"),
         lambda snapshot: automatic(snapshot, router_config_hash=None),
@@ -538,6 +563,66 @@ def test_readiness_checks_enabled_model_ids_and_reuses_endpoint_probe(
                     await adapter.check_ready()
                 assert captured.value.status == 503
             assert calls == ["Bearer readiness-secret"]
+        finally:
+            await runner.cleanup()
+
+    asyncio.run(run())
+
+
+#: The provider models of the enabled targets of ``manifest``.
+ENABLED_MODELS = ("code-student", "code-teacher", "math-student", "math-teacher")
+#: A model list that names each of them.
+EVERY_MODEL = json.dumps({"object": "list", "data": [{"id": name} for name in ENABLED_MODELS]}).encode()
+
+
+@pytest.mark.parametrize(
+    ("content_type", "body", "error"),
+    [
+        # SGLang's model gateway labels its JSON model list as text.
+        pytest.param("text/plain; charset=utf-8", EVERY_MODEL, None, id="text-model-list"),
+        pytest.param("application/json", EVERY_MODEL, None, id="json-model-list"),
+        pytest.param("text/plain; charset=utf-8", b"not a model list", "readiness check failed", id="not-json"),
+        pytest.param("text/plain; charset=utf-8", b"\xff\xfe", "readiness check failed", id="not-utf-8"),
+        pytest.param("text/plain; charset=utf-8", b'{"object":"list"}', "must contain a model list", id="no-list"),
+        pytest.param(
+            "text/plain; charset=utf-8",
+            b'{"object":"list","data":[{"id":"code-student"}]}',
+            "does not expose",
+            id="missing-model",
+        ),
+    ],
+)
+def test_readiness_reads_the_model_list_whatever_its_media_type(
+    tmp_path: Path, manifest: dict[str, object], content_type: str, body: bytes, error: str | None
+) -> None:
+    from aiohttp import web
+
+    async def run() -> None:
+        async def models(request: web.Request) -> web.Response:
+            return web.Response(body=body, headers={"Content-Type": content_type})
+
+        app = web.Application()
+        app.router.add_get("/v1/models", models)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, "127.0.0.1", 0).start()
+            url = f"http://127.0.0.1:{runner.addresses[0][1]}"
+            targets = manifest["targets"]
+            assert isinstance(targets, dict)
+            for target in targets.values():
+                target["url"] = url
+            path = tmp_path / "ready.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            adapter = RoutingAdapter.from_manifest(
+                path, router_config_hash=ROUTER_HASH, environ={"STUDENT_TOKEN": "readiness-secret"}
+            )
+            if error is None:
+                await adapter.check_ready()
+            else:
+                with pytest.raises(RoutingRequestError, match=error) as captured:
+                    await adapter.check_ready()
+                assert captured.value.status == 503
         finally:
             await runner.cleanup()
 

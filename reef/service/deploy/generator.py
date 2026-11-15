@@ -66,7 +66,7 @@ class GeneratorSettings(Settings):
     )
     environment: str = config_option(
         "docker",
-        help="The Harbor environment of the checks and rollouts: docker, or e2b on a host without Docker.",
+        help="The Harbor environment of the checks and rollouts: docker, or e2b or modal on a host without Docker.",
     )
     concurrency: int = config_option(DEFAULT_CONCURRENCY, help="Rollouts in flight across all rollout requests.")
     designer_url: str | None = config_option(

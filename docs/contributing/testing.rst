@@ -53,8 +53,8 @@ Ray processes:
 .. code:: bash
 
    REEF_TEST_RAY=1 PYTHONPATH="$PWD" NO_PROXY='*' \
-     .venv/bin/python -m pytest tests/reef_service/test_service_executor_ray.py \
-       tests/inference/test_inference_control.py -q
+     .venv/bin/python -m pytest tests/reef_service/deploy/test_service_executor_ray.py \
+       tests/inference/sglang/test_inference_control.py -q
 
 Install the Python dependencies from ``.[slime]`` first. These tests use
 private local Ray clusters and CPU engines. They inject process death and
@@ -155,6 +155,78 @@ It builds an image for a small npm program and checks one jailed process: the
 tunnel to this host, the workspace copy in and back, the read-only filesystem
 outside it, and the timeout. ``tests/sandbox/test_modal_executor.py`` covers the
 settings, the sandbox lifecycle and the launch without provider access.
+
+The native inference check runs Reef's own SGLang and vLLM integrations on a
+GPU. It is a command, not a pytest test, so ``pytest tests/`` and CI do not
+run it. `Integration qualification
+<../developer-guide/executors.rst#integration-qualification>`__ lists the
+cases that an engine integration must pass. The check needs:
+
+- one unused GPU;
+- a Reef GPU environment with SGLang, vLLM, Torch and Transformers. The run
+  writes its own small checkpoints, so it downloads no model;
+- an absolute path to a new or empty directory outside the checkout, for
+  the output;
+- for the ``routing`` profile only, a Semantic Router binary
+  (``--router-binary``; ``--help`` lists the router options).
+
+From the checkout, run one profile with one native engine::
+
+    python -m tests.smoke.native_inference --profile features --native-engine sglang \
+      --output /scratch/native-features-sglang
+
+``--native-engine`` selects the engine behind Reef's inference component.
+Each profile except ``recovery`` also starts the other engine as a plain
+OpenAI server. To cover both integrations, run each profile with each
+native engine. ``--profile`` selects the checks:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 86
+
+   * - Profile
+     - What it checks
+   * - ``features``
+     - A published full-weight artifact with request pinning, beside the
+       other engine: traffic splits, requests that name an artifact, a
+       rollout request, log probabilities, stored records, and a load
+       during a stream.
+   * - ``routing``
+     - Both engines as plain endpoints behind a Semantic Router that the
+       run starts. The native engine answers with its base model, without
+       request pinning.
+   * - ``recovery``
+     - The health watcher replaces engines that the run removes through
+       the component's control API. Before the first activation, they
+       stay paused; after it, the watcher loads the artifact again.
+   * - ``lifecycle``
+     - Reef's public API with a real serving worker and two components:
+       creation and import, two checkpoints at the same time, a split, a
+       promotion and a rollback, retirement and reuse of a component, the
+       refusal of a third checkpoint, and watcher recovery. Then two
+       harness artifacts that use the same provider model.
+
+The command exits with status 0 only when every check passes. It saves
+``report.json``, process logs, requests and stored records in the output
+directory. The report lists the failures and the limits of the run;
+``error.txt`` holds the traceback of a failed run. The command stops only
+the processes that it started.
+
+Each run uses small synthetic checkpoints on one GPU, which the two
+``lifecycle`` components share. A run does not show:
+
+- production performance or capacity: no profile measures them. The
+  refusal in ``lifecycle`` shows only the limit of its two components;
+- isolation between GPUs or hosts;
+- recovery from a crashed process, a restarted component or service, or a
+  failed weight load;
+- training, or the trainer's rollout engines;
+- control-plane publication, except in ``lifecycle``: ``features`` and
+  ``recovery`` write their routes themselves;
+- cache isolation for a real model. The checkpoints ignore their context,
+  so ``features``, ``recovery`` and ``lifecycle`` check cached-token counts
+  only. These show when an engine reuses its prefix cache and when it
+  starts empty.
 
 Choose a component suite or one test module. For example, artifact contracts
 need no GPU:

@@ -11,7 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.execution.executor import Executor, ExecutorConfig, ExecutorFuture, WorkerSpec, resolve
+from reef.core.plugins import PluginConfigError
+from reef.execution.executor import Executor, ExecutorFuture, ExecutorLaunch, WorkerSpec, resolve
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import ConcurrentExecutorFuture, UniProcExecutor
 
@@ -88,11 +89,11 @@ class FakeRef:
     error: Exception | None = None
 
 
-class FakeTimeout(Exception):
+class FakeTimeoutError(Exception):
     pass
 
 
-class FakeActorDeath(Exception):
+class FakeActorDeathError(Exception):
     pass
 
 
@@ -141,7 +142,7 @@ class FakeActorBuilder:
 
 
 class FakeRay:
-    exceptions = SimpleNamespace(GetTimeoutError=FakeTimeout, RayActorError=FakeActorDeath)
+    exceptions = SimpleNamespace(GetTimeoutError=FakeTimeoutError, RayActorError=FakeActorDeathError)
 
     def __init__(self):
         self.events = []
@@ -188,7 +189,7 @@ def fake_ray(monkeypatch):
 
 def test_factory_auto_launches_multiple_process_workers_and_dispatches_ranked_rpc():
     executor = Executor.create(
-        ExecutorConfig(
+        ExecutorLaunch(
             backend="auto",
             workers=(WorkerSpec(Worker, (0,)), WorkerSpec(Worker, (1,), {"offset": 3})),
         )
@@ -201,20 +202,27 @@ def test_factory_auto_launches_multiple_process_workers_and_dispatches_ranked_rp
         executor.shutdown()
 
 
-@pytest.mark.parametrize("backend", [CustomExecutor, f"{__name__}:CustomExecutor", f"{__name__}.CustomExecutor"])
-def test_factory_accepts_custom_executor_class_and_import_paths(backend):
-    executor = Executor.create(ExecutorConfig(backend=backend))
+@pytest.mark.parametrize("backend", [CustomExecutor, f"{__name__}:CustomExecutor"])
+def test_factory_accepts_a_custom_executor_class_and_its_reference(backend):
+    executor = Executor.create(ExecutorLaunch(backend=backend))
     assert isinstance(executor, CustomExecutor)
     executor.shutdown()
 
 
 @pytest.mark.parametrize(
     ("backend", "error"),
-    [(int, TypeError), ("builtins:int", TypeError), ("missing", ValueError), (None, TypeError), ("", TypeError)],
+    [
+        (int, TypeError),
+        ("builtins:int", PluginConfigError),
+        ("missing", PluginConfigError),
+        (f"{__name__}.CustomExecutor", PluginConfigError),
+        (None, ValueError),
+        ("", ValueError),
+    ],
 )
 def test_factory_rejects_invalid_backends(backend, error):
     with pytest.raises(error):
-        Executor.create(ExecutorConfig(backend=backend))
+        Executor.create(ExecutorLaunch(backend=backend))
 
 
 @pytest.mark.parametrize(
@@ -227,9 +235,9 @@ def test_worker_spec_rejects_malformed_config(fields):
 
 
 @pytest.mark.parametrize("fields", [{"options": None}, {"workers": "bad"}, {"workers": [{}]}])
-def test_executor_config_rejects_malformed_config(fields):
-    with pytest.raises(TypeError):
-        ExecutorConfig(**fields)
+def test_executor_launch_rejects_malformed_fields(fields):
+    with pytest.raises(ValueError):
+        ExecutorLaunch(**fields)
 
 
 def test_configs_snapshot_launch_arguments():
@@ -238,7 +246,7 @@ def test_configs_snapshot_launch_arguments():
     options = {"num_cpus": 1}
     spec = WorkerSpec(Worker, args=args, kwargs=kwargs, options=options)
     workers = [spec]
-    config = ExecutorConfig(workers=workers, options=options)
+    config = ExecutorLaunch(workers=workers, options=options)
     args.append(3)
     kwargs["offset"] = 10
     options["num_cpus"] = 100
@@ -259,11 +267,11 @@ def guarded_import(name, *args, **kwargs):
         raise AssertionError('local executor imported Ray')
     return original_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import
-from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec
 class Worker:
     def value(self):
         return 42
-executor = Executor.create(ExecutorConfig(backend='uni', workers=(WorkerSpec(Worker),)))
+executor = Executor.create(ExecutorLaunch(backend='uni', workers=(WorkerSpec(Worker),)))
 assert executor.collective_rpc('value') == [42]
 executor.shutdown()
 """
@@ -331,17 +339,17 @@ def test_local_attachment_ownership_and_shutdown_are_explicit(owned):
 
 def test_uni_rejects_multiple_specs_before_launch():
     with pytest.raises(ValueError, match="at most one worker"):
-        Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Worker), WorkerSpec(Worker))))
+        Executor.create(ExecutorLaunch(backend="uni", workers=(WorkerSpec(Worker), WorkerSpec(Worker))))
 
 
 def test_local_rejects_gpu_resource_options():
     with pytest.raises(ValueError, match="resource or backend options"):
-        Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Worker, options={"num_gpus": 1}),)))
+        Executor.create(ExecutorLaunch(backend="uni", workers=(WorkerSpec(Worker, options={"num_gpus": 1}),)))
 
 
 def test_ray_launch_passes_resource_options_and_collective_fans_out(fake_ray):
     executor = Executor.create(
-        ExecutorConfig(
+        ExecutorLaunch(
             workers=(WorkerSpec(Worker, (0,)), WorkerSpec(f"{__name__}:Worker", (1,), options={"num_gpus": 2})),
             options={"num_cpus": 2, "num_gpus": 1},
         )
@@ -380,7 +388,7 @@ def test_ray_launch_rolls_back_partial_allocation(fake_ray):
             raise ValueError("launch failed")
 
     with pytest.raises(ValueError, match="launch failed"):
-        Executor.create(ExecutorConfig(backend="ray", workers=(WorkerSpec(Worker), WorkerSpec(BrokenWorker))))
+        Executor.create(ExecutorLaunch(backend="ray", workers=(WorkerSpec(Worker), WorkerSpec(BrokenWorker))))
     assert len(fake_ray.created) == 1
     assert fake_ray.killed == fake_ray.created
 
@@ -395,7 +403,7 @@ def test_ray_launch_rolls_back_async_constructor_failure(fake_ray, monkeypatch):
 
     monkeypatch.setattr(FakeActorBuilder, "remote", fail_ready)
     with pytest.raises(ValueError, match="async constructor failed"):
-        Executor.create(ExecutorConfig(backend="ray", workers=(WorkerSpec(Worker), WorkerSpec(Worker))))
+        Executor.create(ExecutorLaunch(backend="ray", workers=(WorkerSpec(Worker), WorkerSpec(Worker))))
     assert len(fake_ray.created) == 2
     assert fake_ray.killed == fake_ray.created
 
@@ -408,7 +416,7 @@ def test_ray_errors_and_timeouts_are_exposed_without_retry(fake_ray):
     assert actor.worker.calls == 1
     with pytest.raises(AttributeError):
         executor.rpc(0, "missing")
-    actor.init_error = FakeTimeout()
+    actor.init_error = FakeTimeoutError()
     with pytest.raises(TimeoutError, match="may still be running"):
         executor.check_health(timeout=0)
     executor.shutdown()
@@ -421,7 +429,7 @@ def test_ray_failure_polling_preserves_total_timeout_budget(fake_ray, monkeypatc
     def get(refs, *, timeout):
         waits.append(timeout)
         now[0] += timeout
-        raise FakeTimeout
+        raise FakeTimeoutError
 
     monkeypatch.setattr("reef.execution.executor.ray.monotonic", lambda: now[0])
     monkeypatch.setattr(fake_ray, "get", get)
@@ -452,7 +460,7 @@ def test_ray_does_not_confuse_business_timeout_with_get_timeout(fake_ray):
 def test_ray_rpc_observed_death_records_failure_without_waiting_for_monitor(fake_ray):
     from reef.execution.executor import ExecutorFailedError
 
-    actor = FakeActor(fake_ray, Worker(0), init_error=FakeActorDeath())
+    actor = FakeActor(fake_ray, Worker(0), init_error=FakeActorDeathError())
     executor = RayExecutor.from_workers([actor])
     try:
         with pytest.raises(ExecutorFailedError):
@@ -466,7 +474,7 @@ def test_ray_rpc_observed_death_records_failure_without_waiting_for_monitor(fake
 
 def test_ray_rejects_automatic_mutation_retries(fake_ray):
     with pytest.raises(ValueError, match="max_task_retries=0"):
-        Executor.create(ExecutorConfig(workers=(WorkerSpec(Worker),), options={"max_task_retries": 2}))
+        Executor.create(ExecutorLaunch(workers=(WorkerSpec(Worker),), options={"max_task_retries": 2}))
     assert fake_ray.created == []
 
 
@@ -482,14 +490,14 @@ def test_rpc_rejects_invalid_rank(executor_cls, rank):
 
 
 @pytest.mark.parametrize("node_id", [1, ""])
-def test_executor_config_rejects_malformed_node_id(node_id):
-    with pytest.raises(TypeError, match="node_id"):
-        ExecutorConfig(node_id=node_id)
+def test_executor_launch_rejects_malformed_node_id(node_id):
+    with pytest.raises(ValueError, match="node_id"):
+        ExecutorLaunch(node_id=node_id)
 
 
 def test_local_rejects_node_placement():
     with pytest.raises(ValueError, match="cluster node"):
-        Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Worker),), node_id="node-1"))
+        Executor.create(ExecutorLaunch(backend="uni", workers=(WorkerSpec(Worker),), node_id="node-1"))
 
 
 def test_ray_places_every_worker_on_the_requested_node(fake_ray, monkeypatch):
@@ -508,7 +516,7 @@ def test_ray_places_every_worker_on_the_requested_node(fake_ray, monkeypatch):
     strategies.NodeAffinitySchedulingStrategy = NodeAffinity  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "ray.util.scheduling_strategies", strategies)
     executor = Executor.create(
-        ExecutorConfig(backend="ray", workers=(WorkerSpec(Worker, (0,)), WorkerSpec(Worker, (1,))), node_id="node-1")
+        ExecutorLaunch(backend="ray", workers=(WorkerSpec(Worker, (0,)), WorkerSpec(Worker, (1,))), node_id="node-1")
     )
     placement = NodeAffinity(node_id="node-1", soft=False)
     assert [options["scheduling_strategy"] for options in fake_ray.options] == [placement, placement]
@@ -516,7 +524,7 @@ def test_ray_places_every_worker_on_the_requested_node(fake_ray, monkeypatch):
     # A worker's own strategy would silently override the placement; refuse the pair.
     with pytest.raises(ValueError, match="scheduling_strategy"):
         Executor.create(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend="ray",
                 workers=(WorkerSpec(Worker, (0,), options={"scheduling_strategy": placement}),),
                 node_id="node-1",

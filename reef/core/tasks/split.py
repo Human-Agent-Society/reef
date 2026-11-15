@@ -28,7 +28,7 @@ class TaskSplitError(ReefError):
     """A split request or manifest that cannot be honored."""
 
 
-class TaskSplitConflict(TaskSplitError):
+class TaskSplitConflictError(TaskSplitError):
     """New tasks share source records with tasks in the train split and with tasks in the eval split."""
 
 
@@ -192,7 +192,7 @@ def extend_split_by_source(
 
     Tasks that share a source record form a group. A group with assigned
     tasks in one split adds its new tasks to that split. A group with assigned
-    tasks in both splits raises ``TaskSplitConflict``. A group with no
+    tasks in both splits raises ``TaskSplitConflictError``. A group with no
     assigned task goes to eval when a seeded hash of its record ids falls
     below ``eval_fraction``. The hash does not depend on the other groups, so
     a split that grows one task at a time keeps the expected eval fraction.
@@ -212,7 +212,7 @@ def extend_split_by_source(
         has_training = bool(training.intersection(group))
         has_evaluation = bool(evaluation.intersection(group))
         if has_training and has_evaluation:
-            raise TaskSplitConflict(f"split conflict: tasks {sorted(new_names)} connect train and eval sources")
+            raise TaskSplitConflictError(f"split conflict: tasks {sorted(new_names)} connect train and eval sources")
         if has_evaluation:
             evaluation.update(new_names)
         elif has_training:

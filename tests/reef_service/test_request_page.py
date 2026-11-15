@@ -21,8 +21,8 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_jobs import UNCHANGED, harness_recipe
 from tests.support.harness_service import harness_dispatcher
-from tests.support.harness_steps import UNCHANGED, harness_recipe
 
 from reef.core import AgentRecord, RequestType
 from reef.harness.tree import TreePatch
@@ -36,7 +36,7 @@ from reef.service.request_page import (
     build_request_page,
     settled_step,
 )
-from reef.train.harness_backend.backend import StepProgress
+from reef.train.harness_backend.backend import JobProgress
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
 REFRESH = f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
@@ -67,7 +67,7 @@ def _record(text: str = TEXT, requires: list | None = None) -> dict:
 
 
 def _row(metrics: dict, *, artifact_id: str = "rel-1", parent: str | None = "rel-0", **rest) -> dict:
-    """A catalog row of a one-component scenario, where the artifact id is the release id; activated unless
+    """A catalog row of a one-component scenario, where the artifact id is the snapshot's revision; activated unless
     ``rest`` says otherwise."""
     return {
         "artifact_id": artifact_id,
@@ -122,7 +122,7 @@ def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> No
     assert logo in build_artifact_page(0, [CREATION])
 
 
-def test_the_logo_leads_to_the_active_release_the_request_is_asked_against() -> None:
+def test_the_logo_leads_to_the_active_artifact_the_request_is_asked_against() -> None:
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
     rows = [CREATION, _row(_answered(selected=True, patch=PATCH), active=True)]
     page = request_page(_record(), rows, link_query=QUERY, now=1_100.0)
@@ -162,7 +162,7 @@ def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
 
 
 def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_its_evaluation_size() -> None:
-    evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", runs_total=2)
+    evaluating = JobProgress(RECORD_ID, "evaluating", started_at=900.0, job_record="/work/steps/1", runs_total=2)
     page = request_page(_record(), [CREATION], progress=evaluating, now=1_100.0)
     progress = _section(page, "Progress")
     assert REFRESH in page and '<span class="evaluating">Checking the harness</span>' in progress
@@ -172,7 +172,7 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_its_evalua
     assert '<dt>Step record</dt><dd class="id">/work/steps/1</dd>' in progress
     assert "<dt>Waiting</dt>" not in progress
 
-    proposing = StepProgress(RECORD_ID, "proposing", started_at=1_058.0, step_record="/work/steps/2")
+    proposing = JobProgress(RECORD_ID, "proposing", started_at=1_058.0, job_record="/work/steps/2")
     page = request_page(_record(), [CREATION], progress=proposing, now=1_100.0)
     progress = _section(page, "Progress")
     assert (
@@ -250,15 +250,15 @@ def test_an_inactive_request_names_the_activation_and_reads_published_once_it_is
     assert "Artifact 12345678 is ready but does not serve yet." in page
     assert "storage:unrelated" not in page
     assert REFRESH not in page
-    # The next action is the activate call, runnable as it stands with the scenario header.
-    activate_call = html.escape(
-        f'POST /reef/scenarios/{SCENARIO}/activate {json.dumps({"artifact_id": "artifact:123456789abc"})}'
+    # The next action is the update call that serves the artifact alone, runnable as it stands.
+    serve_call = html.escape(
+        f'POST /reef/scenarios/{SCENARIO}/update {json.dumps({"served": {"artifact:123456789abc": 100}})}'
     )
-    assert f"<h3>Read this page, then activate it</h3><code>{activate_call}</code>" in page
+    assert f"<h3>Read this page, then serve it</h3><code>{serve_call}</code>" in page
     page = request_page(_record(), [CREATION, {**inactive, "active": True, "activated": True}], now=1_100.0)
     assert '<span class="selected">Published</span>' in page
     assert "Published as artifact 12345678" in page
-    assert "What changed" in _sections(page) and "activate it</h3>" not in page
+    assert "What changed" in _sections(page) and "serve it</h3>" not in page
 
 
 def test_a_rejected_request_names_the_missed_run_on_both_pages() -> None:
@@ -303,7 +303,7 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
     assert "The evaluation could not run" not in version and "Candidate score" in version
 
 
-def test_the_next_action_of_a_published_release_names_what_it_requires_where_the_harness_runs() -> None:
+def test_the_next_action_of_a_published_artifact_names_what_it_requires_where_the_harness_runs() -> None:
     metrics = _answered(selected=True, patch=PATCH)
     metrics["training_request"]["requires"] = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your key"}]
     result = _section(request_page(_record(), [CREATION, _row(metrics)], now=1_100.0), "Result")
@@ -406,7 +406,7 @@ def test_a_running_request_lists_the_methods_activity_newest_first() -> None:
         {"at": 1_065.0, "kind": "agent", "text": "write harness/extensions/speak.ts"},
         {"at": 1_130.0, "kind": "provider", "text": "/v1/audio/speech not/real -> 400: <no model>", "failed": True},
     )
-    proposing = StepProgress(RECORD_ID, "proposing", started_at=1_000.0, step_record="/steps/1", activity=activity)
+    proposing = JobProgress(RECORD_ID, "proposing", started_at=1_000.0, job_record="/steps/1", activity=activity)
     page = request_page(_record(), [CREATION], progress=proposing, now=1_200.0)
     assert _sections(page) == ["Request", "Progress", "Activity"]
     listed = _section(page, "Activity")
@@ -441,8 +441,8 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
     tmp_path: Path, failure: bool
 ) -> None:
     entered, release = Event(), Event()
-    recipe = replace(harness_recipe(tmp_path, holding_method(entered, release, failure)), training_mode="manual")
-    dispatcher = harness_dispatcher(tmp_path, recipe)
+    recipe, live = harness_recipe(tmp_path, holding_method(entered, release, failure))
+    dispatcher = harness_dispatcher(tmp_path, replace(recipe, training_mode="manual"), live)
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
     assert scenario is not None
     headers = {"x-reef-scenario": SCENARIO, "Authorization": "Bearer secret"}

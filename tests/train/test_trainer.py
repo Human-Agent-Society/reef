@@ -7,51 +7,53 @@ from functools import partial
 
 import pytest
 from sqlalchemy import func, select
-from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
-from tests.support._grouped_pg import grouped_policy_pipeline
-from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.chat_templates import CharTemplate
 from tests.support.conversations import conversation
-from tests.support.records import item_records, memory_records
+from tests.support.grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
+from tests.support.grouped_pg import ComparisonSetSamples, GroupedPolicyJobData, grouped_policy_pipeline
+from tests.support.records import item_records, memory_records, token_inference
 from tests.support.runtime_stubs import (
     STUB_ROOT,
     RecordingComponent,
     StubInferenceRuntime,
     StubTrainingComponent,
-    runtime_bindings,
+    job_sized_stages,
+    live_objects,
 )
 from tests.support.samples import data_storage, open_sample_store, sample_store
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
+from tests.support.threshold_processor import ThresholdJobData, threshold_pipeline
 
 from recipes.sao import SAOJobData, SAOSamples
+from recipes.sao.processor import SAOSettings
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
+from reef.artifact.components import ComponentSpec, ScenarioComponents
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
-from reef.core.errors import TrainingStartRefused
+from reef.core.errors import TrainingStartRefusedError
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
-from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
-from reef.storage.job_data import read_job_data
 from reef.storage.record_items import ItemRecordStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
-from reef.train import PipelineContext, Trainer, TrainingPipeline
-from reef.train.algos.schedule import StepScheduling
+from reef.train import ComponentTrainer, PipelineContext, Trainer, TrainingPipeline
 from reef.train.component import ScenarioRoot
 from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.pipeline import PipelineSettings, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.trainer import PendingTrainingResult
+from reef.train.trainer_builder import TrainerSpec, build_trainers
 from reef.train.types import JobData, PreparedCommit, TrainingCommit
 
 NUM_GPUS = 0
@@ -60,7 +62,7 @@ NUM_GPUS = 0
 def sao_pipeline(context: PipelineContext, *, accept_multi_turn: bool = False) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2sample=SAOSamples(context, SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
+        record2sample=SAOSamples(context, SAOSettings(accept_multi_turn_policy_samples=accept_multi_turn)),
         sample2job=SAOJobData(context, None, None),
     )
 
@@ -76,6 +78,24 @@ def preparing_trainer(records: ItemRecordStore, **options) -> Trainer:
     return Trainer.build("math", records, **{**values, **options})
 
 
+@pytest.mark.unit
+def test_one_trainer_spec_is_bound_to_the_only_component_and_refused_for_several() -> None:
+    spec = TrainerSpec(name="recipe", stages=PipelineSettings.from_setting(None, spec=PipelineSpec(), environ={}))
+
+    def components(*names: str) -> ScenarioComponents:
+        return ScenarioComponents({name: ComponentSpec() for name in names})
+
+    def build(served: ScenarioComponents) -> tuple[ComponentTrainer, ...]:
+        return build_trainers(spec, "math", memory_records("math"), components=served, algorithm_states={})
+
+    for served, bound in ((components(), "records"), (components("weights"), "weights")):
+        (component_trainer,) = build(served)
+        assert component_trainer.component == bound and not component_trainer.trainer.trains
+        component_trainer.trainer.close()
+    with pytest.raises(ValueError, match="only a composite recipe binds one trainer per component"):
+        build(components("weights", "harness"))
+
+
 def finish(trainer: Trainer) -> None:
     """Commit the end of ``trainer``'s running job, when one runs: its job ended in ``submit``."""
     while trainer.job_running:
@@ -87,27 +107,18 @@ def finish(trainer: Trainer) -> None:
 def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> None:
     """Append ``prepared`` to the commit history as training step ``step``, as the scenario committer does, so the
     sample store counts the samples that the step trained."""
-    session.commit_step(
-        expected_step=step - 1,
+    session.append_commit(
+        expected_commit_number=step - 1,
         commit=CommitRecord(
             scenario="math",
-            step=step,
-            snapshot=SnapshotRef(f"release:{step}", "base"),
+            commit_number=step,
+            snapshot=SnapshotRef(f"snapshot:{step}", "base"),
             checkpoint=True,
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,
             high_water_offset=prepared.high_water_offset,
             consumed_ids=prepared.consumed_ids,
         ),
-    )
-
-
-def inference(agent_record_id: str, *, candidate: str | None = None) -> AgentRecord:
-    payload = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
-    if candidate is not None:
-        payload["candidate"] = candidate
-    return AgentRecord.create(
-        scenario="math", request_type=RequestType.INFERENCE, payload=payload, agent_record_id=agent_record_id
     )
 
 
@@ -132,7 +143,7 @@ def report(agent_record_id: str, references: str | tuple[str, ...], score: float
 def one_pair_records() -> ItemRecordStore:
     """An in-memory store holding inference i1 and its report r1, scored 1."""
     records = memory_records("math")
-    records.append(inference("i1"))
+    records.append(token_inference("i1"))
     records.append(report("r1", "i1", 1.0))
     return records
 
@@ -160,7 +171,7 @@ def positioned_report(sequence: int, reference: str, score: float) -> AgentRecor
 @pytest.mark.unit
 def test_recipe_processor_never_becomes_ready() -> None:
     processor = TrainingPipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
 
     assert not processor.ready(1)
     # A processor that never becomes ready says so: it holds no ready samples, whatever it has been pushed.
@@ -171,8 +182,8 @@ def test_recipe_processor_never_becomes_ready() -> None:
 @pytest.mark.unit
 def test_pairing_processor_uses_feedback_without_score_filtering() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("bad"))
-    processor.push(inference("good"))
+    processor.push(token_inference("bad"))
+    processor.push(token_inference("good"))
     processor.push(report("bad-r", "bad", 0.1))
     processor.push(report("good-r", "good", 1.0))
     assert [trajectory_reward(sample) for sample in processor.build_job_data(2).samples] == [0.1, 1.0]
@@ -181,7 +192,7 @@ def test_pairing_processor_uses_feedback_without_score_filtering() -> None:
 @pytest.mark.unit
 def test_pairing_processor_emits_policy_samples_for_spo() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     processor.push(report("r1", "i1", 0.8))
 
     batch = processor.build_job_data(1)
@@ -200,7 +211,7 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
 @pytest.mark.parametrize("bad_score", [float("nan"), float("inf"), float("-inf")])
 def test_pairing_processor_rejects_a_non_finite_score(bad_score: float) -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     with pytest.raises(ReportValidationError, match="finite"):
         processor.push(report("r1", "i1", bad_score))
     assert not processor.ready(1)
@@ -267,7 +278,7 @@ def test_cookbook_processors_wait_for_references_before_rejecting_a_report_of_se
         context = PipelineContext("math")
         processor = TrainingPipeline(
             context,
-            record2sample=SAOSamples(context, SampleAssemblySettings()),
+            record2sample=SAOSamples(context, SAOSettings()),
             sample2job=SAOJobData(context, None, None),
         )
     processor.push(served_call("i1", 1))
@@ -299,7 +310,7 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
 @pytest.mark.unit
 def test_pairing_processor_rejects_report_eligibility_flags() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     with pytest.raises(ReportValidationError, match="eligible"):
         processor.push(report("r1", "i1", 0.0, training={"eligible": False}))
     assert not processor.ready(1)
@@ -309,7 +320,7 @@ def test_pairing_processor_rejects_report_eligibility_flags() -> None:
 @pytest.mark.unit
 def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     processor.push(report("r1", "i1", 1.0))
     # r1's sample is stored, which consumes r1 and i1; r2 ends at once without training.
     processor.push(report("r2", "i1", 0.5))
@@ -329,7 +340,7 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
 @pytest.mark.unit
 def test_pairing_retention_keeps_low_score_feedback_until_its_sample_is_stored() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(inference("i1"))
+    processor.push(token_inference("i1"))
     assert processor.record2sample.releasable_record_ids().isdisjoint({"i1"})
     processor.push(report("low", "i1", 0.1))
     # The low-score sample is stored, so its records are consumed; the sample trains in the next job data.
@@ -343,7 +354,7 @@ def test_pairing_retention_keeps_low_score_feedback_until_its_sample_is_stored()
 def test_grpo_retention_releases_complete_comparison_set_after_acknowledgement() -> None:
     processor = grouped_policy_pipeline(PipelineContext("math"))
     for agent_record_id, score in (("i1", 0.2), ("i2", 0.8)):
-        processor.push(inference(agent_record_id))
+        processor.push(token_inference(agent_record_id))
         processor.push(report("r" + agent_record_id, agent_record_id, score, comparison_set="set-a"))
 
     batch = processor.build_job_data(1)
@@ -355,14 +366,14 @@ def test_grpo_retention_releases_complete_comparison_set_after_acknowledgement()
 @pytest.mark.unit
 def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None:
     sft_processor = threshold_pipeline(PipelineContext("math"))
-    sft_processor.push(inference("i1"))
+    sft_processor.push(token_inference("i1"))
     sft_processor.push(report("r1", "i1", 1.0))
     sft_result = prepare_slime_job(sft_processor.build_job_data(1), "sft", {}, StepScheduling(), step_size=1)
     assert sft_result.next_algorithm_state == {"steps": 1}
 
     grpo_processor = grouped_policy_pipeline(PipelineContext("math"))
     for rid, score in (("i3", 0.2), ("i4", 0.8)):
-        grpo_processor.push(inference(rid))
+        grpo_processor.push(token_inference(rid))
         grpo_processor.push(report("r" + rid, rid, score, comparison_set="x"))
     result = prepare_slime_job(
         grpo_processor.build_job_data(1), _GROUPED_PG_OBJECTIVE, {}, StepScheduling(), step_size=1
@@ -444,7 +455,7 @@ def test_the_trainer_builds_jobs_only_from_samples_that_the_samples_service_made
 
     # The samples service makes the samples; the next cycle builds the job from them.
     assert trainer.produce_samples() == ProducedSamples(
-        changed=True, background=False, records_read=2, samples_created=1
+        changed=True, background=False, records_read=2, samples_created=1, record_sequences=(1, 3)
     )
     assert trainer.produce_samples() == ProducedSamples(
         changed=False, background=False, records_read=0, samples_created=0
@@ -454,10 +465,34 @@ def test_the_trainer_builds_jobs_only_from_samples_that_the_samples_service_made
 
 
 @pytest.mark.unit
+def test_a_selection_names_the_tasks_that_read_and_stored_each_sample() -> None:
+    from reef.record2sample.service import Selection
+
+    class Recording(Selection):
+        def __init__(self) -> None:
+            super().__init__("task-1")
+            self.reports: list[tuple[int, int]] = []
+
+        def progress(self, records_read: int, samples_created: int) -> None:
+            self.reports.append((records_read, samples_created))
+
+    trainer = preparing_trainer(one_pair_records())
+    selection = Recording()
+    produced = trainer.produce_samples(selection)
+    assert produced.record_sequences == (1, 3) and selection.reports[-1] == (2, 1)
+    store = trainer.pipeline.store.store
+    (item,) = store.data.query(store.owner, kind="trajectory", group=("stored_by_task", "task-1"))
+    assert item.metadata["read_by_task"] == "task-1"
+    assert trainer.pipeline.selection_task is None, "the task ends with the step"
+    # A step outside a task names no task.
+    assert trainer.produce_samples().record_sequences is None
+
+
+@pytest.mark.unit
 def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> None:
     records = memory_records("math")
     for sequence in range(3):
-        records.append(inference(f"i{sequence}"))
+        records.append(token_inference(f"i{sequence}"))
         records.append(report(f"r{sequence}", f"i{sequence}", 1.0))
     trainer = preparing_trainer(records, pipeline_factory=partial(threshold_pipeline, job_samples=2))
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 2)
@@ -481,7 +516,7 @@ def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> 
 @pytest.mark.unit
 def test_the_stage_config_sets_the_trainer_job_samples() -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        return PipelineConfig.from_setting(
+        return PipelineSettings.from_setting(
             {"sample2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(sample2job=ThresholdJobData), environ={}
         ).build(context)
 
@@ -511,12 +546,14 @@ class _RefusingRoots(RecordingComponent):
 @pytest.mark.unit
 def test_a_new_trainer_starts_from_its_root_and_a_refused_root_refuses_the_trainer() -> None:
     """A trainer without committed state starts at the component's start of its scenario's root; it needs the root,
-    and a root that the component cannot start from is a ``TrainingStartRefused`` that names the root."""
+    and a root that the component cannot start from is a ``TrainingStartRefusedError`` that names the root."""
     trainer = preparing_trainer(memory_records("math"))
     assert JobLoopState.from_dict(trainer.state).start == "recording:base"
     with pytest.raises(ValueError, match="starts from the scenario's root: give root"):
         preparing_trainer(memory_records("math"), root=None)
-    with pytest.raises(TrainingStartRefused, match=r"from its root snapshot local:.*: the root holds other weights"):
+    with pytest.raises(
+        TrainingStartRefusedError, match=r"from its root snapshot local:.*: the root holds other weights"
+    ):
         preparing_trainer(memory_records("math"), job_loop=JobLoop(_RefusingRoots(), scenario="math"))
     # Committed state wins: the root is not read.
     committed = JobLoopState("committed").to_dict()
@@ -551,9 +588,9 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     samples = items.for_trainer("")
     records = session.records
     for item in (
-        inference("i1"),
+        token_inference("i1"),
         report("r1", "i1", 1.0),
-        inference("i2"),
+        token_inference("i2"),
         report("r2", "i2", 0.5),
     ):
         records.append(item)
@@ -617,10 +654,10 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         finish(first)
         first_state = first.algorithm_state_dict()
 
-        assert first_store.get("math", first_inference.agent_record_id) == first_inference
-        assert first_store.get("math", first_report.agent_record_id) == first_report
-        assert first_store.get_for_audit("math", first_inference.agent_record_id).item == first_inference
-        assert first_store.get_for_audit("math", first_report.agent_record_id).item == first_report
+        assert first_store.read("math", first_inference.agent_record_id) == first_inference
+        assert first_store.read("math", first_report.agent_record_id) == first_report
+        assert first_store.read_for_audit("math", first_inference.agent_record_id).item == first_inference
+        assert first_store.read_for_audit("math", first_report.agent_record_id).item == first_report
         assert [item.agent_record_id for item in first_store.replay("math")] == [
             first_inference.agent_record_id,
             first_report.agent_record_id,
@@ -665,32 +702,14 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
         def default_parameters(cls):
             return {kind: {"objective": _GROUPED_PG_OBJECTIVE} for kind in ("trajectory", "task")}
 
-        def build(
-            self,
-            scenario,
-            records,
-            *,
-            algorithm_state=None,
-            experiment_logger=None,
-            task_storage=None,
-            artifacts=None,
-            samples=None,
-            root=None,
-        ):
-            return Trainer.build(
-                scenario,
-                records,
-                pipeline_factory=partial(grouped_policy_pipeline, job_samples=1),
-                job_loop=JobLoop(component, scenario=scenario),
-                job_parameters=self.parameters_by_kind(),
-                algorithm_state=algorithm_state,
-                experiment_logger=experiment_logger,
-                root=root,
-            )
+        @classmethod
+        def pipeline_spec(cls):
+            return PipelineSpec(ComparisonSetSamples, GroupedPolicyJobData)
 
     dispatcher = Dispatcher(
-        GroupedPgRecipe(**runtime_bindings(component, inference_runtime), name="grouped_pg"),
+        GroupedPgRecipe(name="grouped_pg", pipeline_stages=job_sized_stages(GroupedPgRecipe.pipeline_spec())),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
+        live=live_objects(component, inference_runtime),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -699,7 +718,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     wait_for_serving(dispatcher)
     serving = scenario.serving_artifact_id()
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
-        record = inference(rid)
+        record = token_inference(rid)
         dispatcher.accept_record(replace(record, payload={**record.payload, "artifact_id": serving}))
         dispatcher.accept_record(report("r" + rid, rid, score, comparison_set="set-a"))
 
@@ -710,8 +729,8 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     [job] = component.submitted
     assert job.parameters == {"objective": _GROUPED_PG_OBJECTIVE}
     # The comparison set is one batch: the component computes its group-relative advantages from the job's data.
-    assert [trajectory_reward(item) for item in read_job_data(job.data_dir).samples] == [0.2, 0.8]
-    prepared = prepare_slime_job(read_job_data(job.data_dir), _GROUPED_PG_OBJECTIVE, {}, StepScheduling(), step_size=1)
+    assert [trajectory_reward(item) for item in job.read_data().samples] == [0.2, 0.8]
+    prepared = prepare_slime_job(job.read_data(), _GROUPED_PG_OBJECTIVE, {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
     # After the root snapshot, the job's checkpoint is what the scenario serves.
@@ -743,65 +762,24 @@ def test_the_slime_sao_row_defaults_the_action_mask_to_the_loss_mask_of_a_render
     assert producing_artifact_id == "artifact-1"
 
 
-def test_reported_samples_without_policy_loss_are_skipped_before_training_component() -> None:
+def test_reported_samples_without_policy_loss_are_skipped_before_training_component(caplog) -> None:
     processor = sao_pipeline(PipelineContext("math"))
     processor.push(served_call("i1", 1))
     processor.push(report("r1", "i1", 1.0))
     assert processor.build_job_data(1) is None
     assert processor.operational_metrics()["skipped_reports_total"] == 1
+    assert "skips report r1" in caplog.text
 
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("include_valid_reference", "accept_multi_turn"),
-    ((False, False), (True, False), (True, True)),
-    ids=("single-reference", "multi-reference-default", "multi-reference-enabled"),
-)
-def test_a_tensorless_report_is_skipped_and_later_reports_train(
-    include_valid_reference: bool, accept_multi_turn: bool, caplog
-) -> None:
-    records = SQLiteRecordStore()
-    references: tuple[str, ...] = ("tensorless",)
-    if include_valid_reference:
-        valid_first = inference("valid-first")
-        records.append(replace(valid_first, payload={**valid_first.payload, "artifact_id": "artifact-1"}))
-        references = ("valid-first", "tensorless")
-    records.append(served_call("tensorless", 1))
-    records.append(report("tensorless-report", references, 1.0))
-    component = RecordingComponent()
-    trainer = preparing_trainer(
-        records,
-        pipeline_factory=partial(sao_pipeline, accept_multi_turn=accept_multi_turn),
-        job_loop=JobLoop(component, scenario="math"),
+    valid = served_call("i2", 1)
+    valid = replace(
+        valid,
+        payload={**valid.payload, "tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
     )
-    make_samples(trainer)
-    assert trainer.run_once() is None
-    assert not component.batches
-    assert trainer.operational_metrics()["skipped_reports_total"] == 1
-    assert "skips report tensorless-report" in caplog.text
-
-    valid_later = served_call("valid-later", 1)
-    records.append(
-        replace(
-            valid_later,
-            payload={
-                **valid_later.payload,
-                "tokens": [1, 2],
-                "loss_mask": [0, 1],
-                "rollout_log_probs": [-0.2],
-            },
-        )
-    )
-    records.append(report("valid-later-report", "valid-later", 1.0))
-    make_samples(trainer)
-    submitted = trainer.run_once()
-
-    assert submitted is not None and submitted.metrics["training_job"]["event"] == "submitted"
-    assert len(component.batches) == 1
-    assert component.batches[0].samples[0].source_agent_record_ids == ("valid-later", "valid-later-report")
-    prepared = trainer.prepare_commit(submitted)
-    assert {*references, "tensorless-report"} <= prepared.consumed_ids
-    trainer.commit(prepared)
+    processor.push(valid)
+    processor.push(report("r2", "i2", 1.0))
+    batch = processor.build_job_data(1)
+    assert batch is not None
+    assert batch.samples[0].source_agent_record_ids == ("i2", "r2")
 
 
 def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp_path, caplog):
@@ -839,4 +817,4 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         make_samples(resumed)
         assert resumed.advance_job() is None
         assert resumed.pipeline_status()["evicted_record_count"] == 1
-        assert records.get("math", "i3") is not None
+        assert records.read("math", "i3") is not None

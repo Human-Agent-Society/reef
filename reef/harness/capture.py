@@ -14,17 +14,19 @@ import sys
 import threading
 import time
 import urllib.request
+from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, MutableMapping
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from http.server import ThreadingHTTPServer
 from typing import Any
 
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
+from reef.core.errors import InternalError
 from reef.core.records_types import ROLLOUT_HEADER
 
 
-class CaptureError(Exception):
+class CaptureError(InternalError):
     """The capture proxy could not start or is not running."""
 
 
@@ -76,19 +78,48 @@ class ProxyTags(MutableMapping[str, str]):
         return len(self.tag_values)
 
 
-class TaggedStore(CaptureStore):
-    """The capture store plus, per capture, the tags in force when it landed, so a trial's receipts are told apart."""
+class CaptureObserver(ABC):
+    """Receives each call that a capture proxy captures, as it lands.
 
-    def __init__(self, tags: Mapping[str, str]) -> None:
+    Purpose: a caller that keeps the calls while the rollout runs gives one to ``CaptureProxy``. The proxy calls
+    ``call_captured`` once for each captured call, on the thread that answered the call, after the call is in the
+    proxy's store. Calls that end at the same time reach it from several threads at once.
+    """
+
+    @abstractmethod
+    def call_captured(self, turn: CapturedTurn) -> None:
+        """Take ``turn``, one captured call. An error that this raises reaches the proxy's request handler."""
+
+
+class TaggedStore(CaptureStore):
+    """The capture store plus, per capture, the tags in force when it landed, so a trial's receipts are told apart.
+    ``observer``, when set, gets each capture after it landed, with its bodies.
+
+    With ``keeps_bodies`` false, the store keeps a capture without its request body, and without its response body
+    when it answered 200: an error body stays, to name the failure. An agent's request carries the whole
+    conversation so far, so the kept bodies of one long rollout grow with the square of its calls."""
+
+    def __init__(
+        self, tags: Mapping[str, str], observer: CaptureObserver | None = None, *, keeps_bodies: bool = True
+    ) -> None:
         super().__init__()
         self.tag_values = tags
+        self.observer = observer
+        self.keeps_bodies = keeps_bodies
         self.tagged: list[dict[str, Any]] = []
         self.guard = threading.Lock()
 
     def add(self, turn: CapturedTurn) -> None:
+        kept = (
+            turn
+            if self.keeps_bodies
+            else replace(turn, request=None, response=None if turn.status == 200 else turn.response)
+        )
         with self.guard:
-            super().add(turn)
-            self.tagged.append({**asdict(turn), "tags": dict(self.tag_values)})
+            super().add(kept)
+            self.tagged.append({**asdict(kept), "tags": dict(self.tag_values)})
+        if self.observer is not None:
+            self.observer.call_captured(turn)
 
     def drain(self) -> list[dict[str, Any]]:
         """The captures since the last drain, with their tags; what one publish carries."""
@@ -126,7 +157,11 @@ class CaptureProxy:
 
     With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
     record of it, and the captured response holds the whole training block. A streaming agent still gets a
-    stream, which the proxy makes from the complete answer."""
+    stream, which the proxy makes from the complete answer.
+
+    ``observer``, when set, gets each captured call as it lands (``CaptureObserver``). With ``keeps_bodies`` false,
+    the captures that ``drain`` returns have no request body, and no response body when they answered 200
+    (``TaggedStore``)."""
 
     def __init__(
         self,
@@ -137,6 +172,8 @@ class CaptureProxy:
         tags: Mapping[str, str] | None = None,
         listen_host: str = "127.0.0.1",
         is_unrecorded: bool = False,
+        observer: CaptureObserver | None = None,
+        keeps_bodies: bool = True,
     ) -> None:
         self.upstream = upstream
         self.scenario = scenario
@@ -153,7 +190,7 @@ class CaptureProxy:
         self.tags: MutableMapping[str, str] = ProxyTags(self.config, fixed)
         for name, value in (tags or {}).items():
             self.tags[name] = value
-        self.store = TaggedStore(self.tags)
+        self.store = TaggedStore(self.tags, observer, keeps_bodies=keeps_bodies)
         self.handler = build_handler(self.config, self.store)
         self.server: CaptureProxyServer | None = None
 
@@ -182,4 +219,4 @@ class CaptureProxy:
         return self.store.drain()
 
 
-__all__ = ["CAPTURE_PATHS", "CaptureError", "CaptureProxy"]
+__all__ = ["CAPTURE_PATHS", "CaptureError", "CaptureObserver", "CaptureProxy"]

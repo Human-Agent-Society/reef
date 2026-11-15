@@ -15,25 +15,27 @@ from typing import Any
 
 import pytest
 from tests.support.chat_templates import CharTemplate
-from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.sdft import SDFTRecipe
 from recipes.sdft.processor import DEFAULT_CONTEXT_TEMPLATE, SDFTSamples, SDFTSettings
 from recipes.sdft.slime import SdftObjective, SdftSettings
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import TeacherRequest, rendered_job_data
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.recipe.loading import build_recipe, load_recipe
+from reef.recipe.registry import recipe_class_for
 from reef.record2sample.distill import student_call
 from reef.sample2job import DistillJobData
+from reef.service.deploy.training import training_recipe_config
 from reef.train import PipelineContext
-from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData
 
 QUESTION = "What is the boiling point of water?"
@@ -180,7 +182,7 @@ def test_processor_emits_one_sample_with_the_teacher_request() -> None:
 
 
 def sdft_recipe(config: Mapping[str, Any]) -> SDFTRecipe:
-    recipe = SDFTRecipe.from_environment({}, config=config, **runtime_bindings())
+    recipe = load_recipe(SDFTRecipe, config, {})
     assert isinstance(recipe, SDFTRecipe)
     return recipe
 
@@ -190,7 +192,7 @@ def test_sdft_recipe_resolves_by_dotted_reference() -> None:
     reference = "recipes.sdft.recipe:SDFTRecipe"
     assert recipe_class_for(reference) is SDFTRecipe
 
-    recipe = build_recipe(reference, {}, {}, **runtime_bindings())
+    recipe = build_recipe(reference, {}, {})
 
     assert isinstance(recipe, SDFTRecipe)
     assert recipe.name == "sdft"
@@ -198,7 +200,7 @@ def test_sdft_recipe_resolves_by_dotted_reference() -> None:
     assert SDFTRecipe.default_parameters()["trajectory"] == {"objective": "sdft"}
     assert SdftObjective.loss_family == "sdft"
     assert SdftObjective.rollout_unit == "sample"
-    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
+    pipeline = recipe.stages().build(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SDFTSamples)
     assert pipeline.record2sample.exclusive_sources, "each report owns its inference records"
     assert isinstance(pipeline.sample2job, DistillJobData)
@@ -218,7 +220,7 @@ def test_sdft_recipe_hands_each_stage_its_pipeline_config() -> None:
         }
     )
 
-    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
+    pipeline = recipe.stages().build(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SDFTSamples)
     assert (pipeline.sample2job.job_samples, pipeline.sample2job.buffer_size) == (4, 16)
     assert pipeline.record2sample.max_teacher_tokens == 24000
@@ -228,16 +230,16 @@ def test_sdft_recipe_hands_each_stage_its_pipeline_config() -> None:
 @pytest.mark.unit
 def test_sdft_recipe_validates_the_demonstration_template_when_the_pipeline_builds() -> None:
     recipe = sdft_recipe({"pipeline": {"record2sample": {"config": {"context_template": "bare"}}}})
-    with pytest.raises(RecipeConfigError, match=r"context_template must contain \{context\}"):
-        recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
+    with pytest.raises(PluginConfigError, match=r"context_template must contain \{context\}"):
+        recipe.stages().build(PipelineContext("science", TeacherContextReport))
 
 
 @pytest.mark.unit
 def test_sdft_recipe_refuses_a_tokenizer_path_and_backend_objective_config() -> None:
     # The training component renders with its own chat template; the stage has no tokenizer to configure.
     recipe = sdft_recipe({"pipeline": {"record2sample": {"config": {"tokenizer_path": "/models/served"}}}})
-    with pytest.raises(RecipeConfigError, match="unknown config fields: tokenizer_path"):
-        recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
+    with pytest.raises(PluginConfigError, match="unknown config fields: tokenizer_path"):
+        recipe.stages().build(PipelineContext("science", TeacherContextReport))
     with pytest.raises(RecipeConfigError, match=r"training\.options"):
         sdft_recipe({"optimization": {"kl_direction": "reverse"}})
 
@@ -248,11 +250,11 @@ def test_sdft_recipe_refuses_stage_settings_in_the_recipe_config() -> None:
     with pytest.raises(RecipeConfigError, match="does not consume"):
         sdft_recipe({"data": {"batch_size": 4}})
     with pytest.raises(RecipeConfigError, match="does not consume"):
-        SDFTRecipe.service_config({"context-template": "Example: {context}"}, model_path="/models/served")
+        training_recipe_config(SDFTRecipe, {"context-template": "Example: {context}"}, model_path="/models/served")
     # A key in the wrong stage fails when the pipeline builds.
     recipe = sdft_recipe({"pipeline": {"record2sample": {"config": {"batch_size": 4}}}})
-    with pytest.raises(RecipeConfigError, match="batch_size"):
-        recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
+    with pytest.raises(PluginConfigError, match="batch_size"):
+        recipe.stages().build(PipelineContext("science", TeacherContextReport))
 
 
 # --- objective and Slime wire payload ----------------------------------------

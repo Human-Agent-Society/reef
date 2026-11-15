@@ -9,7 +9,7 @@ import asyncio
 
 from aiohttp import web
 
-from reef.core.errors import UnknownScenario
+from reef.core.errors import ScenarioNotFoundError
 from reef.service.auth import add_signed_download, signed_download_url
 from reef.service.request_service import RequestService
 from reef.service.routes.data import download_seconds
@@ -40,7 +40,7 @@ def register_scenario_file_routes(app: web.Application, *, request_service: Requ
     async def jobs(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         if not await asyncio.to_thread(dispatcher.has_scenario, scenario):
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
         listing = await asyncio.to_thread(scenario_jobs, dispatcher.queue, scenario)
         return web.json_response({"scenario": scenario, "jobs": listing}, headers={"Cache-Control": "no-store"})
 

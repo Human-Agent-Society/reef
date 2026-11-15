@@ -12,7 +12,7 @@ import pytest
 from reef.core.tasks import (
     TASK_CONFIG_VERSION,
     HarborTask,
-    HarborTaskConflict,
+    HarborTaskConflictError,
     HarborTaskError,
     primary_reward,
     read_harbor_task,
@@ -132,23 +132,23 @@ def test_the_same_task_written_again_is_a_no_op(tmp_path: Path) -> None:
 
 def test_a_different_task_under_the_same_name_is_a_conflict(tmp_path: Path) -> None:
     write_harbor_task(task(), tmp_path)
-    with pytest.raises(HarborTaskConflict, match="different task with the same name"):
+    with pytest.raises(HarborTaskConflictError, match="different task with the same name"):
         write_harbor_task(task(instruction="Add 1 and 1."), tmp_path)
-    with pytest.raises(HarborTaskConflict, match="different task with the same name"):
+    with pytest.raises(HarborTaskConflictError, match="different task with the same name"):
         write_harbor_task(task(source_agent_record_ids=("rec-other",)), tmp_path)
 
 
 def test_a_foreign_directory_under_the_name_is_a_conflict(tmp_path: Path) -> None:
     (tmp_path / "sum-391").mkdir()
     (tmp_path / "sum-391" / "task.toml").write_text('version = "1.0"\n')
-    with pytest.raises(HarborTaskConflict, match="not a task reef wrote"):
+    with pytest.raises(HarborTaskConflictError, match="not a task reef wrote"):
         write_harbor_task(task(), tmp_path)
 
 
 def test_an_unreadable_top_level_file_is_a_conflict_not_a_crash(tmp_path: Path) -> None:
     root = write_harbor_task(task(), tmp_path)
     (root / "instruction.md").write_bytes(b"\xff\xfe not utf-8")
-    with pytest.raises(HarborTaskConflict, match="not UTF-8 text"):
+    with pytest.raises(HarborTaskConflictError, match="not UTF-8 text"):
         write_harbor_task(task(), tmp_path)
 
 
@@ -489,7 +489,7 @@ def test_an_unreadable_directory_is_an_error_not_a_crash(tmp_path: Path) -> None
     try:
         with pytest.raises(HarborTaskError, match="cannot be read"):
             read_harbor_task(root)
-        with pytest.raises(HarborTaskConflict, match=r"cannot be read|not a task reef wrote"):
+        with pytest.raises(HarborTaskConflictError, match=r"cannot be read|not a task reef wrote"):
             write_harbor_task(task(), tmp_path)
     finally:
         (root / "tests").chmod(0o755)
@@ -567,7 +567,7 @@ def test_a_replay_and_a_conflict_create_no_staging_directory(tmp_path: Path) -> 
     root = write_harbor_task(task(), tmp_path)
     (tmp_path / ".staging").rmdir()
     write_harbor_task(task(), tmp_path)
-    with pytest.raises(HarborTaskConflict):
+    with pytest.raises(HarborTaskConflictError):
         write_harbor_task(task(instruction="Add 1 and 1."), tmp_path)
     assert [p.name for p in tmp_path.iterdir()] == [root.name]
 
@@ -598,7 +598,7 @@ def test_an_absurd_timeout_is_refused_not_overflowed() -> None:
 
 def test_a_dangling_symlink_at_the_target_is_a_conflict(tmp_path: Path) -> None:
     (tmp_path / "sum-391").symlink_to(tmp_path / "nowhere")
-    with pytest.raises(HarborTaskConflict, match="not a directory"):
+    with pytest.raises(HarborTaskConflictError, match="not a directory"):
         write_harbor_task(task(), tmp_path)
 
 

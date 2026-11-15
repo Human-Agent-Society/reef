@@ -9,16 +9,18 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import ImportingComponent, ImportingInference
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.artifact_versions import ImportingComponent
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.polling import wait_until
+from tests.support.runtime_stubs import live_objects
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.artifact import SnapshotRef, serving_profile_of
+from reef.artifact.artifact import SnapshotRef
 from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.recipe import Recipe
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.data_service import DataWorker, copy_scenario_artifacts, data_jobs
@@ -41,41 +43,31 @@ class UriBackend(InMemoryRepositoryBackend):
 
 
 def weights(directory: Path, content: bytes) -> Path:
-    """A full-weight artifact: the layout of the test policy's releases."""
+    """A full-weight artifact: the layout of the test policy's artifacts."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
     return directory
 
 
-class ProfileInference(ImportingInference):
-    """A runtime that serves the serving profiles ``qwen@1`` and ``muse@1`` (RFC #1233)."""
-
-    def check_serving_profile(self, profile, start):
-        if profile not in ("qwen@1", "muse@1"):
-            raise ValueError(f"unknown serving profile {profile!r}")
-
-
-def cell(tmp_path: Path, name: str, *, serves_profiles: bool = False) -> Dispatcher:
+def cell(tmp_path: Path, name: str) -> Dispatcher:
     """One deployment, a Cell, whose data service copies records and artifacts, as assembly builds it.
 
     Every Cell of ``tmp_path`` shares the data store under ``tmp_path / "data"``; each has its own repository and
-    records. With ``serves_profiles``, its runtime is a ``ProfileInference``.
+    records.
     """
     root = tmp_path / name
     runtime = ImportingComponent(root / "exported")
-    if serves_profiles:
-        runtime.inference = ProfileInference(runtime.restore_order)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = SQLiteScenarioStorage(root / "records", task_files=task_files, data=data)
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
+        TestPolicyRecipe(),
         UriBackend.factory(directory=root / "repository"),
+        live=live_objects(runtime, runtime.inference, data_store=data),
         local_artifact_dir=root / "staged",
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
-        data_store=data,
         coordination=memory_coordination(),
     )
     dispatcher.workers.add(
@@ -148,6 +140,9 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             assert len((await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]) == len(
                 listed
             )
+            # The data service copies the scenario's first artifact in the background: wait until it did.
+            first_artifact = next(row for row in listed if not row["source"].get("item"))
+            await library_item(other_cell, f"other/{first_artifact['artifact_id']}")
             assert copy_scenario_artifacts(second, "other") == 0
             missing = await client.get(f"{DATA}/other/{receipt['artifact_id']}")
             assert missing.status == 404
@@ -182,7 +177,7 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
 
 def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
     """The body that stores ``directory`` as the client's artifact item ``item_id``."""
-    content = {"source_uri": directory.as_uri(), "kind": "model", "component": None, "content_id": None}
+    content = {"source_uri": directory.as_uri(), "kind": "model", "component": None}
     return {"items": [{"id": item_id, "content": content, "metadata": {"kind": "artifact"}}]}
 
 
@@ -240,8 +235,8 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 (root,) = [row for row in listed if row["artifact_id"] == started]
                 assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
-                # The root is the only release: no default start was written first.
-                assert len(scenario.snapshot_queries.snapshot_rows(scenario.scenario_step)) == 1
+                # The root is the only snapshot: no default start was written first.
+                assert len(scenario.snapshot_queries.snapshot_rows(scenario.commit_number)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
                 again = await client.post(
@@ -255,56 +250,6 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
     finally:
         for dispatcher in cells.values():
             dispatcher.close()
-
-
-@pytest.mark.integration
-def test_an_artifact_takes_its_serving_profile_from_its_item_and_the_profile_never_changes(tmp_path: Path) -> None:
-    """RFC #1233: a client writes the profile when it creates an item, the runtime checks it when an artifact takes it,
-    and one scenario holds artifacts of several profiles."""
-    profiled, plain = cell(tmp_path, "profiled", serves_profiles=True), cell(tmp_path, "plain")
-
-    def profiled_item(item_id: str, profile: str) -> dict[str, Any]:
-        body = upload_item(item_id, weights(tmp_path / item_id, item_id.encode()))
-        body["items"][0]["metadata"]["serving_profile"] = profile
-        return body
-
-    async def run() -> None:
-        async with client_of(plain, tmp_path) as client:
-            for item_id, profile in (("qwen-base", "qwen@1"), ("muse-ft", "muse@1"), ("gpt-base", "gpt@1")):
-                assert (await client.post(DATA, json=profiled_item(item_id, profile))).status == 201
-            changed = await client.post(
-                f"{DATA}/metadata", json={"ids": ["qwen-base"], "patch": {"serving_profile": "x"}}
-            )
-            assert changed.status == 400 and "never changes" in await changed.text()
-            refused = await client.post(
-                "/reef/scenarios", json={"name": "plain", "owner": "acme", "artifact_id": "qwen-base"}
-            )
-            assert refused.status == 400 and "takes no serving profile" in await refused.text()
-            assert not plain.has_scenario("plain")
-        async with client_of(profiled, tmp_path) as client:
-            body = {"name": "math", "owner": "acme"}
-            unknown = await client.post("/reef/scenarios", json={**body, "artifact_id": "gpt-base"})
-            assert unknown.status == 400 and "unknown serving profile" in await unknown.text()
-            assert not profiled.has_scenario("math")
-            created = await client.post("/reef/scenarios", json={**body, "artifact_id": "qwen-base"})
-            assert created.status == 201, await created.text()
-            muse = await client.post("/reef/scenarios/math/artifacts", json={"item": "muse-ft"})
-            assert muse.status == 201, await muse.text()
-            direct = await client.post(
-                "/reef/scenarios/math/artifacts", json={"source": weights(tmp_path / "direct", b"d").as_uri()}
-            )
-            scenario = profiled.registry.require("math")
-            profiles = {
-                answer["artifact_id"]: serving_profile_of(scenario.resolve_artifact(answer["artifact_id"])[1])
-                for answer in [await created.json(), await muse.json(), await direct.json()]
-            }
-            assert sorted(profiles.values(), key=str) == [None, "muse@1", "qwen@1"]
-
-    try:
-        asyncio.run(run())
-    finally:
-        profiled.close()
-        plain.close()
 
 
 @pytest.mark.integration
@@ -344,24 +289,17 @@ def test_a_new_owner_gets_the_artifact_items_that_a_copy_made_for_the_default_ow
         item_id = f"s/{scenario.artifacts()[0]['artifact_id']}"
         store = dispatcher.data_store
         assert store is not None
-        wait_until(lambda: store.read("s", item_id) is not None)
+        wait_until(lambda: store.read("s", item_id) is not None, message="the data service did not copy the item")
         dispatcher.set_scenario_owner("s", "acme")
-        wait_until(lambda: store.read("acme", item_id) is not None)
+        wait_until(lambda: store.read("acme", item_id) is not None, message="the data service did not copy the item")
     finally:
         dispatcher.close()
 
 
-def wait_until(condition, seconds: float = 10.0) -> None:
-    deadline = time.monotonic() + seconds
-    while not condition():
-        if time.monotonic() >= deadline:
-            raise AssertionError("the data service did not copy the item")
-        time.sleep(0.05)
-
-
 def test_an_artifact_item_without_a_source_uri_is_listed_but_not_imported(tmp_path: Path) -> None:
-    # The in-memory repository names no URI, so its artifacts are in the library without a source_uri.
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    # The in-memory repository names no URI, so its artifacts are in the library without a source_uri. A recipe
+    # that only reads records serves no component, so the artifact has no kind.
+    dispatcher = dispatcher_for(tmp_path, Recipe())
 
     async def run() -> None:
         async with client_of(dispatcher, tmp_path) as client:

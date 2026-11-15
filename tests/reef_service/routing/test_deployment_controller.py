@@ -14,11 +14,13 @@ import socket
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
 
 import pytest
+import yaml
 from tests.reef_service.routing.routing_fakes import (
     RUNTIME_HASH,
     SELECTION_TOKEN,
@@ -36,20 +38,21 @@ from reef.service.deploy.routing.containers import (
     ContainerState,
 )
 from reef.service.deploy.routing.deployment_controller import (
+    IMAGE_BUILD_LOG,
     RoutingDeploymentController,
     RoutingDeploymentError,
-    RoutingReadinessTimeout,
+    RoutingReadinessTimeoutError,
 )
 from reef.service.deploy.routing.policy import PolicyState
 from reef.service.deploy.routing.reef_lifecycle_client import (
     LifecycleStatus,
     RoutingControlError,
-    RoutingControlTimeout,
+    RoutingControlTimeoutError,
 )
-from reef.service.deploy.routing.registry import DeploymentOwnership, RoutingOwnershipError
+from reef.service.deploy.routing.registry import DeploymentOwnership, DeploymentRegistry, RoutingOwnershipError
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
-from reef.service.deploy.service_config import ServiceConfig
-from reef.service.routing import RoutingAdapter
+from reef.service.deploy.service_config import ServiceSettings
+from reef.service.routing import RoutingAdapter, RoutingSnapshot
 from reef.service.routing_preview import PreviewSettings
 
 pytestmark = pytest.mark.unit
@@ -86,7 +89,7 @@ def test_no_opening_until_the_router_runtime_is_active_ready_and_consistent(
 ) -> None:
     for name, value in change.items():
         setattr(case.management, name, value)
-    with pytest.raises(RoutingReadinessTimeout):
+    with pytest.raises(RoutingReadinessTimeoutError):
         case.controller.wait_ready()
     assert "control:activate" not in case.actions and "control:open" not in case.actions
 
@@ -100,7 +103,7 @@ def test_a_router_running_another_document_is_fatal(case: ControllerCase) -> Non
 
 def test_a_failed_readiness_preview_is_retried_until_the_deadline(case: ControllerCase) -> None:
     case.control.open_error = RoutingControlError("REEF lifecycle returned HTTP 503", status_code=503)
-    with pytest.raises(RoutingReadinessTimeout):
+    with pytest.raises(RoutingReadinessTimeoutError):
         case.controller.wait_ready()
     assert case.actions.count("control:open") >= 1 and case.controller.state != "ready"
     case.control.open_error = None
@@ -257,13 +260,13 @@ def test_a_drain_read_that_outlasts_the_drain_phase_moves_on_to_the_forced_close
             timed_out.append(deadline)
             if not phase_left and deadline is not None:
                 time.sleep(max(0, deadline - time.monotonic()))
-            raise RoutingControlTimeout("REEF lifecycle request timed out")
+            raise RoutingControlTimeoutError("REEF lifecycle request timed out")
         return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
 
     monkeypatch.setattr(case.control, "request", request)
     if phase_left:
         # Three attempts failed while the drain had time: the child is not answering.
-        with pytest.raises(RoutingControlTimeout):
+        with pytest.raises(RoutingControlTimeoutError):
             case.controller.drain(recovery=False)
         assert case.actions.count("control:close") == 1
     else:
@@ -293,14 +296,14 @@ def test_a_recovery_status_read_cut_short_by_the_readiness_deadline_is_a_readine
             deadlines.append(deadline)
             if not phase_left and deadline is not None:
                 time.sleep(max(0, deadline - time.monotonic()))
-            raise RoutingControlTimeout("REEF lifecycle request timed out")
+            raise RoutingControlTimeoutError("REEF lifecycle request timed out")
         return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
 
     monkeypatch.setattr(case.control, "request", request)
     with pytest.raises(RoutingDeploymentError) as error:
         case.controller.wait_ready(initial=False)
     # Bounded recovery may try again after a readiness timeout, but not after the child stopped answering.
-    assert isinstance(error.value, RoutingReadinessTimeout) is not phase_left
+    assert isinstance(error.value, RoutingReadinessTimeoutError) is not phase_left
     assert deadlines == [case.controller.ready_deadline]
     assert "control:open" not in case.actions
 
@@ -476,7 +479,7 @@ def test_reconnect_readiness_keeps_the_configured_deadline(
         # Every open of the phase carries the configured deadline.
         assert open_deadlines == [started + 30, started + 30]
     else:
-        with pytest.raises(RoutingReadinessTimeout):
+        with pytest.raises(RoutingReadinessTimeoutError):
             case.controller.tick()
         assert open_deadlines == [started + 11]
     assert case.controller.restart_count == 0
@@ -526,7 +529,7 @@ def test_a_late_open_reply_is_drained_again_before_the_next_recovery_removes_sr(
             late_open[0] = False
             case.control.active_requests = 1
             clock.now = (deadline or clock.now) + 0.001
-            raise RoutingControlTimeout("REEF lifecycle replied after the caller's deadline")
+            raise RoutingControlTimeoutError("REEF lifecycle replied after the caller's deadline")
         return status
 
     def remove(ownership: DeploymentOwnership, stop_timeout_seconds: float) -> None:
@@ -572,7 +575,7 @@ def time_out_status_reads(case: ControllerCase, monkeypatch: pytest.MonkeyPatch,
         nonlocal remaining
         if action is None and remaining:
             remaining -= 1
-            raise RoutingControlTimeout("REEF lifecycle request timed out")
+            raise RoutingControlTimeoutError("REEF lifecycle request timed out")
         return original_request(action, cancel_active=cancel_active, publication=publication, deadline=deadline)
 
     monkeypatch.setattr(case.control, "request", request)
@@ -771,11 +774,14 @@ def test_partial_prepare_failure_keeps_lock_until_safe_cleanup(
     monkeypatch.setattr(controller_module, "generate", broken_renderer)
     actions: list[str] = []
     runtime = FakeRuntime(actions)
-    settings = ServiceConfig(
+    # A source that names its image: preparation reads it, and the render then fails.
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(json.dumps(routing_manifest("http://127.0.0.1:9")), encoding="utf-8")
+    settings = ServiceSettings(
         recipe="base",
         host="127.0.0.1",
         tokens=("unit-token",),
-        routing_manifest=str(tmp_path / "manifest.yaml"),
+        routing_manifest=str(manifest),
         routing_deployment=RoutingDeploymentSettings(deployment_id="partial"),
     )
     controller = RoutingDeploymentController(settings, runtime, registry_root=tmp_path / "registry")
@@ -789,6 +795,174 @@ def test_partial_prepare_failure_keeps_lock_until_safe_cleanup(
     assert controller.cleanup_complete
     controller.release_control_directory()
     assert controller.control_directory is None
+
+
+def preparing_controller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime: FakeRuntime, image: str | None
+) -> RoutingDeploymentController:
+    """An unprepared controller over ``runtime`` whose source manifest names ``image``, or omits it when None.
+
+    A previous generation of the deployment is on record, so ``prepare`` removes its resources.
+    """
+    import reef.service.deploy.routing.deployment_controller as controller_module
+
+    monkeypatch.setattr(controller_module.sys, "platform", "linux")
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(json.dumps(routing_manifest("http://127.0.0.1:9", image=image)), encoding="utf-8")
+    settings = ServiceSettings(
+        recipe="base",
+        host="127.0.0.1",
+        tokens=("unit-token",),
+        routing_manifest=str(manifest),
+        routing_deployment=RoutingDeploymentSettings(deployment_id="resolved", image_build_timeout_seconds=12.5),
+    )
+    with DeploymentRegistry("resolved", root=tmp_path / "registry") as registry:
+        registry.prepare("previous", tmp_path / "previous")
+    return RoutingDeploymentController(settings, runtime, registry_root=tmp_path / "registry")
+
+
+@pytest.mark.parametrize("image", [None, "sha256:" + "f" * 64, "registry.example/sr@sha256:" + "e" * 64])
+def test_prepare_resolves_an_omitted_image_once_under_ownership_and_freezes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, image: str | None
+) -> None:
+    actions: list[str] = []
+    runtime = FakeRuntime(actions)
+    controller = preparing_controller(tmp_path, monkeypatch, runtime, image)
+    try:
+        controller.prepare()
+        expected = runtime.resolved_image if image is None else image
+        if image is None:
+            # Resolved under the lock, before the previous generation's resources are removed and before any token
+            # exists: the build environment holds none.
+            assert actions[:3] == ["available", "resolve", "remove"]
+            assert runtime.resolutions == [(controller.registry.directory / IMAGE_BUILD_LOG, 12.5, {})]
+        else:
+            # A named image, a local ID included, is used as it is: nothing resolves or builds one.
+            assert "resolve" not in actions and runtime.resolutions == []
+        assert controller.semantic_router_image == expected
+        compose = yaml.safe_load((controller.directory / "compose.yaml").read_text(encoding="utf-8"))
+        assert compose["services"]["semantic-router"]["image"] == expected
+        generated = RoutingSnapshot.load(controller.directory / "manifest.yaml")
+        assert generated.semantic_router_image == expected
+        assert generated.version == controller.snapshot_version
+        control_data = json.loads((controller.directory / "control.json").read_text(encoding="utf-8"))
+        assert control_data["snapshot_version"] == controller.snapshot_version
+        events = (controller.directory / "lifecycle-events.jsonl").read_text(encoding="utf-8").splitlines()
+        prepared = json.loads(events[-1])
+        assert prepared["state"] == "prepared"
+        assert (prepared["semantic_router_image"], prepared["snapshot_version"]) == (expected, generated.version)
+        assert "unit-token" not in json.dumps(prepared)
+        # Validation stays offline: without a named image it cannot know the version, and says so.
+        assert controller.validate_candidate() == (None if image is None else controller.snapshot_version)
+    finally:
+        controller.registry.release()
+        controller.release_control_directory()
+
+
+@pytest.mark.parametrize("edit", ["named_image", "malformed_yaml", "invalid_manifest", "removed"])
+def test_a_source_edited_during_the_image_build_does_not_reach_the_generation_being_prepared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, edit: str
+) -> None:
+    class EditingRuntime(FakeRuntime):
+        """The public source manifest changes while the image builds."""
+
+        def resolve_image(self, build_log: Path, timeout_seconds: float, stop_requested: Callable[[], bool]) -> str:
+            source = Path(str(controller.service_settings.routing_manifest))
+            if edit == "named_image":
+                named = routing_manifest("http://127.0.0.1:9", image="registry.example/sr@sha256:" + "e" * 64)
+                source.write_text(json.dumps(named), encoding="utf-8")
+            elif edit == "malformed_yaml":
+                source.write_text("deployment: [", encoding="utf-8")
+            elif edit == "invalid_manifest":
+                source.write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+            else:
+                source.unlink()
+            return super().resolve_image(build_log, timeout_seconds, stop_requested)
+
+    actions: list[str] = []
+    runtime = EditingRuntime(actions)
+    controller = preparing_controller(tmp_path, monkeypatch, runtime, None)
+    startup = routing_manifest("http://127.0.0.1:9", image=None)
+    try:
+        controller.prepare()
+        built = runtime.resolved_image
+        assert actions[:3] == ["available", "resolve", "remove"]
+        # One generation: the controller, the Compose file, the generated manifest, the child's control file and the
+        # prepared event all name the built image and the version of the document read before the build began.
+        assert controller.semantic_router_image == built
+        compose = yaml.safe_load((controller.directory / "compose.yaml").read_text(encoding="utf-8"))
+        assert compose["services"]["semantic-router"]["image"] == built
+        generated = yaml.safe_load((controller.directory / "manifest.yaml").read_text(encoding="utf-8"))
+        assert generated["deployment"]["semantic_router_image"] == built
+        unchanged = {key: value for key, value in startup.items() if key != "deployment"}
+        assert {key: value for key, value in generated.items() if key != "deployment"} == unchanged
+        version = RoutingSnapshot.from_mapping(generated).version
+        assert version == controller.snapshot_version
+        control_data = json.loads((controller.directory / "control.json").read_text(encoding="utf-8"))
+        assert control_data["snapshot_version"] == version
+        events = (controller.directory / "lifecycle-events.jsonl").read_text(encoding="utf-8").splitlines()
+        prepared = json.loads(events[-1])
+        assert (prepared["state"], prepared["semantic_router_image"], prepared["snapshot_version"]) == (
+            "prepared",
+            built,
+            version,
+        )
+        # The private copy that the generation rendered is gone; the edit reaches it only as a later update.
+        assert not list(controller.registry.directory.glob("startup-*"))
+    finally:
+        controller.registry.release()
+        controller.release_control_directory()
+
+
+@pytest.mark.parametrize("moment", ["during", "after"])
+def test_a_stop_while_the_image_is_resolved_creates_and_removes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, moment: str
+) -> None:
+    class StoppedRuntime(FakeRuntime):
+        """Stop is requested while the image is resolved; a build that sees it stops."""
+
+        def resolve_image(self, build_log: Path, timeout_seconds: float, stop_requested: Callable[[], bool]) -> str:
+            image = super().resolve_image(build_log, timeout_seconds, stop_requested)
+            controller.request_stop()
+            if moment == "during" and stop_requested():
+                raise InterruptedError("the build was stopped")
+            return image
+
+    actions: list[str] = []
+    runtime = StoppedRuntime(actions)
+    controller = preparing_controller(tmp_path, monkeypatch, runtime, None)
+    controller.prepare()
+    assert controller.stop_requested and not controller.failed
+    assert actions == ["available", "resolve"]
+    assert controller.ownership is None and controller.control_directory is None
+    assert not (controller.registry.directory / "generations").exists()
+    controller.shutdown()
+    assert actions == ["available", "resolve"]
+    assert controller.registry.lock_descriptor is None
+
+
+def test_a_failed_image_build_fails_preparation_before_any_resource_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    actions: list[str] = []
+    runtime = FakeRuntime(actions)
+    runtime.resolve_error = ContainerCommandError("the Semantic Router image build failed with status 1; see a log")
+    controller = preparing_controller(tmp_path, monkeypatch, runtime, None)
+    with pytest.raises(ContainerCommandError, match="image build failed"):
+        controller.prepare()
+    assert controller.failed and controller.ownership is None
+    assert not (controller.registry.directory / "generations").exists()
+    controller.shutdown()
+    assert actions == ["available", "resolve"]
+    assert controller.registry.lock_descriptor is None
+
+
+def test_recovery_restarts_the_frozen_generation_without_resolving_an_image(case: ControllerCase) -> None:
+    opened(case)
+    case.controller.semantic_router_image = "sha256:" + "c" * 64
+    case.controller.recover("router-failure")
+    assert "start" in case.actions and "control:open" in case.actions
+    assert "resolve" not in case.actions and case.runtime.resolutions == []
 
 
 def test_readiness_failure_consumes_budget_even_without_opening(case: ControllerCase) -> None:
@@ -877,7 +1051,7 @@ def test_invalid_candidate_cannot_touch_an_existing_generation(
     def invalid_candidate() -> str:
         raise ValueError("invalid routing candidate")
 
-    case.controller.service_settings = ServiceConfig(
+    case.controller.service_settings = ServiceSettings(
         recipe="base",
         host="127.0.0.1",
         tokens=("test-token",),
@@ -909,7 +1083,7 @@ def test_the_open_budget_covers_each_provider_check_and_preview_with_the_childs_
     path.write_text(json.dumps(manifest), encoding="utf-8")
     policy = RoutingDeploymentSettings(deployment_id="unit-routing", selection_timeout_seconds=7)
     controller = RoutingDeploymentController(
-        ServiceConfig(recipe="base", routing_deployment=policy, inference_timeout_s=inference_timeout_s),
+        ServiceSettings(recipe="base", routing_deployment=policy, inference_timeout_s=inference_timeout_s),
         FakeRuntime([]),
         registry_root=tmp_path / "registry",
     )
@@ -924,4 +1098,4 @@ def test_the_open_budget_covers_each_provider_check_and_preview_with_the_childs_
 
 def test_routing_requires_a_deployment_identity(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="deployment_id"):
-        RoutingDeploymentController(ServiceConfig(recipe="base"), FakeRuntime([]), registry_root=tmp_path)
+        RoutingDeploymentController(ServiceSettings(recipe="base"), FakeRuntime([]), registry_root=tmp_path)

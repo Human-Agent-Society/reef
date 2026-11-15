@@ -44,7 +44,8 @@ def write_manifests(args: argparse.Namespace) -> None:
         manifest = {
             "schema_version": 2,
             "automatic_model": "auto",
-            "deployment": {"semantic_router_image": args.image},
+            # Without an image, reef serve builds the pinned one and freezes it for both policies.
+            "deployment": {} if args.image is None else {"semantic_router_image": args.image},
             "targets": targets,
             "scenarios": {
                 SCENARIO: {
@@ -144,20 +145,36 @@ async def completion(
     }
 
 
+def expected_versions(initial: bytes, updated: bytes, generation: bytes) -> tuple[str, str]:
+    """The snapshot versions of the initial and updated source manifests in the generation whose rendered
+    manifest is ``generation``, once that generation is checked to serve the initial one.
+
+    Rendering adds the generation's configuration digest to every manifest, and the image that the generation
+    runs only to a manifest that omits ``deployment.semantic_router_image``. A named image stays, so a source that
+    names another image than the generation runs has another version.
+
+    Raises:
+        RuntimeError: The generation does not serve the initial manifest, or the two manifests are the same policy.
+    """
+    rendered = yaml.safe_load(generation)
+    versions = []
+    for contents in (initial, updated):
+        policy = yaml.safe_load(contents)
+        policy["deployment"]["configuration_digest"] = rendered["deployment"]["configuration_digest"]
+        policy["deployment"].setdefault("semantic_router_image", rendered["deployment"]["semantic_router_image"])
+        versions.append(RoutingSnapshot.from_mapping(policy).version)
+    if versions[0] == versions[1] or RoutingSnapshot.from_mapping(rendered).version != versions[0]:
+        raise RuntimeError("expected a fresh owner serving this tutorial's initial manifest")
+    return versions[0], versions[1]
+
+
 async def check(args: argparse.Namespace, pidfd: int) -> dict[str, object]:
     directory = args.run_directory
     source = directory / "manifest.yaml"
     initial, updated = source.read_bytes(), (directory / "manifest.updated.yaml").read_bytes()
     events = owner_events(args.deployment_id, args.reef_pid)
-    # Rendering adds a configuration digest. Read it from this generation to calculate both exact snapshot IDs.
-    rendered = yaml.safe_load((events.parent / "manifest.yaml").read_bytes())
-    versions = []
-    for contents in (initial, updated):
-        policy = yaml.safe_load(contents)
-        policy["deployment"]["configuration_digest"] = rendered["deployment"]["configuration_digest"]
-        versions.append(RoutingSnapshot.from_mapping(policy).version)
-    if versions[0] == versions[1] or RoutingSnapshot.from_mapping(rendered).version != versions[0]:
-        raise RuntimeError("expected a fresh owner serving this tutorial's initial manifest")
+    # Both exact snapshot IDs follow from this generation's rendered manifest.
+    versions = expected_versions(initial, updated, (events.parent / "manifest.yaml").read_bytes())
     results = []
     updates = []
     headers = {"Authorization": "Bearer " + os.environ["REEF_TOKEN"], "x-reef-scenario": SCENARIO}
@@ -226,7 +243,7 @@ async def check(args: argparse.Namespace, pidfd: int) -> dict[str, object]:
     with closing(SQLiteScenarioStorage(directory / "records")) as storage, closing(storage.open(SCENARIO)) as scenario:
         for result in results:
             receipt = result["receipt"]
-            record = scenario.records.get(SCENARIO, receipt)
+            record = scenario.records.read(SCENARIO, receipt)
             if record is None:
                 raise RuntimeError(f"missing record for receipt {receipt}")
             route = record.payload["metadata"]["routing"]
@@ -255,7 +272,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     manifests = commands.add_parser("manifests", help="Generate two manifests in a fresh run directory.")
-    manifests.add_argument("--image", required=True)
+    manifests.add_argument("--image", help="A pinned router image; omitted, reef serve builds it.")
     manifests.add_argument("--output-directory", required=True, type=Path)
     for role in MODELS:
         manifests.add_argument(f"--{role}-port", type=int, required=True)

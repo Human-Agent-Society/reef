@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from reef.core.errors import InternalError
 from reef.service.routing import is_router_config_hash
 
 #: AF_UNIX paths are limited to 108 bytes on Linux, including the terminating NUL; keep a margin.
@@ -27,7 +28,7 @@ CONTROL_REPLY_LIMIT_BYTES = 1024 * 1024
 CHECK_REASON_LIMIT = 300
 
 
-class RoutingControlError(RuntimeError):
+class RoutingControlError(InternalError):
     """A bounded control request failed without exposing credentials or bodies.
 
     Values: ``retryable`` is a bool; ``status_code`` is None when no HTTP reply status exists, or the
@@ -45,7 +46,7 @@ class RoutingControlError(RuntimeError):
         self.status_code = status_code
 
 
-class RoutingControlTimeout(RoutingControlError):
+class RoutingControlTimeoutError(RoutingControlError):
     """No timely reply: every attempt timed out, or the reply came after the caller's deadline.
 
     It does not show that the child did nothing: a command may have been applied before its reply was lost.
@@ -250,7 +251,7 @@ class ReefLifecycleClient:
                 completes after it is rejected.
 
         Raises:
-            RoutingControlTimeout: No reply arrived in time.
+            RoutingControlTimeoutError: No reply arrived in time.
             RoutingControlError: The request failed, the child refused it, or its reply is not a lifecycle
                 status; that last error is not retryable.
         """
@@ -287,12 +288,12 @@ class ReefLifecycleClient:
                     )
             except TimeoutError as exc:
                 if attempt == CONTROL_ATTEMPTS or time.monotonic() >= phase_end:
-                    raise RoutingControlTimeout("REEF lifecycle request timed out") from exc
+                    raise RoutingControlTimeoutError("REEF lifecycle request timed out") from exc
             except (OSError, ValueError, http.client.HTTPException) as exc:
                 raise RoutingControlError("REEF lifecycle request failed") from exc
             else:
                 if time.monotonic() > phase_end:
-                    raise RoutingControlTimeout("REEF lifecycle replied after the caller's deadline")
+                    raise RoutingControlTimeoutError("REEF lifecycle replied after the caller's deadline")
                 return lifecycle_status(reply)
             attempt += 1
             attempt_end = min(time.monotonic() + self.timeout_seconds, phase_end)
@@ -308,7 +309,7 @@ class ReefLifecycleClient:
         its own check then too.
 
         Raises:
-            RoutingControlTimeout: No reply arrived before ``deadline``.
+            RoutingControlTimeoutError: No reply arrived before ``deadline``.
             RoutingControlError: The child refused the candidate or a provider check failed, with the child's
                 status and at most ``CHECK_REASON_LIMIT`` characters of its reason, or the transport failed.
                 Not retryable: the owner rejects this update.
@@ -328,12 +329,12 @@ class ReefLifecycleClient:
                 "POST", CANDIDATE_CHECK_PATH, body, deadline, refusal_bytes=CHECK_REASON_LIMIT * 4
             )
         except TimeoutError as exc:
-            raise RoutingControlTimeout("REEF candidate check timed out", retryable=False) from exc
+            raise RoutingControlTimeoutError("REEF candidate check timed out", retryable=False) from exc
         except (OSError, ValueError, http.client.HTTPException) as exc:
             raise RoutingControlError("REEF candidate check failed", retryable=False) from exc
         # A reply after the deadline does not count: the child gave up its check then.
         if time.monotonic() > deadline:
-            raise RoutingControlTimeout("REEF candidate check replied after its deadline", retryable=False)
+            raise RoutingControlTimeoutError("REEF candidate check replied after its deadline", retryable=False)
         if status != 200:
             reason = reply.decode("utf-8", "replace")[:CHECK_REASON_LIMIT]
             raise RoutingControlError(
@@ -344,7 +345,7 @@ class ReefLifecycleClient:
         except (ValueError, AttributeError) as exc:
             raise RoutingControlError("REEF candidate check reply is not an object", retryable=False) from exc
         if time.monotonic() > deadline:
-            raise RoutingControlTimeout("REEF candidate check replied after its deadline", retryable=False)
+            raise RoutingControlTimeoutError("REEF candidate check replied after its deadline", retryable=False)
         if confirmed != snapshot_version:
             raise RoutingControlError("REEF candidate check confirmed another snapshot", retryable=False)
 

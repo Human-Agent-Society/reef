@@ -70,11 +70,32 @@
     "closer",
     "e",
     "f",
-    "sample:s.c:0",
-    "sample:s.e:0"
+    "sample:s.b:0",
+    "sample:s.c:0"
    ],
    "data_id": "s:data:1",
    "items": [
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "b"
+     ],
+     "training": {
+      "loss_mask": [
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1
+      ],
+      "artifact_id": "e:2",
+      "tokens": [
+       1,
+       2
+      ]
+     }
+    },
     {
      "group": null,
      "recipe": {},
@@ -95,13 +116,44 @@
        2
       ]
      }
-    },
+    }
+   ],
+   "request": null
+  },
+  {
+   "consumed": [
+    "sample:s.e:0",
+    "sample:s.f:0"
+   ],
+   "data_id": "s:data:2",
+   "items": [
     {
      "group": null,
      "recipe": {},
      "reward": 1.0,
      "sources": [
       "e"
+     ],
+     "training": {
+      "loss_mask": [
+       1
+      ],
+      "rollout_log_probs": [
+       -0.1
+      ],
+      "artifact_id": "e:3",
+      "tokens": [
+       1,
+       2
+      ]
+     }
+    },
+    {
+     "group": null,
+     "recipe": {},
+     "reward": 1.0,
+     "sources": [
+      "f"
      ],
      "training": {
       "loss_mask": [

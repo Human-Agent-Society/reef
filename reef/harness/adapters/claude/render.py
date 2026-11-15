@@ -27,6 +27,8 @@ from reef.harness.tree.render import RenderError
 
 RULES = "plugin/rules.md"
 HOOKS = "plugin/hooks/hooks.json"
+#: Claude Code's own state file, which holds the MCP servers of a task.
+STATE = "claude/.claude.json"
 #: The output style that holds the rules: Claude Code adds it to its own system prompt, which it keeps.
 OUTPUT_STYLE = "plugin/output-styles/reef.md"
 OUTPUT_STYLE_FRONTMATTER = (
@@ -97,6 +99,8 @@ class ClaudeAdapterRenderer(AdapterRenderer):
         plugin = {**files, "plugin/.claude-plugin/plugin.json": '{"name": "reef"}\n'}
         if not json.loads(plugin[HOOKS]):
             plugin.pop(HOOKS)
+        if not json.loads(plugin[STATE]):
+            plugin.pop(STATE)
         if RULES in plugin:
             plugin[OUTPUT_STYLE] = OUTPUT_STYLE_FRONTMATTER + plugin[RULES]
         return plugin

@@ -13,7 +13,7 @@ rules, and skills retain Harbor's native interfaces in either case.
 
 It writes one trial file under ``REEF_TERMINUS_SESSION_DIR`` holding the
 verifier's rewards and the ATIF steps, which the adapter's
-``reef_terminus.trajectory.read_trials`` reader turns into the run's trajectory. Harbor's
+``reef_terminus.trajectory.TrialReader`` reader turns into the run's trajectory. Harbor's
 own trial tree lands in ``REEF_TERMINUS_TRIALS_DIR``, keeping the session
 directory the reader walks to files Reef wrote.
 """
@@ -154,7 +154,7 @@ def own_trial(trials_dir: Path, names_before_run: Collection[str], uri: str | No
 
 
 def trial_record(task: str, rewards: Any, trial_dir: Path | None, error: str = "") -> dict[str, Any]:
-    """One trial as the ``reef_terminus.trajectory.read_trials`` reader expects it, its steps read from ``trial_dir`` alone.
+    """One trial as the ``reef_terminus.trajectory.TrialReader`` reader expects it, its steps read from ``trial_dir`` alone.
 
     ``error`` is recorded rather than dropped: a run whose container never
     built scores nothing, and a bare zero would read as a candidate the agent

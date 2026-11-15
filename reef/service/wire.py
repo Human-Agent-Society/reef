@@ -19,9 +19,7 @@ from reef.core.records_types import RequestType, parse_references
 SCENARIO_HEADER = "x-reef-scenario"
 #: Harness-stamped side-channel context. The
 #: service carries each pair through to the INFERENCE record so a processor
-#: can correlate on it, and reads one value itself: ``release``, the snapshot
-#: a client runs, which names the record's artifact where the client pulls
-#: the snapshot (``recorded_ref``). Header-free correlation stays the
+#: can correlate on it, and reads no value itself. Header-free correlation stays the
 #: fallback; a tag is what a harness offers when its agent does not resend
 #: the transcript it is continuing.
 TAG_HEADER_PREFIX = "x-reef-tag-"
@@ -158,7 +156,7 @@ def with_request_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Map
 
     Only inference: a tag is context about a served exchange, and the
     processors that read one correlate on the inference side. This stores
-    every pair as sent; only :func:`recorded_ref` reads a value.
+    every pair as sent; the service reads no value.
     """
     if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
         return payload

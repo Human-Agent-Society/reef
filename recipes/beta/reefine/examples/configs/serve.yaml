@@ -21,14 +21,18 @@ recipe:
       # token), or none, which runs the agent unisolated (trusted clients only).
       agent:
         timeout_s: 1800
-        trial_timeout_s: 300
-      # Images, embeddings, speech and decisions: Reef relays the harness's calls to this gateway with its key,
-      # unrecorded. The key is REEF_MULTIMODAL_API_KEY or --recipe.config.evolution.multimodal.api_key, else the
-      # upstream's when the upstream is this gateway; without one those routes answer 501. For another gateway:
-      # preset: openai-compatible and its url.
-      multimodal:
-        preset: openrouter
-        api_key: ${REEF_MULTIMODAL_API_KEY}
+      # The method's own settings. trial_timeout_s bounds each trial of the agent.
+      # multimodal is the gateway for images, embeddings, speech and decisions: the agent's trials reach it with
+      # its key, unrecorded. The key is REEF_MULTIMODAL_API_KEY or
+      # --recipe.config.evolution.method.config.multimodal.api_key, else the upstream's when the upstream is this
+      # gateway; without one those routes answer 501. For another gateway: preset: openai-compatible and its url.
+      method:
+        module: recipes.beta.reefine:ReefineMethod
+        config:
+          trial_timeout_s: 300
+          multimodal:
+            preset: openrouter
+            api_key: ${REEF_MULTIMODAL_API_KEY}
       # Each step's workspace (its tree, material, calls and output) and the history of every candidate, one
       # directory per scenario. It stays outside the
       # checkout: with agent.sandbox none the agent works in a step's directory, and pi reads every AGENTS.md

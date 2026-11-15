@@ -8,8 +8,8 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
@@ -19,7 +19,6 @@ from reef.dispatcher import Dispatcher
 from reef.inference.interfaces import InferenceHandler
 from reef.observability import ExperimentLogger, ExperimentTracker
 from reef.service.app import create_app
-from reef.storage.job_data import read_job_data
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.component import SavedCheckpoint, TrainingJob
@@ -67,11 +66,13 @@ class BlockingLostAckBackend(InMemoryRepositoryBackend):
     release = Event()
     failed = False
 
-    def publish(self, artifact, *, expected_parent, advance_head=True):
+    def publish_stored(self, files, *, metadata, expected_parent, advance_head=True):
         type(self).started.set()
         if not type(self).release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release blocked publication")
-        ref = super().publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
+        ref = super().publish_stored(
+            files, metadata=metadata, expected_parent=expected_parent, advance_head=advance_head
+        )
         if not type(self).failed:
             type(self).failed = True
             raise ArtifactPublicationError("lost publication acknowledgement")
@@ -140,12 +141,13 @@ def start_dispatcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     opened = []
 
-    def start(backend_type=None, *, experiment_tracker=None, max_staleness=0, **component_options):
+    def start(backend_type=None, *, experiment_tracker=None, max_artifact_lag=0, **component_options):
         component = DurableComponent(tmp_path / "checkpoints", **component_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(directory=tmp_path / "repository")
         dispatcher = Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(component, component.inference), max_staleness=max_staleness),
+            TestPolicyRecipe(max_artifact_lag=max_artifact_lag),
             factory,
+            live=live_objects(component, component.inference),
             local_artifact_dir=tmp_path / "staged",
             experiment_tracker=experiment_tracker,
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
@@ -191,7 +193,7 @@ def _wait_for_jobs(dispatcher: Dispatcher, finished_jobs: int) -> None:
     deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
     while time.monotonic() < deadline:
         status = dispatcher.build_training_status()["scenarios"]["math"]
-        if status["finished_jobs"] == finished_jobs and status["training_job"] is None:
+        if status["finished_jobs"] == finished_jobs and not status["training_jobs"]:
             return
         time.sleep(_ASYNC_WAIT_POLL_S)
     pytest.fail(f"scenario did not finish {finished_jobs} jobs: {dispatcher.build_training_status()}")
@@ -234,7 +236,7 @@ def test_report_returns_and_inference_resolves_while_training_job_is_blocked(sta
     component.release.set()
     _wait_for_jobs(dispatcher, 1)
     assert len(component.calls) == 1
-    assert scenario.scenario_step == 3
+    assert scenario.commit_number == 3
 
 
 @pytest.mark.unit
@@ -246,8 +248,9 @@ def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher
     submissions: list[str] = []
 
     def lose_first_acknowledgement(self: JobQueueComponent, job: TrainingJob) -> None:
-        submissions.append(job.job_id)
+        # A submission that waits for the job's check raises before this line.
         queued_submit(self, job)
+        submissions.append(job.job_id)
         if len(submissions) == 1:
             raise ConnectionError("lost submission acknowledgement")
 
@@ -280,7 +283,7 @@ def test_backend_failure_reaches_reef_status(start_dispatcher, monkeypatch) -> N
     # The training service runs the job on the component: the component's failure ends the job, and the job's
     # end reaches the status.
     _wait_for_jobs(dispatcher, 1)
-    status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
+    status = dispatcher.build_training_status()["scenarios"]["math"]["last_training_commit"]
     assert status["metrics"]["training_job"]["event"] == "failed"
     assert status["metrics"]["training_job"]["error"] == "RuntimeError: backend submission failed"
 
@@ -328,7 +331,7 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
 
 
 @pytest.mark.unit
-def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None:
+def test_two_jobs_form_one_deterministic_snapshot_chain(start_dispatcher) -> None:
     component, dispatcher = start_dispatcher()
     _submit_pair(dispatcher)
     _wait_for_jobs(dispatcher, 1)
@@ -337,7 +340,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     _submit_pair(dispatcher, "2")
     _wait_for_jobs(dispatcher, 2)
 
-    assert [source_record_id(read_job_data(job.data_dir).samples[0]) for job in component.calls] == [
+    assert [source_record_id(job.read_data().samples[0]) for job in component.calls] == [
         "inference-1",
         "inference-2",
     ]
@@ -355,7 +358,7 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     _, dispatcher = start_dispatcher(complete_metrics=metrics)
     dispatcher.get_or_create_scenario("math")
 
-    assert dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
+    assert dispatcher.build_training_status()["scenarios"]["math"]["last_training_commit"] is None
 
     _submit_pair(dispatcher)
     _wait_for_jobs(dispatcher, 1)
@@ -371,12 +374,12 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     [checkpoint] = [record for record in scenario.store.history() if record.checkpoint]
     assert checkpoint.activated and scenario.current_snapshot() == checkpoint.snapshot
     # The last commit is the job's end.
-    status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
-    assert status["step"] == 3
+    status = dispatcher.build_training_status()["scenarios"]["math"]["last_training_commit"]
+    assert status["commit_number"] == 3
     assert isinstance(status["recorded_at"], float)
     assert status["metrics"]["training_job"]["event"] == "finished"
     status["metrics"]["training_job"]["event"] = "failed"
-    refreshed = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
+    refreshed = dispatcher.build_training_status()["scenarios"]["math"]["last_training_commit"]
     assert refreshed["metrics"]["training_job"]["event"] == "finished"
 
 
@@ -442,7 +445,7 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
     # The root snapshot answers the second pair while the first job trains, so that pair trains one artifact behind.
-    _, dispatcher = start_dispatcher(experiment_tracker=tracker, max_staleness=1)
+    _, dispatcher = start_dispatcher(experiment_tracker=tracker, max_artifact_lag=1)
     # The trainer's cycle executes while it submits the first job: hold the submission.
     started, release = _hold_job_submission(monkeypatch)
     _submit_pair(dispatcher)
@@ -451,10 +454,10 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     samples_release = Event()
     produce_samples = Trainer.produce_samples
 
-    def held_samples(self: Trainer) -> bool:
+    def held_samples(self: Trainer, selection=None, served=None) -> bool:
         if not samples_release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release the held samples service")
-        return produce_samples(self)
+        return produce_samples(self, selection, served)
 
     monkeypatch.setattr(Trainer, "produce_samples", held_samples)
     _submit_pair(dispatcher, "2")

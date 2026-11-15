@@ -7,8 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import policy_trajectory, recorded_trajectory
 from tests.support.samples import made_task
+from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
@@ -21,8 +21,8 @@ from reef.core.trajectories import (
 )
 from reef.inference.interfaces import InferenceStream
 from reef.service.streaming import stream_record
-from reef.train.algos.schedule import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups
 
 
@@ -217,7 +217,7 @@ def test_non_atif_payloads_are_not_accepted_as_trajectories():
 
 
 def test_request_only_batch_preserves_manual_training_contract():
-    request = TrainingRequest("Improve the harness", "session", "release", id="request")
+    request = TrainingRequest("Improve the harness", "session", "artifact-1", id="request")
     batch = JobData("manual", request=request)
     assert trajectories(batch) == ()
     assert replace(batch, data_id="next").request is request

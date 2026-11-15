@@ -45,10 +45,10 @@ if [ "$MODE" != native ]; then
     exit 0
 fi
 
-# The serve form: name the scenario and write the binding, then one resident
-# process pulls the served tree and follows the head while run.py sends the
-# tasks to it as turns. Each turn returns its receipts, which run.py reports
-# its score against.
+# The serve form: name the scenario, wait for its model, and write the
+# binding, then one resident process pulls the served tree and follows the
+# head while run.py sends the tasks to it as turns. Each turn returns its
+# receipts, which run.py reports its score against.
 python3 run.py pull
 reef-native serve --tree work/tree --scenario harness-evolve-demo --follow head --poll-interval 5 \
     > work/serve.log 2>&1 &

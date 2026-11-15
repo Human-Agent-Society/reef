@@ -16,9 +16,8 @@
 
 from recipes.sdft.processor import SDFTSamples
 from recipes.sdft.recipe import SDFTRecipe
-from reef.train.algos.registry import register_loss_family_ref, register_objective_ref
+from reef.train.slime_backend.objectives import register_objective
 
-register_objective_ref("sdft", "recipes.sdft.slime:SdftObjective")
-register_loss_family_ref("sdft", "recipes.sdft.slime:SdftAlgorithm")
+register_objective("sdft", "recipes.sdft.slime:SdftObjective")
 
 __all__ = ["SDFTRecipe", "SDFTSamples"]

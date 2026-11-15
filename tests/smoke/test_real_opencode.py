@@ -62,7 +62,8 @@ def test_real_opencode_takes_every_part_of_a_tree_in_an_run_and_over_a_persons_o
     try:
         if form == "run":
             files = render_tree(HarnessTree(PARTS), descriptor, binding.config_overlays(descriptor))
-            command = replace(descriptor, argv=(*descriptor.argv[:-1], "--command", "ship", "{task}"))
+            # The option goes before the "--" that ends the options; the message follows it.
+            command = replace(descriptor, argv=(*descriptor.argv[:-2], "--command", "ship", *descriptor.argv[-2:]))
             result = run_task(command, files, "now", binary=REAL_OPENCODE, timeout=120.0)
             assert result.exit_code == 0, (result.stdout, result.stderr)
         else:

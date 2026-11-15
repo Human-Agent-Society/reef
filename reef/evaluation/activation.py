@@ -10,8 +10,8 @@ An ``activation`` section has this shape::
 - ``always`` (``AlwaysActivate``) activates every new artifact, except a harness tree that changes a reviewed
   kind: a kind in ``review_kinds``. A harness recipe adds the parts its adapter always reviews. It is the
   default.
-- ``never`` (``NeverActivate``) activates none; a person activates each one
-  (``POST /reef/scenarios/{scenario}/activate``).
+- ``never`` (``NeverActivate``) activates none; a person sets what the scenario serves
+  (``served`` of ``POST /reef/scenarios/{scenario}/update``).
 - ``evaluated`` (``EvaluatedActivation``) activates an artifact once an evaluation of it finishes with a
   ``mean_score`` of at least ``min_mean_score``. The scenario's ``artifact_evaluation`` settings evaluate each
   new artifact.
@@ -126,18 +126,7 @@ def activation_reference(value: object) -> PluginReference:
     The rule is built once from its config, so a bad config fails when the deployment loads. Raise
     ``PluginConfigError`` for any other value, and for a config that the rule refuses.
     """
-    if isinstance(value, Mapping) and isinstance(value.get("module"), str) and value["module"] in BUILT_IN_RULES:
-        unknown = sorted(str(key) for key in value if key not in ("module", "config"))
-        if unknown:
-            raise PluginConfigError(f"activation has unknown key(s) {', '.join(unknown)}; expected module and config")
-        config = value.get("config", {})
-        if not isinstance(config, Mapping):
-            raise PluginConfigError("activation.config must be a mapping")
-        reference = PluginReference(BUILT_IN_RULES[value["module"]], dict(config))
-    elif isinstance(value, str) and value in BUILT_IN_RULES:
-        reference = PluginReference(BUILT_IN_RULES[value], {})
-    else:
-        reference = ActivationRule.reference(value, setting="activation")
+    reference = ActivationRule.reference(value, setting="activation", builtins=BUILT_IN_RULES)
     build_activation_rule(reference)
     return reference
 

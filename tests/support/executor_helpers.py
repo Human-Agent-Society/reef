@@ -1,6 +1,6 @@
 """In-memory actor doubles for tests of distributed coordinators, not a backend."""
 
-from reef.execution.executor import Executor, ExecutorConfig, ExecutorFuture, resolve
+from reef.execution.executor import Executor, ExecutorFuture, ExecutorLaunch, resolve
 from reef.execution.executor.uniproc import UniProcExecutor
 
 
@@ -19,7 +19,7 @@ class AttachedTestGroup(Executor):
 
     @classmethod
     def from_workers(cls, workers, *, owned=False):
-        group = cls(ExecutorConfig(backend=cls))
+        group = cls(ExecutorLaunch(backend=cls))
         group.ranks = [UniProcExecutor.from_workers([worker], owned=owned) for worker in workers]
         return group
 

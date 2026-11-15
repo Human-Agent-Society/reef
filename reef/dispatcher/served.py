@@ -16,7 +16,7 @@ from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination
-from reef.storage.served_models import AUTOMATIC_RETRIES
+from reef.storage.served_models import AUTOMATIC_RETRIES, REDEPLOY, ControlLeaseConflictError
 from reef.storage.work_queue import JsonValue, WorkItem, clock
 
 logger = logging.getLogger(__name__)
@@ -156,9 +156,9 @@ class ServedModelsPublisher(ServiceWorker):
 
     def desired(self, scenario: str) -> dict[str, JsonValue]:
         """The selected snapshot, the route names and the serving config of the served component, without opening
-        or calling an engine."""
+        or calling an engine; empty for a scenario that serves nothing (``Scenario.serves`` is false)."""
         current = self.registry.get_loaded(scenario)
-        if current is None or current.runtime is None or not current.runtime.serves_requests:
+        if current is None or current.runtime is None or not current.runtime.serves_requests or not current.serves:
             return {}
         aliases: list[JsonValue] = [
             status["active"] for status in current.artifact_status().values() if status["active"] is not None
@@ -184,7 +184,9 @@ class ServedModelsPublisher(ServiceWorker):
             scenario, weights, control_lease_number=self.lease_number
         )
 
-    def publish(self, current: Scenario, *, now: float | None = None, retry_failed: bool = False) -> None:
+    def publish(
+        self, current: Scenario, *, now: float | None = None, retry_failed: bool = False, redeploy: bool = False
+    ) -> None:
         """Queue the desired payload of ``current`` at ``now`` while this instance holds the lease.
 
         Let ``failed`` be the scenario's current request when it failed with the desired payload, ``n`` its
@@ -197,13 +199,17 @@ class ServedModelsPublisher(ServiceWorker):
         - otherwise ``failed`` stays the current request.
 
         Without ``failed``, a desired payload that equals the current request's changes nothing, and another
-        payload replaces it with a new request.
+        payload replaces it with a new request. With ``redeploy`` (a person asks to deploy again, RFC #1299), a new
+        request with the desired payload and a new ``REDEPLOY`` number replaces the current one in any state. A
+        scenario that serves nothing queues no request.
         """
         moment = clock(now)
         with self.lock:
             if not self.held:
                 return
             desired = self.desired(current.name)
+            if redeploy and desired:
+                desired[REDEPLOY] = time.time_ns()
             retries = 0
             if not retry_failed:
                 failed = self.coordination.served_models.current_request(current.name)
@@ -229,16 +235,20 @@ class ServedModelsPublisher(ServiceWorker):
                 )
 
     def withdraw(self, scenario: str, *, now: float | None = None) -> None:
-        """Withdraw the scenario and its pending startup before archiving its files."""
+        """Withdraw the scenario and its pending startup before archiving its files. Raise
+        ``ControlLeaseConflictError`` when this instance does not hold the control lease: the holder withdraws it."""
         with self.lock:
-            if self.held:
-                self.coordination.served_models.request(
-                    scenario,
-                    {},
-                    control_lease_number=self.lease_number,
-                    stop_delay_seconds=self.stop_delay_seconds,
-                    now=now,
+            if not self.held:
+                raise ControlLeaseConflictError(
+                    f"this instance does not hold the control lease to withdraw {scenario!r}"
                 )
+            self.coordination.served_models.request(
+                scenario,
+                {},
+                control_lease_number=self.lease_number,
+                stop_delay_seconds=self.stop_delay_seconds,
+                now=now,
+            )
 
     def run_once(self, *, now: float | None = None) -> bool:
         """Renew the lease and publish every loaded scenario, which retries the failed requests that are due;

@@ -17,21 +17,23 @@ Subclass :class:`TrajectoryReader`, set the class attribute ``format``, implemen
         def __call__(self, path):
             ...
 
-An external reader is named as a dotted ``"module:callable"`` reference that
-:func:`reader_for` resolves; a plain callable from a dotted reference is
-wrapped by :class:`_CallableTrajectoryReader`.
+A reader that Reef does not bundle is named by the reference
+``"package.module:ClassName"`` of its :class:`TrajectoryReader` subclass, which
+:func:`reader_for` resolves.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from reef.core.errors import ReefError
+from reef.core.plugins import PluginConfigError, resolve_plugin_class
 
 
 class TrajectoryError(ReefError):
@@ -56,64 +58,47 @@ class TrajectoryReader(ABC):
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         """Read the trajectory directory and return ordered event objects."""
 
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        """The run in the trajectory directory as ATIF documents, in order (RFC #1290).
 
-class _CallableTrajectoryReader(TrajectoryReader):
-    """Adapter wrapping a plain callable as a :class:`TrajectoryReader` instance.
-
-    Used when a dotted ``"module:callable"`` reference resolves to a function
-    rather than a ``TrajectoryReader`` subclass instance.
-    """
-
-    format = ""
-
-    def __init__(self, fn: Callable[[Path], tuple[dict[str, Any], ...]]) -> None:
-        self._fn = fn
-
-    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
-        return self._fn(path)
+        A run gives one document for each session or conversation, in the order that they started. A compaction
+        can start a new document. A format without a converter gives no documents, and so does a directory that
+        holds no session.
+        """
+        return ()
 
 
-_readers: dict[str, TrajectoryReader] = {}
-"""Bundled trajectory readers registered at import time by
-:func:`register_trajectory_reader`.
-
-Read by :func:`reader_for`; an external reader is a dotted reference instead.
+TRAJECTORY_READERS: dict[str, type[TrajectoryReader]] = {}
+"""The bundled trajectory readers by format name, filled at import time by
+:func:`register_trajectory_reader` and read by :func:`reader_for`.
 """
 
 
 def register_trajectory_reader(cls: type[TrajectoryReader]) -> type[TrajectoryReader]:
-    """Class decorator: instantiate and register a bundled trajectory reader."""
-    instance = cls()
-    fmt = instance.format
-    if fmt in _readers:
-        raise ValueError(f"trajectory reader {fmt!r} is already registered")
-    _readers[fmt] = instance
+    """Class decorator: register a bundled trajectory reader under its ``format``."""
+    if cls.format in TRAJECTORY_READERS:
+        raise ValueError(f"trajectory reader {cls.format!r} is already registered")
+    TRAJECTORY_READERS[cls.format] = cls
     return cls
 
 
 def reader_for(format_: str) -> TrajectoryReader:
-    """Resolve a registered reader name or a dotted ``"module:callable"`` reference."""
-    reader = _readers.get(format_)
-    if reader is not None:
-        return reader
-    if ":" in format_:
-        return _resolve_dotted(format_)
-    available = ", ".join(sorted(_readers))
-    raise TrajectoryError(f"unknown trajectory format {format_!r}; known: {available}")
+    """The reader of the trajectory format ``format_``, made with no arguments.
 
-
-def _resolve_dotted(reference: str) -> TrajectoryReader:
-    """Import a dotted reader reference, wrapping plain callables."""
-    module_name, separator, attribute = reference.partition(":")
-    if not separator or not module_name or not attribute:
-        available = ", ".join(sorted(_readers))
-        raise TrajectoryError(f"unknown trajectory format {reference!r}; known: {available}")
-    candidate = getattr(importlib.import_module(module_name), attribute)
-    if isinstance(candidate, TrajectoryReader):
-        return candidate
-    if callable(candidate):
-        return _CallableTrajectoryReader(candidate)
-    raise TrajectoryError(f"trajectory reader {reference!r} is not callable")
+    ``format_`` is a registered format name, or the ``package.module:ClassName`` reference of a
+    ``TrajectoryReader`` subclass. Raise ``TrajectoryError`` for any other value: a task run reports it as a
+    trajectory failure.
+    """
+    try:
+        reader_class = resolve_plugin_class(
+            format_,
+            builtins=TRAJECTORY_READERS,
+            base=TrajectoryReader,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+            setting="trajectory format",
+        )
+    except PluginConfigError as exc:
+        raise TrajectoryError(str(exc)) from exc
+    return reader_class()
 
 
 def _read_jsonl_tree(path: Path, label: str) -> tuple[dict[str, Any], ...]:
@@ -122,22 +107,169 @@ def _read_jsonl_tree(path: Path, label: str) -> tuple[dict[str, Any], ...]:
     Each file tolerates one torn final line, the residue a crash mid-write
     leaves behind; a corrupt line anywhere else is an error naming ``label``.
     """
+    return tuple(event for file in sorted(Path(path).rglob("*.jsonl")) for event in read_jsonl_file(file, label))
+
+
+def read_jsonl_file(file: Path, label: str) -> list[dict[str, Any]]:
+    """One event object per line of ``file``, with the tolerance of ``_read_jsonl_tree``."""
     events: list[dict[str, Any]] = []
+    lines = file.read_text(encoding="utf-8").removesuffix("\n").split("\n")
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if index == len(lines) - 1:
+                break  # torn tail from a crash mid-write; the event never landed
+            raise TrajectoryError(f"{label} {file} has a corrupt event at line {index + 1}") from exc
+        if not isinstance(event, dict):
+            raise TrajectoryError(f"{label} {file} line {index + 1} is not an event object")
+        events.append(event)
+    return events
+
+
+def harbor_atif(path: Path, layout: str, convert: Callable[[Path], Any]) -> tuple[dict[str, Any], ...]:
+    """The ATIF document of Harbor's converter for the sessions in ``path``, or none.
+
+    ``layout`` is where Harbor's agent keeps the sessions under its log directory, and ``convert`` takes that
+    directory and gives a Harbor ``Trajectory`` or ``None``. Harbor's converters read the agent's main session.
+    """
+    if not Path(path).is_dir():
+        return ()
+    with tempfile.TemporaryDirectory(prefix="reef-atif-") as temporary:
+        logs_dir = Path(temporary)
+        shutil.copytree(path, logs_dir / layout, symlinks=True)
+        trajectory = convert(logs_dir)
+    return () if trajectory is None else (trajectory.to_json_dict(),)
+
+
+def chat_document(session_id: str, agent: str, model: Any, messages: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """An ATIF document of OpenAI chat ``messages``, with the steps that Reef makes of recorded calls."""
+    from reef.core.atif_payloads import OPENAI_CHAT, folded_steps, message_entry
+
+    return {
+        "schema_version": "ATIF-v1.7",
+        "session_id": session_id,
+        "agent": {"name": agent, "version": "unknown", **({"model_name": model} if isinstance(model, str) else {})},
+        "steps": folded_steps([message_entry(message, OPENAI_CHAT, copied=False) for message in messages]),
+    }
+
+
+#: What one event of a session log is to the model: its model and system prompt (``header``), a chat message
+#: (``message``), or the summary that replaces the earlier steps (``compacted``).
+LogItem = tuple[str, Any]
+
+
+def log_documents(
+    path: Path, agent: str, translate: Callable[[Mapping[str, Any]], Iterable[LogItem]]
+) -> tuple[dict[str, Any], ...]:
+    """The ATIF documents of a log of ``{type, seq, time, data}`` events, as native and dsh write it.
+
+    Each ``*.jsonl`` under ``path`` is one session, in path order, and a compaction starts a new document. The new
+    document starts with the system prompt and the summary. A segment without a user or agent message gives none.
+    """
+    documents: list[dict[str, Any]] = []
     for file in sorted(Path(path).rglob("*.jsonl")):
-        lines = file.read_text(encoding="utf-8").removesuffix("\n").split("\n")
-        for index, line in enumerate(lines):
-            if not line.strip():
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError as exc:
-                if index == len(lines) - 1:
-                    break  # torn tail from a crash mid-write; the event never landed
-                raise TrajectoryError(f"{label} {file} has a corrupt event at line {index + 1}") from exc
-            if not isinstance(event, dict):
-                raise TrajectoryError(f"{label} {file} line {index + 1} is not an event object")
-            events.append(event)
-    return tuple(events)
+        model, system = None, None
+        segments: list[list[dict[str, Any]]] = [[]]
+        for event in read_jsonl_file(file, f"{agent} session"):
+            for kind, value in translate(event):
+                if kind == "header":
+                    model, system = value
+                    if system and not any(message["role"] == "system" for message in segments[-1]):
+                        segments[-1].insert(0, {"role": "system", "content": system})
+                elif kind == "message":
+                    segments[-1].append(value)
+                else:
+                    head = [{"role": "system", "content": system}] if system else []
+                    segments.append([*head, {"role": "user", "content": f"Summary of the earlier steps:\n{value}"}])
+        session_id = file.relative_to(path).as_posix()
+        documents.extend(
+            chat_document(session_id, agent, model, messages)
+            for messages in segments
+            if any(message["role"] != "system" for message in messages)
+        )
+    return tuple(documents)
+
+
+def native_items(event: Mapping[str, Any]) -> list[LogItem]:
+    """What one native session event is to the model (``log_documents``)."""
+    data = event.get("data") or {}
+    match event.get("type"):
+        case "session" if data.get("task"):
+            return [("message", {"role": "user", "content": data["task"]})]
+        case "request/header":
+            return [("header", (data.get("model"), data.get("system")))]
+        case "user/message":
+            return [("message", {"role": "user", "content": data.get("content")})]
+        case "assistant/message":
+            reasoning = {key: data[key] for key in ("reasoning_content",) if data.get(key)}
+            calls = {"tool_calls": data["tool_calls"]} if data.get("tool_calls") else {}
+            return [("message", {"role": "assistant", "content": data.get("content"), **reasoning, **calls})]
+        case "tool/result":
+            return [("message", {"role": "tool", "tool_call_id": data.get("call_id"), "content": data.get("content")})]
+        case "context/compacted" if data.get("fired"):
+            return [("compacted", data.get("summary", ""))]
+    return []
+
+
+def block_text(blocks: Any, kind: str = "text") -> str:
+    """The text of the ``kind`` blocks of a dsh content list, or the value itself when it is text."""
+    if isinstance(blocks, str):
+        return blocks
+    texts = [block.get("text", "") for block in blocks or () if isinstance(block, dict) and block.get("type") == kind]
+    return "\n".join(text for text in texts if text)
+
+
+def dsh_items(event: Mapping[str, Any]) -> list[LogItem]:
+    """What one dsh session event is to the model (``log_documents``)."""
+    data = event.get("data") or {}
+    match event.get("type"):
+        case "request/header":
+            header = data.get("header") or {}
+            return [("header", ((header.get("config") or {}).get("model"), header.get("system")))]
+        case "user/message":
+            return [("message", {"role": "user", "content": block_text(data.get("content"))})]
+        case "assistant/message":
+            blocks = (data.get("message") or {}).get("content") or []
+            calls = [
+                {
+                    "id": block.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": block.get("name"),
+                        "arguments": (
+                            arguments
+                            if isinstance(arguments := block.get("arguments"), str)
+                            else json.dumps(arguments)
+                        ),
+                    },
+                }
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "tool-call"
+            ]
+            message = {"role": "assistant", "content": block_text(blocks)}
+            if reasoning := block_text(blocks, "reasoning"):
+                message["reasoning_content"] = reasoning
+            return [("message", {**message, **({"tool_calls": calls} if calls else {})})]
+        case "tool/result":
+            blocks = (data.get("message") or {}).get("content") or []
+            return [
+                (
+                    "message",
+                    {
+                        "role": "tool",
+                        "tool_call_id": block.get("toolCallId"),
+                        "content": block_text(block.get("content")),
+                    },
+                )
+                for block in blocks
+                if isinstance(block, dict) and block.get("type") == "tool-result"
+            ]
+        case "compaction/summary":
+            return [("compacted", block_text(data.get("summary")))]
+    return []
 
 
 @register_trajectory_reader
@@ -148,6 +280,15 @@ class PiSessionReader(TrajectoryReader):
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return _read_jsonl_tree(path, "pi session")
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        from harbor.agents.installed.pi import Pi
+
+        def convert(logs_dir: Path) -> Any:
+            loaded = Pi(logs_dir=logs_dir)._load_trajectory()
+            return None if loaded is None else loaded[0]
+
+        return harbor_atif(path, Pi._SESSIONS_DIRECTORY, convert)
 
 
 @register_trajectory_reader
@@ -166,6 +307,13 @@ class ClaudeSessionReader(TrajectoryReader):
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return _read_jsonl_tree(path, "claude session")
 
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        from harbor.agents.installed.claude_code import ClaudeCode
+
+        return harbor_atif(
+            path, "sessions/projects", lambda logs_dir: ClaudeCode(logs_dir=logs_dir).convert_trajectory(logs_dir)
+        )
+
 
 @register_trajectory_reader
 class CodexSessionReader(TrajectoryReader):
@@ -180,6 +328,11 @@ class CodexSessionReader(TrajectoryReader):
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return _read_jsonl_tree(path, "codex session")
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        from harbor.agents.installed.codex import Codex
+
+        return harbor_atif(path, "sessions", lambda logs_dir: Codex(logs_dir=logs_dir).convert_trajectory(logs_dir))
 
 
 @register_trajectory_reader
@@ -205,6 +358,9 @@ class DeepseekSessionReader(TrajectoryReader):
                 event = {**{key: value for key, value in event.items() if key != "data"}, **data}
             events.append(event)
         return tuple(events)
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return log_documents(path, "dsh", dsh_items)
 
 
 @register_trajectory_reader
@@ -237,6 +393,20 @@ class HermesSessionReader(TrajectoryReader):
                     raise TrajectoryError(f"hermes session {file} holds a message that is not an object")
                 events.append({"type": "message", **message})
         return tuple(events)
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        """One document for each snapshot, with Harbor's Hermes converter. It reads one snapshot as one line."""
+        from harbor.agents.installed.hermes import Hermes
+
+        documents = []
+        with tempfile.TemporaryDirectory(prefix="reef-atif-") as logs_dir:
+            agent = Hermes(logs_dir=Path(logs_dir))
+            for file in sorted(Path(path).rglob("*.json")):
+                snapshot = json.loads(file.read_text(encoding="utf-8"))
+                trajectory = agent._convert_hermes_session_to_atif(json.dumps(snapshot), file.stem)
+                if trajectory is not None:
+                    documents.append(trajectory.to_json_dict())
+        return tuple(documents)
 
 
 @register_trajectory_reader
@@ -297,15 +467,59 @@ class OpencodeSessionReader(TrajectoryReader):
             for message_id, session_id, data in messages
         )
 
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        """One document for each session, in the order of its first message, with Harbor's OpenCode converter.
+
+        Harbor converts the events of ``opencode run --format json``. Each event there carries one part, as the
+        database holds it, so each part becomes the event that would carry it. Harbor keeps the first user message.
+        """
+        from harbor.agents.installed.opencode import OpenCode
+
+        kinds = {"step-start": "step_start", "step-finish": "step_finish", "tool": "tool_use"}
+        sessions: dict[str, list[dict[str, Any]]] = {}
+        for message in self(path):
+            events = sessions.setdefault(message["sessionID"], [])
+            created = (message.get("time") or {}).get("created")
+            if message.get("role") == "user":
+                events.append({"type": "user", "parts": message["content"], "timestamp": created})
+                continue
+            for part in message["content"]:
+                kind = kinds.get(part.get("type"), part.get("type"))
+                events.append({"type": kind, "sessionID": message["sessionID"], "part": part, "timestamp": created})
+        documents = []
+        with tempfile.TemporaryDirectory(prefix="reef-atif-") as logs_dir:
+            agent = OpenCode(logs_dir=Path(logs_dir))
+            for events in sessions.values():
+                trajectory = agent._convert_events_to_trajectory(events)
+                if trajectory is not None:
+                    documents.append(trajectory.to_json_dict())
+        return tuple(documents)
+
 
 @register_trajectory_reader
 class PythonSessionReader(TrajectoryReader):
-    """Read the session tree of a python adapter's program: every ``*.jsonl`` under ``path``, one event per line."""
+    """Read the session tree of a python adapter's program: every ``*.jsonl`` under ``path``, one event per line.
+
+    For ATIF, each line that has a ``response`` is one model call: the request body, with the response body as
+    ``response``, as Reef keeps an evaluation call. Other lines are the program's own events.
+    """
 
     format = "python-jsonl"
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return _read_jsonl_tree(path, "python session")
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        """One document for each conversation of the program's calls, in the order of its first call."""
+        from reef.core.records_types import AgentRecord, RequestType
+        from reef.core.trajectories import make_trajectory
+        from reef.core.trajectory_index import conversations
+
+        calls = [
+            AgentRecord(f"python-call-{index}", "python", RequestType.INFERENCE, event, float(index))
+            for index, event in enumerate(event for event in self(path) if isinstance(event.get("response"), dict))
+        ]
+        return tuple(dict(make_trajectory(conversation).trajectory) for conversation in conversations(calls))
 
 
 # The readers reef.harness exports as functions.
@@ -321,6 +535,9 @@ class NativeSessionReader(TrajectoryReader):
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return PiSessionReader()(path)
+
+    def to_atif(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return log_documents(path, "reef-native", native_items)
 
 
 def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:

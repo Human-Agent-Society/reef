@@ -106,11 +106,12 @@ class ArtifactFormat:
 class ArtifactWeights(ConfiguredPlugin, ABC):
     """Where a serving runtime gets the weight files of a published snapshot.
 
-    ``weight_files(release, layout)`` takes the local directory ``release`` of
+    ``weight_files(artifact_dir, layout)`` takes the local directory ``artifact_dir`` of
     a materialized snapshot and the ``layout`` that the engines load, and
     returns ``WeightFiles`` of that layout with the snapshot's weights. Equal
-    releases give files of equal content. It raises ``ReefError`` when the
-    snapshot gives no files of ``layout``.
+    snapshots give files of equal content. It raises ``ReefError`` when the
+    snapshot gives no files of ``layout``. The runtimes do not call it for a base root
+    (``reef.artifact.base_root``), which holds no weight files.
 
     Purpose: the serving runtimes of ``reef.inference.serving`` call it at each load. ``ArtifactWeightFiles``,
     the default, reads the snapshot's own files. A training backend whose

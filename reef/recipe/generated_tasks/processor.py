@@ -41,12 +41,18 @@ from typing import Any, Self
 from reef.core import AgentRecord
 from reef.core.config import config_option
 from reef.core.job_data import JobOutcome, TaskSample
-from reef.core.plugins import PluginConfigError
+from reef.core.plugins import PluginConfigError, PluginSettings
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
-from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
+from reef.core.tasks.split import TaskSplit, TaskSplitConflictError, extend_split_by_source
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks.generator import GeneratedTaskResult, HeldOutTask, RejectedTask, TaskGenerator
+from reef.recipe.generated_tasks.generator import (
+    GeneratedTaskResult,
+    GeneratorState,
+    HeldOutTask,
+    RejectedTask,
+    TaskGenerator,
+)
 from reef.recipe.generated_tasks.results import (
     TaskRolloutResult,
     delivered_generations,
@@ -54,13 +60,13 @@ from reef.recipe.generated_tasks.results import (
     rollout_results,
     save_rollout_result,
 )
-from reef.record2sample import Record2Sample, Record2SampleSettings, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.generator.client import Generator, HttpGenerator
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.record2sample.reports import report_score
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.samples import StoredSample, TrainerSamples
-from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
+from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflictError, TaskStore, TaskStoreError
 from reef.train.types import JobData, Sample
 
 logger = logging.getLogger(__name__)
@@ -85,7 +91,7 @@ def assigned_split(store: TaskStore, task: HarborTask, *, seed: int, eval_fracti
     """Return the split of a task: the split of its published name, or else the split of its source records.
 
     Tasks that share a source record get the same split, and a published task keeps its split. Raises
-    ``TaskSplitConflict`` if the sources of the task join tasks of both splits.
+    ``TaskSplitConflictError`` if the sources of the task join tasks of both splits.
     """
     published = {stored.name: stored for stored in store.tasks()}
     existing = published.get(task.name)
@@ -223,6 +229,7 @@ def task_item(store: TaskStore, generation: int, stored: StoredTask) -> TaskSamp
                 "split": stored.split,
             }
         },
+        files=store.task_files(stored.files_digest),
     )
 
 
@@ -383,7 +390,7 @@ class SourceSessionGrouping(ReportGrouping):
 
 
 @dataclass(frozen=True)
-class GeneratedTaskSettings(Record2SampleSettings):
+class GeneratedTaskSettings(PluginSettings):
     """The config of ``GeneratedTaskSamples``: the rounds, their pace, the source sessions, and the generations.
 
     Values:
@@ -395,7 +402,6 @@ class GeneratedTaskSettings(Record2SampleSettings):
     * ``generator`` is ``None`` or a ``TaskGenerator`` reference ``{module, config}``.
     * ``eval_fraction`` is a number in [0, 1]; ``split_seed`` an int.
     * ``generation_attempts`` and ``generation_deadline_seconds`` are positive.
-    * ``max_staleness`` is as in ``Record2SampleSettings``.
 
     The constructor refuses other values.
     Purpose: ``GeneratedTaskSamples.from_config`` parses it from ``pipeline.record2sample.config``.
@@ -428,7 +434,6 @@ class GeneratedTaskSettings(Record2SampleSettings):
     )
 
     def __post_init__(self) -> None:
-        super().__post_init__()
         if self.jobs_per_round < 1:
             raise ValueError("jobs_per_round must be positive")
         if self.refill_tasks < 1:
@@ -450,6 +455,41 @@ class GeneratedTaskSettings(Record2SampleSettings):
             raise ValueError("rounds need a description (what the tasks are about)")
         if self.generator is not None:
             TaskGenerator.reference(self.generator, setting="pipeline.record2sample.config.generator")
+
+
+class StoredGeneratorState(GeneratorState):
+    """The generator state ``(S, F)`` of one scenario in the task store of the generated-task stage.
+
+    Values: ``store`` is a ``TaskStore``. ``S`` is the state documents of the
+    store, and ``F`` is the directories that the store saved in the task
+    files of the scenario.
+    Purpose: ``GeneratedTaskSamples.from_config`` makes it for the generator of
+    the scenario. The stage's own generations and documents are not in
+    ``S``, so the generator does not read or change them.
+    """
+
+    def __init__(self, store: TaskStore) -> None:
+        if not isinstance(store, TaskStore):
+            raise TypeError("store must be a TaskStore")
+        self.store = store
+
+    def read(self, key: str) -> str | None:
+        return self.store.state_document(key)
+
+    def write(self, key: str, document: str) -> None:
+        self.store.write_state_document(key=key, document=document)
+
+    def remove(self, key: str) -> None:
+        self.store.delete_state_document(key=key)
+
+    def keys(self, prefix: str = "") -> tuple[str, ...]:
+        return self.store.state_document_keys(prefix=prefix)
+
+    def save_files(self, directory: Path) -> str:
+        return self.store.write_files(directory)
+
+    def files(self, digest: str) -> Path:
+        return self.store.path(digest)
 
 
 class GenerationRunner(BackgroundJobRunner):
@@ -586,7 +626,7 @@ class GenerationRunner(BackgroundJobRunner):
                 directories = tuple(
                     write_harbor_task(task, Path(staging) / str(index)) for index, task in enumerate(generated)
                 )
-                generation = self.task_store.save_candidates(generation=job.generation, directories=directories)
+                generation = self.task_store.write_candidates(generation=job.generation, directories=directories)
         candidates = generation.candidates or ()
         for index in generation.pending_indices:
             candidate = candidates[index]
@@ -604,7 +644,7 @@ class GenerationRunner(BackgroundJobRunner):
                         self.task_store, task, seed=self.split_seed, eval_fraction=self.eval_fraction
                     )
                     self.task_store.publish_task(generation=job.generation, index=index, split=split)
-                except (TaskConflict, TaskSplitConflict) as conflict:
+                except (TaskConflictError, TaskSplitConflictError) as conflict:
                     self.task_store.reject_task(generation=job.generation, index=index, reason=str(conflict))
             else:
                 self.task_store.reject_task(
@@ -700,8 +740,10 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     (``job_ended``), the stage saves ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results` for each task that
     a committed job trained and that has no result. When every train task of a generation has a result, the next
     job sends the generation's results to the generator. A restart sends the results that the generator did not
-    receive.
+    receive. A task never goes stale: the algorithm rolls it out with the weights that it trains.
     """
+
+    goes_stale = False
 
     def __init__(
         self,
@@ -713,7 +755,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         worker: BackgroundJobWorker | None = None,
     ) -> None:
         self.source_grouping = SourceSessionGrouping(source_tag_of(settings.source_tag))
-        super().__init__(context, self.source_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
+        super().__init__(context, self.source_grouping, exclusive_sources=True)
         self.jobs_per_round = settings.jobs_per_round
         self.sources_per_round = settings.source_records_per_round
         self.refill_tasks = settings.refill_tasks
@@ -797,13 +839,26 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         context: PipelineContext,
         environ: Mapping[str, str],
     ) -> Self:
-        """Build the rounds of one scenario, with the ``TaskGenerator`` that ``generator`` names."""
+        """Build the rounds of one scenario, with the ``TaskGenerator`` that ``generator`` names.
+
+        The generator gets its state in the stage's task store. Raises ``PluginConfigError`` if the config names
+        a generator and the context has no task storage.
+        """
         settings = GeneratedTaskSettings.parse(config, plugin_class=cls)
         task_generator = None
         if settings.generator is not None:
             generator = TaskGenerator.reference(settings.generator, setting="pipeline.record2sample.config.generator")
-            task_generator = TaskGenerator.referenced_class(generator).from_config(
-                generator.config, scenario=context.scenario, environ=environ
+            generator_class = TaskGenerator.referenced_class(generator)
+            if context.task_storage is None:
+                raise PluginConfigError(
+                    "pipeline.record2sample.config.generator needs the task storage of a scenario session: "
+                    "the generator keeps its state in the task store"
+                )
+            task_generator = generator_class.from_config(
+                generator.config,
+                scenario=context.scenario,
+                environ=environ,
+                state=StoredGeneratorState(context.task_storage.open(TASK_STORE_NAME)),
             )
         return cls(context, settings, task_generator=task_generator)
 

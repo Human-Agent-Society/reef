@@ -65,7 +65,7 @@ def main() -> None:
     while time.monotonic() < deadline:
         status = client.get("/reef/status")
         block = status.get("scenarios", {}).get(scenario) or {}
-        if block.get("scenario_step", 0) >= 1 and block.get("served_artifact_id") not in (None, base_artifact_id):
+        if block.get("commit_number", 0) >= 1 and block.get("served_artifact_id") not in (None, base_artifact_id):
             print(f"Committed one Tinker update for {scenario}; it serves as {block['served_artifact_id']}")
             return
         time.sleep(2)

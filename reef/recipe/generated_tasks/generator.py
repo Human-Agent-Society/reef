@@ -1,12 +1,13 @@
-"""The task generator contract of the generated-task recipe: the generator, its validation results, and task results.
+"""The task generator contract of the generated-task recipe: the generator, its state, its validation results, and task results.
 
 A deployment selects one :class:`TaskGenerator` in its
 ``pipeline.record2sample.config.generator`` setting. The recipe asks the
 generator for tasks with a ``TaskGenerationRequest``
 (:mod:`reef.record2sample.generator.inputs`), validates each one, runs the
-valid ones, and sends the results back to the generator. This module holds the
-values, their field validation, and the generator interface. Consumers own
-file reads, transport limits, and execution.
+valid ones, and sends the results back to the generator. A generator keeps
+what it must read again after a restart in its :class:`GeneratorState`. This
+module holds the values, their field validation, and the generator
+interface. Consumers own file reads, transport limits, and execution.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import math
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Self
 
 from reef.core.plugins import Plugin
@@ -147,22 +149,82 @@ class FailedTask:
 GeneratedTaskResult = RejectedTask | HeldOutTask | RolledOutTask | FailedTask
 
 
+class GeneratorState(ABC):
+    """The durable state of the task generator of one scenario: documents by key, and saved directories.
+
+    Values: the state is a pair ``(S, F)``. ``S : K ⇀ Str`` maps non-empty
+    keys to documents; a key can be written again and removed. ``F`` is a set
+    of saved directories, each addressed by the digest of its files; nothing
+    is removed from ``F``. A new scenario starts with both empty.
+
+    Purpose: the generated-task stage makes one for each scenario and gives it
+    to :meth:`TaskGenerator.from_config`. The generator keeps there what it
+    must read again after a restart, or after the scenario moves to another
+    machine. The state holds no other part of the scenario's task store: a
+    generator cannot publish a task or read the recipe's documents.
+
+    Each write is durable and atomic when it returns.
+    """
+
+    @abstractmethod
+    def read(self, key: str) -> str | None:
+        """Return ``S(key)``, or ``None`` if no document has ``key``."""
+
+    @abstractmethod
+    def write(self, key: str, document: str) -> None:
+        """Save ``document`` under ``key``: after the call, ``S(key) = document``.
+
+        The call replaces an earlier document of ``key``. Raises
+        ``TaskStoreError`` if ``key`` is empty.
+        """
+
+    @abstractmethod
+    def remove(self, key: str) -> None:
+        """Remove the document of ``key``. A key without a document changes nothing."""
+
+    @abstractmethod
+    def keys(self, prefix: str = "") -> tuple[str, ...]:
+        """Return the keys of ``S`` that start with ``prefix``, in increasing string order."""
+
+    @abstractmethod
+    def save_files(self, directory: Path) -> str:
+        """Save a copy of ``directory`` in ``F`` and return the digest of its files.
+
+        The same files in a directory of the same name give the same digest,
+        so a repeated save changes nothing. Raises ``TaskStoreError`` if
+        ``directory`` holds an entry that is not a file or a directory.
+        """
+
+    @abstractmethod
+    def files(self, digest: str) -> Path:
+        """Return a local directory with the files that ``save_files`` saved under ``digest``.
+
+        The directory has the name of the saved directory. The caller must
+        not change it. Raises ``TaskStoreError`` if ``F`` holds no directory
+        of ``digest``.
+        """
+
+
 class TaskGenerator(Plugin, ABC):
     """Makes tasks for one scenario, and adapts to how the agent did on them.
 
     A deployment names the class in ``pipeline.record2sample.config.generator``. Reef calls
     :meth:`from_config` once for each scenario. A generator gets what it needs
     from its config and from these calls only; it does not read the recipe's
-    settings.
+    settings. It keeps its durable state in the ``GeneratorState`` that
+    :meth:`from_config` gets, and keeps no file of its own.
     """
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str], state: GeneratorState
+    ) -> Self:
         """Build the generator of ``scenario`` from the section's ``config``.
 
         ``environ`` holds the environment the deployment was read with, for
-        credentials that the config names by environment variable.
+        credentials that the config names by environment variable. ``state``
+        is the durable state of this scenario's generator.
         """
 
     @abstractmethod

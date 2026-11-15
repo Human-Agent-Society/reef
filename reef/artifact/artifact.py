@@ -18,13 +18,13 @@ from reef.core.snapshot import LOCAL_SNAPSHOT_PREFIX, SnapshotRef, decode_snapsh
 __all__ = [
     "ARTIFACT_ID_METADATA_KEY",
     "LOCAL_SNAPSHOT_PREFIX",
-    "SERVING_PROFILE_METADATA_KEY",
     "SNAPSHOT_METADATA_KEYS",
+    "TRAINING_STARTS_METADATA_KEY",
     "Artifact",
-    "ArtifactConflict",
+    "ArtifactConflictError",
     "ArtifactError",
     "ArtifactMaterializationError",
-    "ArtifactNotFound",
+    "ArtifactNotFoundError",
     "ArtifactPublicationError",
     "ArtifactRepository",
     "ArtifactSourceError",
@@ -34,8 +34,8 @@ __all__ = [
     "content_metadata",
     "decode_snapshot_ref",
     "encode_snapshot_ref",
-    "serving_profile_of",
-    "with_serving_profile",
+    "training_starts_of",
+    "with_training_starts",
 ]
 
 #: Files a repository adds to a materialized snapshot; a snapshot with nothing else holds no weights.
@@ -44,23 +44,23 @@ REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
 ARTIFACT_ID_METADATA_KEY = "artifact_id"
 #: Metadata keys that describe a snapshot, not the content of the artifact it holds.
 SNAPSHOT_METADATA_KEYS = frozenset({COMPONENTS_METADATA_KEY, "scenario_commit_record"})
-#: The key of an artifact's own metadata that names its serving profile (RFC #1233).
-SERVING_PROFILE_METADATA_KEY = "serving_profile"
+#: The key of an artifact's own metadata that names its training starts (RFC #1263).
+TRAINING_STARTS_METADATA_KEY = "training_starts"
 
 
 class ArtifactError(ReefError):
-    """Base class for artifact storage and release-chain errors."""
+    """Base class for artifact storage and snapshot-chain errors."""
 
 
 class ArtifactSourceError(ArtifactError):
     pass
 
 
-class ArtifactNotFound(ArtifactError):
+class ArtifactNotFoundError(ArtifactError):
     pass
 
 
-class ArtifactConflict(ArtifactError):
+class ArtifactConflictError(ArtifactError):
     pass
 
 
@@ -78,16 +78,53 @@ class ArtifactRepository(ABC):
     @abstractmethod
     def materialize(self, ref: SnapshotRef) -> Artifact: ...
 
+    def materialize_component(self, ref: SnapshotRef, name: str) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` with its files in a local directory, as
+        ``Artifact.component`` gives it.
+
+        This default materializes the whole snapshot. A repository whose snapshots hold large components makes
+        only the files of ``name`` local, so a reader of one component does not fetch the others.
+        """
+        return self.materialize(ref).component(name)
+
+    def materialize_component_files(
+        self, ref: SnapshotRef, name: str | None, paths: tuple[str, ...] | None
+    ) -> Artifact:
+        """The component ``name`` of the snapshot ``ref`` (the snapshot itself for None) in a local directory that
+        holds at least each file of ``paths``, relative to the component, that the component has: all its files
+        when ``paths`` is None. Other files may be missing, so a reader reads only ``paths``.
+
+        This default makes the whole component local (``materialize_component``). A repository whose snapshots
+        hold large files makes only ``paths`` local, so a reader of a few small files fetches no weights.
+        """
+        return self.materialize(ref) if name is None else self.materialize_component(ref, name)
+
 
 class ArtifactValidator(ABC):
-    """Artifact admission checks selected for one scenario."""
+    """An admission check of the artifacts of one component of a scenario.
+
+    ``validate(artifact)`` returns when the check admits ``artifact``, and raises ``ValueError`` or a ``ReefError``
+    that names what does not hold. ``artifact`` is ``Artifact.local(directory)`` of the directory that holds the
+    files of one component alone: it has no metadata and an artifact ID of its own, so the check reads the files
+    only. Every caller gives it so (``ScenarioComponents.validate``), whichever operation stores the artifact.
+
+    Purpose: a recipe binds it on ``ComponentSpec.validator`` or ``ScenarioComponents.validator``. The process that
+    holds an artifact's files for its own work runs the check once, before the artifact is stored: the training
+    service on each checkpoint of a job (``reef.train.job_queue.TrainingJobWorker``), and control on an import, a
+    sync and the artifact item that starts a scenario, whose files it copies. A stored artifact does not change, so
+    an activation, a restore, a serve and a train-from run no check, and no process fetches files to check them.
+    """
 
     @abstractmethod
     def validate(self, artifact: Artifact) -> None: ...
 
 
 class Artifact:
-    """A concrete artifact bound to one scenario-scoped repository."""
+    """A concrete artifact bound to one scenario-scoped repository.
+
+    ``content`` is None, or the non-empty name of the stored content that holds the files of an unpublished
+    artifact (``Artifact.stored``); such an artifact has no ``local_path``.
+    """
 
     def __init__(
         self,
@@ -97,10 +134,14 @@ class Artifact:
         local_path: Path | None = None,
         metadata: Mapping[str, object] | None = None,
         artifact_id: str | None = None,
+        content: str | None = None,
     ) -> None:
+        if content is not None and (not isinstance(content, str) or not content or local_path is not None):
+            raise ValueError("content is the non-empty name of stored content, on an artifact with no local_path")
         self._ref = ref
         self._repository = repository
         self._local_path = None if local_path is None else Path(local_path)
+        self._content = content
         self._metadata = dict(metadata or {})
         stored_identity = self._metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
         if stored_identity is not None and (not isinstance(stored_identity, str) or not stored_identity):
@@ -122,6 +163,11 @@ class Artifact:
     @property
     def local_path(self) -> Path | None:
         return self._local_path
+
+    @property
+    def content(self) -> str | None:
+        """The name of the stored content that holds this unpublished artifact's files, or None."""
+        return self._content
 
     @property
     def metadata(self) -> Mapping[str, object]:
@@ -150,15 +196,16 @@ class Artifact:
         """
         if self._artifact_id is not None:
             return self._artifact_id
-        # Provider calls can carry a ref without local files or a repository.
-        materialized = self if self.repository is None else self.materialize()
+        # Provider calls can carry a ref without local files or a repository. An artifact that carries its
+        # metadata answers from it, and no file is fetched.
+        materialized = self if self.repository is None or self._metadata else self.materialize()
         if materialized._artifact_id is not None:
             return materialized._artifact_id
         manifest = materialized.components
         if manifest is None:
-            raise ArtifactNotFound(f"snapshot {self.ref.revision!r} names no artifact ID")
+            raise ArtifactNotFoundError(f"snapshot {self.ref.revision!r} names no artifact ID")
         if not manifest.single:
-            raise ArtifactNotFound(
+            raise ArtifactNotFoundError(
                 f"snapshot {self.ref.revision!r} holds components {list(manifest.names)}; name one of them"
             )
         return next(iter(manifest.artifact_ids(self.ref.revision).values()))
@@ -172,15 +219,22 @@ class Artifact:
         """The named component of this snapshot, materialized.
 
         A snapshot without a manifest, or with one component, is that component
-        itself. A multi-component release keeps each component in a directory
-        named after it; the view carries the component's own artifact ID and metadata.
+        itself. A multi-component snapshot keeps each component in a directory
+        named after it; the view carries the component's own artifact ID and metadata. A snapshot of several
+        components that is not local yet, and that carries its manifest, makes only this component local
+        (``ArtifactRepository.materialize_component``).
         """
+        known = self.components
+        if self.local_path is None and self.repository is not None and known is not None and not known.single:
+            if name not in known.entries:
+                raise ArtifactNotFoundError(f"snapshot {self.ref.revision!r} binds no component {name!r}")
+            return self.repository.materialize_component(self.ref, name)
         materialized = self.materialize()
         manifest = materialized.components
         if manifest is None:
             return materialized
         if name not in manifest.entries:
-            raise ArtifactNotFound(f"snapshot {self.ref.revision!r} binds no component {name!r}")
+            raise ArtifactNotFoundError(f"snapshot {self.ref.revision!r} binds no component {name!r}")
         if manifest.single:
             return materialized
         if materialized.local_path is None:
@@ -188,7 +242,7 @@ class Artifact:
         entry = manifest.entries[name]
         directory = materialized.local_path / manifest.relative_path(name)
         # A component the base seeded nothing for has no directory in the
-        # release (git keeps none for an empty tree); it is empty, not missing.
+        # snapshot (git keeps none for an empty tree); it is empty, not missing.
         # Only the leaf is created, and only inside a snapshot tree that is
         # there: a snapshot directory that is gone must not come back empty.
         if materialized.local_path.is_dir() and not directory.exists():
@@ -234,6 +288,19 @@ class Artifact:
             metadata=stored_metadata,
         )
 
+    @classmethod
+    def stored(cls, content: str) -> Artifact:
+        """An unpublished artifact with a fresh ID whose files are the stored content ``content`` of its scenario's
+        repository backend (``RepositoryBackend.store_content``). It has no local path: the process that makes it
+        need not hold the files."""
+        token = uuid.uuid4().hex
+        return cls(
+            SnapshotRef(revision=f"{LOCAL_SNAPSHOT_PREFIX}{token}", parent_revision=None),
+            None,
+            metadata={ARTIFACT_ID_METADATA_KEY: f"artifact:{token}"},
+            content=content,
+        )
+
     def with_repository(self, repository: ArtifactRepository) -> Artifact:
         return Artifact(
             self.ref,
@@ -241,7 +308,16 @@ class Artifact:
             local_path=self.local_path,
             metadata=self.metadata,
             artifact_id=self._artifact_id,
+            content=self.content,
         )
+
+    def component_files(self, name: str | None, paths: tuple[str, ...] | None) -> Artifact:
+        """The component ``name`` of this snapshot (the snapshot itself for None) in a local directory that holds
+        at least each file of ``paths`` that the component has, or all its files for None
+        (``ArtifactRepository.materialize_component_files``). A local snapshot gives its local component."""
+        if self.local_path is not None or self.repository is None:
+            return self if name is None else self.component(name)
+        return self.repository.materialize_component_files(self.ref, name, paths)
 
     def materialize(self) -> Artifact:
         if self.local_path is not None:
@@ -278,25 +354,27 @@ def content_metadata(snapshot: Artifact, component: str | None) -> dict[str, obj
     return dict(manifest.entries[component].metadata)
 
 
-def serving_profile_of(artifact: Artifact) -> str | None:
-    """The serving profile in the own metadata of ``artifact`` (RFC #1233), or None when it names none.
+def training_starts_of(artifact: Artifact) -> tuple[str, ...]:
+    """The artifact IDs of the training starts of ``artifact`` (RFC #1263), nearest first: the training start of
+    the trainer that made it, then that start's own training starts. Empty for an artifact that no training made.
 
-    A profile is a non-empty string that the inference runtime defines; None selects the runtime's default model.
-    ``artifact`` is one artifact: a flat snapshot or a component view. Raise ``ValueError`` for another value.
+    ``artifact`` is one artifact: a flat snapshot or a component view. Raise ``ValueError`` when its metadata holds
+    another value than a list of non-empty strings.
     """
-    profile = artifact.metadata.get(SERVING_PROFILE_METADATA_KEY)
-    if profile is not None and (not isinstance(profile, str) or not profile):
-        raise ValueError(f"an artifact's serving profile is a non-empty string, not {profile!r}")
-    return profile
+    starts = artifact.metadata.get(TRAINING_STARTS_METADATA_KEY, [])
+    if not isinstance(starts, list) or not all(isinstance(start, str) and start for start in starts):
+        raise ValueError(f"an artifact's training starts are a list of artifact IDs, not {starts!r}")
+    return tuple(starts)
 
 
-def with_serving_profile(artifact: Artifact, profile: str) -> Artifact:
-    """``artifact``, unpublished, with ``profile`` as the serving profile in its own metadata."""
-    if not isinstance(profile, str) or not profile:
-        raise ValueError("a serving profile is a non-empty string")
+def with_training_starts(artifact: Artifact, starts: tuple[str, ...]) -> Artifact:
+    """``artifact``, unpublished, with ``starts`` as the training starts in its own metadata."""
+    if not starts or not all(isinstance(start, str) and start for start in starts):
+        raise ValueError("training starts are a non-empty tuple of artifact IDs")
     return Artifact(
         artifact.ref,
         artifact.repository,
         local_path=artifact.local_path,
-        metadata={**artifact.storage_metadata, SERVING_PROFILE_METADATA_KEY: profile},
+        metadata={**artifact.storage_metadata, TRAINING_STARTS_METADATA_KEY: list(starts)},
+        content=artifact.content,
     )

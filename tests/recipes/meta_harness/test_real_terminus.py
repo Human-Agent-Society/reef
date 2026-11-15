@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 
 import pytest
-from reef_terminus.trajectory import read_trials
+from reef_terminus.trajectory import TrialReader
 from tests.support.harness_render import write_rendered
 
 from reef.harness.adapters import get_adapter
@@ -62,7 +62,7 @@ def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path,
 
     slug = trial_slug(TASK)
     assert sorted(sessions.glob("*.json")) == [sessions / f"{slug}.json"]
-    events = read_trials(sessions)
+    events = TrialReader()(sessions)
     assert events and events[0]["type"] == "verifier"
     # The verifier has to have run. Accepting an empty reward here would let
     # this pass on a run whose container never built.

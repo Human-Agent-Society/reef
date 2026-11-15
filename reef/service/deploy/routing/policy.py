@@ -32,13 +32,14 @@ from aiohttp import (
     DummyCookieJar,
 )
 
+from reef.core.errors import InternalError
 from reef.storage.durable_files import fsync_dir, write_json
 
 #: At most this many bytes of one management reply are read and decoded; any remainder is not read.
 MANAGEMENT_REPLY_LIMIT_BYTES = 16 * 1024 * 1024
 
 
-class RouterPolicyError(RuntimeError):
+class RouterPolicyError(InternalError):
     """The router's configuration cannot be confirmed as this owner's committed or candidate document.
 
     A failed mutation may still have reached the router, so its caller inspects the result and never replays it.

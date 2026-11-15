@@ -82,8 +82,8 @@ class JudgedSamples(Record2Sample, ABC):
     Without a worker, records track and expire, and nothing is ever judged.
     """
 
-    def __init__(self, judging: RecordJudging, worker: BackgroundJobWorker | None, *, max_staleness: int = 0) -> None:
-        super().__init__(max_staleness=max_staleness)
+    def __init__(self, judging: RecordJudging, worker: BackgroundJobWorker | None) -> None:
+        super().__init__()
         self.judging = judging
         self.worker = worker
         self.tracked: dict[str, AgentRecord] = {}

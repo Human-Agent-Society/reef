@@ -1,6 +1,7 @@
-"""HTTP routes of a data owner's items (RFC #1028), under ``/reef/namespaces/{owner}/data``.
+"""HTTP routes of a data owner's items (RFC #1028), under ``/reef/namespaces/{owner}/data``, and of its
+collections (RFC #1312), under ``/reef/namespaces/{owner}/collections``.
 
-``reef.service.data`` handles each route; this module reads the request and writes the response.
+``reef.service.data`` and ``reef.service.collections`` handle each route; this module reads the request and writes the response.
 """
 
 from __future__ import annotations
@@ -13,6 +14,17 @@ from typing import Any
 from aiohttp import web
 
 from reef.service.auth import add_signed_download, signed_download_url
+from reef.service.collections import (
+    HOLD_ROUTES,
+    add_to_scenario,
+    delete_collection,
+    hold_set,
+    list_collections,
+    list_holds,
+    read_collection,
+    release_set,
+    save_collection,
+)
 from reef.service.data import (
     DataAccess,
     create_items,
@@ -24,6 +36,8 @@ from reef.service.data import (
     parsed_metadata,
     query_items,
     read_item,
+    replace_task_item,
+    set_listing,
     update_items,
 )
 from reef.service.data_transfer import TRANSFER_KINDS, item_archive, start_transfer, transfer_status
@@ -136,6 +150,26 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             receipt = await asyncio.to_thread(create_task_items, data, request.match_info["owner"], archive, metadata)
         return web.json_response(receipt, status=201)
 
+    async def replace_task(request: web.Request) -> web.Response:
+        """Replace a task item's files with the task directory of a tar.gz body (RFC #1359)."""
+        if request.content_type not in TASK_ARCHIVE_TYPES:
+            raise web.HTTPUnsupportedMediaType(
+                text="a task's files come as a tar.gz archive with Content-Type application/gzip"
+            )
+        with tempfile.TemporaryDirectory(prefix="reef-task-archive-") as work:
+            archive = Path(work) / "task.tar.gz"
+            size = 0
+            with archive.open("wb") as file:
+                async for chunk in request.content.iter_chunked(CHUNK_BYTES):
+                    size += len(chunk)
+                    if size > MAX_UNPACKED_BYTES:
+                        raise web.HTTPRequestEntityTooLarge(max_size=MAX_UNPACKED_BYTES, actual_size=size)
+                    file.write(chunk)
+            receipt = await asyncio.to_thread(
+                replace_task_item, data, request.match_info["owner"], request.match_info["item_id"], archive
+            )
+        return web.json_response(receipt)
+
     async def query(request: web.Request) -> web.Response:
         content = query_int(request, "content", 0)
         if content not in (0, 1):
@@ -153,6 +187,23 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             limit=query_int(request, "limit", MAX_QUERY_LIMIT),
             content=content == 1,
             group=None if group_key is None else (group_key, request.query.get("group_value")),
+            benchmark=request.query.get("benchmark") or None,
+            trajectory_set=request.query.get("trajectory_set") or None,
+            id_prefix=request.query.get("id_prefix") or None,
+            before=query_int(request, "before", 0) or None,
+        )
+        return web.json_response(listing)
+
+    async def sets(request: web.Request) -> web.Response:
+        before = query_int(request, "before", 0)
+        listing = await asyncio.to_thread(
+            set_listing,
+            data,
+            request.match_info["owner"],
+            kind=request.match_info["kind"],
+            scenario=request.query.get("scenario") or None,
+            before=before or None,
+            limit=query_int(request, "limit", MAX_QUERY_LIMIT),
         )
         return web.json_response(listing)
 
@@ -185,21 +236,70 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         )
         return web.json_response(receipt)
 
+    async def collections(request: web.Request) -> web.Response:
+        return web.json_response(await asyncio.to_thread(list_collections, data, request.match_info["owner"]))
+
+    async def collection(request: web.Request) -> web.Response:
+        """Store, read or delete one collection, by the method."""
+        owner, name = request.match_info["owner"], request.match_info["name"]
+        if request.method == "PUT":
+            body = await read_object(request)
+            return web.json_response(await asyncio.to_thread(save_collection, data, owner, name, body))
+        handler = read_collection if request.method == "GET" else delete_collection
+        return web.json_response(await asyncio.to_thread(handler, data, owner, name))
+
+    async def collection_scenarios(request: web.Request) -> web.Response:
+        body = await read_object(request)
+        receipt = await asyncio.to_thread(
+            add_to_scenario, data, request.match_info["owner"], request.match_info["name"], body
+        )
+        return web.json_response(receipt)
+
+    async def holds(request: web.Request) -> web.Response:
+        owner, scenario = request.match_info["owner"], request.match_info["scenario"]
+        kind = HOLD_ROUTES[request.match_info["sets"]]
+        return web.json_response(await asyncio.to_thread(list_holds, data, owner, scenario, kind))
+
+    async def hold(request: web.Request) -> web.Response:
+        """Hold one benchmark or trajectory set, or end its hold, by the method."""
+        names = (
+            request.match_info["owner"],
+            request.match_info["scenario"],
+            HOLD_ROUTES[request.match_info["sets"]],
+            request.match_info["name"],
+        )
+        if request.method == "PUT":
+            body = await read_object(request)
+            return web.json_response(await asyncio.to_thread(hold_set, data, *names, body))
+        split = request.query.get("split")
+        return web.json_response(await asyncio.to_thread(release_set, data, *names, split))
+
     base = "/reef/namespaces/{owner}/data"
     transfers = "{transfer:" + "|".join(TRANSFER_KINDS) + "}"
     app.router.add_post(base, create)
     app.router.add_get(base, query)
     app.router.add_post(f"{base}/trajectories", create_trajectories)
     app.router.add_post(f"{base}/tasks", create_tasks)
+    app.router.add_put(f"{base}/tasks/{{item_id}}", replace_task)
     app.router.add_post(f"{base}/metadata", update)
     # These come before the item routes, whose ID takes the rest of the path.
     app.router.add_post(f"{base}/{transfers}", start)
     app.router.add_get(f"{base}/{transfers}/{{transfer_id}}", transfer)
     app.router.add_get(f"{base}/groups/{{key}}", groups)
+    app.router.add_get(f"{base}/sets/{{kind}}", sets)
     add_signed_download(app, base + "/{item_id:.+}/archive", archive)
     # An item ID can hold '/', so the route takes the rest of the path.
     app.router.add_get(base + "/{item_id:.+}", read)
     app.router.add_delete(base + "/{item_id:.+}", delete)
+    stored = "/reef/namespaces/{owner}/collections"
+    app.router.add_get(stored, collections)
+    for method in ("PUT", "GET", "DELETE"):
+        app.router.add_route(method, stored + "/{name}", collection)
+    app.router.add_post(stored + "/{name}/scenarios", collection_scenarios)
+    held = "/reef/namespaces/{owner}/scenarios/{scenario}/{sets:" + "|".join(HOLD_ROUTES) + "}"
+    app.router.add_get(held, holds)
+    for method in ("PUT", "DELETE"):
+        app.router.add_route(method, held + "/{name}", hold)
 
 
 __all__ = ["download_seconds", "register_data_routes"]

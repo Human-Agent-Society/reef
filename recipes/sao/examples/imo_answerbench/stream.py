@@ -133,7 +133,7 @@ def training_step_count() -> int | None:
     except (urllib.error.URLError, TimeoutError):
         return None
     scenario = payload["scenarios"].get(SCENARIO)
-    return 0 if scenario is None else int(scenario["scenario_step"])
+    return 0 if scenario is None else int(scenario["commit_number"])
 
 
 def serving_artifact() -> str | None:
@@ -145,7 +145,7 @@ def serving_artifact() -> str | None:
 class TrainerPacer:
     """Hold new submissions while more than AHEAD batches are out beyond the trainer.
 
-    Reef drops rollouts that exceed pipeline.record2sample.config.max_staleness, and the driver
+    Reef drops rollouts that exceed pipeline.record2sample.config.max_artifact_lag, and the driver
     cannot see that, so an idle trainer (no progress for STALL_S) releases one
     batch of credit; otherwise a burst of dropped rollouts would deadlock.
     """

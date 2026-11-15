@@ -34,10 +34,12 @@ from typing import Any
 
 from reef_client.client import ReefClient, ReefClientError
 
+from reef.core.errors import InternalError
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
 from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
-from reef.harness.capture import CaptureProxy
+from reef.execution.sandbox.task_environment import environment_config
+from reef.harness.capture import CaptureObserver, CaptureProxy
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
 #: LiteLLM routes to api_base only under a provider prefix and strips it before the call, so Reef sees the model name.
@@ -53,7 +55,7 @@ LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 RESERVED_LABELS = ("task", "rollout")
 
 
-class TaskRolloutError(RuntimeError):
+class TaskRolloutError(InternalError, RuntimeError):
     """A task's rollout could not run, or could not be reported."""
 
 
@@ -129,6 +131,10 @@ class ReefEvalLab(TaskLab):
         return row.error
 
 
+#: The file under the agent's log directory that holds the command's exit code and output. ``AdapterAgent`` writes it.
+COMMAND_FILE = "command.json"
+
+
 def verifier_timed_out(trial_uri: str | None) -> bool:
     """Whether Harbor's result file for a local trial records that its verifier ran past its timeout."""
     if not trial_uri or not trial_uri.startswith("file://"):
@@ -140,6 +146,19 @@ def verifier_timed_out(trial_uri: str | None) -> bool:
         return False
     exception = json.loads(result_path.read_text(encoding="utf-8"))["exception_info"]
     return exception is not None and exception["exception_type"] == "VerifierTimeoutError"
+
+
+def agent_command_exit(trial_uri: str | None) -> str:
+    """How the agent's command of a local trial ended: its exit code and the end of its output, or "" for a trial
+    that is not local or whose agent wrote no ``COMMAND_FILE``."""
+    if not trial_uri or not trial_uri.startswith("file://"):
+        return ""
+    command_path = Path(urllib.request.url2pathname(urllib.parse.urlparse(trial_uri).path)) / "agent" / COMMAND_FILE
+    if not command_path.is_file():
+        return ""
+    command = json.loads(command_path.read_text(encoding="utf-8"))
+    output = str(command["stderr"] or command["stdout"]).strip()
+    return f"its command exited {command['exit_code']}: {output[-500:] or 'no output'}"
 
 
 def bound_agent(agent: Mapping[str, object], *, model: str, base_url: str, api_key: str) -> dict[str, object]:
@@ -292,7 +311,13 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     This is the Harbor agent runner of ``RolloutRunner``. It runs the harness ``harness``, the Harbor agent with
     no plugin, and the model ``policy_model``, which ``reef_url`` serves: ``model``, with the LoRA adapter
     ``model_adapter`` when it is given. A request names a task directory, and ``run_rollouts`` runs up to
-    ``concurrency`` rollouts at a time.
+    ``concurrency`` rollouts at a time. ``capture_observer``, when set, gets each model call of each rollout as it
+    lands, failed calls too (``CaptureObserver``).
+
+    An unrecorded rollout (``is_unrecorded``) keeps the bodies of its answered calls as its ``turns`` while
+    ``keeps_turns``. Without ``keeps_turns``, its proxy keeps no request body and no answered response body, its
+    ``turns`` are empty, and a call counts as answered when it answered 200. ``keeps_turns`` changes nothing for a
+    recorded rollout.
     """
 
     def __init__(
@@ -314,6 +339,8 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         lab: TaskLab | None = None,
         verifier_timeout_reward: float | None = None,
         concurrency: int = 1,
+        capture_observer: CaptureObserver | None = None,
+        keeps_turns: bool = True,
     ) -> None:
         for label, value in (
             ("reef_url", reef_url),
@@ -350,9 +377,11 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         self.is_reporting = is_reporting
         # An unrecorded rollout: Reef keeps no record of its calls, and the rollout keeps their turns.
         self.is_unrecorded = is_unrecorded
+        self.keeps_turns = keeps_turns
         # The reward for a rollout whose verifier ran past its timeout; None leaves such a rollout unscored.
         self.verifier_timeout_reward = verifier_timeout_reward
         self.concurrency = concurrency
+        self.capture_observer = capture_observer
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
         self.client = ReefClient(self.reef_url, token=token)
@@ -433,12 +462,16 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         return list(await asyncio.gather(*(run_one(task_path) for task_path in task_paths)))
 
     async def build_task_environment(self, task_path: Path, slots: asyncio.Semaphore) -> str:
-        """Start and stop the task's environment, holding one of ``slots``: "", or the error of the second failed try."""
+        """Start and stop the task's environment, holding one of ``slots``: "", or the error of the second failed try.
+
+        The build gets the environment config of the task's rollouts, which holds the time limits of this runner's
+        agent (``environment_config``).
+        """
         error = ""
         for _ in range(2):
             async with slots:
                 error = await self.lab.build_environment(
-                    task_path, overrides={"environment": {"type": self.environment}}
+                    task_path, overrides={"environment": environment_config(self.environment, task_path, self.agent)}
                 )
             if not error:
                 break
@@ -464,12 +497,16 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             tags=tags,
             listen_host=listen_host,
             is_unrecorded=self.is_unrecorded,
+            observer=self.capture_observer,
+            keeps_bodies=self.keeps_turns or not self.is_unrecorded,
         )
         proxy.start()
         try:
             base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
             agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
-            overrides: dict[str, object] = {"environment": {"type": self.environment}}
+            # The environment config reads the agent's own time limits, so a cloud sandbox lives for them. They are
+            # numbers, which bound_agent leaves as they are, so the task's build gets the same config.
+            overrides: dict[str, object] = {"environment": environment_config(self.environment, task_path, self.agent)}
             if self.extra_instruction_paths:
                 overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
             row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)
@@ -478,7 +515,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             proxy.stop()
         receipts: tuple[str, ...] = ()
         answered: tuple[RolloutTurn, ...] = ()
-        if self.is_unrecorded:
+        if self.is_unrecorded and self.keeps_turns:
             answered = tuple(
                 RolloutTurn(turn["request"], turn["response"])
                 for turn in turns
@@ -488,12 +525,20 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             )
             failed_calls = len(turns) - len(answered)
             error = row.error or ("" if answered else unrecorded_call_failure(turns))
+        elif self.is_unrecorded:
+            failed_calls = sum(turn.get("status") != 200 for turn in turns)
+            error = row.error or ("" if failed_calls < len(turns) else unrecorded_call_failure(turns))
         else:
             receipts = tuple(
                 str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200
             )
             failed_calls = len(turns) - len(receipts)
             error = row.error or ("" if receipts else call_failure(turns))
+        if not turns and not row.error:
+            # An agent that ends before its first call leaves the reason in its own output.
+            exited = agent_command_exit(row.trial_uri)
+            if exited:
+                error = f"the agent made no model call: {exited}"
         reward = rollout_reward(row.rewards)
         if row.rewards and primary_reward(row.rewards) is None and not error:
             error = f"the verifier wrote {', '.join(sorted(row.rewards))} and no reward entry"

@@ -54,7 +54,7 @@ class TaskImport:
         The train tasks come first, then the eval tasks, each in name order.
         Raises ``TaskSplitError`` if the manifest cannot be read,
         ``TaskImportError`` if a task directory is missing or is not a Harbor
-        task, and ``ItemConflict`` if ``owner`` stores a task of the same name
+        task, and ``ItemConflictError`` if ``owner`` stores a task of the same name
         with other files.
         """
         manifest = read_split_manifest(self.manifest)
@@ -89,7 +89,7 @@ class DataScenarioStorage(ScenarioStorage):
     If a step raises, ``open`` closes the session and raises. ``archive`` is
     ``inner``'s, which removes the scenario from the ``scenarios`` of its
     owner's items, also of the record items that it made
-    (``DataStore.remove_scenario``).
+    (``DataStore.delete_scenario``).
 
     Purpose: deployment assembly wraps the scenario storage in it. The
     scenario factory opens each scenario's session through it.

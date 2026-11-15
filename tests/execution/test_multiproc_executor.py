@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from reef.execution.executor import Executor, ExecutorConfig, ExecutorFailedError, WorkerSpec, resolve
+from reef.execution.executor import Executor, ExecutorFailedError, ExecutorLaunch, WorkerSpec, resolve
 
 
 class Counter:
@@ -83,18 +83,18 @@ class RunSleeper:
 
 
 def test_uni_is_one_in_process_worker():
-    executor = Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Counter),)))
+    executor = Executor.create(ExecutorLaunch(backend="uni", workers=(WorkerSpec(Counter),)))
     try:
         assert executor.rpc(0, "identity")[1] == os.getpid()
     finally:
         executor.shutdown()
     with pytest.raises(ValueError, match="at most one"):
-        Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Counter), WorkerSpec(Counter))))
+        Executor.create(ExecutorLaunch(backend="uni", workers=(WorkerSpec(Counter), WorkerSpec(Counter))))
 
 
 def test_mp_spawns_distinct_cpu_ranks_with_ordered_rpc_and_cleanup(tmp_path):
     executor = Executor.create(
-        ExecutorConfig(
+        ExecutorLaunch(
             backend="mp",
             workers=tuple(
                 WorkerSpec(Counter, args=(rank,), kwargs={"marker": str(tmp_path / str(rank))}) for rank in range(2)
@@ -122,7 +122,7 @@ def test_mp_spawns_distinct_cpu_ranks_with_ordered_rpc_and_cleanup(tmp_path):
 
 def test_mp_collective_dispatches_all_ranks_before_waiting(tmp_path):
     executor = Executor.create(
-        ExecutorConfig(
+        ExecutorLaunch(
             backend="mp", workers=tuple(WorkerSpec(Rendezvous, args=(str(tmp_path), rank)) for rank in range(2))
         )
     )
@@ -133,7 +133,7 @@ def test_mp_collective_dispatches_all_ranks_before_waiting(tmp_path):
 
 
 def test_mp_timeout_does_not_retry_or_cancel_work():
-    executor = Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(Counter),)))
+    executor = Executor.create(ExecutorLaunch(backend="mp", workers=(WorkerSpec(Counter),)))
     try:
         future = executor.rpc(0, "increment", args=(0.2,), non_block=True)
         with pytest.raises(TimeoutError):
@@ -150,7 +150,7 @@ def test_mp_constructor_failure_rolls_back_started_ranks(tmp_path):
     before = {child.pid for child in multiprocessing.active_children()}
     with pytest.raises(ValueError, match="constructor failed"):
         Executor.create(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend="mp",
                 workers=(
                     WorkerSpec(Counter, kwargs={"marker": str(tmp_path / "stopped")}),
@@ -163,7 +163,7 @@ def test_mp_constructor_failure_rolls_back_started_ranks(tmp_path):
 
 
 def test_mp_worker_death_fails_rpc_and_health_without_hanging():
-    executor = Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(Counter),)))
+    executor = Executor.create(ExecutorLaunch(backend="mp", workers=(WorkerSpec(Counter),)))
     try:
         with pytest.raises(ExecutorFailedError, match=r"exited|disconnected"):
             executor.rpc(0, "crash", timeout=5)
@@ -183,7 +183,7 @@ def test_idle_rank_death_proactively_fails_other_rank_and_notifies_once():
             self.events.append(failure)
             self.received.set()
 
-    executor = Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(Counter),) * 2))
+    executor = Executor.create(ExecutorLaunch(backend="mp", workers=(WorkerSpec(Counter),) * 2))
     listener = Listener()
     executor.register_failure_listener(listener)
     pids = [row[1] for row in executor.collective_rpc("identity")]
@@ -211,13 +211,13 @@ def test_idle_rank_death_proactively_fails_other_rank_and_notifies_once():
 def test_mp_rejects_unpickleable_worker_before_starting_any_rank():
     before = {child.pid for child in multiprocessing.active_children()}
     with pytest.raises(TypeError, match="spawn-pickleable"):
-        Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(Counter, kwargs={"marker": lambda: None}),)))
+        Executor.create(ExecutorLaunch(backend="mp", workers=(WorkerSpec(Counter, kwargs={"marker": lambda: None}),)))
     assert {child.pid for child in multiprocessing.active_children()} == before
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group leases")
 def test_killed_worker_does_not_leave_running_harness(tmp_path):
-    executor = Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(RunSleeper),)))
+    executor = Executor.create(ExecutorLaunch(backend="mp", workers=(WorkerSpec(RunSleeper),)))
     try:
         pending = executor.rpc(0, "run", args=(str(tmp_path),), non_block=True)
         marker = tmp_path / "child.pid"
@@ -251,4 +251,4 @@ def test_killed_worker_does_not_leave_running_harness(tmp_path):
 
 def test_mp_rejects_node_placement():
     with pytest.raises(ValueError, match="cluster node"):
-        Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(Counter),), node_id="node-1"))
+        Executor.create(ExecutorLaunch(backend="mp", workers=(WorkerSpec(Counter),), node_id="node-1"))
