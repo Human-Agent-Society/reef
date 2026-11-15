@@ -528,7 +528,8 @@ class DataStore(Plugin, JobDataReader, ABC):
     Values: the state of a store is a finite set of ``StoredItem`` values. Within one owner, no two items have
     the same ``item_id``, and ``sequence`` increases in the order the items arrived. An item's content,
     ``digest`` and fixed metadata (``kind``, ``owner``, ``origin``) never change, except that ``replace_task`` gives a
-    task item new files and so a new ``digest``. Every operation names one owner
+    task item new files and ``replace_trajectory`` a trajectory item new content, and so a new ``digest``. Every
+    operation names one owner
     and reads or writes only the items of that owner.
 
     Operations:
@@ -589,6 +590,12 @@ class DataStore(Plugin, JobDataReader, ABC):
       reads the task again; the same files change nothing. It returns the item without content. An unknown ID is an
       ``ItemNotFoundError``; an item of another kind, or a directory of another name, is a ``ValueError``, and nothing
       changes. The files of the old digest stay, so a reader that opened them can go on.
+    * ``replace_trajectory(owner, item_id, content)`` gives the trajectory item ``item_id`` the content ``content``,
+      checked as ``create`` checks a trajectory's content, and its digest (RFC #1455). The item keeps its ID,
+      sequence, metadata, sets and holds. When the digest changes, each use of the item gets a new use sequence, as
+      with ``replace_task``; the same content changes nothing. It returns the item without content. An unknown ID is
+      an ``ItemNotFoundError``; an item of another kind, or content that a trajectory may not have, is a
+      ``ValueError``, and nothing changes.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
     * ``delete_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
       the record items that it made, and returns the number of items that named it. It ends the scenario's holds
@@ -775,6 +782,9 @@ class DataStore(Plugin, JobDataReader, ABC):
 
     @abstractmethod
     def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem: ...
+
+    @abstractmethod
+    def replace_trajectory(self, owner: str, item_id: str, content: Mapping[str, Any]) -> StoredItem: ...
 
     @abstractmethod
     def delete(self, owner: str, item_id: str) -> bool: ...
@@ -1045,6 +1055,17 @@ def replaced_task_digest(owner: str, item: StoredItem, directory: Path, task_fil
             f"item {item.item_id!r} is a {item.metadata['kind']} item; only a task's files can be replaced"
         )
     return ITEM_KIND_RULES["task"].stored_digest(owner, item.item_id, directory, item.metadata, task_files)
+
+
+def replaced_trajectory_digest(item: StoredItem, content: Mapping[str, Any], task_files: TaskFileStore) -> str:
+    """The digest of the content ``content`` that ``replace_trajectory`` gives the stored ``item``. Raise
+    ``ValueError`` unless ``item`` is a trajectory item and ``content`` follows the rules of a trajectory's content."""
+    if item.metadata["kind"] != "trajectory":
+        raise ValueError(
+            f"item {item.item_id!r} is a {item.metadata['kind']} item; only a trajectory's content can be replaced"
+        )
+    rules = ITEM_KIND_RULES["trajectory"]
+    return rules.stored_digest(item.owner, item.item_id, content, item.metadata, task_files)
 
 
 def prepared_items(
@@ -1430,6 +1451,20 @@ class MemoryDataStore(DataStore):
         digest = replaced_task_digest(owner, item, directory, self.task_files)
         if digest != item.digest:
             item = replace(item, digest=digest)
+            stored[item_id] = item
+            for key in sorted(key for key in self.uses if key[:2] == (owner, item_id)):
+                self.uses[key] = self.take_sequence()
+        return replace(item, content=None)
+
+    def replace_trajectory(self, owner: str, item_id: str, content: Mapping[str, Any]) -> StoredItem:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        item = stored.get(item_id)
+        if item is None:
+            raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
+        digest = replaced_trajectory_digest(item, content, self.task_files)
+        if digest != item.digest:
+            item = replace(item, digest=digest, content=copy.deepcopy(dict(content)))
             stored[item_id] = item
             for key in sorted(key for key in self.uses if key[:2] == (owner, item_id)):
                 self.uses[key] = self.take_sequence()
