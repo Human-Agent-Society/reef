@@ -1502,9 +1502,8 @@ A retry of a cancelled or stopped evaluation does not run its cancelled
 rollouts and does not start its other rollouts. When the failed rollouts end,
 the evaluation fails again. Its error is ``cancelled by request`` after a
 cancel. After a stop, it starts with ``too many rollouts failed``, as the
-error of the stop does. While a
-cancelled rollout waits for a resume, ``max_failed_fraction`` does not count
-it. To finish an evaluation that too many failures stopped, retry it first,
+error of the stop does. While a cancelled rollout waits for a resume,
+``max_failed_fraction`` does not count it. To finish an evaluation that too many failures stopped, retry it first,
 and then resume it. A resume first counts the same failures, so it can stop
 again.
 
