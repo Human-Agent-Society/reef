@@ -1023,7 +1023,8 @@ def test_after_a_failure_stop_a_retry_runs_the_failed_rollouts_and_a_resume_the_
             assert (await client.post(f"{route}/retry", headers=AUTH)).status == 202
             ended_all(None)
             answer = await finished(client, accepted["evaluation_id"])
-            assert (answer["state"], answer["error"]) == ("failed", FAILURES_ERROR)
+            assert answer["state"] == "failed"
+            assert answer["error"] == "too many rollouts failed: the stop ended 2 rollouts, which wait for a resume"
             assert (answer["progress"]["scored"], answer["progress"]["cancelled"]) == (10, 2)
 
             assert (await client.post(f"{route}/resume", headers=AUTH)).status == 202

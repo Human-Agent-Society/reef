@@ -567,7 +567,11 @@ class EvaluationResults:
                     current.store.evaluations.begin(evaluation_id)
                 return
         if cancelled:
-            error = CANCELLED_ERROR if any(item.error == CANCELLED_ERROR for item in cancelled) else FAILURES_ERROR
+            # The error says again what ended the evaluation: a cancel, or the failure check with its usual prefix.
+            if any(item.error == CANCELLED_ERROR for item in cancelled):
+                error = CANCELLED_ERROR
+            else:
+                error = f"too many rollouts failed: the stop ended {len(cancelled)} rollouts, which wait for a resume"
             self.end(scenario, evaluation_id, request, result=None, error=error)
             return
         rollouts = [EvaluationRollout.from_item(item) for item in items]
