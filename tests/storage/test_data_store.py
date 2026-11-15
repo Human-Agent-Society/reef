@@ -322,6 +322,43 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
     assert store.read("acme", "fix-bug").digest == replaced.digest
 
 
+def test_a_trajectory_items_content_is_replaced_in_place_and_its_uses_are_read_again(store, tmp_path):
+    (item,) = store.create("acme", [trajectory("t1", "a long copy", scenarios={"coding": "train"})])
+    store.create("acme", [trajectory("t2", "after")])
+    used_before = store.scenario_items("acme", "coding", kinds=("trajectory",))[0].sequence
+    smaller = {**ATIF, "steps": [{"step_id": 1, "message": "short"}]}
+
+    replaced = store.replace_trajectory("acme", "t1", smaller)
+    assert (replaced.sequence, replaced.metadata, replaced.digest, replaced.content) == (
+        item.sequence,
+        item.metadata,
+        json_digest(smaller),
+        None,
+    )
+    assert store.read("acme", "t1").content == smaller
+    # The item keeps its place in the arrival order, and a trainer reads it again after its cursor.
+    assert [found.item_id for found in store.query("acme", kind="trajectory")] == ["t1", "t2"]
+    assert [
+        use.item.item_id for use in store.scenario_items("acme", "coding", kinds=("trajectory",), after=used_before)
+    ] == ["t1"]
+    # The same content again changes nothing, not even the use.
+    (used_after,) = [use.sequence for use in store.scenario_items("acme", "coding", kinds=("trajectory",))]
+    assert store.replace_trajectory("acme", "t1", smaller) == replaced
+    assert store.scenario_items("acme", "coding", kinds=("trajectory",))[0].sequence == used_after
+
+    with pytest.raises(ItemNotFoundError):
+        store.replace_trajectory("acme", "missing", smaller)
+    with pytest.raises(ValueError):
+        store.replace_trajectory("acme", "t1", {"steps": "not ATIF"})
+    task = tmp_path / "fix-bug"
+    task.mkdir()
+    (task / "instruction.md").write_text("Fix the bug.\n")
+    store.create("acme", [NewItem("fix-bug", task, {"kind": "task"})])
+    with pytest.raises(ValueError, match="only a trajectory's content"):
+        store.replace_trajectory("acme", "fix-bug", smaller)
+    assert store.read("acme", "t1").digest == replaced.digest
+
+
 def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path):
     task = tmp_path / "fix-bug"
     (task / "tests").mkdir(parents=True)
