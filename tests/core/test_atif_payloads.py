@@ -14,6 +14,8 @@ from reef.core.atif_payloads import (
     provider_payload,
     response_metrics,
 )
+from reef.core.records_types import AgentRecord, RequestType
+from reef.core.trajectories import make_trajectory
 
 CHAT = {
     "model": "m",
@@ -279,3 +281,43 @@ def test_a_patch_turns_the_rendered_value_into_the_original(original, rendered) 
     patch = patch_of(original, rendered)
     assert canonical_json(patched(rendered, patch)) == canonical_json(original)
     assert (patch is None) == (canonical_json(original) == canonical_json(rendered))
+
+
+def test_a_trajectory_of_records_keeps_each_response_metrics_on_its_agent_step() -> None:
+    def answer(text: str, **choice) -> dict:
+        return {"choices": [{"message": {"role": "assistant", "content": text}, **choice}]}
+
+    first = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "response": {
+            **answer("hello", logprobs={"content": ENTRIES}, token_ids=[20, 21]),
+            "prompt_token_ids": [10, 11],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 2},
+        },
+    }
+    second = {
+        "messages": [
+            *first["messages"],
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "bye"},
+        ],
+        "response": {**answer("goodbye"), "usage": {"prompt_tokens": 5, "completion_tokens": 1}},
+    }
+    records = [
+        AgentRecord(f"r{index}", "s", RequestType.INFERENCE, payload, float(index))
+        for index, payload in enumerate((first, second))
+    ]
+    trajectory = make_trajectory(records).trajectory
+    agent = [step for step in trajectory["steps"] if step["source"] == "agent"]
+    # Each call's response gives the metrics of its own agent step; the second call has only token counts.
+    assert [step["metrics"] for step in agent] == [
+        {
+            "prompt_tokens": 2,
+            "completion_tokens": 2,
+            "prompt_token_ids": [10, 11],
+            "completion_token_ids": [20, 21],
+            "logprobs": [-0.25, -0.5],
+        },
+        {"prompt_tokens": 5, "completion_tokens": 1},
+    ]
+    Trajectory.model_validate(trajectory)
