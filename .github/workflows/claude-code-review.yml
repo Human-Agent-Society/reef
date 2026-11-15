@@ -51,3 +51,21 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
+      # The action's log omits why Claude failed. Print only the SDK's error categories, never message text.
+      - name: Report Claude error categories
+        if: failure() && steps.claude-review.outcome == 'failure'
+        env:
+          EXECUTION_FILE: ${{ steps.claude-review.outputs.execution_file }}
+        run: |
+          if categories=$(jq -cs '
+              if length == 1 and (.[0] | type) == "array" then
+                [.[0][] | objects | select(.type == "assistant") | .error | select(. != null)
+                  | if IN("authentication_failed", "oauth_org_not_allowed", "account_on_hold", "billing_error",
+                      "rate_limit", "overloaded", "invalid_request", "model_not_found", "server_error",
+                      "max_output_tokens", "cloud_credential_error", "unknown") then . else "unrecognized" end]
+                | unique | {assistant_errors: (if . == [] then ["unreported"] else . end)}
+              else error("unexpected execution file") end' "$EXECUTION_FILE" 2>/dev/null); then
+            echo "$categories"
+          else
+            echo "Claude error categories are unavailable."
+          fi
