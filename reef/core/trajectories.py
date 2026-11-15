@@ -20,6 +20,7 @@ from reef.core.atif_payloads import (
     folded_steps,
     message_entry,
     payload_provider,
+    response_metrics,
 )
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
@@ -94,7 +95,9 @@ class TrajectoryBuilder:
     last: AgentRecord | None = None
 
     def add(self, record: AgentRecord) -> None:
-        """Add the messages of ``record`` that the last record did not have, and its responses."""
+        """Add the messages of ``record`` that the last record did not have, and its responses. The last agent step
+        of the responses carries the ATIF ``metrics`` of the record's response (``response_metrics``): its token
+        counts, and its token IDs and log probabilities when the response has them."""
         provider = payload_provider(record.payload) or OPENAI_CHAT
         request, responses = exchange_messages(record.payload)
         shared = 0
@@ -103,7 +106,12 @@ class TrajectoryBuilder:
                 break
             shared += 1
         self.entries.extend(message_entry(message, provider, copied=True) for message in request[shared:])
-        self.entries.extend(message_entry(message, provider, copied=False) for message in responses)
+        reply = [message_entry(message, provider, copied=False) for message in responses]
+        response = record.payload.get("response")
+        metrics = response_metrics(response) if isinstance(response, Mapping) else None
+        if metrics and reply and reply[-1] and reply[-1][-1].get("source") == "agent":
+            reply[-1][-1] = {**reply[-1][-1], "metrics": metrics}
+        self.entries.extend(reply)
         self.history = [*request, *responses]
         self.record_ids.append(record.agent_record_id)
         if self.include_records:
