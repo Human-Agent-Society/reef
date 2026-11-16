@@ -1851,9 +1851,16 @@ including inputs removed by a recipe's existing group rules.
 The ``reef.core.trajectories`` helpers construct and consume ATIF:
 ``make_trajectory(records, reward, feedback)`` converts the exchanges with
 ``reef.core.atif_payloads``, as the record stores do, writes the last record's
-``tools`` as the agent's ``tool_definitions``, and retains original exchanges;
-``recorded_payload`` / ``recorded_payloads`` project exchanges for harness
-methods, including external ATIF without captured records; and
+``tools`` as the agent's ``tool_definitions``, and keeps a summary of each
+call in ``extra.reef.records`` (``call_summary``): its
+``agent_record_id``, ``created_at`` and ``artifact_id``, and its ``payload``
+without the conversation, the tools and the response
+(``CONVERSATION_FIELDS``), such as ``model`` and ``chat_template_kwargs``. The
+steps hold the conversation, so the trajectory does not grow with the square
+of its calls. ``recorded_payloads`` gives each call's stored payload;
+``recorded_payload`` gives the last call as served, with the conversation that
+the steps project, for harness methods and for external ATIF without captured
+records; and
 ``trajectory_reward`` reads a finite policy reward. ``SampleAssembly.build``
 (``reef.record2sample.assembly``) makes a report's sample. Without
 ``accept_multi_turn_policy_samples``, the sample is the trajectory's last

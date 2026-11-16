@@ -41,6 +41,7 @@ from reef.core.evaluation import (
 from reef.core.served_models import ServedArtifact
 from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
+from reef.core.trajectories import CONVERSATION_FIELDS
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import (
@@ -1094,7 +1095,9 @@ def test_the_calls_of_each_attempt_stitch_into_one_trajectory_and_the_scored_att
     )
     records = scored["extra"]["reef"]["records"]
     assert [record["agent_record_id"] for record in records] == ["e1:2:0:3:0", "e1:2:0:3:2"]
-    assert records[0]["created_at"] == 30.0 and records[0]["payload"]["response"]["choices"][0]["message"]["content"]
+    # Each record is the call's summary: its time and its settings, without the conversation that the steps hold.
+    assert records[0]["created_at"] == 30.0
+    assert not CONVERSATION_FIELDS & set(records[0]["payload"])
     # The second call repeats the first exchange, so the stitched steps hold each message once.
     assert [step["message"] for step in scored["steps"]] == ["solve add", "ls", "a.txt", "cat a.txt"]
     running = replace(item, state="running", ended_at=None, result=None, worker_id="w", lease_expires_at=9.0)

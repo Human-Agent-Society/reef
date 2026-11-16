@@ -157,9 +157,9 @@ def test_trace_processor_carries_the_task_a_report_names() -> None:
 
 
 def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() -> None:
-    """A report over a whole run becomes one sample: the trajectory holds
-    every referenced payload in reference order, the payload is the last
-    exchange, and the feedback rides along verbatim."""
+    """A report over a whole run becomes one sample: the trajectory keeps a
+    summary of every referenced call in reference order, the payload is the
+    last exchange that the steps project, and the feedback rides along verbatim."""
     processor = _processor()
     first = {"messages": [{"role": "user", "content": "first"}]}
     second = {"messages": [{"role": "user", "content": "second"}]}
@@ -171,8 +171,8 @@ def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() ->
     batch = processor.build_job_data(1)
     (sample,) = batch.samples
     assert source_record_id(sample) == "inf-2"
-    assert recorded_payload(sample) == second
-    assert recorded_payloads(sample) == (first, second)
+    assert recorded_payload(sample)["messages"][-1] == second["messages"][-1]
+    assert recorded_payloads(sample) == ({}, {})
     assert sample.metadata.get("feedback") == "wrong file"
     assert sample.metadata.get("reward") == 0.0
 
@@ -185,8 +185,8 @@ def test_trace_processor_keeps_single_reference_trajectory_and_carries_feedback(
 
     batch = processor.build_job_data(1)
     (sample,) = batch.samples
-    assert recorded_payload(sample) == payload
-    assert recorded_payloads(sample) == (payload,)
+    assert recorded_payload(sample)["messages"] == payload["messages"]
+    assert recorded_payloads(sample) == ({},)
     assert sample.metadata.get("feedback") == {"reason": "timeout"}
 
 
@@ -235,7 +235,7 @@ def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
     batch = processor.build_job_data(2)
     assert isinstance(batch, JobData)
     assert [source_record_id(s) for s in batch.samples] == ["inf-1", "inf-2"]
-    assert [recorded_payload(s) for s in batch.samples] == [first, second]
+    assert [recorded_payload(s)["messages"] for s in batch.samples] == [first["messages"], second["messages"]]
     assert {s.metadata.get("reward") for s in batch.samples} == {None}
 
     # The stored samples consume their records; the job data consumes the samples.

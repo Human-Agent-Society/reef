@@ -449,9 +449,9 @@ gives the rule (``Record2Sample.is_stale(samples, served)``); it has no config
 key of its own unless its method defines a bound. The check has these steps:
 
 1. The inference service writes the ``artifact_id`` of the artifact that
-   answered into each inference record. The sample keeps each record's
-   payload in ``extra.reef.records``, and ``TrajectorySample.artifact_id``
-   reads the ``artifact_id`` of its last call. A task rollout of a training
+   answered into each inference record. The sample keeps a summary of each
+   record in ``extra.reef.records``, with the record's ``artifact_id``, and
+   ``TrajectorySample.artifact_id`` reads the ``artifact_id`` of its last call. A task rollout of a training
    component names its artifact in ``training.artifact_id`` instead.
 2. In each step, the samples service reads the artifacts that the scenario
    served from the newest commit history in the store (``ServedArtifacts``):
