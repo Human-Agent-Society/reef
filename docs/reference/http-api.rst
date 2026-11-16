@@ -1608,7 +1608,9 @@ without a 200 call has no trajectory.
 - Each call is one entry of ``extra.reef.records``. Its ``agent_record_id`` is
   the call's record ID (`Evaluation calls`_), and its
   ``created_at`` is the call's ``started_at``. Its ``payload`` is the request
-  body plus ``response``, the response body.
+  body without the conversation, the tools and the response
+  (``call_summary``), such as ``model`` and ``chat_template_kwargs``. The
+  steps hold the conversation.
 - ``extra.reef.reward`` is the rollout's score for each trajectory of the
   attempt that was scored: the last attempt of a finished rollout. It is null
   for every other attempt, and for a failed score.
