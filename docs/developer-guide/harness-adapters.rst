@@ -127,8 +127,9 @@ How Reef runs an agent
        needs an adapter with ``run.task.skills``: Reef copies the task's
        skills there before the tree, so the tree's file wins on one path. A
        task that sets ``environment.mcp_servers`` needs an adapter with
-       ``run.task.mcp`` (`Task MCP servers`_). An evaluation refuses a task
-       that needs what the adapter does not give its agent. The verifier can read the run as ATIF in
+       ``run.task.mcp`` (`Task MCP servers`_). The rollout of a task that
+       needs what the adapter does not give its agent fails with no retry,
+       and the other rollouts run. The verifier can read the run as ATIF in
        ``/logs/agent/trajectory.json`` when the reader has ``to_atif``.
      - an npm, uv or git ``install``, ``run.task.skills``,
        ``run.task.mcp``

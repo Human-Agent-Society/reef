@@ -50,10 +50,10 @@ from reef.core.served_models import ServedArtifact
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.evaluation.trials import EvaluationTrial, TrialObserver
-from reef.execution.workers import QueueWorker, WorkerStoppedError
+from reef.execution.workers import ItemFailedError, QueueWorker, WorkerStoppedError
 from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
-from reef.harness.harbor.agent import tree_agent, trial_directory
+from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRollout, TaskRolloutRunner
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
@@ -583,8 +583,9 @@ class EvaluationRolloutWorker(QueueWorker):
     Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
     ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
     lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
-    address at which a task's container reaches this host. Every failed rollout is retried: a trial fails for reasons
-    outside its input, such as a sandbox that did not start.
+    address at which a task's container reaches this host. A failed rollout is retried: a trial fails for reasons
+    outside its input, such as a sandbox that did not start. A rollout of a harness tree whose task needs what the
+    tree's agent does not give it (``task_agent_tools``) fails for good.
 
     Purpose: the evaluation service starts one (``start``) and stops it (``stop``).
     """
@@ -649,6 +650,15 @@ class EvaluationRolloutWorker(QueueWorker):
         (``verifier_rewards``), and the reason of a failed score (None for a scored rollout). ``attempt`` is the
         1-based attempt of the rollout's work item; the rollout's calls are kept under it (``RolloutCalls``)."""
         task_directory = self.endpoints.task_directory(rollout)
+        if rollout.tree is not None:
+            # A retry runs the same task with the same tree, so a task that asks for what the tree's agent cannot
+            # give fails for good, before its candidate is served.
+            tools = task_agent_tools(get_adapter(rollout.tree.adapter), task_directory)
+            if tools:
+                raise ItemFailedError(
+                    f"task {rollout.task_name!r} needs {', '.join(tools)}, which adapter {rollout.tree.adapter!r} "
+                    "does not give its agent"
+                )
         served = self.served_candidate(rollout, lease_lost)
         # A tree in a remote environment reaches the capture proxy through the bridge, on loopback (RFC #986).
         bridged = rollout.tree is not None and rollout.environment != "docker"
