@@ -66,9 +66,9 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/trajectories``                                                                   | create trajectory items from JSON Lines           |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data/tasks``                                                                          | create task items from a tar.gz of Harbor tasks   |
+| ``POST /reef/namespaces/{owner}/data/tasks``                                                                          | create task items from a tar.gz, or by reference  |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``PUT /reef/namespaces/{owner}/data/tasks/{id}``                                                                      | replace a task item's files                       |
+| ``PUT /reef/namespaces/{owner}/data/tasks/{id}``                                                                      | replace a task item's files, or by reference      |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data``                                                                                 | the owner's items, in arrival order               |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
@@ -680,12 +680,39 @@ scenario that does not exist yet when the scenario opens.
 Create task items
 ~~~~~~~~~~~~~~~~~
 
-Send a gzip-compressed tar archive to ``POST
-/reef/namespaces/{owner}/data/tasks`` with ``Content-Type:
-application/gzip``. Each top-level entry is one Harbor task directory, named
-by its task name: a lowercase letter or a digit, then lowercase letters,
-digits, ``.``, ``_`` and ``-``. The task name is the item's ID. The query
-parameter ``metadata`` is the JSON metadata of every task of the archive:
+``POST /reef/namespaces/{owner}/data/tasks`` creates one task item for each
+Harbor task directory. The task name is the item's ID: a lowercase letter or a
+digit, then lowercase letters, digits, ``.``, ``_`` and ``-``. A request
+holds 1 to 1000 tasks. The request has one of two forms:
+
+- An archive (``Content-Type: application/gzip``). The data service unpacks
+  the archive and copies each task directory into the task file store.
+- A reference (``Content-Type: application/json``). The client wrote each task
+  directory into the task file store itself. The data service copies no file.
+  Use this form for a task that is too large for an archive.
+
+Every task must be within the limits on its files. The module
+``reef.storage.tasks`` defines them, so a client can check a task before it
+sends it (``task_limit_errors``):
+
+.. list-table::
+   :header-rows: 1
+   :widths: 40 60
+
+   * - Limit
+     - Value
+   * - Size of one file
+     - 500 GB (``MAX_TASK_FILE_BYTES``)
+   * - Entries, files and directories, directly in one directory
+     - 10,000 (``MAX_TASK_DIRECTORY_ENTRIES``)
+   * - Files in one task
+     - 100,000 (``MAX_TASK_FILES``)
+   * - Size of one task
+     - no limit
+
+In the archive form, each top-level entry of the gzip-compressed tar archive
+is one task directory, named by its task name. The query parameter
+``metadata`` is the JSON metadata of every task of the archive:
 
 .. code:: bash
 
@@ -697,35 +724,73 @@ parameter ``metadata`` is the JSON metadata of every task of the archive:
      -H 'Content-Type: application/gzip' \
      --data-binary @tasks.tar.gz
 
-The response is the same as for trajectory items, in name order. Reef
-returns:
+The data service writes the body to a local file before it unpacks it. The
+setting ``data.max-task-archive-bytes`` limits the body (default 512 MiB; see
+`The data section <configuration.rst#the-data-section>`__). The files of one
+archive unpack to at most 8 GiB; create larger tasks in the reference form.
+Harbor's task loader must accept each task directory.
+
+In the reference form, first write each task directory into the owner's
+partition of the task file store, in the layout of the deployment's
+``TaskFileStore`` (``storage.task-file-backend``). The partition of the owner
+``<owner>`` is ``data/<owner>``. The directory has the task name as its name.
+Compute its digest with ``reef.storage.tasks.FilesDigest``, or with
+``files_digest`` for a local directory. Then send the task names and digests
+as JSON. ``metadata`` is optional, as in the archive form:
+
+.. code:: bash
+
+   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks" \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"tasks": [{"name": "sum-391", "digest": "<files digest>"}],
+          "metadata": {"scenarios": {"my-agent": "train"}}}'
+
+For each task, the task file store must hold a complete directory with that
+name and digest in the owner's partition (``TaskFileStore.contains``). The
+item then gets that digest. The data service does not run Harbor's task
+loader on a reference: the client that wrote the files checks them.
+
+Both forms return the same response as for trajectory items, with the items in
+name order. Reef returns:
 
 - 400, and stores nothing, for an archive that is not tar.gz, a link or a
   device in it, a path outside its task directories, a file at the top level,
-  a name that is not a task name, more than 1000 tasks or 10,000 entries, more
-  than 256 MiB unpacked, a directory that Harbor's task loader refuses, or
-  metadata that is not a JSON object of kind ``task``;
-- 413 for a body larger than 256 MiB;
+  a task over a limit of the table above, or a directory that Harbor's task
+  loader refuses;
+- 400, and stores nothing, for a reference body that is not
+  ``{"tasks": [{"name", "digest"}], "metadata"}``, or a digest that is not 64
+  lowercase hexadecimal digits;
+- 400, and stores nothing, for a name that is not a task name, more than 1000
+  tasks, or metadata that is not a JSON object of kind ``task``;
+- 404, and stores nothing, for a reference to a task directory that the
+  owner's partition does not hold;
 - 409, and stores nothing, for a task name that the owner holds with other
   files. To change the files of a task, replace them (below);
+- 413 for an archive body larger than ``data.max-task-archive-bytes``;
 - 415 for another content type.
 
 Replace a task's files
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Send the task's new directory, as a gzip-compressed tar archive of that one
-directory, to ``PUT /reef/namespaces/{owner}/data/tasks/{id}`` with
-``Content-Type: application/gzip``. The directory has the item's ID as its
-name:
+``PUT /reef/namespaces/{owner}/data/tasks/{id}`` gives the task item ``id``
+new files. The new task directory has the item's ID as its name. The request
+has the same two forms as a create:
 
-.. code:: bash
+- An archive of that one directory (``Content-Type: application/gzip``):
 
-   tar -czf sum-391.tar.gz -C /data/benchmark/tasks sum-391
-   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks/sum-391" \
-     -X PUT \
-     -H "Authorization: Bearer $REEF_TOKEN" \
-     -H 'Content-Type: application/gzip' \
-     --data-binary @sum-391.tar.gz
+  .. code:: bash
+
+     tar -czf sum-391.tar.gz -C /data/benchmark/tasks sum-391
+     curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks/sum-391" \
+       -X PUT \
+       -H "Authorization: Bearer $REEF_TOKEN" \
+       -H 'Content-Type: application/gzip' \
+       --data-binary @sum-391.tar.gz
+
+- A reference (``Content-Type: application/json``) to a directory that the
+  client wrote into the owner's partition of the task file store:
+  ``{"digest": "<files digest>"}``.
 
 The item keeps its ID, metadata and splits. Each evaluation attempt reads
 the task's current files, so a new evaluation and a retry of a started one
@@ -737,8 +802,9 @@ task reads it again. The same files again change nothing.
 The response is ``{"owner", "item", "synced"}``, without content. Reef
 returns 400, and changes nothing, for an archive of no task or of several, a
 directory with another name, a directory that Harbor's task loader refuses,
-or an item that is not a task; 404 for an unknown item; 413 and 415 as for a
-create.
+a reference body that is not ``{"digest"}``, or an item that is not a task;
+404 for an unknown item or a reference to a directory that the owner's
+partition does not hold; 413 and 415 as for a create.
 
 Record items
 ~~~~~~~~~~~~

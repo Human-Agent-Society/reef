@@ -31,7 +31,7 @@ from reef.core.job_data import JobData, TaskFiles
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
-from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
+from reef.storage.item_kinds import ITEM_KIND_RULES, TaskFilesReference, task_partition
 from reef.storage.job_data import (
     JOB_DATA_PREFIX,
     JobDataReader,
@@ -330,15 +330,16 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
 class NewItem:
     """An item that a client creates.
 
-    Values: ``item_id`` passes ``check_item_id``. ``content`` is a JSON object for a trajectory, a record or an artifact, and
-    the path of a task directory for a task; a task's ``item_id`` is the name of that directory. ``metadata`` is the client's metadata, which ``created_metadata``
-    checks against the owner.
+    Values: ``item_id`` passes ``check_item_id``. ``content`` is a JSON object for a trajectory, a record or an
+    artifact. For a task, it is the path of a task directory, or a ``TaskFilesReference`` to a directory that the
+    owner's task file partition holds; the directory has the name ``item_id``. ``metadata`` is the client's
+    metadata, which ``created_metadata`` checks against the owner.
 
     Purpose: the input of ``DataStore.create``.
     """
 
     item_id: str
-    content: Mapping[str, Any] | Path
+    content: Mapping[str, Any] | Path | TaskFilesReference
     metadata: Mapping[str, Any]
 
 
@@ -584,12 +585,14 @@ class DataStore(Plugin, JobDataReader, ABC):
       ``sequence`` orders the items of one scenario, and it does not order the items of several (RFC #1219).
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFoundError``. It returns the updated items, without content.
-    * ``replace_task(owner, item_id, directory)`` copies the task directory ``directory``, named ``item_id``, into
-      the owner's task file partition and gives the task item ``item_id`` its digest. The item keeps its ID,
-      sequence and metadata. When the digest changes, each use of the item gets a new use sequence, so a trainer
-      reads the task again; the same files change nothing. It returns the item without content. An unknown ID is an
-      ``ItemNotFoundError``; an item of another kind, or a directory of another name, is a ``ValueError``, and nothing
-      changes. The files of the old digest stay, so a reader that opened them can go on.
+    * ``replace_task(owner, item_id, files)`` gives the task item ``item_id`` new files. ``files`` is a task
+      directory named ``item_id``, which the store copies into the owner's task file partition, or a
+      ``TaskFilesReference`` to a directory named ``item_id`` that the partition holds. The item gets the digest of
+      the files, and keeps its ID, sequence and metadata. When the digest changes, each use of the item gets a new use
+      sequence, so a trainer reads the task again; the same files change nothing. It returns the item without
+      content. An unknown ID is an ``ItemNotFoundError``; an item of another kind, or a directory of another name, is
+      a ``ValueError``; a reference that the partition does not hold is a ``TaskFilesNotFoundError``. Nothing changes
+      then. The files of the old digest stay, so a reader that opened them can go on.
     * ``replace_trajectory(owner, item_id, content)`` gives the trajectory item ``item_id`` the content ``content``,
       checked as ``create`` checks a trajectory's content, and its digest (RFC #1455). The item keeps its ID,
       sequence, metadata, sets and holds. When the digest changes, each use of the item gets a new use sequence, as
@@ -781,7 +784,7 @@ class DataStore(Plugin, JobDataReader, ABC):
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]: ...
 
     @abstractmethod
-    def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem: ...
+    def replace_task(self, owner: str, item_id: str, files: Path | TaskFilesReference) -> StoredItem: ...
 
     @abstractmethod
     def replace_trajectory(self, owner: str, item_id: str, content: Mapping[str, Any]) -> StoredItem: ...
@@ -1046,15 +1049,18 @@ def generation_origin(
     return origins.pop()
 
 
-def replaced_task_digest(owner: str, item: StoredItem, directory: Path, task_files: TaskFileStore) -> str:
-    """The digest of the task directory ``directory`` that ``replace_task`` gives the stored ``item``, after it copied
-    the directory into the owner's task file partition. Raise ``ValueError`` unless ``item`` is a task item and
-    ``directory`` is a directory named after it."""
+def replaced_task_digest(
+    owner: str, item: StoredItem, files: Path | TaskFilesReference, task_files: TaskFileStore
+) -> str:
+    """The digest of the task files ``files`` that ``replace_task`` gives the stored ``item``, after it copied a
+    directory into the owner's task file partition, or checked that the partition holds the directory of a reference.
+    Raise ``ValueError`` unless ``item`` is a task item and ``files`` is a directory named after it or a reference;
+    raise ``TaskFilesNotFoundError`` for a reference that the partition does not hold."""
     if item.metadata["kind"] != "task":
         raise ValueError(
             f"item {item.item_id!r} is a {item.metadata['kind']} item; only a task's files can be replaced"
         )
-    return ITEM_KIND_RULES["task"].stored_digest(owner, item.item_id, directory, item.metadata, task_files)
+    return ITEM_KIND_RULES["task"].stored_digest(owner, item.item_id, files, item.metadata, task_files)
 
 
 def replaced_trajectory_digest(item: StoredItem, content: Mapping[str, Any], task_files: TaskFileStore) -> str:
@@ -1076,7 +1082,8 @@ def prepared_items(
     Each item's content follows the rules of its kind (``ITEM_KIND_RULES``). A task directory is copied into the
     owner's task file partition, so its digest names stored files. The copy happens before the store checks for
     conflicts; files are kept by digest, so a refused call leaves at most an unused copy. Raise ``ValueError`` for
-    an invalid owner, ID, metadata or content, or for an ID given twice.
+    an invalid owner, ID, metadata or content, or for an ID given twice, and ``TaskFilesNotFoundError`` for a task
+    reference that the owner's partition does not hold.
     """
     check_owner(owner)
     prepared: list[tuple[NewItem, dict[str, Any], str]] = []
@@ -1442,13 +1449,13 @@ class MemoryDataStore(DataStore):
             self.write_uses(owner, item.item_id, item.metadata)
         return tuple(replace(item, content=None) for item in updated)
 
-    def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem:
+    def replace_task(self, owner: str, item_id: str, files: Path | TaskFilesReference) -> StoredItem:
         check_owner(owner)
         stored = self.items.get(owner, {})
         item = stored.get(item_id)
         if item is None:
             raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
-        digest = replaced_task_digest(owner, item, directory, self.task_files)
+        digest = replaced_task_digest(owner, item, files, self.task_files)
         if digest != item.digest:
             item = replace(item, digest=digest)
             stored[item_id] = item

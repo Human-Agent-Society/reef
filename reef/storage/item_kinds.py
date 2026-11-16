@@ -8,7 +8,7 @@ kind (``ITEM_KIND_RULES``), and every data store checks them when it creates an 
   (``reef.storage.record_items``).
 * ``artifact``: a reference to an artifact's files (``check_artifact_content``, ``reef.storage.artifact_items``).
 * ``task``: a Harbor task directory named after the item, which the store copies into the owner's task file
-  partition (``task_partition``).
+  partition (``task_partition``), or a ``TaskFilesReference`` to such a directory that the partition already holds.
 
 This module imports no store, so that each store and each kind's own module can import it.
 """
@@ -19,13 +19,14 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from reef.core.evaluation import ARTIFACT_KINDS
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
-from reef.storage.tasks import TaskFileStore
+from reef.storage.tasks import FILES_DIGEST_PATTERN, TaskFilesNotFoundError, TaskFileStore
 
 #: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
 #: starts with it, and archiving a scenario never moves an owner's task files.
@@ -68,6 +69,25 @@ def evaluation_trajectory_id(evaluation_id: str, task_index: int, repeat: int, a
 def task_partition(owner: str) -> str:
     """The task file store partition that keeps the task directories of ``owner``."""
     return TASK_PARTITION_PREFIX + owner
+
+
+@dataclass(frozen=True)
+class TaskFilesReference:
+    """The files of a task item that the owner's task file partition already holds.
+
+    Values: ``digest`` is a string that matches ``FILES_DIGEST_PATTERN``: the ``files_digest`` of a task directory
+    that a client wrote into the owner's partition (``task_partition``) of the task file store itself. The
+    directory has the name of the item, so a reference names no directory name of its own.
+
+    Purpose: the data service makes it from a create or a replace by reference. ``TaskRules`` reads it as the
+    content of a task item, in place of a local task directory, and copies no file.
+    """
+
+    digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.digest, str) or not FILES_DIGEST_PATTERN.fullmatch(self.digest):
+            raise ValueError("a task's files digest is 64 lowercase hexadecimal digits")
 
 
 def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenario: str) -> AgentRecord:
@@ -227,16 +247,28 @@ class ArtifactRules(JsonItemRules):
 
 
 class TaskRules(ItemKindRules):
-    """A task's content is a Harbor task directory named after the item. The store copies it into the owner's task
-    file partition, so the digest names stored files."""
+    """A task's content is a Harbor task directory named after the item, or a ``TaskFilesReference``.
+
+    The store copies a directory into the owner's task file partition. For a reference, the partition must already
+    hold a complete directory of the reference's digest, named after the item, and the store copies nothing. Either
+    way, the digest names stored files. ``stored_digest`` raises ``TaskFilesNotFoundError`` for a reference to a
+    directory that the partition does not hold.
+    """
 
     kind = "task"
 
     def stored_digest(
         self, owner: str, item_id: str, content: object, metadata: Mapping[str, Any], task_files: TaskFileStore
     ) -> str:
+        if isinstance(content, TaskFilesReference):
+            if not task_files.contains(task_partition(owner), content.digest, item_id):
+                raise TaskFilesNotFoundError(
+                    f"the task file store holds no task directory {item_id!r} with digest {content.digest} for"
+                    f" {owner!r}"
+                )
+            return content.digest
         if not isinstance(content, Path) or not content.is_dir():
-            raise ValueError(f"task item {item_id!r} needs a task directory as its content")
+            raise ValueError(f"task item {item_id!r} needs a task directory or a reference as its content")
         if content.name != item_id:
             raise ValueError(f"task item {item_id!r} needs a task directory of the same name")
         return task_files.write(task_partition(owner), content)
@@ -256,6 +288,7 @@ __all__ = [
     "ItemKindRules",
     "JsonItemRules",
     "RecordRules",
+    "TaskFilesReference",
     "TaskRules",
     "TrajectoryRules",
     "check_artifact_content",

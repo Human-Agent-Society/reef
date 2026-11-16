@@ -29,6 +29,7 @@ from reef.service.data import (
     DataAccess,
     create_items,
     create_task_items,
+    create_task_references,
     create_trajectory_items,
     delete_item,
     group_items,
@@ -37,17 +38,20 @@ from reef.service.data import (
     query_items,
     read_item,
     replace_task_item,
+    replace_task_reference,
     set_listing,
     update_items,
 )
 from reef.service.data_transfer import TRANSFER_KINDS, item_archive, start_transfer, transfer_status
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
-from reef.service.tasks import MAX_UNPACKED_BYTES
+from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.storage.data import MAX_QUERY_LIMIT
 
 #: The content types of a task archive.
 TASK_ARCHIVE_TYPES = frozenset({"application/gzip", "application/x-gzip"})
+#: The content type of a create or a replace of task items by reference to the files in the task file store.
+TASK_REFERENCE_TYPE = "application/json"
 #: The content types of a JSON Lines upload of trajectories: one ATIF document a line.
 TRAJECTORY_LINES_TYPES = frozenset({"application/x-ndjson", "application/jsonl"})
 #: The bytes read from the body at a time.
@@ -68,7 +72,28 @@ def download_seconds(request: web.Request) -> int:
     return query_int(request, "expires_in", 3600)
 
 
-def register_data_routes(app: web.Application, *, request_service: RequestService) -> None:
+async def write_body_file(request: web.Request, path: Path, max_bytes: int) -> None:
+    """Write the body of ``request`` to the file ``path``, in chunks; HTTP 413 for a body of more than ``max_bytes``.
+
+    The body goes to a file, not to memory, so ``max_bytes`` bounds disk use.
+    """
+    size = 0
+    with path.open("wb") as file:
+        async for chunk in request.content.iter_chunked(CHUNK_BYTES):
+            size += len(chunk)
+            if size > max_bytes:
+                raise web.HTTPRequestEntityTooLarge(max_size=max_bytes, actual_size=size)
+            file.write(chunk)
+
+
+def register_data_routes(
+    app: web.Application,
+    *,
+    request_service: RequestService,
+    max_task_archive_bytes: int = DEFAULT_MAX_TASK_ARCHIVE_BYTES,
+) -> None:
+    """Register the data routes. ``max_task_archive_bytes`` is ``data.max_task_archive_bytes``: the most bytes of the
+    body of a task archive."""
     data = DataAccess.of(request_service.dispatcher)
 
     async def start(request: web.Request) -> web.Response:
@@ -132,42 +157,39 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         return web.json_response(await asyncio.to_thread(create), status=201)
 
     async def create_tasks(request: web.Request) -> web.Response:
+        """Create task items from a tar.gz of task directories, or by reference to the files in the task file store."""
+        owner = request.match_info["owner"]
+        if request.content_type == TASK_REFERENCE_TYPE:
+            body = await read_object(request.clone(client_max_size=MAX_CREATE_BYTES))
+            return web.json_response(await asyncio.to_thread(create_task_references, data, owner, body), status=201)
         if request.content_type not in TASK_ARCHIVE_TYPES:
             raise web.HTTPUnsupportedMediaType(
-                text="task items come as a tar.gz archive with Content-Type application/gzip"
+                text="task items come as a tar.gz archive with Content-Type application/gzip, or as references with"
+                " Content-Type application/json"
             )
         metadata = parsed_metadata(request.query.get("metadata"))
         with tempfile.TemporaryDirectory(prefix="reef-task-archive-") as work:
             archive = Path(work) / "tasks.tar.gz"
-            size = 0
-            # The body goes to a file, not to memory; its size is bounded like the tasks it unpacks to.
-            with archive.open("wb") as file:
-                async for chunk in request.content.iter_chunked(CHUNK_BYTES):
-                    size += len(chunk)
-                    if size > MAX_UNPACKED_BYTES:
-                        raise web.HTTPRequestEntityTooLarge(max_size=MAX_UNPACKED_BYTES, actual_size=size)
-                    file.write(chunk)
-            receipt = await asyncio.to_thread(create_task_items, data, request.match_info["owner"], archive, metadata)
+            await write_body_file(request, archive, max_task_archive_bytes)
+            receipt = await asyncio.to_thread(create_task_items, data, owner, archive, metadata)
         return web.json_response(receipt, status=201)
 
     async def replace_task(request: web.Request) -> web.Response:
-        """Replace a task item's files with the task directory of a tar.gz body (RFC #1359)."""
+        """Replace a task item's files with the task directory of a tar.gz body (RFC #1359), or by reference to the
+        files in the task file store."""
+        owner, item_id = request.match_info["owner"], request.match_info["item_id"]
+        if request.content_type == TASK_REFERENCE_TYPE:
+            body = await read_object(request)
+            return web.json_response(await asyncio.to_thread(replace_task_reference, data, owner, item_id, body))
         if request.content_type not in TASK_ARCHIVE_TYPES:
             raise web.HTTPUnsupportedMediaType(
-                text="a task's files come as a tar.gz archive with Content-Type application/gzip"
+                text="a task's files come as a tar.gz archive with Content-Type application/gzip, or as a reference"
+                " with Content-Type application/json"
             )
         with tempfile.TemporaryDirectory(prefix="reef-task-archive-") as work:
             archive = Path(work) / "task.tar.gz"
-            size = 0
-            with archive.open("wb") as file:
-                async for chunk in request.content.iter_chunked(CHUNK_BYTES):
-                    size += len(chunk)
-                    if size > MAX_UNPACKED_BYTES:
-                        raise web.HTTPRequestEntityTooLarge(max_size=MAX_UNPACKED_BYTES, actual_size=size)
-                    file.write(chunk)
-            receipt = await asyncio.to_thread(
-                replace_task_item, data, request.match_info["owner"], request.match_info["item_id"], archive
-            )
+            await write_body_file(request, archive, max_task_archive_bytes)
+            receipt = await asyncio.to_thread(replace_task_item, data, owner, item_id, archive)
         return web.json_response(receipt)
 
     async def query(request: web.Request) -> web.Response:

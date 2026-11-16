@@ -34,7 +34,7 @@ from reef.storage.data import (
     ScenarioArchivedError,
     ScenarioHold,
 )
-from reef.storage.item_kinds import json_digest
+from reef.storage.item_kinds import TaskFilesReference, json_digest, task_partition
 from reef.storage.job_data import job_data_key
 from reef.storage.record_items import (
     evaluation_call_item,
@@ -48,7 +48,7 @@ from reef.storage.sql_data import USES_TABLE, PostgresDataStore, SQLiteDataStore
 from reef.storage.sql_records import TrajectoryNodes
 from reef.storage.sql_setup import prefix_upper_bound
 from reef.storage.task_collections import TaskCollection, collection_benchmarks
-from reef.storage.tasks import LocalTaskFileStore, files_digest
+from reef.storage.tasks import LocalTaskFileStore, TaskFilesNotFoundError, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
 ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
@@ -320,6 +320,48 @@ def test_a_task_items_files_are_replaced_in_place_and_its_uses_are_read_again(st
     with pytest.raises(ValueError, match="only a task's files"):
         store.replace_task("acme", "t1", trajectory_task)
     assert store.read("acme", "fix-bug").digest == replaced.digest
+
+
+def test_a_task_item_is_created_and_replaced_by_a_reference_to_files_in_the_owners_partition(store, tmp_path):
+    digests = {}
+    for name, text in (("fix-bug", "Fix the bug.\n"), ("fix-bug-2", "Fix the bug in parse.\n"), ("other", "Other.\n")):
+        directory = tmp_path / name / ("fix-bug" if name.startswith("fix-bug") else name)
+        directory.mkdir(parents=True)
+        (directory / "instruction.md").write_text(text)
+        # A client writes the files into the owner's partition itself.
+        digests[name] = store.task_files.write(task_partition("acme"), directory)
+    metadata = {"kind": "task", "scenarios": {"coding": "train"}}
+    (item,) = store.create("acme", [NewItem("fix-bug", TaskFilesReference(digests["fix-bug"]), metadata)])
+    assert (item.digest, item.inserted) == (digests["fix-bug"], True)
+    assert (store.task_path(item) / "instruction.md").read_text() == "Fix the bug.\n"
+
+    # A digest that the partition does not hold, holds under another name, or holds for another owner stores
+    # nothing, also beside a good reference.
+    for owner, name, digest in (
+        ("acme", "new-task", "0" * 64),
+        ("acme", "new-task", digests["other"]),
+        ("rival", "fix-bug", digests["fix-bug"]),
+    ):
+        with pytest.raises(TaskFilesNotFoundError, match="holds no task directory"):
+            store.create(
+                owner,
+                [
+                    NewItem("other", TaskFilesReference(digests["other"]), {"kind": "task"}),
+                    NewItem(name, TaskFilesReference(digest), {"kind": "task"}),
+                ],
+            )
+    assert store.read("acme", "other") is None and store.read("rival", "fix-bug") is None
+
+    replaced = store.replace_task("acme", "fix-bug", TaskFilesReference(digests["fix-bug-2"]))
+    assert (replaced.sequence, replaced.digest) == (item.sequence, digests["fix-bug-2"])
+    assert (store.task_path(replaced) / "instruction.md").read_text() == "Fix the bug in parse.\n"
+    with pytest.raises(TaskFilesNotFoundError):
+        store.replace_task("acme", "fix-bug", TaskFilesReference(digests["other"]))
+    with pytest.raises(ItemNotFoundError):
+        store.replace_task("acme", "missing", TaskFilesReference(digests["fix-bug"]))
+    assert store.read("acme", "fix-bug").digest == digests["fix-bug-2"]
+    with pytest.raises(ValueError, match="64 lowercase hexadecimal"):
+        TaskFilesReference("../" + digests["fix-bug"])
 
 
 def test_a_trajectory_items_content_is_replaced_in_place_and_its_uses_are_read_again(store, tmp_path):
