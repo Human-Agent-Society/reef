@@ -2634,6 +2634,17 @@ token from ``reef.token``, and the served model from ``inference.model-path``
 or ``inference.upstream-model``. Without ``reef serve``,
 ``python -m reef.service.deploy.generator_process -c serve.yaml`` runs it from the same file.
 
+The ``data`` section
+--------------------
+
+Settings of the data service, which answers the data routes (`Data items
+<http-api.rst#data-items>`__).
+
+.. container:: config
+
+   ``data.max-task-archive-bytes`` : 536870912
+       the most bytes of the body of a task archive (512 MiB), for ``POST`` and ``PUT`` on ``/reef/namespaces/{owner}/data/tasks``. A larger body gets HTTP 413. The data service writes the body to a local file before it unpacks it, so the setting limits the disk that one upload uses. A larger task uses the reference form, which sends no files
+
 The ``task-import`` section
 ---------------------------
 

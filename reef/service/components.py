@@ -166,6 +166,7 @@ class DataApp(ComponentApp):
             build_dispatcher(settings, environ=environ, components=frozenset({"data"})),
             tokens=settings.tokens,
             console_origins=settings.console_origins,
+            max_task_archive_bytes=settings.max_task_archive_bytes,
         )
 
 

@@ -35,6 +35,7 @@ from reef.storage.data import ItemConflictError, ItemNotFoundError
 from reef.storage.evaluations import EvaluationStateConflictError
 from reef.storage.records import RecordConflictError
 from reef.storage.task_collections import CollectionNotFoundError
+from reef.storage.tasks import TaskFilesNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ScenarioNotFoundError, web.HTTPNotFound),
     (ItemNotFoundError, web.HTTPNotFound),
     (CollectionNotFoundError, web.HTTPNotFound),
+    (TaskFilesNotFoundError, web.HTTPNotFound),
     (ItemConflictError, web.HTTPConflict),
     (DataStoreUnavailableError, web.HTTPServiceUnavailable),
     (ScenarioLimitReachedError, web.HTTPConflict),
