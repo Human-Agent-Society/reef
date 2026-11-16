@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +14,7 @@ from reef.artifact import SnapshotRef
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.tasks import write_harbor_task
 from reef.storage.commits import CommitRecord
-from reef.storage.data import TASK_PATH_READERS, DataStore, MemoryDataStore, NewItem
+from reef.storage.data import DataStore, MemoryDataStore, NewItem
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.samples import SampleStore, consumed_sample_id, stage_item_id
 from reef.storage.scenario import ScenarioStore
@@ -303,26 +302,6 @@ def test_the_listing_of_the_imported_tasks_reads_no_task_files(scenario, monkeyp
     ]
 
 
-def test_the_task_directories_of_many_tasks_are_read_at_the_same_time(scenario, monkeypatch):
-    samples = scenario.samples
-    names = [f"task-{index}" for index in range(TASK_PATH_READERS)]
-    for name in names:
-        scenario.task(name, "eval")
-    scenario.data.create("acme", [upload("trajectory", math="train")])
-    expected = tuple(stored.sample.task_path for stored in samples.read(names))
-
-    # Each read waits until every reader has started one: a store that reads one directory at a time never ends.
-    started = threading.Barrier(TASK_PATH_READERS, timeout=10)
-    task_path = scenario.data.task_path
-
-    def slow_task_path(item):
-        started.wait()
-        return task_path(item)
-
-    monkeypatch.setattr(scenario.data, "task_path", slow_task_path)
-    assert samples.task_paths([*reversed(names), "trajectory", "missing"]) == expected
-
-
 def test_a_restart_counts_the_trained_samples_from_the_commits(open_durable_storage):
     with closing(open_durable_storage()) as storage, closing(storage.open("math")) as session:
         consumed = (consumed_sample_id("upload"), consumed_sample_id("a:r1:0"))
@@ -354,10 +333,9 @@ def test_a_task_that_the_scenario_uses_through_benchmarks_is_listed_for_each_use
     # A reader of the ID gets the item once: it trains when one of its uses trains.
     (read,) = samples.read(["task-a", "task-a"])
     assert (read.sample_id, read.split, read.held_set) == ("task-a", "train", None)
-    assert len(samples.task_paths(["task-a"])) == 1
 
     for benchmark in ("suite", "more"):
         assert scenario.data.release("acme", "math", "benchmark", benchmark, "train")
     assert [stored.split for stored in samples.read(["task-a"])] == ["eval"]
     scenario.data.update("acme", ["task-a"], {"scenarios": {"math": None}})
-    assert samples.read(["task-a"]) == () and samples.task_paths(["task-a"]) == ()
+    assert samples.read(["task-a"]) == ()

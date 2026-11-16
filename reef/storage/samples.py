@@ -18,7 +18,6 @@ import shutil
 import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from itertools import batched
 from pathlib import Path
@@ -27,7 +26,6 @@ from typing import Any, Literal, cast
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
 from reef.storage.data import (
     MAX_QUERY_LIMIT,
-    TASK_PATH_READERS,
     DataStore,
     ItemConflictError,
     ItemUse,
@@ -264,27 +262,6 @@ class SampleStore:
                 uses.append(ItemUse(item.sequence, item, split))
         uses.sort(key=lambda use: use.sequence)
         return tuple(stored for batch in batched(uses, MAX_QUERY_LIMIT) for stored in self.stored(batch))
-
-    def task_paths(self, sample_ids: Sequence[str]) -> tuple[Path, ...]:
-        """The task directories of the tasks of ``sample_ids`` that the scenario uses, in the order of their items.
-
-        It gives the directories that ``read`` gives for the same tasks, and reads ``TASK_PATH_READERS`` of them from
-        the task file store at the same time. An ID of a trajectory, or of an item that the scenario does not use,
-        gives no directory.
-        """
-        items = sorted(
-            (
-                item
-                for batch in batched(dict.fromkeys(sample_ids), MAX_QUERY_LIMIT)
-                for item in self.data.read_many(
-                    self.owner, list(self.data.item_splits(self.owner, self.scenario, batch)), content=False
-                )
-                if item.kind == "task"
-            ),
-            key=lambda item: item.sequence,
-        )
-        with ThreadPoolExecutor(max_workers=TASK_PATH_READERS) as readers:
-            return tuple(readers.map(self.data.task_path, items))
 
     def stored(self, uses: Sequence[ItemUse]) -> tuple[StoredSample, ...]:
         """The samples of the uses ``uses`` that are trajectories or tasks, with their train counts."""
