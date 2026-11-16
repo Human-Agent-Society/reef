@@ -811,6 +811,7 @@ def build_app(
                 Path(settings.artifact_cache_dir) / "imports",
             ),
             harness_inference_url=settings.harness_inference_url,
+            max_task_archive_bytes=settings.max_task_archive_bytes,
         )
     except BaseException:
         with suppress(Exception):

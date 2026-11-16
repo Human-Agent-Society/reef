@@ -23,6 +23,7 @@ from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
+from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 from reef.storage.data import JOB_DIRECTORY_TTL_SECONDS, DataStore
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -355,6 +356,13 @@ class ServiceSettings:
         public_path=("storage", "task_file_dir"),
         help="Directory of the generated task files, or the local cache of a plugin store.",
     )
+    #: The most bytes of the body of a task archive that the data routes take; a larger task uses a create by
+    #: reference. The body goes to a local file, so the limit bounds the disk that one upload uses.
+    max_task_archive_bytes: int = config_option(
+        DEFAULT_MAX_TASK_ARCHIVE_BYTES,
+        public_path=("data", "max_task_archive_bytes"),
+        help="The most bytes of the body of a task archive upload (POST and PUT .../data/tasks). Default: 512 MiB.",
+    )
     task_import_manifest: str | None = config_option(
         None,
         public_path=("task_import", "manifest"),
@@ -538,6 +546,9 @@ class ServiceSettings:
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
             TaskFileStore.reference(self.task_file_backend, setting="storage.task_file_backend")
+        archive_bytes = self.max_task_archive_bytes
+        if isinstance(archive_bytes, bool) or not isinstance(archive_bytes, int) or archive_bytes < 1:
+            raise ValueError("data.max_task_archive_bytes must be a positive integer")
         if (self.task_import_manifest is None) != (self.task_import_tasks_root is None):
             raise ValueError("task-import needs both manifest and tasks-root")
         if self.task_import_manifest == "" or self.task_import_tasks_root == "":

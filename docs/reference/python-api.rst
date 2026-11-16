@@ -913,6 +913,12 @@ store to ``SQLiteScenarioStorage(..., task_files=...)`` or
 ``PostgresScenarioStorage(..., task_files=...)``. Without one, the storage
 uses a ``LocalTaskFileStore`` in ``task-files`` under its directory.
 
+A store keeps its files in partitions: one for each scenario, and
+``data/<owner>`` for the task items of each data owner. A client can write a
+task directory into a partition itself, in the layout of the store, and then
+create the task item by reference (`Create task items
+<http-api.rst#create-task-items>`__). The layout belongs to each store.
+
 .. list-table::
    :header-rows: 1
    :widths: 45 55
@@ -930,10 +936,51 @@ uses a ``LocalTaskFileStore`` in ``task-files`` under its directory.
      - Return a local directory with the files of ``digest``. The directory
        has the name of the saved directory. Raise ``TaskStoreError`` if the
        store does not hold the digest.
+   * - ``contains(partition, digest, name)``
+     - Return whether ``partition`` holds a complete task directory named
+       ``name`` with the files of ``digest``. A directory that a client
+       writes is complete when the client has written its last part. Do not
+       read the files. Raise ``ValueError`` for a digest that is not 64
+       lowercase hexadecimal digits.
    * - ``archive(scenario)``
      - Retire the files of the scenario and return the archive locations.
    * - ``close()``
      - Release the resources of the store. A second call does nothing.
+
+The module also gives the digest and the limits that every client uses for a
+task directory:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Name
+     - Contract
+   * - ``files_digest(source)``
+     - Return the SHA-256 hex digest of the local task directory ``source``:
+       its name, and the path and bytes of each file. Directories add
+       nothing. Raise ``TaskStoreError`` for a symbolic link or a special
+       file.
+   * - ``FilesDigest(directory_name)``
+     - Compute ``files_digest`` from files given one at a time. Call
+       ``add_file(relative_path, size_bytes)`` for each file, then
+       ``update(chunk)`` until the file's bytes are given, then
+       ``hexdigest()``. The files come in increasing ``task_file_order``.
+       A file out of order, or a file with more or fewer bytes than its size,
+       raises ``TaskStoreError``.
+   * - ``task_file_order(relative_path)``
+     - Return the sort key of a file path relative to the task directory: the
+       tuple of its parts, so ``a/b`` comes before ``a-b``. Raise
+       ``ValueError`` for an empty part, ``.`` or ``..``.
+   * - ``task_limit_errors(entries)``
+     - Return a ``TaskLimitError`` for each limit that a task breaks, from its
+       ``(relative_path, size_bytes)`` entries (``None`` as the size of a
+       directory). Each error has a ``code``, the ``path`` (``""`` for the
+       task directory) and an English ``message``. The codes are
+       ``file_too_large`` (a file over ``MAX_TASK_FILE_BYTES``, 500 GB),
+       ``too_many_entries`` (a directory with more than
+       ``MAX_TASK_DIRECTORY_ENTRIES``, 10,000, entries) and
+       ``too_many_files`` (more than ``MAX_TASK_FILES``, 100,000, files).
 
 Data stores
 ~~~~~~~~~~~
@@ -969,7 +1016,11 @@ stores`_).
    * - ``create(owner, items)``
      - Stores ``NewItem`` values, all or none. The same ID and content again
        changes nothing; other content is ``ItemConflictError``. Bad metadata is
-       ``ValueError``.
+       ``ValueError``. A task's content is a local task directory, which the
+       store copies into the owner's task file partition, or a
+       ``TaskFilesReference(digest)`` (``reef.storage.item_kinds``) to a
+       directory that the partition holds; a reference that it does not hold
+       is ``TaskFilesNotFoundError``.
    * - ``read(owner, item_id)``
      - The ``StoredItem``, or ``None``.
    * - ``query(owner, *, kind, scenario, after, limit, content=True)``

@@ -106,7 +106,7 @@ from reef.storage.data import (
     replaced_task_digest,
     replaced_trajectory_digest,
 )
-from reef.storage.item_kinds import task_partition
+from reef.storage.item_kinds import TaskFilesReference, task_partition
 from reef.storage.schema_upgrades import SchemaStep, upgrade_schema
 from reef.storage.segments import LocalSegmentStore, SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
@@ -1827,7 +1827,7 @@ class SQLDataStore(DataStore):
             )
             return len(rows)
 
-    def replace_task(self, owner: str, item_id: str, directory: Path) -> StoredItem:
+    def replace_task(self, owner: str, item_id: str, files: Path | TaskFilesReference) -> StoredItem:
         check_owner(owner)
         with self.transaction() as connection:
             row = self.rows(connection, owner, [item_id]).get(item_id)
@@ -1838,7 +1838,7 @@ class SQLDataStore(DataStore):
             self.lock_uses(connection, owner, [metadata])
             row = self.rows(connection, owner, [item_id], lock=True)[item_id]
             stored = StoredItem(row["sequence"], owner, item_id, metadata, row["digest"])
-            digest = replaced_task_digest(owner, stored, directory, self.task_files)
+            digest = replaced_task_digest(owner, stored, files, self.task_files)
             if digest == stored.digest:
                 return stored
             items = self.items_table

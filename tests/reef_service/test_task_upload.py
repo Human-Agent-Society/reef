@@ -24,6 +24,7 @@ from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
+from reef.storage.item_kinds import task_partition
 from reef.train import JobData
 from reef.train.pipeline import PipelineSettings
 
@@ -75,6 +76,13 @@ def archive(root: Path, *names: str, port: int = 9000) -> bytes:
         for offset, name in enumerate(names):
             tar.add(write_harbor_task(task_for(name, "record-1", port + offset), root / str(port)), arcname=name)
     return buffer.getvalue()
+
+
+def stored_task(dispatcher, root: Path, name: str, port: int = 9000) -> str:
+    """Write one Harbor task directory into the partition of owner ``s`` in the task file store, as a client that
+    writes the store itself does; return its files digest."""
+    directory = write_harbor_task(task_for(name, "record-1", port), root / f"stored-{port}")
+    return dispatcher.data_store.task_files.write(task_partition("s"), directory)
 
 
 def raw_archive(*entries: tarfile.TarInfo) -> bytes:
@@ -263,14 +271,122 @@ def test_an_invalid_task_create_is_refused_and_stores_nothing(tmp_path: Path) ->
         dispatcher.close()
 
 
-def test_a_body_over_the_unpacked_limit_is_refused_before_it_unpacks(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("reef.service.routes.data.MAX_UNPACKED_BYTES", 64)
+def test_a_body_over_the_archive_setting_is_refused_and_a_task_over_a_file_limit_is_not_unpacked(
+    tmp_path: Path, monkeypatch
+) -> None:
     dispatcher = dispatcher_for(tmp_path, task_recipe())
+    monkeypatch.setattr("reef.storage.tasks.MAX_TASK_DIRECTORY_ENTRIES", 2)
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, max_task_archive_bytes=64))) as client:
+            response = await client.post(tasks_url(), headers=GZIP, data=archive(tmp_path, "task-a"))
+            assert response.status == 413
+            replace = await client.put("/reef/namespaces/s/data/tasks/task-a", headers=GZIP, data=b"x" * 65)
+            assert replace.status == 413
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            body = raw_archive(*(entry(f"task/{name}") for name in ("a", "b", "c")))
+            response = await client.post(tasks_url(), headers=GZIP, data=body)
+            assert response.status == 400
+            assert "task 'task' breaks a limit: The task directory has 3 entries. The limit is 2." in (
+                await response.text()
+            )
+            assert dispatcher.data_store.query("s", kind="task") == ()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_task_items_are_created_by_reference_to_the_files_in_the_task_file_store(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
+    digests = {
+        name: stored_task(dispatcher, tmp_path, name, port) for name, port in (("task-b", 9000), ("task-a", 9001))
+    }
+    url = "/reef/namespaces/s/data/tasks"
+    body = {
+        "tasks": [{"name": name, "digest": digest} for name, digest in digests.items()],
+        "metadata": {"scenarios": {"s": "train"}},
+    }
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            response = await client.post(tasks_url(), headers=GZIP, data=archive(tmp_path, "task-a"))
-            assert response.status == 413
+            await create_scenario(client)
+            response = await client.post(url, headers=AUTH, json=body)
+            assert response.status == 201, await response.text()
+            receipt = await response.json()
+            assert [(item["id"], item["digest"]) for item in receipt["items"]] == [
+                ("task-a", digests["task-a"]),
+                ("task-b", digests["task-b"]),
+            ]
+            assert receipt["items"][0]["metadata"] == {"kind": "task", "owner": "s", "scenarios": {"s": "train"}}
+            assert receipt["synced"] is True
+            assert await (await client.post(url, headers=AUTH, json=body)).json() == receipt
+            listing = await (await client.get("/reef/scenarios/s/tasks", headers=AUTH)).json()
+            assert [(task["name"], task["split"]) for task in listing["tasks"]] == [
+                ("task-a", "train"),
+                ("task-b", "train"),
+            ]
+            # The same files as an archive give the same item.
+            archived = await client.post(tasks_url("train"), headers=GZIP, data=archive(tmp_path, "task-b"))
+            assert archived.status == 201 and (await archived.json())["items"] == receipt["items"][1:]
+
+            # A task that the store does not hold, under that name or at all, stores nothing.
+            other = stored_task(dispatcher, tmp_path, "task-c", 9002)
+            for name, digest in (("task-d", other), ("task-d", "0" * 64)):
+                tasks = [{"name": "task-c", "digest": other}, {"name": name, "digest": digest}]
+                refused = await client.post(url, headers=AUTH, json={"tasks": tasks})
+                assert refused.status == 404, await refused.text()
+            for refused_body, reason in (
+                ({"tasks": []}, "1 to 1000 tasks"),
+                ({"tasks": [{"name": "task-c"}]}, "only 'name' and 'digest'"),
+                ({"tasks": [{"name": "Task_C", "digest": other}]}, "is not a task name"),
+                ({"tasks": [{"name": "task-c", "digest": "abc"}]}, "64 lowercase hexadecimal"),
+                ({"tasks": [{"name": "task-c", "digest": other}], "split": "train"}, "optionally 'metadata'"),
+                ({"tasks": [{"name": "task-c", "digest": other}], "metadata": {"kind": "trajectory"}}, "kind is task"),
+                ({"tasks": [{"name": "task-c", "digest": other}], "metadata": {"scenarios": {"s": "test"}}}, "test"),
+            ):
+                refused = await client.post(url, headers=AUTH, json=refused_body)
+                assert refused.status == 400 and reason in await refused.text(), reason
+            assert dispatcher.data_store.read("s", "task-c") is None
+            assert (await client.post(url, headers=AUTH, data=b"tasks")).status == 415
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_a_task_items_files_are_replaced_by_reference_to_the_files_in_the_task_file_store(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
+    created, replaced, other = (
+        stored_task(dispatcher, tmp_path, name, port)
+        for name, port in (("task-a", 9000), ("task-a", 9001), ("task-b", 9002))
+    )
+    url = "/reef/namespaces/s/data/tasks/task-a"
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await create_scenario(client)
+            body = {"tasks": [{"name": "task-a", "digest": created}], "metadata": {"scenarios": {"s": "eval"}}}
+            assert (await client.post("/reef/namespaces/s/data/tasks", headers=AUTH, json=body)).status == 201
+            response = await client.put(url, headers=AUTH, json={"digest": replaced})
+            assert response.status == 200, await response.text()
+            receipt = await response.json()
+            assert (receipt["item"]["id"], receipt["item"]["digest"], receipt["synced"]) == ("task-a", replaced, True)
+            listing = await (await client.get("/reef/scenarios/s/tasks", headers=AUTH)).json()
+            assert [task["files_digest"] for task in listing["tasks"]] == [replaced]
+
+            for target, refused_body, status in (
+                (url, {"digest": other}, 404),
+                (url, {"digest": "0" * 64}, 404),
+                ("/reef/namespaces/s/data/tasks/missing", {"digest": replaced}, 404),
+                (url, {"digest": replaced, "name": "task-a"}, 400),
+                (url, {"digest": "abc"}, 400),
+            ):
+                refused = await client.put(target, headers=AUTH, json=refused_body)
+                assert refused.status == status, await refused.text()
+            assert dispatcher.data_store.read("s", "task-a").digest == replaced
 
     try:
         asyncio.run(run())
