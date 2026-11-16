@@ -726,8 +726,9 @@ is one task directory, named by its task name. The query parameter
 
 The data service writes the body to a local file before it unpacks it. The
 setting ``data.max-task-archive-bytes`` limits the body (default 512 MiB; see
-`The data section <configuration.rst#the-data-section>`__). Harbor's task
-loader must accept each task directory.
+`The data section <configuration.rst#the-data-section>`__). The files of one
+archive unpack to at most 8 GiB; create larger tasks in the reference form.
+Harbor's task loader must accept each task directory.
 
 In the reference form, first write each task directory into the owner's
 partition of the task file store, in the layout of the deployment's

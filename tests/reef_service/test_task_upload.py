@@ -291,6 +291,12 @@ def test_a_body_over_the_archive_setting_is_refused_and_a_task_over_a_file_limit
                 await response.text()
             )
             assert dispatcher.data_store.query("s", kind="task") == ()
+            # A small gzip body can unpack to far more bytes than the data service takes on its disk.
+            monkeypatch.setattr("reef.service.tasks.MAX_ARCHIVE_UNPACKED_BYTES", 8)
+            response = await client.post(tasks_url(), headers=GZIP, data=archive(tmp_path, "task-a"))
+            assert response.status == 400
+            assert "the archive unpacks to more than 8 bytes" in await response.text()
+            assert dispatcher.data_store.query("s", kind="task") == ()
 
     try:
         asyncio.run(run())

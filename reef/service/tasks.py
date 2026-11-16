@@ -22,6 +22,9 @@ MAX_TASKS_PER_UPLOAD = 1000
 #: The default of ``data.max_task_archive_bytes``: the most bytes of the body of a task archive upload. The route
 #: streams the body to a local file, so the limit bounds disk use, not memory.
 DEFAULT_MAX_TASK_ARCHIVE_BYTES = 512 * 1024 * 1024
+#: The most bytes that the files of one archive unpack to. A small gzip body can unpack to far more than its size,
+#: and the route unpacks the whole archive to local disk. A larger task uses the reference form.
+MAX_ARCHIVE_UNPACKED_BYTES = 8 * 1024**3
 
 
 def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
@@ -30,7 +33,8 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
     Every entry is a regular file or a directory under a top-level directory whose name is a task name
     (``TASK_NAME_PATTERN``); a top-level file, a link, a device, an absolute path, a ``..`` component or another
     top-level name is refused with ``ValueError``, as is an archive of no task or of more than
-    ``MAX_TASKS_PER_UPLOAD`` tasks, and a task that breaks a limit of ``reef.storage.tasks.task_limit_errors``.
+    ``MAX_TASKS_PER_UPLOAD`` tasks, of files that unpack to more than ``MAX_ARCHIVE_UNPACKED_BYTES``, and a task that
+    breaks a limit of ``reef.storage.tasks.task_limit_errors``.
     Nothing is unpacked then.
     """
     try:
@@ -57,6 +61,11 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
                     raise ValueError(f"{name!r} is not a task name: it must match {TASK_NAME_PATTERN.pattern}")
             if len(tasks) > MAX_TASKS_PER_UPLOAD:
                 raise ValueError(f"an upload holds at most {MAX_TASKS_PER_UPLOAD} tasks")
+            if sum(member.size for member in members if member.isfile()) > MAX_ARCHIVE_UNPACKED_BYTES:
+                raise ValueError(
+                    f"the archive unpacks to more than {MAX_ARCHIVE_UNPACKED_BYTES} bytes; "
+                    "create larger tasks by reference to the task file store"
+                )
             for name, entries in sorted(tasks.items()):
                 errors = task_limit_errors(entries)
                 if errors:
