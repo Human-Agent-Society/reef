@@ -1,7 +1,7 @@
 """ATIF construction and projections shared by record processors and consumers.
 
-No I/O or model calls live here. Captured requests and responses are retained
-verbatim in ``extra.reef.records``; standard steps make the conversation portable.
+No I/O or model calls live here. The standard steps hold the conversation. ``extra.reef.records`` holds a summary of
+each captured call (``call_summary``): its ID, its time, its artifact and its settings, without the conversation.
 A training component renders the steps into the tokens that it trains (``reef.core.chat_rendering``).
 """
 
@@ -45,39 +45,61 @@ def trajectory_reward(item: TrajectorySample) -> float:
     return float(reward)
 
 
-def recorded_payloads(item: TrajectorySample) -> tuple[Mapping[str, Any], ...]:
-    """Read every original provider exchange, in reference order.
+#: The fields of a provider payload that hold a call's conversation, its tools or its answer. The steps and
+#: ``agent.tools`` of a trajectory hold them, so a call's summary (``call_summary``) leaves them out.
+CONVERSATION_FIELDS = frozenset({"messages", "input", "prompt", "system", "instructions", "tools", "response"})
 
-    Imported ATIF without captured records is projected into one exchange for
-    harness methods. The original ATIF remains on the item, including fields
-    that a provider-message projection cannot express.
-    """
+
+def call_summary(record: AgentRecord) -> dict[str, Any]:
+    """What a trajectory keeps of ``record`` in ``extra.reef.records``: ``{agent_record_id, created_at, artifact_id,
+    payload}``. ``payload`` is the record's provider payload without ``CONVERSATION_FIELDS``: the call's settings, such
+    as ``model``, ``chat_template_kwargs`` and ``metadata``. Each request repeats the conversation so far, so a
+    trajectory that kept whole payloads would grow with the square of its calls."""
+    return {
+        "agent_record_id": record.agent_record_id,
+        "created_at": record.created_at,
+        "artifact_id": record.artifact_id,
+        "payload": {key: value for key, value in record.payload.items() if key not in CONVERSATION_FIELDS},
+    }
+
+
+def recorded_payloads(item: TrajectorySample) -> tuple[Mapping[str, Any], ...]:
+    """The stored payload of each call that ``item`` recorded, oldest first: the call's settings (``call_summary``),
+    the whole provider payload in a trajectory that kept it, or ``{}`` for a summary without a payload. ATIF without
+    records gives one exchange, which its steps project. ``ValueError`` when ``extra.reef.records`` is not a non-empty
+    list of objects."""
     records = item.metadata.get("records")
     if records is None:
         return (_project_exchange(item.trajectory),)
-    if not isinstance(records, list) or not records:
-        raise ValueError("ATIF extra.reef.records must be a non-empty list")
+    if not isinstance(records, list) or not records or not all(isinstance(record, Mapping) for record in records):
+        raise ValueError("ATIF extra.reef.records must be a non-empty list of objects")
     payloads = []
     for record in records:
-        if not isinstance(record, Mapping) or not isinstance(record.get("payload"), Mapping):
-            raise ValueError("every ATIF captured record must contain a payload object")
-        payloads.append(record["payload"])
+        payload = record.get("payload", {})
+        if not isinstance(payload, Mapping):
+            raise ValueError("the payload of an ATIF captured record must be an object")
+        payloads.append(payload)
     return tuple(payloads)
 
 
 def recorded_payload(item: TrajectorySample) -> Mapping[str, Any]:
-    """The last captured exchange, retaining the original provider request body."""
-    return recorded_payloads(item)[-1]
+    """The last call as served: its stored payload (``recorded_payloads``) when it holds the conversation, else that
+    payload over the exchange that the steps project, so the conversation comes from the steps and the settings from
+    the call."""
+    last = recorded_payloads(item)[-1]
+    if any(key in last for key in ("messages", "input", "prompt")):
+        return last
+    return {**_project_exchange(item.trajectory), **last}
 
 
 @dataclass
 class TrajectoryBuilder:
     """An ATIF trajectory that grows by one inference record at a time, oldest first.
 
-    Values: ``include_records`` says whether the trajectory keeps each record's raw provider body in
+    Values: ``include_records`` says whether the trajectory keeps the summary of each record (``call_summary``) in
     ``extra.reef.records``. ``entries`` holds the message entries so far: each new request message once
     (``copied``) and each response (not copied). ``history`` is the request and the responses of the last record
-    added, the only messages that a new record is compared with. ``kept`` holds the raw records when
+    added, the only messages that a new record is compared with. ``kept`` holds the summaries of the records when
     ``include_records`` is true and is empty otherwise. ``record_ids`` holds the ID of each record added, in order;
     ``first`` and ``last`` are the first and the last record added, both None exactly when none was added.
 
@@ -115,14 +137,7 @@ class TrajectoryBuilder:
         self.history = [*request, *responses]
         self.record_ids.append(record.agent_record_id)
         if self.include_records:
-            self.kept.append(
-                {
-                    "agent_record_id": record.agent_record_id,
-                    "created_at": record.created_at,
-                    "artifact_id": record.artifact_id,
-                    "payload": dict(record.payload),
-                }
-            )
+            self.kept.append(call_summary(record))
         if self.first is None:
             self.first = record
         self.last = record
@@ -168,11 +183,12 @@ def make_trajectory(
     *,
     include_records: bool = True,
 ) -> TrajectorySample:
-    """Encode ordered inference records as ATIF, retaining all raw provider fields (``TrajectoryBuilder``).
+    """Encode ordered inference records as ATIF (``TrajectoryBuilder``), with the summary of each record in
+    ``extra.reef.records`` (``call_summary``).
 
     It reads ``records`` once, in order, and keeps only the messages of the previous record, so an iterator that
     reads each record when asked holds one record at a time. With ``include_records`` false, ``extra.reef`` has no
-    ``records``: the trajectory then holds no raw provider body, and its size is that of its messages."""
+    ``records``. Either way the trajectory holds no provider body, so its size is about that of its steps."""
     builder = TrajectoryBuilder(include_records)
     for record in records:
         builder.add(record)
