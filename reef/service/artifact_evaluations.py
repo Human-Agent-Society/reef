@@ -31,7 +31,6 @@ import time
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any, Literal, cast, overload
 
 from reef.artifact.artifact import Artifact
@@ -65,7 +64,7 @@ from reef.evaluation.rollout_worker import (
 )
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.harbor.agent import can_run_in_task_container, task_agent_tools
+from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
 from reef.service.collections import collection_tasks
@@ -954,12 +953,12 @@ class ArtifactEvaluations:
             raise ValueError(f"the eval split of the imported tasks holds no task of the collection {name!r}")
         return EvaluationCollection(name, stored.average, benchmarks)
 
-    def tree_harness(self, scenario: str, item_id: str, api: str, tasks: Sequence[str]) -> TreeHarness:
+    def tree_harness(self, scenario: str, item_id: str, api: str) -> TreeHarness:
         """The harness tree of the artifact item ``item_id`` of the owner of ``scenario``, for model calls of the
-        dialect ``api`` on the Harbor task directories ``tasks``.
+        dialect ``api``.
 
-        Raise ``ValueError`` when the item is not a tree that a task's container can run, or when a task needs what
-        the tree's agent does not give it.
+        Raise ``ValueError`` when the item is not a tree that a task's container can run. The tasks are not read
+        here: each rollout checks its own task against the tree's agent (``EvaluationRolloutWorker.score``).
         """
         owner = self.dispatcher.scenario_owner(scenario)
         if owner is None:
@@ -987,12 +986,6 @@ class ArtifactEvaluations:
             raise ValueError(f"adapter {adapter!r} cannot run in a task's container")
         if api not in descriptor.model_binding:
             raise ValueError(f"adapter {adapter!r} cannot call this runtime's API dialect {api!r}")
-        for task in tasks:
-            tools = task_agent_tools(descriptor, Path(task))
-            if tools:
-                raise ValueError(
-                    f"task {task!r} needs {', '.join(tools)}, which adapter {adapter!r} does not give its agent"
-                )
         files = self.sources.open(uri)
         tree = HarnessTree({path: files.read_bytes(path).decode("utf-8") for path in files.paths()})
         validation = validate_tree(tree, descriptor)
@@ -1058,15 +1051,7 @@ class ArtifactEvaluations:
         names = sampled
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
-        if item is None:
-            tree = None
-        else:
-            # Only a harness tree is checked against the task files, and only against the tasks that it runs. A
-            # remote task file store downloads them, so the read does not hold the scenario's lock.
-            with self.dispatcher.locked_scenario(scenario) as current:
-                samples = self.dispatcher.storage.sample_store(scenario, current.store)
-            directories = [str(path) for path in (() if samples is None else samples.task_paths(names))]
-            tree = self.tree_harness(scenario, item, api, directories)
+        tree = None if item is None else self.tree_harness(scenario, item, api)
         agent = None if tree is not None else harbor_agent(request.harness)
         # The stored request names its tasks, so that the rollouts that wait can be added later.
         request = replace(request, task_names=names, collection=collection)

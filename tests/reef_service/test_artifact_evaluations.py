@@ -1409,9 +1409,7 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
 
 
 @pytest.mark.integration
-def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_refused(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_an_item_of_another_owner_and_automatic_settings_are_refused(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
 
     async def run() -> None:
@@ -1428,13 +1426,6 @@ def test_an_item_of_another_owner_a_task_with_tools_and_automatic_settings_are_r
             settings = {"artifact_evaluation": {"harness": {"item": item_id}}}
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json=settings)
             assert response.status == 400 and "not an artifact item" in await response.text()
-
-            monkeypatch.setattr(
-                "reef.service.artifact_evaluations.task_agent_tools", lambda descriptor, task: ("mcp_servers",)
-            )
-            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
-            response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
-            assert response.status == 400 and "mcp_servers" in await response.text()
 
     asyncio.run(run())
 

@@ -27,6 +27,7 @@ from reef.evaluation.rollout_worker import (
     EvaluationRollout,
     EvaluationRolloutWorker,
     RolloutCalls,
+    TreeHarness,
     evaluation_call,
     reply_summary,
     rollout_item_id,
@@ -273,6 +274,37 @@ def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
     assert failed.state == "failed" and "cannot be served" in failed.error
     assert worker.run_once() is False
+
+
+class ServingRefusedWorker(EvaluationRolloutWorker):
+    """A worker that fails the test when it asks to serve a candidate."""
+
+    def served_candidate(self, rollout: EvaluationRollout, lease_lost: threading.Event) -> ServedArtifact | None:
+        raise AssertionError("a rollout that cannot run serves no candidate")
+
+
+class ToolTaskEndpoints(OpenEndpoints):
+    """Endpoints whose task asks its agent for an SSE MCP server."""
+
+    def task_directory(self, rollout: EvaluationRollout) -> Path:
+        task = super().task_directory(rollout)
+        (task / "task.toml").write_text(
+            '[[environment.mcp_servers]]\nname = "search"\ntransport = "sse"\nurl = "http://search:8000/sse"\n'
+        )
+        return task
+
+
+@pytest.mark.unit
+def test_a_tree_rollout_whose_task_needs_what_the_agent_lacks_fails_for_good_before_serving(tmp_path):
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 3})
+    value = replace(rollout(), agent=None, tree=TreeHarness("codex", "openai-responses", {}))
+    queue.append(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
+    worker = ServingRefusedWorker(queue, ToolTaskEndpoints(tmp_path), worker_id="evaluation-1")
+
+    assert worker.run_once() is True
+    failed = queue.read(EVALUATIONS_QUEUE, value.item_id())
+    assert failed.state == "failed" and failed.attempt_count == 1
+    assert failed.error == "task 'add' needs mcp_servers, which adapter 'codex' does not give its agent"
 
 
 @pytest.mark.unit
