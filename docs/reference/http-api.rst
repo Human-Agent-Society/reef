@@ -471,8 +471,11 @@ The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
 not mean a training step has finished. Identical retries return the existing
 receipt, including after capacity eviction; reusing the ID with different content
 returns HTTP 409. Authentication failures return 401 and invalid envelopes,
-report schemas or references return 400. Scenario selection comes only from
-headers; envelope fields other than the three shown above are rejected.
+report schemas or references return 400. An inference record with an image also
+returns 400 when the deployment's recipes include a weight-training recipe,
+because training renders text only; a batch then stores nothing. Scenario
+selection comes only from headers; envelope fields other than the three shown
+above are rejected.
 
 ``request_type`` may be ``inference`` or ``report``. Inference payloads follow
 the selected recipe's recorded-input contract: native provider request fields
@@ -653,6 +656,11 @@ or none. An identical retry changes nothing. The same ID with other content
 returns 409. A line that is not an ATIF document returns 400 and names the
 line. ``POST /reef/namespaces/{owner}/data`` refuses a trajectory; it creates
 record items only.
+
+When the deployment's recipes include a weight-training recipe, Reef first
+refuses a trajectory or a record item with an image, also one that names no
+scenario, because training renders text only. The refusal returns 400, names
+the item, and stores nothing.
 
 Before Reef stores the items, it checks each scenario that they name. The
 scenario must have the owner, and its recipe must train on the items:

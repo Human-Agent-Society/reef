@@ -8,7 +8,7 @@ so no recipe class answers for another recipe. The questions that also need a li
 
 from __future__ import annotations
 
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, WeightTrainingRecipe
 from reef.recipe.composite import component_recipes
 from reef.recipe.harness import HarnessEvolutionRecipe
 
@@ -35,4 +35,15 @@ def harness_adapter(recipe: Recipe) -> str | None:
     return None if harness is None else harness[1].evolution.adapter
 
 
-__all__ = ["harness_adapter", "harness_recipe"]
+def refuses_images(recipe: Recipe) -> bool:
+    """Whether the deployment whose recipe is ``recipe`` refuses image content: whether any of its recipes trains
+    weights (``WeightTrainingRecipe``).
+
+    Training renders text only, so a sample with an image would train on its text without the image. No recipe
+    trains on images yet. When one can, this function is the one place to change. A recipe that trains no weights
+    keeps image content in its records.
+    """
+    return any(isinstance(child, WeightTrainingRecipe) for _, child in component_recipes(recipe))
+
+
+__all__ = ["harness_adapter", "harness_recipe", "refuses_images"]

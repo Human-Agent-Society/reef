@@ -24,6 +24,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
 from reef.core.serving_config import ServingConfig
 from reef.core.snapshot import ItemIdentity
+from reef.core.trajectories import has_image_content
 from reef.dispatcher import ingest
 from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
@@ -41,6 +42,7 @@ from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorker
 from reef.inference.interfaces import InferenceRuntime
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
+from reef.recipe.deployment import refuses_images
 from reef.record2sample.service import SamplesWorker, request_selection
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
@@ -960,6 +962,7 @@ class Dispatcher(
     # -- Record acceptance -----------------------------------------------
 
     def accept_record(self, item: AgentRecord) -> AgentRecord:
+        self.check_record_images((item,))
         with self.registry.lock_for(item.scenario):
             current = self.get_or_create_scenario(item.scenario)
             if current is None:
@@ -1004,6 +1007,17 @@ class Dispatcher(
             self.local_workers.wake(current)
             return RequestCancel(not item.final, cancel_request_jobs(self.queue, scenario, request_id))
 
+    def check_record_images(self, items: Sequence[AgentRecord]) -> None:
+        """Raise ``ValueError`` for an inference record that holds an image (``has_image_content``) when the
+        deployment refuses image content (``reef.recipe.deployment.refuses_images``), before any record is stored."""
+        if not refuses_images(self.recipe):
+            return
+        for item in items:
+            if item.request_type is RequestType.INFERENCE and has_image_content(item.payload):
+                raise ValueError(
+                    f"record {item.agent_record_id!r} holds an image, and the deployment's recipe does not train on images"
+                )
+
     def accept_records(self, items: Sequence[AgentRecord]) -> tuple[AgentRecord, ...]:
         """Validate an ordered import batch, commit it, then wake its consumer."""
         if not items:
@@ -1011,6 +1025,7 @@ class Dispatcher(
         scenario = items[0].scenario
         if any(item.scenario != scenario for item in items):
             raise ValueError("a record batch must contain records from one scenario")
+        self.check_record_images(items)
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario)
             if current is None:

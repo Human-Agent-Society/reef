@@ -426,3 +426,44 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
         asyncio.run(run())
     finally:
         dispatcher.close()
+
+
+def image_payload():
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    return {**inference_payload("q"), "messages": [{"role": "user", "content": [image]}]}
+
+
+def test_a_weight_recipe_refuses_an_imported_image_and_stores_nothing(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            image = imported("image", image_payload())
+            response = await client.post("/reef/records", headers=HEADERS, json=image)
+            assert response.status == 400
+            assert "record 'image' holds an image" in await response.text()
+            body = {"records": [imported("text"), image]}
+            response = await client.post("/reef/records/batch", headers=HEADERS, json=body)
+            assert response.status == 400, "a batch stores nothing"
+            assert dispatcher.get_or_create_scenario("s").records.count("s") == 0
+            assert (await client.post("/reef/records", headers=HEADERS, json=imported("text"))).status == 200
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_a_recipe_that_trains_no_weights_stores_an_imported_image(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, Recipe())
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            image = imported("image", image_payload())
+            response = await client.post("/reef/records", headers=HEADERS, json=image)
+            assert response.status == 200, await response.text()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()

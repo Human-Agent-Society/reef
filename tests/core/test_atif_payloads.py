@@ -15,7 +15,7 @@ from reef.core.atif_payloads import (
     response_metrics,
 )
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.trajectories import make_trajectory
+from reef.core.trajectories import has_image_content, make_trajectory
 
 CHAT = {
     "model": "m",
@@ -321,3 +321,41 @@ def test_a_trajectory_of_records_keeps_each_response_metrics_on_its_agent_step()
         {"prompt_tokens": 5, "completion_tokens": 1},
     ]
     Trajectory.model_validate(trajectory)
+
+
+IMAGE_URL = "data:image/png;base64,AAAA"
+ANTHROPIC_IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": IMAGE_URL}}]}]},
+        {"messages": [{"role": "user", "content": [ANTHROPIC_IMAGE]}]},
+        {"messages": [{"role": "user", "content": [{"type": "tool_result", "content": [ANTHROPIC_IMAGE]}]}]},
+        {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": IMAGE_URL}]}]},
+        {
+            "input": [
+                {"type": "computer_call_output", "output": {"type": "computer_screenshot", "image_url": IMAGE_URL}}
+            ]
+        },
+        {"steps": [{"source": "user", "message": [{"type": "image", "source": {"path": "a.png"}}]}]},
+    ],
+)
+def test_has_image_content_finds_an_image(payload) -> None:
+    assert has_image_content(payload)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"messages": [{"role": "user", "content": "an image_url"}]},
+        {"messages": [{"role": "user", "content": [{"type": "text", "text": "q", "image_url": None}]}]},
+        # A tool's definition and its call's arguments are not conversation content.
+        {"messages": [], "tools": [{"type": "function", "function": {"parameters": {"type": "image"}}}]},
+        {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "input": {"type": "image"}}]}]},
+        {"steps": [{"source": "user", "message": "q"}]},
+    ],
+)
+def test_has_image_content_ignores_text_and_tools(payload) -> None:
+    assert not has_image_content(payload)
