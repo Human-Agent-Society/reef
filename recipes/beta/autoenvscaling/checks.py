@@ -217,20 +217,33 @@ class SeedCheck(TaskCheck):
 
 def review_prompt(task: HarborTask) -> str:
     """The review's user turn: the instruction, every test file and every solution file, each cut to
-    :data:`REVIEW_FILE_CHARS` characters and fenced as data."""
+    :data:`REVIEW_FILE_CHARS` characters and fenced as data. A binary file shows only its size."""
 
     def fenced(text: str, label: str) -> str:
         cut = f"\n[... {len(text) - REVIEW_FILE_CHARS} characters cut]" if len(text) > REVIEW_FILE_CHARS else ""
         return untrusted_text(text[:REVIEW_FILE_CHARS] + cut, label)
 
-    def files_text(folder: str, files: Mapping[str, str]) -> str:
-        return "\n\n".join(fenced(text, f"{folder}/{name}") for name, text in sorted(files.items())) or "(none)"
+    def files_text(folder: str) -> str:
+        return (
+            "\n\n".join(
+                fenced(content if isinstance(content, str) else f"[binary file, {len(content)} bytes]", path)
+                for path, content in sorted(task.files.items())
+                if path.startswith(f"{folder}/")
+            )
+            or "(none)"
+        )
 
     return REVIEW_PROMPT.format(
-        instruction=fenced(task.instruction, "instruction.md"),
-        tests=files_text("tests", task.tests),
-        solution=files_text("solution", task.solution),
+        instruction=fenced(instruction_text(task), "instruction.md"),
+        tests=files_text("tests"),
+        solution=files_text("solution"),
     )
+
+
+def instruction_text(task: HarborTask) -> str:
+    """The text of the task's ``instruction.md``; empty when the task has none or it is not UTF-8."""
+    instruction = task.files.get("instruction.md")
+    return instruction if isinstance(instruction, str) else ""
 
 
 def review_findings(reply: str) -> tuple[ReviewFinding, ...]:
@@ -637,7 +650,7 @@ class ContaminationCheck(TaskCheck):
     async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
         # Each distinct shared n-gram, in the instruction's order, and the first reference task that holds it.
         shared: dict[str, str] = {}
-        for ngram in instruction_ngrams(instruction_tokens(task.instruction), self.n):
+        for ngram in instruction_ngrams(instruction_tokens(instruction_text(task)), self.n):
             if ngram in self.index and ngram not in shared:
                 shared[ngram] = self.index[ngram]
         hits = [

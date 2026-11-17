@@ -102,7 +102,7 @@ def test_the_review_lists_unstated_requirements_and_refuses_or_measures(tmp_path
     assert call["headers"]["x-reef-scenario"] == "autoenvscaling"
     assert call["headers"]["x-reef-tag-role"] == "test-review" and call["headers"]["x-reef-tag-task"] == NAMES[0]
     prompt = call["messages"][1]["content"]
-    assert "[BEGIN instruction.md" in prompt and task.instruction.strip() in prompt
+    assert "[BEGIN instruction.md" in prompt and task.files["instruction.md"].strip() in prompt
     assert "[BEGIN tests/test.sh" in prompt and "[BEGIN solution/solve.sh" in prompt
     expected = (f"wording in tests/test.sh: {FINDING['requirement']}",)
     assert errors == (expected if is_refusing else ())
@@ -277,9 +277,17 @@ def test_the_review_reads_capped_files_and_takes_a_fenced_reply() -> None:
         checks.review_findings(fenced({"findings": []}))  # text around the JSON
     task = task_for("harbor-00000-000", "r", 8471)
     prompt = checks.review_prompt(
-        replace(task, tests={**task.tests, "data.txt": "x" * (checks.REVIEW_FILE_CHARS + 10)})
+        replace(
+            task,
+            files={
+                **task.files,
+                "tests/data.txt": "x" * (checks.REVIEW_FILE_CHARS + 10),
+                "tests/golden.bin": b"\xff\x00",
+            },
+        )
     )
     assert "[... 10 characters cut]" in prompt and "x" * (checks.REVIEW_FILE_CHARS + 1) not in prompt
+    assert "[binary file, 2 bytes]" in prompt
 
 
 def calibration(service: StandInGenerator, **settings: float | bool | str | None) -> checks.CalibrationCheck:
@@ -595,7 +603,8 @@ def contamination(root: Path, *, is_refusing: bool = True) -> checks.Contaminati
 def contamination_result(tmp_path: Path, references: Mapping[str, str], instruction: str) -> checks.CheckResult:
     """The contamination check of a task with ``instruction``, against the reference tasks ``references``."""
     check = contamination(reference_tasks(tmp_path / "reference", references))
-    task = replace(task_for("harbor-00000-000", "r", 8471), instruction=instruction)
+    task = task_for("harbor-00000-000", "r", 8471)
+    task = replace(task, files={**task.files, "instruction.md": instruction})
     return asyncio.run(check.run(task, WrittenTask(tmp_path / "tasks" / task.name, task.name, task.digest)))
 
 

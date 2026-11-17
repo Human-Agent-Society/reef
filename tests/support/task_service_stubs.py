@@ -54,12 +54,16 @@ def task_for(name: str, record_id: str, port: int, *, skill: str | None = None, 
     )
     if skill is not None:
         metadata["skill"] = skill
+    files = {"instruction.md": document["instruction"] + "\n"}
+    for directory, tree in (
+        ("tests", document["tests"]),
+        ("environment", document["environment"]),
+        ("solution", solution),
+    ):
+        files.update({f"{directory}/{path}": text for path, text in tree.items()})
     return HarborTask(
         name=name,
-        instruction=document["instruction"] + "\n",
-        tests=document["tests"],
-        environment=document["environment"],
-        solution=solution,
+        files=files,
         metadata=metadata,
         source_agent_record_ids=(record_id,),
     )

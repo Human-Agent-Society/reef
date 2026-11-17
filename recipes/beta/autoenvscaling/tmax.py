@@ -259,12 +259,15 @@ def converted_task(task_dir: Path, verifier: str) -> tuple[HarborTask, Container
     try:
         task = HarborTask(
             name=task_name(task_dir.name),
-            instruction=description,
-            tests={"test.sh": verifier, "test_outputs.py": text_file(task_dir / "test_final_state.py")},
-            environment=environment,
+            files={
+                "instruction.md": description,
+                "tests/test.sh": verifier,
+                "tests/test_outputs.py": text_file(task_dir / "test_final_state.py"),
+                **{f"environment/{path}": text for path, text in environment.items()},
+                "solution/solve.sh": SOLVE_SCRIPT,
+            },
             config=TASK_CONFIG,
             metadata=metadata,
-            solution={"solve.sh": SOLVE_SCRIPT},
         )
     except HarborTaskError as exc:
         raise ValueError(str(exc)) from exc
@@ -314,12 +317,14 @@ def harbor_task_seed(task_dir: Path) -> HarborTask:
     try:
         return HarborTask(
             name=task_name(task_dir.name),
-            instruction=text_file(task_dir / "instruction.md"),
-            tests=tests,
-            environment=environment,
+            files={
+                "instruction.md": text_file(task_dir / "instruction.md"),
+                **{f"tests/{path}": text for path, text in tests.items()},
+                **{f"environment/{path}": text for path, text in environment.items()},
+                "solution/solve.sh": SOLVE_SCRIPT,
+            },
             config=task_config,
             metadata=metadata,
-            solution={"solve.sh": SOLVE_SCRIPT},
         )
     except HarborTaskError as exc:
         raise ValueError(str(exc)) from exc

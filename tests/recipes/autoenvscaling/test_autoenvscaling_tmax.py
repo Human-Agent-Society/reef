@@ -15,7 +15,7 @@ import pytest
 
 from recipes.beta.autoenvscaling import admitted_task, tmax, workspace_reply
 from recipes.beta.autoenvscaling.generator import seed_tasks
-from reef.core.tasks import read_harbor_task
+from reef.core.tasks import HarborTask, read_harbor_task
 
 CONTAINER_DEF = """Bootstrap: docker
 From: python:3.12-slim
@@ -36,6 +36,12 @@ From: python:3.12-slim
 """
 DESCRIPTION = "Read /app/config.ini and write the value of its mode key, and nothing else, to /app/out/mode.txt."
 FINAL_STATE = "def test_mode():\n    assert open('/app/out/mode.txt').read().strip() == 'strict'\n"
+
+
+def tree(task: HarborTask, directory: str) -> dict[str, str | bytes]:
+    """The files of ``task`` under ``directory``, by their path inside it."""
+    prefix = f"{directory}/"
+    return {path.removeprefix(prefix): content for path, content in task.files.items() if path.startswith(prefix)}
 
 
 def tmax_task(
@@ -119,12 +125,15 @@ def test_a_tmax_v11_harbor_task_becomes_a_seed_that_keeps_its_verifier_and_setti
     assert tmax.main(arguments) == 0
 
     task = read_harbor_task(tmp_path / "seeds" / "task-000007-ab12cd34")
-    assert task.instruction == DESCRIPTION
+    assert task.files["instruction.md"] == DESCRIPTION
     # The binary verifier and its hidden truth stay as v1.1 ships them.
-    assert task.tests == {"test.sh": V11_TEST, ".truth.json": "[1, 2]\n"}
-    assert task.solution == {"solve.sh": tmax.SOLVE_SCRIPT}
-    assert task.environment["Dockerfile"].splitlines() == [*V11_DOCKERFILE.splitlines(), *tmax.HARBOR_TOOL_STEPS]
-    assert "docker-compose.yaml" in task.environment
+    assert tree(task, "tests") == {"test.sh": V11_TEST, ".truth.json": "[1, 2]\n"}
+    assert tree(task, "solution") == {"solve.sh": tmax.SOLVE_SCRIPT}
+    assert tree(task, "environment")["Dockerfile"].splitlines() == [
+        *V11_DOCKERFILE.splitlines(),
+        *tmax.HARBOR_TOOL_STEPS,
+    ]
+    assert "docker-compose.yaml" in tree(task, "environment")
     assert task.metadata == {
         "tmax_task": "task_000007_ab12cd34",
         "tmax_release": "v1.1",
@@ -168,7 +177,7 @@ def test_a_tmax_task_becomes_a_reef_harbor_task_that_reads_back(tmp_path: Path) 
     assert tmax.main(["--tasks", str(tmp_path / "tasks"), "--out", str(tmp_path / "seeds")]) == 0
 
     task = read_harbor_task(tmp_path / "seeds" / "task-007")
-    assert task.environment["Dockerfile"].splitlines() == [
+    assert tree(task, "environment")["Dockerfile"].splitlines() == [
         "FROM python:3.12-slim",
         "ENV APP_MODE=strict",
         "ENV PATH=/opt/tools:$PATH",
@@ -178,16 +187,16 @@ def test_a_tmax_task_becomes_a_reef_harbor_task_that_reads_back(tmp_path: Path) 
         *tmax.TOOL_STEPS,
         "WORKDIR /app",
     ]
-    assert task.environment["fixtures/data/config.ini"] == "mode = strict\n"
+    assert tree(task, "environment")["fixtures/data/config.ini"] == "mode = strict\n"
     # Neither the agent's container nor the verifier has network: the image installs tmux and pytest.
-    assert "apt-get install -y tmux" in task.environment["Dockerfile"]
-    assert "python3 -m pip install -q pytest" in task.environment["Dockerfile"]
-    assert task.environment["tmax_build.sh"] == (
+    assert "apt-get install -y tmux" in tree(task, "environment")["Dockerfile"]
+    assert "python3 -m pip install -q pytest" in tree(task, "environment")["Dockerfile"]
+    assert tree(task, "environment")["tmax_build.sh"] == (
         "#!/bin/bash\nset -e\n    mkdir -p /app/out\n    echo ready > /app/out/state.txt\n\n"
     )
-    assert task.instruction == DESCRIPTION
-    assert task.tests == {"test.sh": tmax.VERIFIER.read_text(), "test_outputs.py": FINAL_STATE}
-    assert task.solution == {"solve.sh": tmax.SOLVE_SCRIPT}
+    assert task.files["instruction.md"] == DESCRIPTION
+    assert tree(task, "tests") == {"test.sh": tmax.VERIFIER.read_text(), "test_outputs.py": FINAL_STATE}
+    assert tree(task, "solution") == {"solve.sh": tmax.SOLVE_SCRIPT}
     assert task.metadata == {"tmax_task": "Task_007", "domain": "files", "tier": "easy"}
     assert task.config["environment"]["network_mode"] == "no-network"
     # The initial-state check is not used.
@@ -286,12 +295,17 @@ def test_each_fixture_keeps_its_own_file_under_a_name_a_variant_can_hold(tmp_pat
     assert tmax.main([*arguments, "--select", str(tmp_path / "selection.json")]) == 0
 
     task = read_harbor_task(tmp_path / "seeds" / "t1")
-    assert [line for line in task.environment["Dockerfile"].splitlines() if line.startswith("COPY fixtures/")] == [
+    assert [
+        line for line in tree(task, "environment")["Dockerfile"].splitlines() if line.startswith("COPY fixtures/")
+    ] == [
         "COPY fixtures/a/config.json /etc/app/a.json",
         "COPY fixtures/b/config.json /etc/app/b.json",
         "COPY fixtures/sales_2024.csv /home/user/sales+2024.csv",
     ]
-    assert (task.environment["fixtures/a/config.json"], task.environment["fixtures/b/config.json"]) == (
+    assert (
+        tree(task, "environment")["fixtures/a/config.json"],
+        tree(task, "environment")["fixtures/b/config.json"],
+    ) == (
         '{"a": 1}\n',
         '{"b": 2}\n',
     )
@@ -299,7 +313,7 @@ def test_each_fixture_keeps_its_own_file_under_a_name_a_variant_can_hold(tmp_pat
     admitted = admitted_task(
         workspace_reply(tmp_path / "seeds" / "t1"), generation=0, index=0, record_id="seed-0", checkout_path=None
     )
-    assert admitted.environment == task.environment
+    assert tree(admitted, "environment") == tree(task, "environment")
 
 
 def verifier_reward(

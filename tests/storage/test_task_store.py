@@ -40,15 +40,17 @@ from reef.storage.tasks import (
 def generated(name: str, *, instruction: str = "", sources: tuple[str, ...] = ("record-1",)) -> HarborTask:
     return HarborTask(
         name=name,
-        instruction=instruction or f"Solve {name}.",
-        tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
-        environment={"Dockerfile": "FROM python:3.12-slim\n"},
+        files={
+            "instruction.md": instruction or f"Solve {name}.",
+            "tests/test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n",
+            "environment/Dockerfile": "FROM python:3.12-slim\n",
+            "solution/hint.txt": "look closer",
+        },
         config={
             "verifier": {"timeout_sec": 30},
             "environment": {"network_mode": "allowlist", "allowed_hosts": ["pypi.org"]},
         },
         metadata={"designer_record_id": "designer-1"},
-        solution={"hint.txt": "look closer"},
         source_agent_record_ids=sources,
     )
 

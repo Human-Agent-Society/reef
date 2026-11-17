@@ -90,12 +90,15 @@ SEED_ID = "seed-0123456789abcdef"
 def seed_task(number: int, config: Mapping[str, Mapping[str, object]] | None = None) -> HarborTask:
     """A seed as the TMax converter writes one: its own image and fixture, and a solution that does nothing."""
     document = json.loads(json.dumps(DOCUMENT).replace("8471", str(9100 + number)))
+    environment = {**document["environment"], "fixtures/data.txt": f"seed {number}\n"}
     return HarborTask(
         name=f"tmax-{number}",
-        instruction=document["instruction"],
-        tests=document["tests"],
-        environment={**document["environment"], "fixtures/data.txt": f"seed {number}\n"},
-        solution={"solve.sh": "#!/bin/bash\nexit 0\n"},
+        files={
+            "instruction.md": document["instruction"],
+            **{f"tests/{path}": text for path, text in document["tests"].items()},
+            **{f"environment/{path}": text for path, text in environment.items()},
+            "solution/solve.sh": "#!/bin/bash\nexit 0\n",
+        },
         metadata={"tmax_task": f"TMax_{number}"},
         config=dict(config or {}),
     )
@@ -217,7 +220,7 @@ def test_seeds_fill_the_slots_after_variants_and_before_sessions_once_each(tmp_p
     # The seeds take their slots as they are; only the session's slot runs the Designer.
     assert designer.sources == ["session-1"]
     assert [result.task.metadata.get("seed_task") for result in first] == [seeds[0].name, seeds[1].name, None]
-    assert first[0].task.name == NAMES[0] and first[0].task.instruction == seeds[0].instruction
+    assert first[0].task.name == NAMES[0] and first[0].task.files["instruction.md"] == seeds[0].files["instruction.md"]
     assert first[0].task.source_agent_record_ids == (seed_record_id(seeds[0]),)
     assert seed_record_id(seeds[0]) == f"seed-{seeds[0].digest[:16]}"
     asyncio.run(generator.record_results(first, generation=0))
@@ -579,13 +582,13 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
 
     assert {name for name in session.seen if name.startswith("inputs/")} == {
         "inputs/variant.md",
-        *(f"inputs/parent/{name}" for name in parent.files),
+        *(f"inputs/parent/{name}" for name in parent.directory_files()),
     }
     assert session.seen["inputs/variant.md"].startswith(
         "The solver's mean reward on the task in ../inputs/parent/ (tmax-0) is 0.00 over 2 rollouts;"
     )
     assert {name: text for name, text in session.seen.items() if name.startswith("workspace/")} == {
-        f"workspace/task/environment/{name}": text for name, text in parent.environment.items()
+        f"workspace/task/{path}": text for path, text in parent.files.items() if path.startswith("environment/")
     }
     rules = agent_rules(checks, True, "", True)
     assert "session" not in rules.lower() and "../inputs/repo" not in rules and "history" not in rules
@@ -630,15 +633,15 @@ def test_a_seed_variant_task_has_no_history_step(tmp_path: Path) -> None:
     )
     seed_id = seed_record_id(parent)
     seeded_variant = asyncio.run(generator.rebuilt(None, 0, variant=variant, source_record_id=seed_id))
-    assert HISTORY_MARK not in seeded_variant.environment["Dockerfile"]
+    assert HISTORY_MARK not in seeded_variant.files["environment/Dockerfile"]
     assert designer.checks[0]["passed"] is True, "the agent's own check admits the task without the step"
     session_task = asyncio.run(generator.rebuilt(generator.sources[0], 1))
-    assert HISTORY_MARK in session_task.environment["Dockerfile"]
+    assert HISTORY_MARK in session_task.files["environment/Dockerfile"]
     with pytest.raises(ValueError, match="variant of a seeded parent"):
         asyncio.run(generator.rebuilt(None, 2, variant=variant))
     reply = workspace_reply(write_workspace_task(tmp_path / "task", 8800))
     task = admitted_task(reply, generation=0, index=0, record_id=seed_id, checkout_path=None)
-    assert task.environment["Dockerfile"] == (tmp_path / "task" / "environment" / "Dockerfile").read_text()
+    assert task.files["environment/Dockerfile"] == (tmp_path / "task" / "environment" / "Dockerfile").read_text()
 
 
 @pytest.mark.unit

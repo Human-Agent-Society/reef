@@ -162,7 +162,7 @@ def test_a_bad_harbor_task_is_refused(overrides: dict[str, object], message: str
 
 def test_a_reply_without_a_hint_writes_no_hint_file() -> None:
     task = harbor_task(generated(reply=reply_with(hint="")))
-    assert "hint.txt" not in task.solution and task.solution["solve.sh"] == REPLY.solution["solve.sh"]
+    assert "solution/hint.txt" not in task.files and task.files["solution/solve.sh"] == REPLY.solution["solve.sh"]
 
 
 def test_a_bad_agent_timeout_is_refused() -> None:
