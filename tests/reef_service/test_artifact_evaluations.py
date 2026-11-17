@@ -1507,6 +1507,67 @@ def test_an_evaluation_stops_when_too_many_of_its_ended_rollouts_fail_and_report
     asyncio.run(run())
 
 
+def test_the_list_reads_the_rollouts_of_an_ended_evaluation_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+    read_rollouts = evaluations.results.rollouts
+    reads: list[str] = []
+
+    def counted_rollouts(evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
+        reads.append(evaluation_id)
+        return read_rollouts(evaluation_id, scenario)
+
+    monkeypatch.setattr(evaluations.results, "rollouts", counted_rollouts)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add", "sort")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            for _ in range(2):
+                item = queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+                queue.finish(EVALUATIONS_QUEUE, item.id, "w", {"score": RolloutScore(1.0).to_json()})
+            ended = await finished(client, accepted["evaluation_id"])
+            assert ended["progress"]["scored"] == 2
+
+            reads.clear()
+            for _ in range(2):
+                listed = (await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json())[
+                    "evaluations"
+                ]
+                assert listed[0]["progress"] == ended["progress"]
+            assert reads == []
+
+    asyncio.run(run())
+
+
+def test_ended_progress_keeps_nothing_while_a_rollout_has_not_ended(tmp_path: Path) -> None:
+    # A cancel stores the failed evaluation before it ends the rollouts; a reader in between sees a running rollout.
+    dispatcher = dispatcher_for(tmp_path, WeightRecipe(), live=LiveObjects(runtime=ArtifactRuntime()))
+    queue = dispatcher.queue
+    evaluations = ArtifactEvaluations(dispatcher)
+
+    async def run() -> None:
+        server = TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))
+        async with TestClient(server) as client:
+            artifact_id = await created(client, tmp_path, "add")
+            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
+            accepted = await (await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)).json()
+            queue.take(EVALUATIONS_QUEUE, "w", [EVALUATION_ROLLOUT_KIND])
+            running = evaluations.results.rollouts(accepted["evaluation_id"], "s")
+            stored = replace(
+                evaluations.get("s", accepted["evaluation_id"]), state="failed", error="x", finished_at=1e10
+            )
+            evaluations.ended_progress.add("s", stored, running, {"ended": 0})
+            assert evaluations.ended_progress.read("s", stored) is None
+
+    asyncio.run(run())
+
+
 class NoCallLab(TaskLab):
     """A trial whose verifier writes a reward, though the agent reached no model: the endpoint went away."""
 
