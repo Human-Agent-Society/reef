@@ -80,7 +80,13 @@ Routes
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/metadata``                                                                       | patch the metadata of items                       |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
-| ``DELETE /reef/namespaces/{owner}/data/{id}``                                                                         | delete one item                                   |
+| ``DELETE /reef/namespaces/{owner}/data/{id}``                                                                         | delete one item; restore it for 30 days           |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/deleted-items``                                                                        | the owner's deleted items, newest first           |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/deleted-items/restore``                                                               | restore deleted items                             |
++-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/deleted-items/{id}``                                                                | purge one deleted item for good                   |
 +-----------------------------------------------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/{id}/archive``                                                                    | one item to download: a task's files as tar.gz,   |
 |                                                                                                                       | another item's content as JSON                    |
@@ -1004,7 +1010,8 @@ Read, query, update and delete items
   ``{"owner", "id", "deleted": true, "synced"}``. The scenarios that used a
   trajectory or a task lose its copy. A record stays in the record store of the
   scenario that made it. The item of an artifact that a scenario made returns 400 while
-  the scenario exists, because the next copy would make it again.
+  the scenario exists, because the next copy would make it again. Reef keeps the
+  deleted item for 30 days, so you can restore it (`Restore deleted items`_).
 
 An unknown ID returns 404. A deployment without a data store returns 503.
 An item that leaves a scenario keeps its train counts there, so ``auto`` does
@@ -1025,6 +1032,36 @@ GET of ``.../data/imports/<x>`` or ``.../data/exports/<x>`` reads a transfer.
 So GET cannot read an item whose ID ends in ``/archive``, or whose ID is
 ``imports/<x>`` or ``exports/<x>`` with ``<x>`` one path segment. Give such
 items other IDs.
+
+Restore deleted items
+~~~~~~~~~~~~~~~~~~~~~
+
+A delete does not remove an item at once. Reef keeps it as a deleted item of
+its owner for 30 days, and then purges it. A deleted item is in no listing,
+set, scenario or read of the routes above. A new item can take its ID.
+
+- ``GET /reef/namespaces/{owner}/deleted-items?kind=&before=&limit=`` lists
+  the owner's deleted items, newest item first by ``sequence``: ``{"owner",
+  "items", "next"}``. Each item is ``{"id", "sequence", "digest", "metadata",
+  "deleted_at", "purge_at"}``, without content. ``deleted_at`` and
+  ``purge_at`` are seconds since the epoch. ``kind`` keeps one kind of item.
+  ``before`` and ``limit`` page the items as in the item query; ``next`` is the
+  ``before`` of the next page, or null after the last item.
+- ``POST /reef/namespaces/{owner}/deleted-items/restore`` takes ``{"ids":
+  [...]}``, 1 to 1000 IDs, and restores the items, all or none. An item comes
+  back with its ``sequence``, metadata and content, and in its sets. Reef checks
+  its ``scenarios`` as for a create call. Each scenario that uses it again
+  reads it again, also through a held set. The response is ``{"owner",
+  "items", "synced"}``, without content. An ID without a deleted item returns
+  404. An ID that the owner uses for an item again returns 409.
+- ``DELETE /reef/namespaces/{owner}/deleted-items/{id}`` purges one deleted
+  item for good and returns ``{"owner", "id", "purged": true}``. An ID without
+  a deleted item returns 404.
+
+The archive of a scenario removes it from the ``scenarios`` of the deleted
+items too. A reader that pages items with ``after`` and is past the
+``sequence`` of a restored item does not see it again; a scenario reads it
+again through its uses.
 
 Benchmarks and collections
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
