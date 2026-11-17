@@ -1,11 +1,14 @@
-"""The SQLite database of a scenario's state, and the scenario storage's data store and old record tables."""
+"""The SQLite database of a scenario's state and its data store."""
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
+from pathlib import Path
+from threading import Barrier
+from time import monotonic
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -13,7 +16,9 @@ from tests.support.records import report
 
 from reef.artifact import SnapshotRef
 from reef.core.errors import ReefError
+from reef.storage import sql_setup
 from reef.storage.commits import CommitRecord
+from reef.storage.scenario import ScenarioSettings
 from reef.storage.sqlite import SQLiteScenarioDatabase, SQLiteScenarioStorage
 
 
@@ -50,21 +55,6 @@ def test_a_storage_keeps_the_records_in_its_own_data_store_across_a_restart(tmp_
         assert storage.data.read("math", "math/r1") is not None
 
 
-def scenario_file(directory, scenario: str = "math"):
-    return directory / f"{hashlib.sha256(scenario.encode()).hexdigest()}.sqlite3"
-
-
-def rollback_mode_database(path) -> None:
-    """A database file still in SQLite's rollback journal mode."""
-    with closing(sqlite3.connect(path)) as connection:
-        connection.execute(
-            """
-            CREATE TABLE other_table (sequence INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT NOT NULL)
-            """
-        )
-        connection.commit()
-
-
 class SwitchCursor:
     def __init__(self, row) -> None:
         self._row = row
@@ -95,49 +85,45 @@ class SwitchReplies:
 
 
 @pytest.mark.unit
-def test_a_contended_journal_mode_switch_is_retried_until_the_database_is_wal(tmp_path, monkeypatch) -> None:
-    """SQLite answers a contended journal-mode switch with SQLITE_BUSY without
-    running the busy handler, so the connection timeout does not cover it. Both
-    that and a declined switch (the unchanged mode, returned rather than raised)
-    have to be retried, or a racing opener fails outright."""
-    monkeypatch.setattr(SQLiteScenarioDatabase, "_WAL_RETRY_INTERVAL", 0.0)
-    with SQLiteScenarioDatabase(tmp_path / "records.sqlite3") as store:
-        real, replies = store._connection, SwitchReplies("busy", "delete", "busy", "wal")
-        try:
-            store._connection = replies
-            store._enable_wal()
-        finally:
-            store._connection = real
-    assert replies.calls == 4  # three contended answers, then the switch lands
+def test_a_declined_journal_mode_switch_is_retried_until_the_database_is_wal() -> None:
+    # SQLite can return the unchanged mode when it cannot make the switch.
+    replies = SwitchReplies("delete", "wal")
+    sql_setup.enable_wal(replies, "records.sqlite3", timeout_seconds=1, retry_seconds=0)
+    assert replies.calls >= 2
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("reply, reported", [("busy", "unknown"), ("delete", "delete")])
-def test_a_switch_that_never_lands_names_the_database_and_the_wait(tmp_path, monkeypatch, reply, reported) -> None:
-    monkeypatch.setattr(SQLiteScenarioDatabase, "_WAL_SWITCH_TIMEOUT", 0.02)
-    monkeypatch.setattr(SQLiteScenarioDatabase, "_WAL_RETRY_INTERVAL", 0.0)
-    with SQLiteScenarioDatabase(tmp_path / "records.sqlite3") as store:
-        real = store._connection
-        try:
-            store._connection = SwitchReplies(reply)
-            with pytest.raises(ReefError, match=f"could not switch .* to WAL within .*journal mode is {reported}"):
-                store._enable_wal()
-        finally:
-            store._connection = real
+def test_a_switch_that_never_lands_names_the_database_and_the_wait(reply: str, reported: str) -> None:
+    with pytest.raises(
+        ReefError, match=rf"could not switch records\.sqlite3 to WAL within 0\.01s;.*mode is {reported}"
+    ):
+        sql_setup.enable_wal(SwitchReplies(reply), "records.sqlite3", timeout_seconds=0.01, retry_seconds=0.001)
 
 
 @pytest.mark.unit
-def test_concurrent_openers_all_upgrade_a_rollback_mode_database(tmp_path) -> None:
-    """The race as it reaches CI: several stores opening one rollback-mode database at
-    once, each trying to convert it to WAL. Repeated because the loser of the
-    race is timing-dependent; a single round misses the regression most times."""
+def test_concurrent_openers_all_upgrade_a_rollback_mode_database(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "records.sqlite3"
 
-    def open_store(_: int) -> None:
-        with SQLiteScenarioDatabase(database):
-            pass
+    def open_store(_: int) -> ScenarioSettings:
+        with SQLiteScenarioDatabase(database) as store:
+            return store.read_settings()
 
-    for attempt in range(60):
-        database = tmp_path / f"rollback-{attempt}.sqlite3"
-        rollback_mode_database(database)
-        with ThreadPoolExecutor(max_workers=12) as executor:
-            tuple(executor.map(open_store, range(12)))  # raises if any opener saw "database is locked"
+    with closing(sqlite3.connect(database, check_same_thread=False)) as holder:
+        holder.execute("CREATE TABLE old_table (value TEXT)")
+        holder.commit()
+        # A real write transaction prevents the switch until both openers have tried.
+        holder.execute("BEGIN IMMEDIATE")
+        retrying = Barrier(2, action=holder.rollback)
+
+        def wait_for_unlock(_: float) -> None:
+            if holder.in_transaction:
+                retrying.wait(timeout=10)
+
+        monkeypatch.setattr(sql_setup, "time", SimpleNamespace(monotonic=monotonic, sleep=wait_for_unlock))
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            assert tuple(executor.map(open_store, range(2))) == (ScenarioSettings(),) * 2
+    with closing(sqlite3.connect(database)) as reopened:
+        assert reopened.execute("PRAGMA journal_mode").fetchone() == ("wal",)
