@@ -277,10 +277,14 @@ def with_parent_limits(task: HarborTask, parent: HarborTask) -> HarborTask:
     Harbor's default for it (the sandbox's for the machine size), as the parent does. A table left with no key is
     removed too.
     """
-    config = {section: dict(values) for section, values in task.config.items()}
+    config = dict(task.config)
     for section, keys in PARENT_LIMITS.items():
         limits = parent.config.get(section, {})
-        values = {key: value for key, value in config.get(section, {}).items() if key not in keys}
+        current = config.get(section, {})
+        # Harbor's TaskConfig, which checked both tasks, reads each of these sections as a table.
+        if not isinstance(limits, Mapping) or not isinstance(current, Mapping):
+            raise ValueError(f"config.{section} is not a table")
+        values = {key: value for key, value in current.items() if key not in keys}
         values.update({key: limits[key] for key in keys if key in limits})
         if values:
             config[section] = values

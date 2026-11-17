@@ -107,8 +107,8 @@ def test_a_generation_rebuilds_the_next_sessions_and_admits_each_task(tmp_path: 
     assert [task.name for task in tasks] == NAMES
     task = tasks[0]
     assert task.source_agent_record_ids == ("agent-2", "session-1")
-    assert "RUN set -e; cd /app; if [ -d .git ]" in task.environment["Dockerfile"], "the source's history step"
-    assert task.solution["hint.txt"]
+    assert "RUN set -e; cd /app; if [ -d .git ]" in task.files["environment/Dockerfile"], "the source's history step"
+    assert task.files["solution/hint.txt"]
     # A slow build or verifier fails the task's oracle trial, inside the service's bound on that trial; a trial past
     # the bound would stop the round instead of refusing the task.
     build_seconds = task.config["environment"]["build_timeout_sec"]
@@ -602,7 +602,7 @@ def test_admission_appends_a_step_that_keeps_only_the_base_commits_history(tmp_p
         record_id="r",
         checkout_path="/srv/my repo",
     )
-    step = task.environment["Dockerfile"].split("USER agent\n", 1)[1]
+    step = task.files["environment/Dockerfile"].split("USER agent\n", 1)[1]
     assert step.startswith("USER root\n") and step.endswith("USER agent\n")
     assert "cd '/srv/my repo';" in step
 
@@ -657,7 +657,7 @@ def test_the_history_step_leaves_only_the_base_commit_in_the_repository(tmp_path
         record_id="r",
         checkout_path=str(checkout),
     )
-    dockerfile = task.environment["Dockerfile"]
+    dockerfile = task.files["environment/Dockerfile"]
     run = dockerfile[dockerfile.index("RUN set -e;") :].removeprefix("RUN ")
     subprocess.run(["sh", "-c", run], env=environ, check=True, capture_output=True)
 
@@ -693,7 +693,7 @@ def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_c
     task = read_harbor_task(tmp_path / "tasks" / NAMES[0])
     assert task.source_agent_record_ids == ("rec-1", "session-1")
     assert task.config["environment"]["build_timeout_sec"] == 1200
-    assert task.instruction == DOCUMENT["instruction"] + "\n"
+    assert task.files["instruction.md"] == DOCUMENT["instruction"] + "\n"
     # Every rollout passed: outside the default band, inside with the band off.
     assert [entry["band"] for entry in report(tmp_path)["tasks"]] == ["inside"]
     assert report(tmp_path)["proposals"][0]["designer_record_id"] == "rec-1"
