@@ -7,7 +7,8 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import policy_trajectory, recorded_trajectory
+from tests.support.samples import made_task
+from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
@@ -20,9 +21,8 @@ from reef.core.trajectories import (
 )
 from reef.inference.interfaces import InferenceStream
 from reef.service.streaming import stream_record
-from reef.train.algos.schedule import StepScheduling
-from reef.train.method import TrainingMethod
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.slime_backend.schedule import StepScheduling
 from reef.train.types import JobData, TaskSample, TrajectorySample, trajectories, trajectory_groups
 
 
@@ -77,9 +77,9 @@ def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algor
     loaded = JobData(
         "batch", tuple(replace(item, trajectory=json.loads(json.dumps(item.trajectory))) for item in items)
     )
-    assert prepare_slime_job(
-        loaded, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE
-    ) == prepare_slime_job(original, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
+    assert prepare_slime_job(loaded, algorithm, {}, SCHEDULING, step_size=STEP_SIZE) == prepare_slime_job(
+        original, algorithm, {}, SCHEDULING, step_size=STEP_SIZE
+    )
     assert loaded.samples[0].training["artifact_id"] == "weights-1"
 
 
@@ -92,14 +92,32 @@ def test_harness_projection_reads_external_atif_without_reef_records():
     assert source_record_id(item) == "rollout-1"
 
 
-def test_original_provider_payloads_and_feedback_survive_json_roundtrip():
+def test_call_settings_and_feedback_survive_json_roundtrip():
     first = {"messages": [{"role": "user", "content": "hi"}], "provider_specific": {"opaque": [1, 2]}}
     last = {"messages": [{"role": "user", "content": "next"}], "response": {"content": "done"}}
     item = recorded_trajectory("record", last, 0.0, {"detail": "feedback"}, (first, last))
     loaded = TrajectorySample(json.loads(json.dumps(item.trajectory)))
-    assert recorded_payloads(loaded) == (first, last)
-    assert recorded_payload(loaded) == last
+    # Each call keeps its settings; the conversation and the answer come from the steps.
+    assert recorded_payloads(loaded) == ({"provider_specific": {"opaque": [1, 2]}}, {})
+    assert recorded_payload(loaded)["messages"][-1] == {"role": "user", "content": "next"}
+    assert recorded_payload(loaded)["response"]["choices"][0]["message"]["content"] == "done"
     assert loaded.metadata["feedback"] == {"detail": "feedback"}
+
+
+def test_a_trajectory_that_kept_whole_payloads_or_only_ids_reads_as_it_was_stored():
+    item = recorded_trajectory("record", {"messages": [{"role": "user", "content": "q"}]}, 1.0)
+    whole = {"model": "m", "messages": [{"role": "user", "content": "q"}], "chat_template_kwargs": {"x": 1}}
+    kept = item.with_metadata(records=[{"agent_record_id": "record", "artifact_id": "a1", "payload": whole}])
+    # A whole payload, which trajectories kept before call summaries, is the last call as served.
+    assert recorded_payloads(kept) == (whole,) and recorded_payload(kept) == whole
+    assert kept.artifact_id == "a1"
+    # A summary without a payload names the call and its artifact; the steps give the exchange.
+    named = item.with_metadata(records=[{"agent_record_id": "record", "created_at": 1.0, "artifact_id": "a1"}])
+    assert recorded_payloads(named) == ({},)
+    assert recorded_payload(named)["messages"] == [{"role": "user", "content": "q"}]
+    assert named.artifact_id == "a1"
+    with pytest.raises(ValueError, match="non-empty list of objects"):
+        recorded_payloads(item.with_metadata(records=["record"]))
 
 
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
@@ -139,7 +157,7 @@ def test_completed_stream_messages_survive_multiturn_atif_conversion(provider: s
         ("user", "Next question"),
         ("agent", "Next answer"),
     ]
-    assert recorded_payloads(loaded) == tuple(record.payload for record in records)
+    assert recorded_payloads(loaded) == ({}, {})
     assert item.source_agent_record_ids == tuple(record.agent_record_id for record in records)
     assert trajectory_reward(loaded) == 1.0
     assert loaded.training == {}
@@ -165,14 +183,14 @@ def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(al
     batch = JobData("mixed", (replace(captured_trajectory(), group_id="a"), TaskSample(Path("tasks/example"))))
     state = {"steps": 3}
     with pytest.raises(TypeError, match="unsupported sample 1"):
-        prepare_slime_job(batch, TrainingMethod(algorithm), state, SCHEDULING, step_size=STEP_SIZE)
+        prepare_slime_job(batch, algorithm, state, SCHEDULING, step_size=STEP_SIZE)
     assert state == {"steps": 3}
     assert isinstance(batch.samples[1], TaskSample)
 
 
 def test_policy_backend_reports_missing_training_data_without_inventing_tokens():
     item = atif_item()
-    prepared = prepare_slime_job(JobData("plain", (item,)), TrainingMethod("sao"), {}, SCHEDULING, step_size=STEP_SIZE)
+    prepared = prepare_slime_job(JobData("plain", (item,)), "sao", {}, SCHEDULING, step_size=STEP_SIZE)
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
     with pytest.raises(ValueError, match="training tensors"):
@@ -188,13 +206,14 @@ def test_groups_preserve_row_and_advantage_order():
     batch = JobData("groups", items)
     assert trajectories(batch) == items
     assert trajectory_groups(batch) == (items[:2], items[2:])
-    from recipes.tttd.objective import TttdObjective
+    from recipes.tttd.objective import adaptive_entropic_advantages
+    from recipes.tttd.slime import TttdObjective
 
     objective = TttdObjective()
     expected = tuple(
         value
         for group in (items[:2], items[2:])
-        for value in objective.adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
+        for value in adaptive_entropic_advantages([trajectory_reward(item) for item in group])[0]
     )
     assert objective.prepare(batch, {}).advantages == expected
 
@@ -216,7 +235,7 @@ def test_non_atif_payloads_are_not_accepted_as_trajectories():
 
 
 def test_request_only_batch_preserves_manual_training_contract():
-    request = TrainingRequest("Improve the harness", "session", "release", id="request")
+    request = TrainingRequest("Improve the harness", "session", "artifact-1", id="request")
     batch = JobData("manual", request=request)
     assert trajectories(batch) == ()
     assert replace(batch, data_id="next").request is request
@@ -232,7 +251,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
         def make_sample(self, context):
             source = context.inferences[0]
             return (
-                TaskSample(Path(source.payload["task_path"]))
+                made_task(source.payload["task_path"])
                 if "task_path" in source.payload
                 else make_trajectory(context.inferences)
             )
@@ -267,23 +286,23 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
             )
         )
     ids = frozenset({"inference-0", "report-0", "inference-1", "report-1"})
-    assert ids <= processor.releasable_record_ids()
+    assert ids <= processor.record2sample.releasable_record_ids()
     # One job's data holds samples of one kind, in store order: the trajectory first, then the task.
     assert not processor.ready(2)
     batch = processor.build_job_data(1)
     assert processor.build_job_data(1) is batch
     assert [type(sample) for sample in batch.samples] == [TrajectorySample]
-    assert processor.acknowledge(batch.data_id) == {"sample:report-0:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:mixed.report-0:0"}
     batch = processor.build_job_data(1)
     assert [type(sample) for sample in batch.samples] == [TaskSample]
-    assert processor.acknowledge(batch.data_id) == {"sample:report-1:0"}
+    assert processor.acknowledge(batch.data_id) == {"sample:mixed.report-1:0"}
     assert not processor.ready(1)
 
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl"])
 def test_independent_algorithms_ignore_group_metadata(algorithm):
     batch = JobData("grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2)))
-    result = prepare_slime_job(batch, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
+    result = prepare_slime_job(batch, algorithm, {}, SCHEDULING, step_size=STEP_SIZE)
     assert result.payload["rollout_ids"] == [0, 1]
     assert result.payload["producing_artifact_ids"] == ["weights-1", "weights-1"]
 
@@ -324,7 +343,7 @@ def test_atif_multiturn_tools_preserve_history_observations_and_provider_fields(
     assert steps[1]["observation"]["results"][0]["source_call_id"] == "read-1"
     assert steps[2]["reasoning_content"] == "File read"
     assert "is_copied_context" not in steps[1]
-    assert recorded_payloads(TrajectorySample(json.loads(json.dumps(item.trajectory)))) == (first, second)
+    assert recorded_payloads(TrajectorySample(json.loads(json.dumps(item.trajectory)))) == ({"opaque": {"x": 7}}, {})
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "responses"])
@@ -381,7 +400,11 @@ def test_atif_provider_tool_calls_and_multimodal_context(provider):
     assert steps[2]["tool_calls"][0]["arguments"] == {"x": 1}
     assert steps[2]["observation"]["results"][0]["content"] == "ok"
     assert steps[3]["message"] == "Done"
-    assert recorded_payload(item) == payload
+    # The payload holds only the conversation, so the call keeps no settings and the steps give the exchange.
+    assert recorded_payloads(item) == ({},)
+    served = recorded_payload(item)
+    assert served["messages"][0] == {"role": "system", "content": "Be precise"}
+    assert served["response"]["choices"][0]["message"]["content"] == "Done"
 
 
 def test_external_atif_projection_preserves_images_reasoning_and_tool_results():

@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import ArtifactNotFound
+from reef.artifact.artifact import ArtifactNotFoundError
 from reef.artifact.files import DirectoryFiles
 from reef.dispatcher import Dispatcher
 from reef.service.auth import MAX_DOWNLOAD_URL_SECONDS
@@ -19,11 +19,12 @@ def artifact_directory(dispatcher: Dispatcher, scenario: str, artifact_id: str, 
     """The local directory of the files of ``artifact_id``, ``component``'s content in ``scenario``.
 
     Raise as ``Scenario.resolve_artifact`` does: ``ValueError`` for a missing or unknown component and
-    ``ArtifactNotFound`` for an artifact that the scenario does not list.
+    ``ArtifactNotFoundError`` for an artifact that the scenario does not list.
     """
     with dispatcher.locked_scenario(scenario) as current:
-        selected, release = current.resolve_artifact(artifact_id, component)
-        view = current.components.component_artifact(release.materialize(), selected.component).materialize()
+        selected, snapshot = current.resolve_artifact(artifact_id, component)
+        # Only the component of the artifact is made local, not the other components of its snapshot.
+        view = current.components.component_artifact(snapshot, selected.component).materialize()
     if view.local_path is None:
         raise ValueError(f"artifact {artifact_id!r} of {scenario!r} has no local files")
     return view.local_path
@@ -36,8 +37,8 @@ def artifact_files(
     path order.
 
     When the repository backend signs URLs (``RepositoryBackend.file_downloads``), ``url`` opens the file in its
-    storage until ``url_expires_at``, ``expires_in_seconds`` from now, and the release is not materialized. Otherwise
-    both are null, and the files are those of the materialized release. Raise ``ValueError`` for an
+    storage until ``url_expires_at``, ``expires_in_seconds`` from now, and the snapshot is not materialized. Otherwise
+    both are null, and the files are those of the materialized snapshot. Raise ``ValueError`` for an
     ``expires_in_seconds`` outside 1 to ``MAX_DOWNLOAD_URL_SECONDS``, and as ``Scenario.resolve_artifact`` does.
     """
     if not 1 <= expires_in_seconds <= MAX_DOWNLOAD_URL_SECONDS:
@@ -45,7 +46,7 @@ def artifact_files(
     with dispatcher.locked_scenario(scenario) as current:
         selected, ref = current.artifact_snapshot(artifact_id, component)
         downloads = current.repository.file_downloads(ref, expires_in_seconds)
-        # A release of several components keeps each one in a directory named after it.
+        # A snapshot of several components keeps each one in a directory named after it.
         prefix = "" if current.components.single else f"{selected}/"
     if downloads is not None:
         files = [
@@ -68,10 +69,10 @@ def artifact_files(
 
 
 def artifact_file(dispatcher: Dispatcher, scenario: str, artifact_id: str, component: str | None, path: str) -> Path:
-    """The file at ``path`` of the artifact; ``ArtifactNotFound`` unless ``path`` is one of its files."""
+    """The file at ``path`` of the artifact; ``ArtifactNotFoundError`` unless ``path`` is one of its files."""
     files = DirectoryFiles(artifact_directory(dispatcher, scenario, artifact_id, component))
     if path not in files.paths():
-        raise ArtifactNotFound(f"artifact {artifact_id!r} of {scenario!r} holds no file {path!r}")
+        raise ArtifactNotFoundError(f"artifact {artifact_id!r} of {scenario!r} holds no file {path!r}")
     return files.file(path)
 
 

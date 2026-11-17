@@ -59,7 +59,7 @@ class OpenClawRLSamples(JudgedSamples):
             worker = BackgroundJobWorker(
                 self.openclawrl_judging, thread_name="openclawrl-judging", concurrency=settings.prm_concurrency
             )
-        super().__init__(self.openclawrl_judging, worker, max_staleness=settings.max_staleness)
+        super().__init__(self.openclawrl_judging, worker)
 
     @classmethod
     def from_config(
@@ -93,7 +93,7 @@ class OpenClawRLSamples(JudgedSamples):
 
 @dataclass(frozen=True)
 class OpenClawRLJobSettings(Sample2JobSettings):
-    """The config of ``OpenClawRLJobData``: the buffer, the job size, and the PRM record file."""
+    """The config of ``OpenClawRLJobData``: ``buffer_size``, the job size, and the PRM record file."""
 
     # Upstream's OPENCLAW_PRM_RECORD_FILE.
     prm_record_file: str = config_option(

@@ -21,30 +21,33 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from harbor.models.task.task import Task as HarborTaskLoader
 
 from reef.core.errors import ReefError
 from reef.core.job_data import TrajectorySample
+from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.dispatcher import Dispatcher
-from reef.service.tasks import unpack_task_archive
+from reef.service.tasks import MAX_TASKS_PER_UPLOAD, unpack_task_archive
 from reef.storage.data import (
     ITEM_KINDS,
     MAX_QUERY_LIMIT,
     DataStore,
     ItemKind,
-    ItemNotFound,
+    ItemNotFoundError,
     NewItem,
     StoredItem,
     check_item_id,
     check_owner,
     check_scenarios,
     created_metadata,
+    held_sets,
     patched_metadata,
 )
 from reef.storage.data_queue import DATA_SYNC_QUEUE
 from reef.storage.data_sync import ScenarioUses, request_data_sync
+from reef.storage.item_kinds import TaskFilesReference
 from reef.storage.work_queue import WorkQueue
 
 #: The most items in one create call: the most trajectories of one upload before RFC #1028.
@@ -57,7 +60,7 @@ SYNC_WAIT_SECONDS = 30.0
 SYNC_POLL_SECONDS = 0.05
 
 
-class NoDataStore(ReefError):
+class DataStoreUnavailableError(ReefError):
     """The deployment has no data store, so it serves no data route."""
 
 
@@ -81,17 +84,15 @@ class DataAccess:
         return cls(dispatcher.data_store, dispatcher.queue, dispatcher)
 
     def require_store(self) -> DataStore:
-        """The data store; ``NoDataStore`` for a deployment without one."""
+        """The data store; ``DataStoreUnavailableError`` for a deployment without one."""
         if self.store is None:
-            raise NoDataStore("this deployment has no data store")
+            raise DataStoreUnavailableError("this deployment has no data store")
         return self.store
 
 
 def item_json(item: StoredItem, *, content: bool) -> dict[str, Any]:
     """An item as JSON: ``{id, sequence, digest, metadata}``, and ``content`` when asked (null for a task)."""
     metadata = dict(item.metadata)
-    if "origin" in metadata:
-        metadata["origin"] = {key: value for key, value in metadata["origin"].items() if key != "release_id"}
     value: dict[str, Any] = {
         "id": item.item_id,
         "sequence": item.sequence,
@@ -107,20 +108,33 @@ def item_json(item: StoredItem, *, content: bool) -> dict[str, Any]:
 class Use:
     """One item that one scenario is to use in a split other than before.
 
-    Values: ``item_id`` is the item's ID. ``trajectory`` is the item's content as a ``TrajectorySample`` for a
-    trajectory, else None. ``train_task`` is True exactly for a task in the ``train`` split.
+    Values: ``trajectory`` is True exactly for a trajectory item. ``train_task`` is True exactly for a task item in
+    the ``train`` split.
 
     Purpose: a write collects the new uses of each scenario, and ``check_uses`` checks them before the write.
     """
 
-    item_id: str
-    trajectory: TrajectorySample | None
+    trajectory: bool
     train_task: bool
 
 
-def new_use(item_id: str, kind: str, content: Mapping[str, Any] | None, split: str) -> Use:
-    trajectory = TrajectorySample(content) if kind == "trajectory" and content is not None else None
-    return Use(item_id, trajectory, kind == "task" and split == "train")
+def new_use(kind: str, split: str) -> Use:
+    return Use(kind == "trajectory", kind == "task" and split == "train")
+
+
+def using_scenarios(store: DataStore, owner: str, metadata: Iterable[Mapping[str, Any]]) -> set[str]:
+    """The scenarios that use an item with one of ``metadata``: those of its ``scenarios``, and those that hold one
+    of its sets (``held_sets``, RFC #1420). A write of such an item syncs them."""
+    values = list(metadata)
+    scenarios = {scenario for value in values for scenario in value.get("scenarios", {})}
+    sets: dict[str, set[str]] = {}
+    for value in values:
+        kind, names = held_sets(value) or ("", ())
+        sets.setdefault(kind, set()).update(names)
+    for set_kind, set_names in sorted(sets.items()):
+        if set_names:
+            scenarios.update(store.holding_scenarios(owner, set_kind, sorted(set_names)))
+    return scenarios
 
 
 def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait: bool = True) -> bool:
@@ -134,7 +148,7 @@ def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait
         pending = {
             item_id
             for item_id in pending
-            if (item := queue.get(DATA_SYNC_QUEUE, item_id)) is not None and not item.final
+            if (item := queue.read(DATA_SYNC_QUEUE, item_id)) is not None and not item.final
         }
         if not pending or time.monotonic() >= deadline:
             break
@@ -153,8 +167,9 @@ def check_uses(data: DataAccess, owner: str, uses: Mapping[str, list[Use]]) -> N
             continue
         if scenario_owner != owner:
             raise ValueError(f"scenario {scenario!r} has the owner {scenario_owner!r}, not {owner!r}")
-        trajectories = [(use.item_id, use.trajectory) for use in scenario_uses if use.trajectory is not None]
-        data.scenarios.check_use(scenario, trajectories, any(use.train_task for use in scenario_uses))
+        data.scenarios.check_use(
+            scenario, any(use.trajectory for use in scenario_uses), any(use.train_task for use in scenario_uses)
+        )
 
 
 def create_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
@@ -236,14 +251,15 @@ def store_items(data: DataAccess, owner: str, items: Sequence[NewItem], *, wait:
     if not 1 <= len(items) <= MAX_ITEMS_PER_CREATE:
         raise ValueError(f"a create call holds 1 to {MAX_ITEMS_PER_CREATE} items")
     uses: dict[str, list[Use]] = {}
-    for item in items:
-        checked = created_metadata(owner, item.metadata)
-        content = cast(Mapping[str, Any], item.content)
+    created = [created_metadata(owner, item.metadata) for item in items]
+    for checked in created:
         for scenario, split in checked["scenarios"].items():
-            uses.setdefault(scenario, []).append(new_use(item.item_id, checked["kind"], content, split))
+            uses.setdefault(scenario, []).append(new_use(checked["kind"], split))
     check_uses(data, owner, uses)
-    stored = data.require_store().create(owner, list(items))
-    synced = sync_touched(data, owner, uses, wait=wait)
+    store = data.require_store()
+    stored = store.create(owner, list(items))
+    # A scenario that holds the trajectory set of a new trajectory uses it too.
+    synced = sync_touched(data, owner, using_scenarios(store, owner, created), wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
@@ -254,6 +270,81 @@ def create_task_items(data: DataAccess, owner: str, archive: Path, metadata: Map
     """
     with tempfile.TemporaryDirectory(prefix="reef-task-items-") as work:
         return create_task_directories(data, owner, unpack_task_archive(archive, Path(work)), metadata)
+
+
+def create_task_references(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """Create task items by reference from ``{"tasks": [{"name", "digest"}], "metadata": {...}}``; return them.
+
+    The client wrote each task directory, named ``name``, into the owner's partition of the task file store itself.
+    Each item gets the directory's ``digest`` (``TaskFilesReference``), and the store copies no file. ``metadata``
+    is optional and is as in ``create_task_directories``. Harbor's task loader does not read the directories: the
+    client that wrote the files checked them. The response is ``{owner, items, synced}``, in name order, as for an
+    archive.
+
+    Raise ``ValueError`` for a body of another form, for 0 or more than ``MAX_TASKS_PER_UPLOAD`` tasks, for a name
+    that is not a task name or a digest that is not a files digest, and as ``store_task_items``. Raise
+    ``TaskFilesNotFoundError`` for a task that the owner's partition does not hold. Nothing is stored then.
+    """
+    tasks = body.get("tasks")
+    if not body.keys() <= {"tasks", "metadata"} or not isinstance(tasks, list):
+        raise ValueError("the body holds 'tasks', an array of {name, digest} objects, and optionally 'metadata'")
+    if not 1 <= len(tasks) <= MAX_TASKS_PER_UPLOAD:
+        raise ValueError(f"a create by reference holds 1 to {MAX_TASKS_PER_UPLOAD} tasks")
+    references: list[tuple[str, TaskFilesReference]] = []
+    for task in tasks:
+        if not isinstance(task, Mapping) or task.keys() != {"name", "digest"}:
+            raise ValueError("each task holds only 'name' and 'digest'")
+        name = task["name"]
+        if not isinstance(name, str) or not TASK_NAME_PATTERN.fullmatch(name):
+            raise ValueError(f"{name!r} is not a task name: it must match {TASK_NAME_PATTERN.pattern}")
+        try:
+            references.append((name, TaskFilesReference(task["digest"])))
+        except ValueError as exc:
+            raise ValueError(f"task {name!r}: {exc}") from exc
+    return store_task_items(data, owner, sorted(references), body.get("metadata", {}))
+
+
+def replace_task_item(data: DataAccess, owner: str, item_id: str, archive: Path) -> dict[str, Any]:
+    """Replace the files of the task item ``item_id`` of ``owner`` with the one task directory of the tar.gz
+    ``archive``, then sync the scenarios that use it; return ``{owner, item, synced}``, without content.
+
+    Each evaluation attempt reads the item's current files, so a retry and a new evaluation run the new ones.
+    ``ItemNotFoundError`` for an unknown item; ``ValueError`` for an archive of no task or of several, for a directory
+    that is not named ``item_id`` or that Harbor cannot load, and for an item of another kind. Nothing changes then.
+    """
+    with tempfile.TemporaryDirectory(prefix="reef-task-replace-") as work:
+        directories = unpack_task_archive(archive, Path(work))
+        if len(directories) != 1:
+            raise ValueError(f"a task replace holds one task directory, not {len(directories)}")
+        (directory,) = directories
+        try:
+            HarborTaskLoader(directory)
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
+        return replace_task_files(data, owner, item_id, directory)
+
+
+def replace_task_reference(data: DataAccess, owner: str, item_id: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """Replace the files of the task item ``item_id`` of ``owner`` by reference, from ``{"digest": ...}``; return
+    ``{owner, item, synced}`` as ``replace_task_item`` does.
+
+    The client wrote the new task directory, named ``item_id``, into the owner's partition of the task file store
+    itself, and ``digest`` is its files digest. Harbor's task loader does not read it. ``ItemNotFoundError`` for an
+    unknown item; ``TaskFilesNotFoundError`` for a directory that the partition does not hold; ``ValueError`` for a
+    body of another form, a digest that is not a files digest, or an item of another kind. Nothing changes then.
+    """
+    if body.keys() != {"digest"}:
+        raise ValueError("the body holds only 'digest', the files digest of the task directory")
+    return replace_task_files(data, owner, item_id, TaskFilesReference(body["digest"]))
+
+
+def replace_task_files(data: DataAccess, owner: str, item_id: str, files: Path | TaskFilesReference) -> dict[str, Any]:
+    """Give the task item ``item_id`` of ``owner`` the files ``files`` (``DataStore.replace_task``), then sync the
+    scenarios that use it; return ``{owner, item, synced}``, without content."""
+    store = data.require_store()
+    item = store.replace_task(owner, item_id, files)
+    synced = sync_touched(data, owner, using_scenarios(store, owner, [item.metadata]))
+    return {"owner": owner, "item": item_json(item, content=False), "synced": synced}
 
 
 def create_task_directories(
@@ -267,43 +358,86 @@ def create_task_directories(
     """Create a task item for each Harbor task directory of ``directories``, named after it, each with ``metadata``;
     return ``{owner, items, synced}`` as ``create_items`` does.
 
-    ``metadata`` is the client's metadata for every task; its ``kind`` is ``task``. Raise ``ValueError`` for a
-    directory that Harbor cannot load; nothing is stored then.
+    Raise ``ValueError`` for a directory that Harbor cannot load, and as ``store_task_items``; nothing is stored
+    then.
     """
-    check_owner(owner)
-    if not isinstance(metadata, Mapping) or metadata.get("kind", "task") != "task":
-        raise ValueError("the metadata of task items is an object whose kind is task")
-    scenarios = check_scenarios(metadata.get("scenarios", {}), "task")
     for directory in directories:
         try:
             HarborTaskLoader(directory)
         except (ValueError, OSError) as exc:
             raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
-    new_uses = {
-        scenario: [new_use(directory.name, "task", None, split) for directory in directories]
-        for scenario, split in scenarios.items()
-    }
-    check_uses(data, owner, new_uses)
-    stored = data.require_store().create(
-        owner, [NewItem(directory.name, directory, {**metadata, "kind": "task"}) for directory in directories]
+    return store_task_items(
+        data, owner, [(directory.name, directory) for directory in directories], metadata, wait=wait
     )
-    synced = sync_touched(data, owner, scenarios, wait=wait)
+
+
+def store_task_items(
+    data: DataAccess,
+    owner: str,
+    tasks: Sequence[tuple[str, Path | TaskFilesReference]],
+    metadata: Mapping[str, Any],
+    *,
+    wait: bool = True,
+) -> dict[str, Any]:
+    """Create a task item for each ``(name, files)`` of ``tasks``, with the ID ``name``, the files ``files`` and
+    ``metadata``; then sync the scenarios that use them. Return ``{owner, items, synced}`` as ``create_items`` does.
+
+    ``metadata`` is the client's metadata for every task; its ``kind`` is ``task``. Raise ``ValueError`` for other
+    metadata, for a scenario that cannot use the tasks (``check_uses``), and as ``DataStore.create``; nothing is
+    stored then. ``wait`` is as in ``sync_touched``.
+    """
+    check_owner(owner)
+    if not isinstance(metadata, Mapping) or metadata.get("kind", "task") != "task":
+        raise ValueError("the metadata of task items is an object whose kind is task")
+    scenarios = check_scenarios(metadata.get("scenarios", {}), "task")
+    new_uses = {scenario: [new_use("task", split) for _ in tasks] for scenario, split in scenarios.items()}
+    check_uses(data, owner, new_uses)
+    store = data.require_store()
+    stored = store.create(owner, [NewItem(name, files, {**metadata, "kind": "task"}) for name, files in tasks])
+    used = using_scenarios(store, owner, [{**metadata, "kind": "task", "scenarios": scenarios}])
+    synced = sync_touched(data, owner, used, wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
 def query_items(
-    data: DataAccess, owner: str, *, kind: str | None, scenario: str | None, after: int, limit: int, content: bool
+    data: DataAccess,
+    owner: str,
+    *,
+    kind: str | None,
+    scenario: str | None,
+    after: int,
+    limit: int,
+    content: bool,
+    group: tuple[str, str | None] | None = None,
+    benchmark: str | None = None,
+    trajectory_set: str | None = None,
+    id_prefix: str | None = None,
+    before: int | None = None,
 ) -> dict[str, Any]:
     """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, each item with its
-    content when ``content`` (``item_json``), else without.
+    content when ``content`` (``item_json``), else without. ``group`` keeps only the items of one group,
+    ``benchmark`` only the task items of one benchmark, ``trajectory_set`` only the trajectory items of one
+    trajectory set, and ``id_prefix`` only the items whose ID starts with it (``DataStore.query``). With
+    ``before``, the items come newest first, from the one just before ``before``.
 
-    ``next`` is the ``after`` of the next page, or null after the last item.
+    ``next`` is the ``after`` of the next page, or with ``before`` the ``before`` of the next page: the sequence of
+    the page's last item. It is null after the last item.
     """
     if kind is not None and kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
     checked_kind = None if kind is None else KINDS[kind]
     found = data.require_store().query(
-        owner, kind=checked_kind, scenario=scenario, after=after, limit=limit, content=content
+        owner,
+        kind=checked_kind,
+        scenario=scenario,
+        after=after,
+        limit=limit,
+        content=content,
+        group=group,
+        benchmark=benchmark,
+        trajectory_set=trajectory_set,
+        id_prefix=id_prefix,
+        before=before,
     )
     return {
         "owner": owner,
@@ -313,16 +447,19 @@ def query_items(
 
 
 def group_items(
-    data: DataAccess, owner: str, *, kind: str | None, key: str, before: int | None, limit: int
+    data: DataAccess, owner: str, *, kind: str | None, key: str, scenario: str | None, before: int | None, limit: int
 ) -> dict[str, Any]:
-    """The groups of the items of ``owner`` and ``kind`` by the metadata key ``key`` (``DataStore.groups``), newest
-    first: ``{owner, groups, next}``. Each group is ``{value, item_count, first_sequence, last_sequence, metadata}``.
+    """The groups of the items of ``owner`` and ``kind`` by the metadata key ``key`` (``DataStore.groups``), only of
+    the items that ``scenario`` uses if it is given, newest first: ``{owner, groups, next}``. Each group is
+    ``{value, item_count, first_sequence, last_sequence, metadata}``.
 
     ``next`` is the ``before`` of the next page, or null after the last group.
     """
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
-    found = data.require_store().groups(owner, kind=KINDS[kind], key=key, before=before, limit=limit)
+    found = data.require_store().groups(
+        owner, kind=KINDS[kind], key=key, scenario=scenario, before=before, limit=limit
+    )
     return {
         "owner": owner,
         "groups": [
@@ -339,11 +476,37 @@ def group_items(
     }
 
 
+def set_listing(
+    data: DataAccess, owner: str, *, kind: str, scenario: str | None, before: int | None, limit: int
+) -> dict[str, Any]:
+    """The sets of ``kind`` that have an item of ``owner`` (``DataStore.sets``), with only the items that
+    ``scenario`` uses when it is given, newest first: ``{owner, sets, next}``. Each set is ``{name, item_count, first_sequence, last_sequence, metadata}``, where ``metadata`` is the
+    metadata of its first item.
+
+    ``next`` is the ``before`` of the next page, or null after the last set.
+    """
+    found = data.require_store().sets(owner, kind, scenario=scenario, before=before, limit=limit)
+    return {
+        "owner": owner,
+        "sets": [
+            {
+                "name": group.value,
+                "item_count": group.item_count,
+                "first_sequence": group.first_sequence,
+                "last_sequence": group.last_sequence,
+                "metadata": dict(group.metadata),
+            }
+            for group in found
+        ],
+        "next": found[-1].first_sequence if len(found) == limit else None,
+    }
+
+
 def read_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
-    """One item of ``owner`` with its content; ``ItemNotFound`` for an unknown ID."""
+    """One item of ``owner`` with its content; ``ItemNotFoundError`` for an unknown ID."""
     item = data.require_store().read(owner, item_id)
     if item is None:
-        raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+        raise ItemNotFoundError(f"{owner!r} stores no item {item_id!r}")
     return {"owner": owner, **item_json(item, content=True)}
 
 
@@ -351,7 +514,7 @@ def update_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
     """Apply ``{"ids": [...], "patch": {...}}``, one JSON merge patch on each item's metadata; return the items.
 
     The scenarios that the patch adds to an item, or moves to another split, are checked first. Raise
-    ``ItemNotFound`` for an unknown ID and ``ValueError`` for a patch that ``patched_metadata`` refuses.
+    ``ItemNotFoundError`` for an unknown ID and ``ValueError`` for a patch that ``patched_metadata`` refuses.
     """
     check_owner(owner)
     ids, patch = body.get("ids"), body.get("patch")
@@ -362,21 +525,24 @@ def update_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
     store = data.require_store()
     current = touched_items(store, owner, ids)
     uses: dict[str, list[Use]] = {}
-    touched: set[str] = set()
+    changed: list[Mapping[str, Any]] = []
     for item in current:
-        after = patched_metadata(item.metadata, patch)["scenarios"]
-        touched.update(item.scenarios, after)
+        patched = patched_metadata(item.metadata, patch)
+        after = patched["scenarios"]
+        changed += [item.metadata, patched]
         for scenario, split in after.items():
             if item.scenarios.get(scenario) != split:
-                uses.setdefault(scenario, []).append(new_use(item.item_id, item.kind, item.content, split))
+                uses.setdefault(scenario, []).append(new_use(item.kind, split))
     check_uses(data, owner, uses)
+    # The holds are read before the write: a task that leaves a benchmark leaves the scenarios that hold it.
+    touched = using_scenarios(store, owner, changed)
     updated = store.update(owner, ids, patch)
     synced = sync_touched(data, owner, touched)
     return {"owner": owner, "items": [item_json(item, content=False) for item in updated], "synced": synced}
 
 
 def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
-    """Delete one item of ``owner``; the scenarios that used it lose its upload. ``ItemNotFound`` if unknown.
+    """Delete one item of ``owner``; the scenarios that used it lose its upload. ``ItemNotFoundError`` if unknown.
 
     Raise ``ValueError`` for the artifact item of an artifact that a scenario of ``owner`` made while the scenario
     exists: the next artifact copy would make the item again (``reef.storage.artifact_items``).
@@ -389,22 +555,25 @@ def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
             raise ValueError(
                 f"artifact item {item_id!r} lists an artifact of scenario {made_by!r}, which still exists"
             )
+    touched = using_scenarios(store, owner, [item.metadata])
     store.delete(owner, item_id)
-    synced = sync_touched(data, owner, item.scenarios)
+    synced = sync_touched(data, owner, touched)
     return {"owner": owner, "id": item_id, "deleted": True, "synced": synced}
 
 
 def touched_items(store: DataStore, owner: str, ids: Sequence[object]) -> list[StoredItem]:
-    """The stored items of ``ids``, in the order given; ``ValueError`` for a bad ID, ``ItemNotFound`` if unknown."""
-    found: list[StoredItem] = []
+    """The stored items of ``ids``, without content, each once, in the order given, from one read; ``ValueError``
+    for a bad ID, ``ItemNotFoundError`` if unknown."""
+    item_ids: list[str] = []
     for item_id in dict.fromkeys(ids):
         if not isinstance(item_id, str) or not item_id:
             raise ValueError("an item ID is a non-empty string")
-        item = store.read(owner, item_id)
-        if item is None:
-            raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
-        found.append(item)
-    return found
+        item_ids.append(item_id)
+    found = {item.item_id: item for item in store.read_many(owner, item_ids, content=False)}
+    missing = [item_id for item_id in item_ids if item_id not in found]
+    if missing:
+        raise ItemNotFoundError(f"{owner!r} stores no item {missing[0]!r}")
+    return [found[item_id] for item_id in item_ids]
 
 
 def parsed_metadata(text: str | None) -> Mapping[str, Any]:
@@ -424,10 +593,11 @@ __all__ = [
     "MAX_ITEMS_PER_CREATE",
     "SYNC_WAIT_SECONDS",
     "DataAccess",
-    "NoDataStore",
+    "DataStoreUnavailableError",
     "create_items",
     "create_task_directories",
     "create_task_items",
+    "create_task_references",
     "create_trajectory_items",
     "delete_item",
     "item_json",
@@ -435,6 +605,10 @@ __all__ = [
     "parsed_metadata",
     "query_items",
     "read_item",
+    "replace_task_files",
+    "replace_task_item",
+    "replace_task_reference",
+    "set_listing",
     "store_items",
     "update_items",
 ]

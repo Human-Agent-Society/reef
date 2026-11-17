@@ -23,7 +23,9 @@ def postgres_config():
         engine = create_engine(postgres_url(url), hide_parameters=True)
         try:
             with engine.begin() as connection:
-                connection.execute(DropSchema(schema, cascade=True, if_exists=True))
+                # A PostgresScenarioStorage without a data store keeps its records in ``<schema>_data``.
+                for name in (schema, f"{schema}_data"):
+                    connection.execute(DropSchema(name, cascade=True, if_exists=True))
         finally:
             engine.dispose()
 

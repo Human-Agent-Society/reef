@@ -3,9 +3,8 @@
 A harness that runs outside Reef's evaluation, such as a Harbor task run
 or the native serve process, reaches Reef through this proxy. It forwards to
 Reef with ``x-reef-scenario`` and the token, tags every call as
-``x-reef-tag-<name>``, keeps the receipt each answer carries, and hands the
-legacy harness head to a ``ReleaseObserver``. Modern inference responses identify model artifacts instead;
-the harness watch polls its own catalog for updates.
+``x-reef-tag-<name>``, and keeps the receipt each answer carries. The harness watch polls its own catalog for
+updates.
 """
 
 from __future__ import annotations
@@ -17,16 +16,17 @@ import time
 import urllib.request
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, MutableMapping
-from dataclasses import asdict
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import asdict, replace
+from http.server import ThreadingHTTPServer
 from typing import Any
 
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
+from reef.core.errors import InternalError
 from reef.core.records_types import ROLLOUT_HEADER
 
 
-class CaptureError(Exception):
+class CaptureError(InternalError):
     """The capture proxy could not start or is not running."""
 
 
@@ -41,18 +41,9 @@ def wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
-#: Older file-serving services announce their harness head through this response header.
-RELEASE_HEADER = "x-reef-release-id"
 #: The paths Reef serves inference on; a receipt rides on each. The proxy matches the path with its query, and
 #: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed.
 CAPTURE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages?beta=true")
-
-
-class ReleaseObserver(ABC):
-    """Where the proxy hands the release id an inference response names."""
-
-    @abstractmethod
-    def observe(self, release_id: str) -> None: ...
 
 
 class ProxyTags(MutableMapping[str, str]):
@@ -87,19 +78,48 @@ class ProxyTags(MutableMapping[str, str]):
         return len(self.tag_values)
 
 
-class TaggedStore(CaptureStore):
-    """The capture store plus, per capture, the tags in force when it landed, so a trial's receipts are told apart."""
+class CaptureObserver(ABC):
+    """Receives each call that a capture proxy captures, as it lands.
 
-    def __init__(self, tags: Mapping[str, str]) -> None:
+    Purpose: a caller that keeps the calls while the rollout runs gives one to ``CaptureProxy``. The proxy calls
+    ``call_captured`` once for each captured call, on the thread that answered the call, after the call is in the
+    proxy's store. Calls that end at the same time reach it from several threads at once.
+    """
+
+    @abstractmethod
+    def call_captured(self, turn: CapturedTurn) -> None:
+        """Take ``turn``, one captured call. An error that this raises reaches the proxy's request handler."""
+
+
+class TaggedStore(CaptureStore):
+    """The capture store plus, per capture, the tags in force when it landed, so a trial's receipts are told apart.
+    ``observer``, when set, gets each capture after it landed, with its bodies.
+
+    With ``keeps_bodies`` false, the store keeps a capture without its request body, and without its response body
+    when it answered 200: an error body stays, to name the failure. An agent's request carries the whole
+    conversation so far, so the kept bodies of one long rollout grow with the square of its calls."""
+
+    def __init__(
+        self, tags: Mapping[str, str], observer: CaptureObserver | None = None, *, keeps_bodies: bool = True
+    ) -> None:
         super().__init__()
         self.tag_values = tags
+        self.observer = observer
+        self.keeps_bodies = keeps_bodies
         self.tagged: list[dict[str, Any]] = []
         self.guard = threading.Lock()
 
     def add(self, turn: CapturedTurn) -> None:
+        kept = (
+            turn
+            if self.keeps_bodies
+            else replace(turn, request=None, response=None if turn.status == 200 else turn.response)
+        )
         with self.guard:
-            super().add(turn)
-            self.tagged.append({**asdict(turn), "tags": dict(self.tag_values)})
+            super().add(kept)
+            self.tagged.append({**asdict(kept), "tags": dict(self.tag_values)})
+        if self.observer is not None:
+            self.observer.call_captured(turn)
 
     def drain(self) -> list[dict[str, Any]]:
         """The captures since the last drain, with their tags; what one publish carries."""
@@ -112,20 +132,6 @@ class TaggedStore(CaptureStore):
         with self.guard:
             self.tagged = []
             return super().clear()
-
-
-def observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObserver) -> type[BaseHTTPRequestHandler]:
-    class Handler(base):  # type: ignore[valid-type,misc]
-        def _relay(self, response: Any, *args: Any) -> None:
-            # Before the body reaches the agent: a head the answer names is queued by the time the agent reads it.
-            # Modern inference answers identify the model artifact, which need not be the harness artifact.
-            # Its update watch polls the harness catalog. Older file-serving services used the legacy header.
-            release = response.getheader(RELEASE_HEADER)
-            if release and not response.getheader("x-reef-artifact-id"):
-                observer.observe(str(release))
-            super()._relay(response, *args)
-
-    return Handler
 
 
 class CaptureProxyServer(ThreadingHTTPServer):
@@ -147,12 +153,15 @@ class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
     Forwards to ``upstream`` with ``x-reef-scenario`` and the token, tags every
-    call with ``tags`` as ``x-reef-tag-<name>`` headers, keeps the receipts,
-    and hands the release id an answer names to ``observer``.
+    call with ``tags`` as ``x-reef-tag-<name>`` headers, and keeps the receipts.
 
     With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
     record of it, and the captured response holds the whole training block. A streaming agent still gets a
-    stream, which the proxy makes from the complete answer."""
+    stream, which the proxy makes from the complete answer.
+
+    ``observer``, when set, gets each captured call as it lands (``CaptureObserver``). With ``keeps_bodies`` false,
+    the captures that ``drain`` returns have no request body, and no response body when they answered 200
+    (``TaggedStore``)."""
 
     def __init__(
         self,
@@ -161,9 +170,10 @@ class CaptureProxy:
         token: str | None = None,
         *,
         tags: Mapping[str, str] | None = None,
-        observer: ReleaseObserver | None = None,
         listen_host: str = "127.0.0.1",
         is_unrecorded: bool = False,
+        observer: CaptureObserver | None = None,
+        keeps_bodies: bool = True,
     ) -> None:
         self.upstream = upstream
         self.scenario = scenario
@@ -176,13 +186,12 @@ class CaptureProxy:
         self.config = ServeConfig(
             upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_unrecorded
         )
-        #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
+        #: The tag channel: the record keeps which snapshot (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = ProxyTags(self.config, fixed)
         for name, value in (tags or {}).items():
             self.tags[name] = value
-        self.store = TaggedStore(self.tags)
-        handler = build_handler(self.config, self.store)
-        self.handler = handler if observer is None else observing_handler(handler, observer)
+        self.store = TaggedStore(self.tags, observer, keeps_bodies=keeps_bodies)
+        self.handler = build_handler(self.config, self.store)
         self.server: CaptureProxyServer | None = None
 
     @property
@@ -210,4 +219,4 @@ class CaptureProxy:
         return self.store.drain()
 
 
-__all__ = ["CAPTURE_PATHS", "RELEASE_HEADER", "CaptureError", "CaptureProxy", "ReleaseObserver"]
+__all__ = ["CAPTURE_PATHS", "CaptureError", "CaptureObserver", "CaptureProxy"]

@@ -23,7 +23,7 @@ from reef.execution.sandbox.process import (
     ProcessOwner,
     ProgramExecutor,
     ProgramLaunchError,
-    ProgramTimeout,
+    ProgramTimeoutError,
 )
 
 ResultType = TypeVar("ResultType")
@@ -189,7 +189,7 @@ class ExecutorEnvironment(BaseEnvironment):
                 try:
                     await asyncio.to_thread(self.executor.close)
                 finally:
-                    with contextlib.suppress(ProgramLaunchError, ProgramTimeout):
+                    with contextlib.suppress(ProgramLaunchError, ProgramTimeoutError):
                         await asyncio.shield(pending)
                 self.closed = True
                 raise

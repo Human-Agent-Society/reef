@@ -13,11 +13,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from reef_client.serve import CapturedTurn
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.core.tasks import HarborTask, TaskSplit, read_split_manifest, write_harbor_task, write_split_manifest
-from reef.harness.tasks.rollouts import (
+from reef.execution.sandbox.task_environment import HARBOR_E2B_ENVIRONMENT, environment_config
+from reef.harness.capture import CaptureObserver, TaggedStore
+from reef.harness.harbor.rollouts import (
     DEFAULT_AGENT,
     ReefEvalLab,
     RolloutRow,
@@ -31,6 +34,12 @@ from reef.harness.tasks.rollouts import (
     rollout_reward,
     task_identity,
 )
+
+#: The Harbor environment config of an ``e2b`` trial of a task with no agent time limit: no lifetime, so the sandbox
+#: keeps Harbor's default.
+E2B_CONFIG = {"type": "e2b", "import_path": HARBOR_E2B_ENVIRONMENT}
+#: The same for a ``modal`` trial: a lifetime of two hours.
+MODAL_CONFIG = {"type": "modal", "kwargs": {"sandbox_timeout_secs": 2 * 60 * 60}}
 
 
 class StandInReef:
@@ -400,7 +409,7 @@ def test_concurrent_rollouts_each_get_their_own_proxy_and_report(reef: StandInRe
     lab = StandInLab({"reward": 1.0})
     running = runner(reef, tmp_path, lab, concurrency=3)
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(path)) for path in paths]
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in paths]
     )
     assert [rollout.name for rollout in rollouts] == ["t1", "t2", "t3"] and all(
         rollout.report_agent_record_ids != () for rollout in rollouts
@@ -417,15 +426,135 @@ def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: Sta
     running = runner(reef, tmp_path, lab, concurrency=7, environment="e2b")
     names = ["t1", "t2", "t1", "t3", "t2", "t1", "t2"]
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(paths[name])) for name in names]
+        [RolloutRequest(running.harness, running.policy_model, str(paths[name])) for name in names]
     )
     assert [(rollout.name, rollout.reward, rollout.error) for rollout in rollouts] == [
         (name, 1.0, "") for name in names
     ]
     assert sorted(lab.template_builds) == ["t1", "t2", "t3"], "each task's template is built once"
     assert [build["task_path"] for build in lab.builds] == [paths["t1"], paths["t2"]], "t3 has one rollout"
-    assert lab.builds[0]["overrides"] == {"environment": {"type": "e2b"}}
+    assert lab.builds[0]["overrides"] == {"environment": E2B_CONFIG}
     assert lab.most_building == 3, "no task waits for the build of another task"
+
+
+@pytest.mark.parametrize(
+    ("environment", "has_compose", "gpu_count", "config"),
+    [
+        ("modal", True, 0, {"type": "modal", "kwargs": {"modal_vm_runtime": True, "sandbox_timeout_secs": 7200}}),
+        ("modal", False, 0, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
+        ("modal", True, 1, {"type": "modal", "kwargs": {"sandbox_timeout_secs": 7200}}),
+        ("e2b", True, 0, E2B_CONFIG),
+    ],
+    ids=["modal-compose", "modal-dockerfile", "modal-compose-gpu", "e2b-compose"],
+)
+def test_only_a_modal_compose_task_with_no_gpu_runs_on_the_vm_runtime(
+    reef: StandInReef, tmp_path: Path, environment: str, has_compose: bool, gpu_count: int, config: dict
+) -> None:
+    task_path = tmp_path / "tasks" / "t"
+    (task_path / "environment").mkdir(parents=True)
+    (task_path / "environment" / "Dockerfile").write_text("FROM python:3.12-slim\n")
+    if has_compose:
+        (task_path / "environment" / "docker-compose.yaml").write_text("services:\n  main: {}\n")
+    (task_path / "task.toml").write_text(f'[environment]\ngpus = {gpu_count}\nnetwork_mode = "no-network"\n')
+    lab = StandInLab({"reward": 1.0})
+    running = runner(reef, tmp_path, lab, concurrency=2, environment=environment)
+    running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task_path))] * 2)
+    assert [build["overrides"] for build in lab.builds] == [{"environment": config}]
+    assert [call["overrides"]["environment"] for call in lab.calls] == [config, config]
+
+
+@pytest.mark.parametrize(
+    ("task_toml", "kwargs"),
+    [
+        ("[agent]\ntimeout_sec = 28800.0\n", {"sandbox_timeout_secs": 600 + 28800 + 600 + 3600}),
+        (
+            "[agent]\ntimeout_sec = 900\n[verifier]\ntimeout_sec = 1200\n[environment]\nbuild_timeout_sec = 300\n",
+            {"sandbox_timeout_secs": 300 + 900 + 1200 + 3600},
+        ),
+        ("[agent]\ntimeout_sec = 86400\n", {"sandbox_timeout_secs": 86400}),
+        ("[verifier]\ntimeout_sec = 1200\n", None),
+    ],
+    ids=["agent-limit", "all-limits", "one-day-at-most", "no-agent-limit"],
+)
+def test_a_cloud_sandbox_lives_for_the_time_limits_of_its_task(tmp_path: Path, task_toml: str, kwargs) -> None:
+    (tmp_path / "task.toml").write_text(task_toml)
+    # With no agent time limit (None), each provider has its own default: two hours on Modal, Harbor's on E2B.
+    lifetime = {} if kwargs is None else {"kwargs": kwargs}
+    assert environment_config("modal", tmp_path) == {**MODAL_CONFIG, **lifetime}
+    # E2B gets the same lifetime from an agent time limit, and Reef's class, which deletes the sandbox at that time.
+    assert environment_config("e2b", tmp_path) == {**E2B_CONFIG, **lifetime}
+    assert environment_config("docker", tmp_path) == {"type": "docker"}
+
+
+@pytest.mark.parametrize("environment", ["e2b", "modal"])
+@pytest.mark.parametrize(
+    ("task_toml", "agent_limits", "lifetime_seconds"),
+    [
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": 7200}, 600 + 7200 + 600 + 3600),
+        ("", {"override_timeout_sec": 7200}, 600 + 7200 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": 0}, 600 + 900 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": None}, 600 + 900 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_setup_timeout_sec": 1800}, 600 + 1800 + 900 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": float("inf")}, 86400),
+        ("[agent]\ntimeout_sec = 900\n", {}, 600 + 900 + 600 + 3600),
+        ("", {"override_setup_timeout_sec": 1800}, None),
+        ("", {"override_timeout_sec": 0}, None),
+        ("", {"override_timeout_sec": None}, None),
+        ("[agent]\ntimeout_sec = 900\n", {"override_timeout_sec": "7200"}, 600 + 7200 + 600 + 3600),
+        ("[agent]\ntimeout_sec = 900\n", {"override_setup_timeout_sec": "1800"}, 600 + 1800 + 900 + 600 + 3600),
+    ],
+    ids=[
+        "longer",
+        "no-task-limit",
+        "zero",
+        "none",
+        "setup",
+        "infinite",
+        "no-override",
+        "no-agent-limit",
+        "no-task-limit-zero",
+        "no-task-limit-none",
+        "numeric-string",
+        "setup-numeric-string",
+    ],
+)
+def test_a_cloud_sandbox_lives_for_the_time_limits_of_the_runners_agent(
+    reef: StandInReef, tmp_path: Path, environment: str, task_toml: str, agent_limits: dict, lifetime_seconds
+) -> None:
+    """The build and the rollouts of a task get one lifetime, from the limits of the agent config that Harbor gets.
+
+    Harbor's trial runs the agent for its ``override_timeout_sec``, or for the task's limit when that is None or 0,
+    and sets it up for its ``override_setup_timeout_sec`` (harbor 0.25.0, ``Trial._compute_agent_timeout_sec`` and
+    ``Trial._compute_agent_setup_timeout_sec``). Harbor's ``AgentConfig`` reads a numeric string as a number, so the
+    lifetime counts it, and the trial still gets the caller's own value. When neither the task nor the agent config
+    gives the agent a time limit (None), each provider has its own default, and a setup time limit does not count.
+    """
+    task_path = tmp_path / "tasks" / "t"
+    task_path.mkdir(parents=True)
+    (task_path / "task.toml").write_text(task_toml)
+    lab = StandInLab({"reward": 1.0})
+    agent = {**DEFAULT_AGENT, **agent_limits}
+    running = runner(reef, tmp_path, lab, concurrency=2, environment=environment, agent=agent)
+    running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task_path))] * 2)
+    config: dict[str, object] = dict(E2B_CONFIG if environment == "e2b" else MODAL_CONFIG)
+    if lifetime_seconds is not None:
+        config["kwargs"] = {"sandbox_timeout_secs": lifetime_seconds}
+    assert [build["overrides"] for build in lab.builds] == [{"environment": config}]
+    assert [call["overrides"]["environment"] for call in lab.calls] == [config, config]
+    # The agent config of each trial holds the limits that its sandbox lives for.
+    assert [{name: call["agent"][name] for name in agent_limits} for call in lab.calls] == [agent_limits] * 2
+
+
+def test_an_agent_time_limit_that_harbor_refuses_is_refused_before_the_trial(
+    reef: StandInReef, tmp_path: Path
+) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    lab = StandInLab({"reward": 1.0})
+    agent = {**DEFAULT_AGENT, "override_timeout_sec": "soon"}
+    # Harbor's AgentConfig refuses the value; its error is a ValueError that names the field.
+    with pytest.raises(ValueError, match="override_timeout_sec"):
+        runner(reef, tmp_path, lab, environment="e2b", agent=agent).run(task_path)
+    assert lab.calls == [], "no trial starts with a sandbox that can end before it"
 
 
 def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None:
@@ -433,7 +562,7 @@ def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None
     lab = TemplateLab()
     running = runner(reef, tmp_path, lab, concurrency=1, environment="e2b")
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(path)) for path in paths * 2]
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in paths * 2]
     )
     assert [rollout.reward for rollout in rollouts] == [1.0] * 4
     assert lab.most_building == 1, "with one slot, the two builds run one after the other"
@@ -444,7 +573,7 @@ def test_a_task_whose_environment_does_not_build_runs_no_rollout(reef: StandInRe
     lab = TemplateLab({"bad": "COPY app.py: no such file"})
     running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b")
     rollouts = running.run_rollouts(
-        [RolloutRequest(running.harness, running.served_model, str(path)) for path in (bad, good, bad, good)]
+        [RolloutRequest(running.harness, running.policy_model, str(path)) for path in (bad, good, bad, good)]
     )
     assert [rollout.reward for rollout in rollouts] == [None, 1.0, None, 1.0]
     assert rollouts[0].error == rollouts[2].error == "the environment of bad did not start: COPY app.py: no such file"
@@ -458,7 +587,7 @@ def test_a_build_that_fails_once_is_tried_again_and_the_rollouts_run(reef: Stand
     task = written_task(tmp_path / "tasks", "t1")
     lab = TemplateLab({"t1": "429: rate limit"}, failing_builds=1)
     running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b")
-    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.served_model, str(task))] * 3)
+    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task))] * 3)
     assert [(rollout.reward, rollout.error) for rollout in rollouts] == [(1.0, "")] * 3
     assert len(lab.builds) == 2 and lab.template_builds == ["t1", "t1"]
 
@@ -467,7 +596,7 @@ def test_docker_rollouts_start_with_no_build_first(reef: StandInReef, tmp_path: 
     task = written_task(tmp_path / "tasks", "t1")
     lab = StandInLab({"reward": 1.0})
     running = runner(reef, tmp_path, lab, concurrency=4, environment="docker")
-    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.served_model, str(task))] * 3)
+    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.policy_model, str(task))] * 3)
     assert [rollout.reward for rollout in rollouts] == [1.0] * 3
     assert lab.builds == [], "Harbor builds one Docker image at a time"
 
@@ -481,7 +610,7 @@ def test_run_rollouts_refuses_a_directory_without_task_toml_before_any_build(
     running = runner(reef, tmp_path, lab)
     with pytest.raises(TaskRolloutError, match="not a Harbor task directory"):
         running.run_rollouts(
-            [RolloutRequest(running.harness, running.served_model, str(path)) for path in (task, task, empty, empty)]
+            [RolloutRequest(running.harness, running.policy_model, str(path)) for path in (task, task, empty, empty)]
         )
     assert lab.calls == [] and lab.builds == []
 
@@ -587,6 +716,95 @@ def test_refused_model_calls_are_named_in_the_error_whether_or_not_the_rollout_i
     assert ran.as_line()["failed_calls"] == 2
     assert unrecorded_ran.turns == () and unrecorded_ran.failed_calls == 2
     assert unrecorded_ran.error.startswith("2 model calls failed; the first answered 401")
+
+
+def test_an_agent_that_ends_before_its_first_call_is_named_with_its_exit_code_and_output(tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    trial = tmp_path / "trial"
+    (trial / "agent").mkdir(parents=True)
+    (trial / "agent" / "command.json").write_text(json.dumps({"exit_code": 137, "stdout": "", "stderr": "Killed\n"}))
+    with contextlib.closing(StandInReef()) as reef:
+        ended = runner(reef, tmp_path, StandInLab({"reward": 0.0}, turns=0, trial_uri=trial.as_uri())).run(task_path)
+        # A trial that left no command file keeps the error it had: none.
+        silent = runner(reef, tmp_path, StandInLab({"reward": 0.0}, turns=0, trial_uri=tmp_path.as_uri())).run(
+            task_path
+        )
+    assert ended.error == "the agent made no model call: its command exited 137: Killed"
+    assert silent.error == ""
+
+
+class ObservedCalls(CaptureObserver):
+    def __init__(self) -> None:
+        self.turns: list[CapturedTurn] = []
+
+    def call_captured(self, turn: CapturedTurn) -> None:
+        self.turns.append(turn)
+
+
+def test_a_capture_observer_gets_every_call_as_it_lands_failed_calls_with_their_error_body(tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    answered, refused = ObservedCalls(), ObservedCalls()
+    with contextlib.closing(StandInReef()) as reef:
+        runner(reef, tmp_path, StandInLab({"reward": 1.0}), capture_observer=answered).run(task_path)
+    with contextlib.closing(StandInReef(refuse_inference=True)) as reef:
+        runner(reef, tmp_path, StandInLab({"reward": 1.0}), capture_observer=refused).run(task_path)
+    assert [(turn.status, turn.request["messages"][0]["content"]) for turn in answered.turns] == [
+        (200, "turn 0"),
+        (200, "turn 1"),
+    ]
+    assert [(turn.status, turn.response) for turn in refused.turns] == [
+        (401, {"error": {"message": "invalid service token"}})
+    ] * 2
+
+
+def test_an_unrecorded_rollout_without_turns_keeps_no_call_body_and_its_observer_gets_them_all(
+    tmp_path: Path,
+) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    observed, refused_observed = ObservedCalls(), ObservedCalls()
+    with contextlib.closing(StandInReef()) as reef:
+        ran = runner(
+            reef,
+            tmp_path,
+            StandInLab({"reward": 1.0}),
+            is_reporting=False,
+            is_unrecorded=True,
+            keeps_turns=False,
+            capture_observer=observed,
+        ).run(task_path)
+    with contextlib.closing(StandInReef(refuse_inference=True)) as reef:
+        refused_ran = runner(
+            reef,
+            tmp_path,
+            StandInLab({"reward": 0.0}),
+            is_reporting=False,
+            is_unrecorded=True,
+            keeps_turns=False,
+            capture_observer=refused_observed,
+        ).run(task_path)
+    assert (ran.reward, ran.error, ran.failed_calls, ran.turns) == (1.0, "", 0, ())
+    assert [turn.request["messages"][0]["content"] for turn in observed.turns] == ["turn 0", "turn 1"]
+    # A refused call keeps its error body, which names the failure.
+    assert refused_ran.failed_calls == 2 and refused_ran.turns == ()
+    assert refused_ran.error.startswith("2 model calls failed; the first answered 401")
+    assert len(refused_observed.turns) == 2
+
+
+def test_a_store_without_bodies_keeps_an_error_body_and_gives_the_observer_the_whole_call() -> None:
+    observed = ObservedCalls()
+    store = TaggedStore({"task": "t1"}, observed, keeps_bodies=False)
+    answered = CapturedTurn(
+        "s", "/v1/chat/completions", 200, {"messages": ["long"]}, {"choices": []}, None, False, 1.0
+    )
+    refused = CapturedTurn("s", "/v1/chat/completions", 401, {"messages": ["long"]}, {"error": "no"}, None, False, 1.0)
+    store.add(answered)
+    store.add(refused)
+    assert [(turn["status"], turn["request"], turn["response"], turn["tags"]) for turn in store.drain()] == [
+        (200, None, None, {"task": "t1"}),
+        (401, None, {"error": "no"}, {"task": "t1"}),
+    ]
+    assert observed.turns == [answered, refused]
+    assert all(turn["request"] is None for turn in store.snapshot())
 
 
 def test_an_agent_inside_the_container_gets_a_reachable_proxy_address(reef: StandInReef, tmp_path: Path) -> None:
@@ -714,16 +932,16 @@ def test_run_rollouts_refuses_a_harness_a_model_or_a_record_dir_it_cannot_use(
     task = str(written_task(tmp_path / "tasks", "t1"))
     lab = StandInLab({"reward": 1.0})
     running = runner(reef, tmp_path, lab, model_adapter="tinker://start/sampler")
-    assert running.served_model.kind == "model_adapter" and running.harness.kind == "harness"
+    assert running.policy_model.kind == "model_adapter" and running.harness.kind == "harness"
     refused = (
         (
-            RolloutRequest(PolicyHarness(running.agent_name, {"AGENTS.md": "hint"}), running.served_model, task),
+            RolloutRequest(PolicyHarness(running.agent_name, {"AGENTS.md": "hint"}), running.policy_model, task),
             "agent",
         ),
         (RolloutRequest(running.harness, PolicyModel(running.model), task), "serves"),
-        (RolloutRequest(running.harness, running.served_model, task, tmp_path / "keep"), "work_dir"),
+        (RolloutRequest(running.harness, running.policy_model, task, tmp_path / "keep"), "work_dir"),
     )
     for request, message in refused:
         with pytest.raises(ValueError, match=message):
-            running.run_rollouts([RolloutRequest(running.harness, running.served_model, task), request])
+            running.run_rollouts([RolloutRequest(running.harness, running.policy_model, task), request])
     assert lab.calls == [], "a refused request runs no rollout"

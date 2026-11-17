@@ -1,11 +1,14 @@
 """On-policy distillation recipe using a separate, frozen teacher."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from recipes.opd.processor import OPDSamples
 from reef.core.reports import ReportBase, TeacherContextReport
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
+from reef.recipe.base import WeightTrainingRecipe
 from reef.sample2job import DistillJobData
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -31,8 +34,8 @@ class OPDRecipe(WeightTrainingRecipe):
         return TeacherContextReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective="opd")
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "opd"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:

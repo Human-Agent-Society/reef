@@ -93,11 +93,11 @@ for `/healthz` and runs the campaign, whose output goes to
 `REEF_SCENARIO` must belong to this experiment.
 
 The driver collects a complete job's responses before submitting any training report,
-checks that every response came from one release, then waits for exactly one
+checks that every response came from one snapshot, then waits for exactly one
 committed update. It refuses an existing output directory or scenario unless
 `--resume` is given. `run.sh --resume` recovers an interrupted driver against
 the same live service, scenario and output directory: completed responses are
-reused and only the missing samples of the active release are regenerated.
+reused and only the missing samples of the active selection are regenerated.
 Resume does not restore a stopped trainer or its optimizer.
 
 `run.py --steps 0` against a separately served frozen model gives a control

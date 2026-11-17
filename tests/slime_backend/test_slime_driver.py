@@ -14,13 +14,13 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.slime_backend.test_slime_component import batch_for, parameters, worker_args
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import finished
 
 from reef.core.job_data import JobData, TaskSample
 from reef.storage.durable_files import read_json, write_json
 from reef.train.component import TrainingJob
 from reef.train.local_jobs import JOB_FILE
-from reef.train.method import TrainingMethod
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import driver
 from reef.train.slime_backend.component import (
@@ -36,7 +36,7 @@ from reef.train.slime_backend.component import (
 from reef.train.slime_backend.rollout_group import SERVING_FILE
 
 SETTINGS = SlimeSettings(
-    arguments=("--lr=1e-06",),
+    arguments=("--lr=1e-06", "--hf-checkpoint=/models/test"),
     loss_family="sft",
     recipe="recipes.test:Recipe",
     execution={"execution": {"training": "ray"}},
@@ -54,7 +54,7 @@ start.mkdir(parents=True)
 (start / "start.json").write_text(json.dumps(
     {"rollout_id": 0, "objective": None, "algorithm_state": {}, "schedule_state": None}))
 (directory / "checkpoints.json").write_text(json.dumps({"checkpoints": [
-    {"step": 2, "path": str(start), "release_path": str(start), "metrics": {"train/loss": 0.5}, "changed_kinds": []}]}))
+    {"step": 2, "path": str(start), "artifact_path": str(start), "metrics": {"train/loss": 0.5}, "changed_kinds": []}]}))
 (directory / "driver-result.json").write_text(json.dumps({"metrics": {"arguments": settings["arguments"]}}))
 """
 
@@ -75,7 +75,7 @@ def parsed(tmp_path, monkeypatch):
 
     def prepare(arguments, **options):
         calls.append(tuple(arguments))
-        return worker_args(tmp_path, megatron_lora_rank=0, hf_checkpoint=str(tmp_path / "model")), None, None
+        return worker_args(tmp_path, megatron_lora_rank=0, hf_checkpoint="/models/test"), None, None
 
     monkeypatch.setattr(slime_component, "prepare_slime_arguments", prepare)
     monkeypatch.setattr(slime_component, "prepare_checkpoint_storage", lambda args, retention: None)
@@ -88,7 +88,12 @@ def parsed(tmp_path, monkeypatch):
 
 def sft_job(component: SlimeTrainingComponent, job_id: str = "job-0", start: str | None = None) -> TrainingJob:
     return TrainingJob(
-        job_id, "slime", start or component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+        job_id,
+        "slime",
+        start or component.base_start,
+        job_data_ref(batch_for(0)),
+        parameters("sft"),
+        scenario="s",
     )
 
 
@@ -98,7 +103,7 @@ def test_the_component_parses_the_arguments_at_deployment_and_starts_nothing(tmp
     component.start_jobs()
     try:
         # One parse, as a job that starts no rollout engines; a malformed option fails here.
-        assert parsed == [("--lr=1e-06", NO_ROLLOUT_ENGINES)]
+        assert parsed == [(*SETTINGS.arguments, NO_ROLLOUT_ENGINES)]
         assert component.held_rollout_id is None
     finally:
         component.close()
@@ -116,7 +121,7 @@ def test_a_jobs_driver_reports_its_checkpoints_and_the_next_job_continues_them(t
             (2, {"train/loss": 0.5})
         ]
         # The driver started from the deployment's settings.
-        assert status.metrics == {"arguments": ["--lr=1e-06"]}
+        assert status.metrics == {"arguments": list(SETTINGS.arguments)}
         directory = component.job_directory("job-0")
         assert read_json(directory / DRIVER_FILE) == settings_to_json(SETTINGS)
         # The next job continues the rollout the driver saved, not the untrained weights.
@@ -228,12 +233,19 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
     start.mkdir(parents=True)
     SlimeStart(None, None, {}, None).write(start)
     job_parameters = {
-        **parameters(TrainingMethod("sft")),
-        **({"rollout": {"rollouts_per_task": 2}} if rollout else {}),
+        **parameters("sft"),
+        **({"harbor": {}} if rollout else {}),
     }
+    # The job file that LocalJobComponent.submit writes: the job data reference with its local path and its tasks'.
+    ref = job_data_ref(data)
     write_json(
         directory / JOB_FILE,
-        {"scenario": "s", "start": str(start), "data": data.to_dict(), "parameters": job_parameters},
+        {
+            "scenario": "s",
+            "start": str(start),
+            "data": {**ref.to_dict(), "path": str(ref.path), "task_paths": [str(path) for path in ref.task_paths]},
+            "parameters": job_parameters,
+        },
     )
     write_json(directory / DRIVER_FILE, settings_to_json(SETTINGS))
     return directory
@@ -259,7 +271,7 @@ def test_the_driver_uses_the_serving_session_for_a_task_job_and_while_one_runs(
     # deployment's options, which the session's engines started with.
     serving = task_job or session
     assert calls["serving"] is serving
-    assert arguments == (("--lr=1e-06",) if serving else ("--lr=1e-06", NO_ROLLOUT_ENGINES))
+    assert arguments == (SETTINGS.arguments if serving else (*SETTINGS.arguments, NO_ROLLOUT_ENGINES))
     assert calls["job"].job_id == "job-0" and calls["closed"]
     assert json.loads((directory / DRIVER_RESULT_FILE).read_text()) == {"metrics": {"train/loss": 0.25}}
 

@@ -27,7 +27,7 @@ STAGE_COMMAND = (
 )
 #: Host variables forwarded into the container: the run's settings and how to reach Reef.
 FORWARDED_PREFIXES = ("SDPO_", "REEF_")
-#: A run is many steps, each a grid, an optimizer step and a weight release; the
+#: A run is many steps, each a grid, an optimizer step and a weight artifact; the
 #: ceiling matches the task's agent timeout.
 DEFAULT_STAGE_TIMEOUT_S = 172_800.0
 

@@ -15,9 +15,17 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.core.errors import UpstreamStatusError
-from reef.inference.interfaces import InferenceArtifact, InferenceHandler, InferenceRuntime, InferenceStream
+from reef.core.served_models import ServedArtifact
+from reef.inference.interfaces import (
+    FULL_WEIGHT_NAME_PREFIX,
+    InferenceArtifact,
+    InferenceHandler,
+    InferenceRuntime,
+    InferenceStream,
+)
 from reef.inference.provider_protocol import provider_headers
 from reef.inference.registry import RuntimeFactory, RuntimeRegistry, config_secret, config_string
+from reef.inference.residency import ADAPTER_NAME_PREFIX
 
 #: Hop-by-hop headers that describe one connection and must not be forwarded.
 HOP_BY_HOP_HEADERS = frozenset(
@@ -37,6 +45,10 @@ HOP_BY_HOP_HEADERS = frozenset(
 #: Provider API dialects the proxy can describe to the training side.
 PROVIDER_APIS = ("openai", "responses", "anthropic")
 
+#: The request header with the engine-side name of the weights that a request selects. A remote inference
+#: component that keeps each request on its weights admits the request only while it serves that name.
+SERVED_MODEL_HEADER = "x-reef-served-model"
+
 # -- Request headers ----------------------------------------------------------
 
 
@@ -47,10 +59,23 @@ class RequestHeadersFactory(ABC):
     def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
         """Return identity and authentication headers for the selected route."""
 
+    def external_headers(self, path: str) -> Mapping[str, str]:
+        """Headers for an external model call with no Reef artifact identity."""
+        return {}
+
 
 def artifact_identity_headers(artifact: InferenceArtifact) -> dict[str, str]:
-    """Reef identity headers for one selected, optionally materialized artifact."""
-    headers = {"x-reef-artifact-id": artifact.artifact_id, "x-reef-release-id": artifact.artifact_id}
+    """Reef identity headers for one selected, optionally materialized artifact.
+
+    The artifact ID is always present, and the local path when the artifact has one. ``SERVED_MODEL_HEADER``
+    carries ``served_model`` when that is a full-weight or adapter name that Reef gave the engines; a provider's
+    own model name stays in the request body only.
+    """
+    headers = {"x-reef-artifact-id": artifact.artifact_id}
+    if artifact.served_model is not None and artifact.served_model.startswith(
+        (FULL_WEIGHT_NAME_PREFIX, ADAPTER_NAME_PREFIX)
+    ):
+        headers[SERVED_MODEL_HEADER] = artifact.served_model
     if artifact.local_path is not None:
         headers["x-reef-artifact-path"] = str(artifact.local_path)
     return headers
@@ -79,7 +104,10 @@ class ProviderRequestHeaders(RequestHeadersFactory):
         self._api_key = api_key
 
     def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
-        return {**artifact_identity_headers(artifact), **provider_headers(path, self._api_key)}
+        return {**artifact_identity_headers(artifact), **self.external_headers(path)}
+
+    def external_headers(self, path: str) -> Mapping[str, str]:
+        return provider_headers(path, self._api_key)
 
 
 def provider_request_headers(api_key: str) -> RequestHeadersFactory:
@@ -95,6 +123,12 @@ class HttpInferenceHandler(InferenceHandler):
 
     RequestHeadersFactory implementations provide artifact identity, provider
     authentication, or deployment-specific headers.
+
+    ``inference`` returns the provider's JSON object. A provider status of 400 or more raises
+    ``UpstreamStatusError`` with that status; a successful status whose body is not one JSON object raises
+    it with status 502, since the provider failed and not the caller. ``inference_stream`` owns its
+    provider session until it returns: on any failure or cancellation before then it closes the session
+    and re-raises. The returned ``InferenceStream`` then owns the session, and its ``close`` releases it.
     """
 
     def __init__(
@@ -124,41 +158,64 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
         return cls(upstream_url, timeout_s=timeout_s)
 
-    def _post_arguments(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Keyword arguments of one ``session.post`` call."""
+    def post_arguments(self, artifact: InferenceArtifact | None, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """The keyword arguments of one ``session.post`` call: the upstream URL of ``path``, ``payload`` as JSON,
+        and the headers for ``artifact``, or only the provider's headers without one."""
+        headers = (
+            self._request_headers.external_headers(path)
+            if artifact is None
+            else self._request_headers.headers(artifact, path)
+        )
         return {
             "url": f"{self._upstream_url}{path}",
             "json": payload,
-            "headers": dict(self._request_headers.headers(artifact, path)),
+            "headers": dict(headers),
         }
 
     def _status_error(self, status: int, body: str) -> UpstreamStatusError:
         return UpstreamStatusError(f"{self._error_label} returned {status}: {body[:400]}", status=status)
 
     async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        from aiohttp import ClientSession, ClientTimeout
+        return await self.post_json(path, payload, artifact=artifact)
+
+    async def post_json(
+        self, path: str, payload: dict[str, Any], *, artifact: InferenceArtifact | None = None
+    ) -> dict[str, Any]:
+        """POST to the provider. External models omit the Reef artifact."""
+        from aiohttp import ClientSession, ClientTimeout, ContentTypeError
 
         async with (
             ClientSession(timeout=ClientTimeout(total=self._timeout_s)) as session,
-            session.post(**self._post_arguments(artifact, path, payload)) as response,
+            session.post(**self.post_arguments(artifact, path, payload)) as response,
         ):
             if response.status >= 400:
                 raise self._status_error(response.status, await response.text())
-            value = await response.json()
+            try:
+                value = await response.json()
+            except (ContentTypeError, ValueError) as exc:
+                # A successful status with an unreadable body is the provider's failure, not the caller's.
+                raise UpstreamStatusError(f"{self._error_label} returned a body that is not JSON", status=502) from exc
         if not isinstance(value, dict):
-            raise TypeError(f"{self._error_label} response must be a JSON object")
+            raise UpstreamStatusError(f"{self._error_label} response must be a JSON object", status=502)
         return value
 
     async def inference_stream(
         self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
     ) -> InferenceStream:
+        return await self.post_stream(path, payload, artifact=artifact)
+
+    async def post_stream(
+        self, path: str, payload: dict[str, Any], *, artifact: InferenceArtifact | None = None
+    ) -> InferenceStream:
+        """Open the provider stream. Its owner closes it after consuming or cancelling it."""
         from aiohttp import ClientSession, ClientTimeout
 
         # The session outlives this call: the stream owns it until closed.
         session = ClientSession(timeout=ClientTimeout(total=self._timeout_s), auto_decompress=False)
         try:
-            response = await session.post(**self._post_arguments(artifact, path, payload))
-        except Exception:
+            response = await session.post(**self.post_arguments(artifact, path, payload))
+        except BaseException:
+            # Cancelled while waiting for the provider's headers, too: nothing else owns this session yet.
             await session.close()
             raise
 
@@ -190,8 +247,13 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     Returned by the ``inference_proxy`` runtime type for no-update recipes.
     Holds an HttpInferenceHandler with provider-native auth
-    and exposes it via inference_handler. It loads no weights: a release
-    serves under its release ID, and no load names what serves.
+    and exposes it via inference_handler, which forwards each request to the
+    provider in its native format. It binds no weights: nothing ties a Reef
+    artifact to what the provider serves under ``model_path``. So
+    ``served_artifact`` gives no route for any artifact, and
+    ``activate_checkpoint`` refuses every snapshot whose weights the runtime
+    would load. A snapshot without a weight component, such as a record-only or
+    harness snapshot, routes to the provider's model (``endpoint_model_name``).
     """
 
     def __init__(
@@ -237,11 +299,25 @@ class InferenceProxyRuntime(InferenceRuntime):
         return self._inference_handler
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        return artifact.artifact_id
+        """Refuse the snapshot with ``ValueError``: the proxy loads no weights, so its provider's model would answer
+        under the snapshot's artifact ID. The refusal does not change on a retry, so a startup fails for good."""
+        raise ValueError(
+            f"an inference proxy loads no weights, so it cannot serve the weights of artifact {artifact.artifact_id}; "
+            "serve weight snapshots with a runtime that loads them"
+        )
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """None for every artifact: the proxy binds no artifact's weights to the provider's model."""
+        return None
+
+    def endpoint_model_name(self, scenario: str) -> str | None:
+        """The provider's model (``served_model_name``, by default ``model_path``) for a snapshot without weights; None
+        when the proxy names no model."""
+        return self.served_model_name(scenario) or None
 
 
 @dataclass(frozen=True)
-class InferenceProxyConfig:
+class InferenceProxySettings:
     """Connection configuration owned by the inference proxy adapter."""
 
     base_url: str = config_option("", help="Inference provider base URL.")
@@ -263,7 +339,7 @@ class InferenceProxyRuntimeFactory(RuntimeFactory):
     kind = "inference_proxy"
 
     def config_type(self) -> type:
-        return InferenceProxyConfig
+        return InferenceProxySettings
 
     def __call__(
         self,
@@ -315,11 +391,12 @@ def _env_value(values: Mapping[str, str], name: str) -> str | None:
 
 __all__ = [
     "PROVIDER_APIS",
+    "SERVED_MODEL_HEADER",
     "ArtifactRequestHeaders",
     "HttpInferenceHandler",
-    "InferenceProxyConfig",
     "InferenceProxyRuntime",
     "InferenceProxyRuntimeFactory",
+    "InferenceProxySettings",
     "ProviderRequestHeaders",
     "RequestHeadersFactory",
     "artifact_identity_headers",

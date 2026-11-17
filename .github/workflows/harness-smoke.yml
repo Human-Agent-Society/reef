@@ -62,14 +62,27 @@ jobs:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
         with:
           python-version: "3.12"
+          # Keep pip's downloads between runs; pip still asks the index for versions.
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
-      - run: npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@0.84.2
+      # The package version is pinned, so its install directory is the same in every run.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: agent-cache
+        with:
+          path: ${{ runner.temp }}/pi
+          key: agent-${{ runner.os }}-${{ runner.arch }}-node22-@earendil-works/pi-coding-agent@0.84.2
+      - if: steps.agent-cache.outputs.cache-hit != 'true'
+        run: npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@0.84.2
       - run: python -m pytest tests/smoke/test_real_pi.py tests/smoke/test_reefine_scripted_trial.py
         env:
           REEF_REAL_PI_BINARY: ${{ runner.temp }}/pi/node_modules/.bin/pi
@@ -95,14 +108,27 @@ jobs:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
         with:
           python-version: "3.12"
+          # Keep pip's downloads between runs; pip still asks the index for versions.
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
-      - run: npm install --prefix "$RUNNER_TEMP/codex" @openai/codex@0.158.0
+      # The package version is pinned, so its install directory is the same in every run.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: agent-cache
+        with:
+          path: ${{ runner.temp }}/codex
+          key: agent-${{ runner.os }}-${{ runner.arch }}-node22-@openai/codex@0.158.0
+      - if: steps.agent-cache.outputs.cache-hit != 'true'
+        run: npm install --prefix "$RUNNER_TEMP/codex" @openai/codex@0.158.0
       - run: python -m pytest tests/smoke/test_real_codex.py
         env:
           REEF_REAL_CODEX_BINARY: ${{ runner.temp }}/codex/node_modules/.bin/codex
@@ -126,14 +152,27 @@ jobs:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
         with:
           python-version: "3.12"
+          # Keep pip's downloads between runs; pip still asks the index for versions.
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
-      - run: npm install --prefix "$RUNNER_TEMP/claude" @anthropic-ai/claude-code@2.1.257
+      # The package version is pinned, so its install directory is the same in every run.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: agent-cache
+        with:
+          path: ${{ runner.temp }}/claude
+          key: agent-${{ runner.os }}-${{ runner.arch }}-node22-@anthropic-ai/claude-code@2.1.257
+      - if: steps.agent-cache.outputs.cache-hit != 'true'
+        run: npm install --prefix "$RUNNER_TEMP/claude" @anthropic-ai/claude-code@2.1.257
       - run: python -m pytest tests/smoke/test_real_claude.py
         env:
           REEF_REAL_CLAUDE_BINARY: ${{ runner.temp }}/claude/node_modules/.bin/claude
@@ -150,14 +189,27 @@ jobs:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
         with:
           python-version: "3.12"
+          # Keep pip's downloads between runs; pip still asks the index for versions.
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
-      - run: npm install --prefix "$RUNNER_TEMP/opencode" opencode-ai@1.18.18
+      # The package version is pinned, so its install directory is the same in every run.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: agent-cache
+        with:
+          path: ${{ runner.temp }}/opencode
+          key: agent-${{ runner.os }}-${{ runner.arch }}-node22-opencode-ai@1.18.18
+      - if: steps.agent-cache.outputs.cache-hit != 'true'
+        run: npm install --prefix "$RUNNER_TEMP/opencode" opencode-ai@1.18.18
       - run: python -m pytest tests/smoke/test_real_opencode.py
         env:
           REEF_REAL_OPENCODE_BINARY: ${{ runner.temp }}/opencode/node_modules/.bin/opencode
@@ -174,14 +226,27 @@ jobs:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
         with:
           python-version: "3.12"
+          # Keep pip's downloads between runs; pip still asks the index for versions.
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
-      - run: npm install --prefix "$RUNNER_TEMP/dsh" @deepseek-ai/dsh@0.1.2-alpha.5
+      # The package version is pinned, so its install directory is the same in every run.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: agent-cache
+        with:
+          path: ${{ runner.temp }}/dsh
+          key: agent-${{ runner.os }}-${{ runner.arch }}-node22-@deepseek-ai/dsh@0.1.2-alpha.5
+      - if: steps.agent-cache.outputs.cache-hit != 'true'
+        run: npm install --prefix "$RUNNER_TEMP/dsh" @deepseek-ai/dsh@0.1.2-alpha.5
       - run: python -m pytest tests/smoke/test_real_dsh.py
         env:
           REEF_REAL_DSH_BINARY: ${{ runner.temp }}/dsh/node_modules/.bin/dsh
@@ -199,11 +264,24 @@ jobs:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
         with:
           python-version: "3.12"
+          # Keep pip's downloads between runs; pip still asks the index for versions.
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
-      - run: |
+      # The checkout is pinned to a tag. Its venv names this Python's path, so the key has the Python version.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: agent-cache
+        with:
+          path: ${{ runner.temp }}/hermes
+          key: agent-${{ runner.os }}-${{ runner.arch }}-python${{ steps.python.outputs.python-version }}-hermes-agent@v2026.8.31
+      - if: steps.agent-cache.outputs.cache-hit != 'true'
+        run: |
           git clone --quiet --depth 1 --branch v2026.8.31 https://github.com/NousResearch/hermes-agent "$RUNNER_TEMP/hermes/src"
           rm -rf "$RUNNER_TEMP/hermes/src/.git"
           python3 -m venv "$RUNNER_TEMP/hermes/venv"
@@ -229,8 +307,14 @@ jobs:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        id: python
         with:
           python-version: "3.12"
+          # Keep pip's downloads between runs; pip still asks the index for versions.
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            third_party/reef-client/pyproject.toml
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . pytest pytest-xdist==3.8.0
       - run: python -m pytest tests/recipes/meta_harness/test_terminus_agent.py -v

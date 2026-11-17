@@ -281,11 +281,11 @@ def test_status_client_reads_authenticated_public_training_status() -> None:
                     "preload_errors": {},
                     "scenarios": {
                         "smoke": {
-                            "scenario_step": 3,
+                            "commit_number": 3,
                             "training_job": None,
                             "finished_jobs": 1,
-                            "last_committed_step": {
-                                "step": 3,
+                            "last_training_commit": {
+                                "commit_number": 3,
                                 "metrics": {"training_job": {"job_id": "job-0", "event": "finished"}},
                             },
                             "served_artifact_id": "v1",

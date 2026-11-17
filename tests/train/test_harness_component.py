@@ -1,58 +1,45 @@
-"""The harness training component: one harness step per training job, its starts, and its state across jobs.
+"""The harness training component: each training job as one run of the method, its starts, and its state across jobs.
 
-Each job runs on the component's own job thread over the pi recipe of ``tests.support.harness_steps``, whose fake
+Each job runs on the component's own job thread over the pi recipe of ``tests.support.harness_jobs``, whose fake
 binary scores rules that hold the marker higher.
 """
 
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
-from tests.support.harness_steps import (
-    COMPONENT,
-    PI_SEED,
-    UNCHANGED,
-    TreeReleases,
-    changed_rules,
-    harness_backend,
-    harness_recipe,
-)
+from tests.support.harness_jobs import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_recipe
+from tests.support.job_data import job_data_ref
+from tests.support.trajectories import recorded_trajectory
 
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData
-from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, TreePatch
-from reef.recipe.harness import HarnessJobLoop
-from reef.train.backend import ComponentArtifacts
-from reef.train.component import JobStatus, TrainingJob
-from reef.train.harness_backend.backend import StepProgress
-from reef.train.harness_backend.component import (
-    PROGRESS_FILE,
-    HarnessTrainingComponent,
-    ProgressFile,
-    read_step_progress,
-)
-from reef.train.jobs import JobLoopState, RunningJob
+from reef.train.component import JobStatus, TrainingArtifactLayout, TrainingJob
+from reef.train.harness_backend.backend import JobProgress
+from reef.train.harness_backend.component import HarnessTrainingComponent
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 
 
 def component_of(tmp_path: Path, method) -> HarnessTrainingComponent:
-    component = harness_recipe(tmp_path, method).harness_component
+    _, live = harness_recipe(tmp_path, method)
+    component = live.harness_component
     assert isinstance(component, HarnessTrainingComponent)
     return component
 
 
 def seed_start(component: HarnessTrainingComponent, tmp_path: Path) -> str:
-    """The start of a job from the seed tree: the component's import of a release that holds the seed."""
-    release = tmp_path / "seed-release"
-    if not release.is_dir():
-        PI_SEED.write(release)
-    return component.import_start(release)
+    """The start of a job from the seed tree: the component's import of a snapshot that holds the seed."""
+    artifact_dir = tmp_path / "seed-snapshot"
+    if not artifact_dir.is_dir():
+        PI_SEED.write(artifact_dir)
+    return component.import_start(artifact_dir)
 
 
 def job(component: HarnessTrainingComponent, name: str, *, start: str, previous: str | None = None):
@@ -61,14 +48,11 @@ def job(component: HarnessTrainingComponent, name: str, *, start: str, previous:
         name,
         component.name,
         start,
-        JobData(name, (recorded_trajectory(f"{name}-trace", {"messages": []}, 0.0),)),
-        {
-            "component": COMPONENT,
-            "head_artifact_id": "base",
-            "evaluation_tasks": None,
-            "previous_job": previous,
-        },
+        job_data_ref(JobData(name, (recorded_trajectory(f"{name}-trace", {"messages": []}, 0.0),))),
+        {"evaluation_tasks": None},
         scenario="demo",
+        component=COMPONENT,
+        previous_job_id=previous,
     )
 
 
@@ -83,31 +67,30 @@ def ended(component: HarnessTrainingComponent, job_id: str, seconds: float = 30.
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("legacy_start", [False, True])
-def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(tmp_path: Path, legacy_start: bool) -> None:
+def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(
+    tmp_path: Path,
+) -> None:
     component = component_of(tmp_path, lambda workspace, services: MARKER)
     component.start_jobs()
     try:
         first = job(component, "one", start=seed_start(component, tmp_path))
-        if legacy_start:
-            parameters = dict(first.parameters)
-            parameters["head_release_id"] = parameters.pop("head_artifact_id")
-            first = replace(first, parameters=parameters)
         component.submit(first)
         status = ended(component, "one")
         assert status.state == "finished" and status.metrics == {}
         (checkpoint,) = status.checkpoints
-        # The step's metrics are the checkpoint's: the job's end carries none of its own.
+        # The job's metrics are the checkpoint's: the job's end carries none of its own.
         assert checkpoint.metrics["selected"] is True
-        assert checkpoint.metrics["head_artifact_id"] == "base"
+        # The tree's checksum names the head that the job ran on.
+        assert checkpoint.metrics["head_checksum"] == PI_SEED.checksum()
         assert "head_release_id" not in checkpoint.metrics
-        assert checkpoint.path == checkpoint.release_path
+        assert checkpoint.path == checkpoint.artifact_path
         assert HarnessTree.read(Path(checkpoint.path)) == PI_SEED.apply(MARKER)
         # The next job starts from the checkpoint and continues the state after this job.
         component.submit(job(component, "two", start=checkpoint.path, previous="one"))
         second = ended(component, "two")
         assert second.state == "finished" and second.checkpoints == ()
-        assert second.metrics["skipped"] == UNCHANGED and second.metrics["head_artifact_id"] == "base"
+        assert second.metrics["skipped"] == UNCHANGED
+        assert second.metrics["head_checksum"] == PI_SEED.apply(MARKER).checksum()
         assert component.state_after("two")[0] == 2 and component.state_after(None)[0] == 0
     finally:
         component.close()
@@ -122,22 +105,12 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
         (checkpoint,) = ended(component, "one").checkpoints
     finally:
         component.close()
-    loop = HarnessJobLoop(
-        component,
-        scenario="demo",
-        releases=ComponentArtifacts(TreeReleases(PI_SEED), COMPONENT),
-        eval_samples=None,
-        layout=get_adapter("pi").layout,
-    )
-    # The activation rule reads the parts: the step rewrote the rules of the seed tree.
-    published = loop.publish(JobLoopState(seed_start(component, tmp_path), RunningJob("one")), checkpoint)
-    assert published.result.artifact is not None and published.result.changed_kinds == {"rules"}
+    # The training worker asks the component for the parts and records them with the checkpoint; the activation
+    # rule reads them. The parts are those that changed from the job's own start: the job rewrote the rules of the
+    # seed tree.
+    assert component.changed_parts(seed_start(component, tmp_path), checkpoint) == {"rules"}
     # From a start that holds the same tree, nothing changed.
-    again = loop.publish(JobLoopState(checkpoint.path, RunningJob("two")), checkpoint)
-    assert again.result.changed_kinds == frozenset()
-    # The harness parameters are the loop's own: the stage cannot name them.
-    with pytest.raises(ValueError, match="already name"):
-        loop.submit(JobLoopState(seed_start(component, tmp_path)), JobData("three"), {"component": "other"})
+    assert component.changed_parts(checkpoint.path, checkpoint) == frozenset()
 
 
 @pytest.mark.unit
@@ -177,7 +150,7 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
         status = ended(component, "one")
         assert status.state == "failed" and status.error == "RuntimeError: the method failed"
         assert status.metrics["skipped"] == "step failed" and status.metrics["error"] == status.error
-        # The failed step counts, so the next one claims the next step record; the harness state stays.
+        # The failed job counts, so the next one claims the next job record; the harness state stays.
         steps, state = component.state_after("one")
         assert steps == 1 and state == component.state_after(None)[1]
         # A job that never settled changed nothing: the state after it is the state after the job it names.
@@ -190,52 +163,60 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
 @pytest.mark.unit
 def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     component = component_of(tmp_path, lambda workspace, services: None)
-    assert component.release_format is None and component.shares_scenarios
-    assert component.default_start().files == dict(PI_SEED.files)
-    # An imported start is a copy of the release's tree, under its checksum, without the repository's own files.
-    release = tmp_path / "release"
-    PI_SEED.apply(MARKER).write(release)
+    assert component.artifact_format is None and component.shares_scenarios
+    assert component.facts.default_start().files == dict(PI_SEED.files)
+    # An imported start is a copy of the snapshot's tree, under its checksum, without the repository's own files.
+    artifact_dir = tmp_path / "snapshot"
+    PI_SEED.apply(MARKER).write(artifact_dir)
     # An import's directory holds the tree alone.
-    component.check_release(DirectoryFiles(release))
-    (release / ".gitattributes").write_text("* filter=lfs\n")
-    (release / "reef-artifact.json").write_text("{}\n")
-    start = component.import_start(release)
+    TrainingArtifactLayout(component.facts, component).check(DirectoryFiles(artifact_dir))
+    (artifact_dir / ".gitattributes").write_text("* filter=lfs\n")
+    (artifact_dir / "reef-artifact.json").write_text("{}\n")
+    start = component.import_start(artifact_dir)
     assert Path(start).name == PI_SEED.apply(MARKER).checksum()
-    assert HarnessTree.read(Path(start)) == PI_SEED.apply(MARKER) and component.import_start(release) == start
+    assert HarnessTree.read(Path(start)) == PI_SEED.apply(MARKER) and component.import_start(artifact_dir) == start
     broken = tmp_path / "broken"
     HarnessTree({"rules.md": ""}).write(broken)
     with pytest.raises(ValueError, match="fails validation"):
         component.import_start(broken)
     valid = job(component, "valid", start=seed_start(component, tmp_path))
-    for name, value, message in (
-        ("component", "", "names the scenario component"),
-        ("head_artifact_id", None, "names the artifact of its start"),
-        ("evaluation_tasks", "t", "evaluation_tasks"),
-        ("previous_job", "", "previous_job"),
+    for broken_job, message in (
+        (replace(valid, component=None), "names the scenario component"),
+        (replace(valid, parameters={**valid.parameters, "evaluation_tasks": "t"}), "evaluation_tasks"),
+        (replace(valid, parameters={**valid.parameters, "request": "r"}), "training request"),
     ):
-        broken_job = TrainingJob(
-            valid.job_id,
-            valid.backend,
-            valid.start,
-            valid.data,
-            {**valid.parameters, name: value},
-            scenario="demo",
-        )
         with pytest.raises(ValueError, match=message):
             component.check_job(broken_job)
     component.close()
 
 
 @pytest.mark.unit
-def test_the_progress_file_holds_the_running_steps_progress_until_it_ends(tmp_path: Path) -> None:
-    backend, _ = harness_backend(tmp_path, lambda workspace, services: None)
-    progress = StepProgress(request_id="ask-1", phase="proposing", started_at=1.0, step_record=str(tmp_path / "1"))
-    path = tmp_path / PROGRESS_FILE
-    with ProgressFile(backend, path, interval_seconds=0.01):
-        assert read_step_progress(path) is None
-        backend.progress = progress
-        deadline = time.monotonic() + 5
-        while read_step_progress(path) is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert read_step_progress(path) == progress
-    assert read_step_progress(path) is None
+def test_the_component_reports_the_running_jobs_progress_and_the_ended_jobs_records(tmp_path: Path) -> None:
+    """No other process reads the component's directories: the training worker copies ``job_progress`` into the
+    job's item and stores ``job_records`` in the artifact store."""
+    seen: list[Mapping[str, Any] | None] = []
+
+    def method(workspace, services):
+        seen.append(component.job_progress("one"))
+        return MARKER
+
+    component = component_of(tmp_path, method)
+    assert component.job_progress("one") is None and component.job_records("one") is None
+    component.start_jobs()
+    try:
+        component.submit(job(component, "one", start=seed_start(component, tmp_path)))
+        ended(component, "one")
+    finally:
+        component.close()
+    (progress,) = seen
+    assert progress is not None and JobProgress.from_json(progress).phase == "proposing"
+    assert component.job_progress("one") is None
+    records = component.job_records("one")
+    assert records is not None and records.is_dir()
+    assert records.parent.name == "steps"
+    # A deleted scenario's directory moves aside, under its ID, which no later scenario uses.
+    scenario_dir = records.parent.parent.parent
+    component.archive_scenario(scenario_dir.name)
+    assert not scenario_dir.exists() and component.job_records("one") is None
+    (archived,) = (scenario_dir.parent / "archived").iterdir()
+    assert archived.name == scenario_dir.name

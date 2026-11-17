@@ -4,11 +4,10 @@ The recipe keeps requests unchanged, reuses the shared distillation stages
 and Slime backend, and trains only on the student's recorded samples.
 """
 
-from recipes.opd.objective import OpdObjective
 from recipes.opd.processor import OPDSamples, OPDSettings
 from recipes.opd.recipe import OPDRecipe
-from reef.train.algos.registry import register_loss_family_ref
+from reef.train.slime_backend.objectives import register_objective
 
-register_loss_family_ref("opd", "recipes.opd.slime:OpdAlgorithm")
+register_objective("opd", "recipes.opd.slime:OpdObjective")
 
-__all__ = ["OPDRecipe", "OPDSamples", "OPDSettings", "OpdObjective"]
+__all__ = ["OPDRecipe", "OPDSamples", "OPDSettings"]

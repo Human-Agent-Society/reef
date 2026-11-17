@@ -1,6 +1,6 @@
-"""The components a scenario's releases bind, and how each one is checked, imported and read.
+"""The components a scenario's snapshots bind, and how each one is checked, imported and read.
 
-A recipe declares them (``Recipe.build_components``). A release binds named
+A recipe declares them (``Recipe.build_components``). A snapshot binds named
 components (``weights``, ``harness``, ``config``, ...). A scenario with no
 component records traffic only. The inference runtime loads the component of
 a weight kind; a client pulls the component that has a file tree.
@@ -69,7 +69,7 @@ class ArtifactLayout(ABC):
     """The directory layout of one component's artifacts, which an artifact import must meet (RFC #980).
 
     ``check(files)`` returns when ``files`` are an artifact of the component, in the layout of the component's
-    releases, and every remote path they name resolves on the component's service. Otherwise it raises
+    snapshots, and every remote path they name resolves on the component's service. Otherwise it raises
     ``ValueError`` naming what does not hold. ``files`` is the source's files, wherever the source keeps them, so a
     check reads files through it and reads no more of them than it needs.
 
@@ -79,8 +79,8 @@ class ArtifactLayout(ABC):
 
     ``stored(files, directory)`` checks ``files``, then stores them in the empty directory ``directory``:
     ``files.reference`` when the source keeps the files fixed and ``resolves_references`` is true (RFC #995), else
-    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, with a new artifact ID
-    (``Artifact.local``).
+    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, with the ID
+    ``artifact_id`` or a new one (``Artifact.local``).
 
     Purpose: a recipe binds it on ``ComponentSpec.layout``. The committer stores an import with it, and the
     scenario factory stores the artifact item that a new scenario starts from.
@@ -93,22 +93,22 @@ class ArtifactLayout(ABC):
     def resolves_references(self) -> bool:
         return False
 
-    def stored(self, files: SourceFiles, directory: Path) -> Artifact:
+    def stored(self, files: SourceFiles, directory: Path, *, artifact_id: str | None = None) -> Artifact:
         self.check(files)
         if files.reference is None or not self.resolves_references:
             files.copy_into(directory)
         else:
             for path, data in files.reference.items():
                 (directory / path).write_bytes(data)
-        return Artifact.local(directory)
+        return Artifact.local(directory, artifact_id=artifact_id)
 
 
 @dataclass(frozen=True)
 class ComponentSpec:
-    """How one named component of a release is admitted, imported and read, and what kind it is.
+    """How one named component of a snapshot is admitted, imported and read, and what kind it is.
 
     Values: ``validator`` admits an artifact of the component before it is
-    published or activated; the default accepts any. ``kind`` is the
+    stored (``ArtifactValidator``); the default accepts any. ``kind`` is the
     ``ArtifactKind`` of every artifact of the component, or ``None`` when the
     component is no side of a policy. A component of a ``WEIGHT_KINDS`` kind
     is the one the inference runtime loads. ``files`` is the tree a client
@@ -135,16 +135,18 @@ class ComponentSpec:
 
 @dataclass(frozen=True)
 class ScenarioComponents:
-    """The components that every release of one scenario binds, by name.
+    """The components that every snapshot of one scenario binds, by name.
 
     Values: ``components`` maps valid component names to ``ComponentSpec``s, in
     declaration order; it may be empty. At most one component is ``loaded`` and
-    at most one has ``files``. ``validator`` is the whole release's admission
-    check, run before each component's; it carries the
-    ``build_artifact_validator`` of a recipe that serves no component.
+    at most one has ``files``. ``validator`` is the snapshot's own admission
+    check, run before the component's (``validate``). With at most one
+    component it admits the whole flat snapshot. With several it is
+    ``AcceptAnyArtifact``: each component is checked alone, where its files
+    are, and no process holds the files of a combination to check them.
 
-    A release with at most one component is flat: the whole artifact is the
-    component. A release with several keeps each one in a directory named after
+    A snapshot with at most one component is flat: the whole artifact is the
+    component. A snapshot with several keeps each one in a directory named after
     it, and ``component_artifact`` reads that directory.
 
     Purpose: a recipe makes it in ``build_components``; the scenario factory,
@@ -169,6 +171,10 @@ class ScenarioComponents:
         trees = [name for name, component in validated.items() if component.files is not None]
         if len(trees) > 1:
             raise ValueError(f"at most one component exposes a client-pulled file tree, not {trees}")
+        if len(validated) > 1 and not isinstance(self.validator, AcceptAnyArtifact):
+            raise ValueError(
+                "a snapshot of several components has no check of its own: give each component its validator"
+            )
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -176,7 +182,7 @@ class ScenarioComponents:
 
     @property
     def single(self) -> bool:
-        """True when the release is flat: the whole artifact is the one component, or there is none."""
+        """True when the snapshot is flat: the whole artifact is the one component, or there is none."""
         return len(self.components) <= 1
 
     @property
@@ -210,11 +216,11 @@ class ScenarioComponents:
         return component, layout
 
     def component_artifact(self, artifact: Artifact, name: str) -> Artifact:
-        """``name``'s view of a release: the artifact itself when the release is flat."""
+        """``name``'s view of a snapshot: the artifact itself when the snapshot is flat."""
         return artifact if self.single else artifact.component(name)
 
     def read_files(self, artifact: Artifact) -> Mapping[str, str] | None:
-        """The client-pulled file tree of the release ``artifact``; ``None`` when no component has one."""
+        """The client-pulled file tree of the snapshot ``artifact``; ``None`` when no component has one."""
         name = self.files_component
         if name is None:
             return None
@@ -223,25 +229,39 @@ class ScenarioComponents:
             return None
         return tree.read_files(self.component_artifact(artifact, name))
 
-    def validate(self, artifact: Artifact) -> None:
-        """Run the release's own admission check, then every component's against its view of ``artifact``."""
-        self.validator.validate(artifact)
-        for name, component in self.components.items():
-            component.validator.validate(self.component_artifact(artifact, name))
+    def validate(self, directory: Path, component: str | None = None) -> None:
+        """Admit the files in ``directory`` as an artifact of ``component``: run the snapshot's own check, then the
+        check of ``component``, each on ``Artifact.local(directory)`` (``ArtifactValidator``).
 
-    def component_changed(self, artifact: Artifact, previous: Artifact, name: str) -> bool:
-        """Whether the snapshots select different artifacts for ``name``.
-
-        A flat snapshot names its artifact directly. A composed snapshot uses
-        its component manifest; a missing manifest counts as changed.
+        ``component`` None names the one component of a flat snapshot, or none when the scenario serves none; a
+        scenario that serves no component runs only its own check, whatever ``component`` names. Raise
+        ``ValueError`` for None when the scenario serves several components and for a component that it does not
+        serve; otherwise raise what a check raises.
         """
-        if self.single:
-            return artifact.artifact_id != previous.artifact_id
-        current = artifact.materialize().components
-        before = previous.materialize().components
-        if current is None or before is None or name not in current.entries or name not in before.entries:
-            return True
-        return current.artifact_id(name, artifact.ref.revision) != before.artifact_id(name, previous.ref.revision)
+        if component is None and len(self.names) > 1:
+            raise ValueError(f"the scenario serves components {list(self.names)}: name the component")
+        if component is not None and self.names and component not in self.components:
+            raise ValueError(f"the scenario has no component {component!r}")
+        artifact = Artifact.local(Path(directory))
+        self.validator.validate(artifact)
+        if self.names:
+            self.components[self.names[0] if component is None else component].validator.validate(artifact)
+
+
+class ComponentChecks(ABC):
+    """The admission checks of the components of every scenario of one deployment.
+
+    ``validate(scenario, component, directory)`` returns when the checks of ``scenario`` admit the files in
+    ``directory`` as an artifact of ``component`` (``ScenarioComponents.validate``), and raises what they raise
+    otherwise.
+
+    Purpose: the job worker of the training service (``reef.train.job_queue.TrainingJobWorker``) checks each
+    checkpoint with it before it stores the checkpoint. ``reef.scenario.live_objects.RecipeChecks`` gives the checks
+    that a recipe declares.
+    """
+
+    @abstractmethod
+    def validate(self, scenario: str, component: str | None, directory: Path) -> None: ...
 
 
 __all__ = [
@@ -249,6 +269,7 @@ __all__ = [
     "WEIGHT_KINDS",
     "AcceptAnyArtifact",
     "ArtifactLayout",
+    "ComponentChecks",
     "ComponentSpec",
     "FileTree",
     "ScenarioComponents",

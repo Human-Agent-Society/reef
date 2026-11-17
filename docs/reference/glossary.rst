@@ -7,11 +7,11 @@ method implements.
 Scenario
 --------
 
-One workload: its records, training state, and release chain, isolated from
+One workload: its records, training state, and snapshot chain, isolated from
 every other scenario. ``POST /reef/scenarios``, a harness install, or the
 first report or imported record carrying a new ``x-reef-scenario`` creates it
 and permanently binds its recipe. An inference request never creates a scenario. The creating
-request may also bind a starting release, whose content becomes the scenario's
+request may also bind a starting artifact, whose content becomes the scenario's
 creation artifact.
 
 Agent
@@ -25,15 +25,15 @@ Agent record
 ------------
 
 One stored exchange, either an inference call or a report, with its id, scenario,
-request type, payload, and, for inference, the release that served it.
-The record store lives under ``agent_record_dir``.
+request type, payload, and, for inference, the snapshot that served it.
+A record is a record item of the scenario's owner in the data store (RFC #1219).
 
 Receipt
 -------
 
 The id of a stored inference record, returned in ``x-reef-agent-record-id`` or,
 for a stream, as ``reef.agent_record_id`` in the terminal SSE metadata. It names
-the exchange *and* the release that produced it. Reports quote receipts
+the exchange *and* the snapshot that produced it. Reports quote receipts
 in ``references``.
 
 Report
@@ -55,7 +55,7 @@ Recipe
 ------
 
 The method a deployment runs. It binds a processor, a training objective, an
-inference runtime, and the components of its releases; a weight recipe also binds a training
+inference runtime, and the components of its snapshots; a weight recipe also binds a training
 component. The core ``recipe`` records without producing updates.
 
 Recipe reference
@@ -86,14 +86,13 @@ an opaque string. It stays the same when the scenario activates it, serves it
 beside another artifact, or carries it through another component's update.
 Repository revisions and content checksums are storage details.
 
-Release
--------
+Snapshot
+--------
 
 An internal repository snapshot that stores artifact bytes and recovery
 metadata. Backend interfaces locate it with ``SnapshotRef.revision``.
 Artifact callers use ``artifact_id``. Activation and serving
-change scenario state without publishing a snapshot. Older harness protocol
-fields with release names remain compatibility aliases.
+change scenario state without publishing a snapshot.
 
 Creation artifact
 -----------------
@@ -109,11 +108,13 @@ Active selection
 A scenario's serving selection: a mapping from each
 component name to its selected ``artifact_id``. Inference answers from the
 selection that completed startup; harness routes read the selected tree.
-``POST /reef/scenarios/{scenario}/activate`` updates one component in the
-mapping and records the complete selection atomically. By default Reef activates each new artifact that passes its checks.
+The ``served`` setting of ``POST /reef/scenarios/{scenario}/update`` names the
+artifacts that the scenario serves of one component. The artifact with the
+largest weight is the active artifact of that component, and Reef records the
+complete selection atomically. By default Reef activates each new artifact that passes its checks.
 Every other artifact is inactive. An artifact that a training step made and
 that was never active waits for activation. See `Operate a deployment
-<../user-guide/operate.rst#activate-an-artifact>`__.
+<../user-guide/operate.rst#set-what-a-scenario-serves>`__.
 
 Chain tip
 ---------
@@ -122,7 +123,7 @@ The repository's publication head, used internally to order new artifact
 snapshots. It is independent of the scenario's active selection. Activating
 or serving an existing artifact does not publish a snapshot or move this
 head.
-See `The release chain <../advanced_topics/state-model.rst#the-release-chain>`__.
+See `The snapshot chain <../advanced_topics/state-model.rst#the-snapshot-chain>`__.
 
 Training start
 --------------
@@ -141,8 +142,8 @@ An internal checksum of bytes or logical model state. Storage can use equal
 checksums to reuse content. A checksum does not replace ``artifact_id``:
 two imports can contain the same files and still create distinct artifacts.
 
-Release chain
--------------
+Snapshot chain
+--------------
 
 The internal repository history used to publish and recover artifact
 snapshots. A scenario's operation history separately records training,
@@ -164,8 +165,8 @@ Candidate selection
 A harness trainer's decision about which candidate tree its step keeps. A
 ``CandidateEvaluator`` measures the candidate, a ``CandidateSelector`` makes
 the select-or-reject decision, and a ``CandidateEvaluationPlugin`` implements
-both. A harness recipe builds it for each scenario from its publication
-policy. Selection does not decide what serves; the activation rule does.
+both. The harness training component builds it for each job from the
+deployment's publication policy. Selection does not decide what serves; the activation rule does.
 
 Activation rule
 ---------------
@@ -192,16 +193,16 @@ Sample
 One item of job data, a ``Sample`` (``reef.core.job_data``): a
 ``TrajectorySample`` that trains as it is, or a ``TaskSample``, a Harbor task that
 the training component rolls out. The record-to-sample stage makes samples;
-``job_samples`` and the sample buffer count them. A sample is not a sampling
+``job_samples`` and ``buffer_size`` count them. A sample is not a sampling
 call to a model.
 
 Training objective
 ------------------
 
-The method-owned ``TrainingObjective`` declares its backend loss family and
-prepares a job's complete reserved data. Its ``prepare`` method returns advantages,
+A backend's objective (``SlimeObjective`` or ``TinkerObjective``) declares its
+loss family and prepares a job's complete reserved data. Its ``prepare`` method returns advantages,
 metrics, and proposed algorithm state in a ``TrainingSignal`` before optimizer or
-worker partitioning. It imports no training stack. A recipe selects it by
+worker partitioning. A recipe selects it through the job parameter ``objective``, by
 registered name or dotted class/instance path. The training component cuts
 each job's data into optimizer steps. The objective declares the rows that one step
 keeps together (``rollout_unit``) and rejects a job's step schedule that its
@@ -210,8 +211,7 @@ loss cannot train.
 Loss family
 -----------
 
-The backend implementation selected by ``TrainingObjective.loss_family`` and
-exposed through ``WeightTrainingSpec.loss_family``. It computes model-dependent
+The backend implementation that an objective's ``loss_family`` selects. It computes model-dependent
 terms and the tensor loss. Shipped method families include ``sao``, ``tttd``,
 and ``openclawrl``.
 
@@ -228,7 +228,7 @@ Harness tree
 Reef's versioned representation of the mutable files in a harness: config,
 rules, prompt templates, skills, extension code, and, for the ``native``
 adapter, the loop's own tools, hook listeners, control flow graphs, delegate
-agents and loop code. A tree is one directory of text files, and each release
+agents and loop code. A tree is one directory of text files, and each snapshot
 stores one as its source tree. The adapter decides which parts a tree may
 hold: the ``evolve`` section of its ``adapter.yaml`` declares each part's tree path, format and render
 path, and a path that no part takes is refused. Reef serves the tree
@@ -261,7 +261,7 @@ Runtime
 -------
 
 ``InferenceRuntime`` executes inference requests, owns admission, and loads
-published releases for serving. It loads only weights that a
+published snapshots for serving. It loads only weights that a
 training job saved and that Reef published. It is independent of the
 training component: no trainer holds a serving engine.
 
@@ -272,12 +272,12 @@ A ``TrainingComponent`` runs bounded training jobs with its framework's own
 training loop, for example Slime or Tinker. Reef submits a job, reads its
 status, and can cancel it; the component saves checkpoints. A
 ``SavedCheckpoint`` names the directory a later job starts from and the
-directory Reef publishes as a release.
+directory whose files the training service stores in the artifact backend, where Reef commits them as a snapshot.
 
 Training job
 ------------
 
-One ``TrainingJob``: its job data, the weights it starts from, and the backend's
+One ``TrainingJob``: its job data directory, the weights it starts from, and the backend's
 parameters. The recipe gives the parameters of each job, by the kind of its
 samples. The
 job ID is a hash of the scenario, the backend, the start, the records of the
@@ -334,11 +334,11 @@ artifact that answered by ``artifact_id``.
 Staleness
 ---------
 
-The number of artifacts that a scenario served after the artifact that
-produced a sample, bounded by the record-to-sample stage's ``max_staleness``
-(``pipeline.record2sample.config.max_staleness``). Zero trains a sample only
-while the artifact that produced it serves. The record-to-sample stage checks
-it before job data forms.
+Whether a stored sample may still train, given the artifacts that the
+scenario served after the artifact that produced it. The record-to-sample
+stage gives the rule, and the samples service marks a stale sample in the
+store. An on-policy stage trains a sample only while the artifact that
+produced it serves.
 
 Reported and computed feedback
 ------------------------------
@@ -354,8 +354,8 @@ Method
 
 The learning algorithm itself. A recipe is the object that binds one method to a
 scenario; ``HarnessEvolutionRecipe`` is one mechanism running many possible
-methods. Each is a ``Method`` whose ``step`` edits the harness tree in a
-step's workspace, with a scorer when its evaluation runs tasks.
+methods. Each is a ``Method`` whose ``run`` edits the harness tree in a
+job's workspace, with a scorer when its evaluation runs tasks.
 
 Adapter
 -------
@@ -389,9 +389,10 @@ Rollout
 -------
 
 One run of one task by the policy model in weight training or in a checkpoint
-evaluation. It gives one trajectory and one score, as a harness run does. A
-Tinker task job runs each task ``rollouts_per_task`` times on the job's start
-weights.
+evaluation. It gives one trajectory and one score, as a harness run does. On
+Tinker, a task job runs each task ``rollouts_per_task`` times on the job's start
+weights. On Slime, ``n-samples-per-prompt`` gives the rollouts of each task, on
+the weights of the Slime rollout that holds them.
 
 Patch
 -----

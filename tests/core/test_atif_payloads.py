@@ -5,7 +5,17 @@ from __future__ import annotations
 import pytest
 from harbor.models.trajectories import Trajectory
 
-from reef.core.atif_payloads import atif_call, canonical_json, folded_steps, patch_of, patched, provider_payload
+from reef.core.atif_payloads import (
+    atif_call,
+    canonical_json,
+    folded_steps,
+    patch_of,
+    patched,
+    provider_payload,
+    response_metrics,
+)
+from reef.core.records_types import AgentRecord, RequestType
+from reef.core.trajectories import make_trajectory
 
 CHAT = {
     "model": "m",
@@ -166,6 +176,89 @@ def test_private_fields_stay_in_extra_and_tools_take_the_function_schema() -> No
     assert call.reply[0][0]["metrics"] == {"prompt_tokens": 5, "completion_tokens": 3}
 
 
+def test_a_chat_reply_keeps_its_token_ids_and_log_probabilities_in_the_atif_metrics() -> None:
+    entries = [
+        {"token": "Do", "logprob": -0.25, "top_logprobs": []},
+        {"token": "ne", "logprob": -0.5, "top_logprobs": []},
+    ]
+    payload = {
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "logprobs": True,
+        "return_token_ids": True,
+        "response": {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Done"},
+                    "finish_reason": "stop",
+                    "logprobs": {"content": entries},
+                    "token_ids": [20, 21],
+                }
+            ],
+            "prompt_token_ids": [10, 11],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 2},
+        },
+    }
+    call = atif_call(payload)
+    assert call is not None
+    assert call.reply[0][0]["metrics"] == {
+        "prompt_tokens": 2,
+        "completion_tokens": 2,
+        "prompt_token_ids": [10, 11],
+        "completion_token_ids": [20, 21],
+        "logprobs": [-0.25, -0.5],
+    }
+    assert canonical_json(provider_payload(call)) == canonical_json(payload)
+    steps = folded_steps([*call.entries, *call.reply])
+    Trajectory.model_validate({"schema_version": "ATIF-v1.7", "agent": {"name": "a", "version": "1"}, "steps": steps})
+
+    entries[1]["logprob"] = None
+    unreadable = atif_call(payload)
+    assert unreadable is not None and "logprobs" not in unreadable.reply[0][0]["metrics"]
+
+
+ENTRIES = [{"token": "a", "logprob": -0.25}, {"token": "b", "logprob": -0.5}]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # vLLM and Reef: the prompt's IDs beside the choices, the sampled IDs in the choice.
+        {"choices": [{"logprobs": {"content": ENTRIES}, "token_ids": [20, 21]}], "prompt_token_ids": [10, 11]},
+        # SGLang's OpenAI server: both in the choice.
+        {
+            "choices": [
+                {"logprobs": {"content": ENTRIES}, "prompt_token_ids": [10, 11], "response_token_ids": [20, 21]}
+            ]
+        },
+        # Reef's extension of Anthropic Messages: all at the top level.
+        {"type": "message", "logprobs": {"content": ENTRIES}, "token_ids": [20, 21], "prompt_token_ids": [10, 11]},
+    ],
+    ids=["vllm", "sglang", "anthropic"],
+)
+def test_each_protocol_gives_its_token_ids_and_log_probabilities_as_atif_metrics(response: dict) -> None:
+    assert response_metrics(response) == {
+        "prompt_token_ids": [10, 11],
+        "completion_token_ids": [20, 21],
+        "logprobs": [-0.25, -0.5],
+    }
+
+
+def test_an_openai_response_gives_the_log_probabilities_of_its_output_text_in_order() -> None:
+    response = {
+        "output": [
+            {"type": "reasoning", "summary": []},
+            {"type": "message", "content": [{"type": "output_text", "text": "a", "logprobs": ENTRIES[:1]}]},
+            {"type": "message", "content": [{"type": "output_text", "text": "b", "logprobs": ENTRIES[1:]}]},
+        ]
+    }
+    assert response_metrics(response) == {"logprobs": [-0.25, -0.5]}
+    assert (
+        response_metrics({"output": [{"type": "message", "content": [{"type": "output_text", "text": "a"}]}]}) is None
+    )
+
+
 def test_a_payload_without_a_message_list_has_no_atif_call() -> None:
     assert atif_call({"prompt": "hi"}) is None
     assert atif_call({"input": "a string prompt"}) is None
@@ -188,3 +281,43 @@ def test_a_patch_turns_the_rendered_value_into_the_original(original, rendered) 
     patch = patch_of(original, rendered)
     assert canonical_json(patched(rendered, patch)) == canonical_json(original)
     assert (patch is None) == (canonical_json(original) == canonical_json(rendered))
+
+
+def test_a_trajectory_of_records_keeps_each_response_metrics_on_its_agent_step() -> None:
+    def answer(text: str, **choice) -> dict:
+        return {"choices": [{"message": {"role": "assistant", "content": text}, **choice}]}
+
+    first = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "response": {
+            **answer("hello", logprobs={"content": ENTRIES}, token_ids=[20, 21]),
+            "prompt_token_ids": [10, 11],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 2},
+        },
+    }
+    second = {
+        "messages": [
+            *first["messages"],
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "bye"},
+        ],
+        "response": {**answer("goodbye"), "usage": {"prompt_tokens": 5, "completion_tokens": 1}},
+    }
+    records = [
+        AgentRecord(f"r{index}", "s", RequestType.INFERENCE, payload, float(index))
+        for index, payload in enumerate((first, second))
+    ]
+    trajectory = make_trajectory(records).trajectory
+    agent = [step for step in trajectory["steps"] if step["source"] == "agent"]
+    # Each call's response gives the metrics of its own agent step; the second call has only token counts.
+    assert [step["metrics"] for step in agent] == [
+        {
+            "prompt_tokens": 2,
+            "completion_tokens": 2,
+            "prompt_token_ids": [10, 11],
+            "completion_token_ids": [20, 21],
+            "logprobs": [-0.25, -0.5],
+        },
+        {"prompt_tokens": 5, "completion_tokens": 1},
+    ]
+    Trajectory.model_validate(trajectory)

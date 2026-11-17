@@ -24,13 +24,16 @@ from enum import StrEnum
 from pathlib import PurePosixPath
 from typing import Any
 
+from reef.core.errors import ReefError
+
 
 class Format(StrEnum):
     """What Reef checks a part's file as, and which render step processes it.
 
     Values: ``text`` is any text. ``skill`` and ``command`` are text that the
     adapter's ``process_skill`` and ``process_command`` render steps
-    process. ``code`` is code the harness loads in its process. ``config``
+    process. ``code`` is code the harness loads in its process. ``program``
+    is a module of the Python program that the harness is. ``config``
     is a JSON object merged into one of the adapter's config files. The
     ``native_*`` formats are the native loop's tools, hooks, graphs, agents
     and loop code.
@@ -42,6 +45,7 @@ class Format(StrEnum):
     SKILL = "skill"
     COMMAND = "command"
     CODE = "code"
+    PROGRAM = "program"
     CONFIG = "config"
     NATIVE_TOOL = "native_tool"
     NATIVE_HOOK = "native_hook"
@@ -62,7 +66,7 @@ EVOLVE_KEYS = frozenset({"renders", "format", "holds"})
 MERGE_MODES = ("file", "lines")
 
 
-class TreeLayoutError(ValueError):
+class TreeLayoutError(ReefError, ValueError):
     """An adapter's ``parts`` section is missing, malformed, or declares parts that conflict."""
 
 
@@ -300,6 +304,12 @@ KINDS: Mapping[str, Kind] = {
         "native/loops/{name}.py",
         Format.NATIVE_LOOP,
         "the loop itself as code: run_turn(ctx), which runs the root turn in place of the graph",
+        review=True,
+    ),
+    "program": Kind(
+        "program/{name}.py",
+        Format.PROGRAM,
+        "a module of the Python program that {agent} runs, whose entry point is main.py",
         review=True,
     ),
 }

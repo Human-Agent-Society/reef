@@ -12,7 +12,9 @@ A port in ``forward_ports`` is reachable inside the sandbox at the same loopback
 so no URL handed to a process changes. The sandbox runs :mod:`reef.execution.sandbox.relay` on that port; a
 :class:`TunnelPump` on the Reef host polls the relay over the provider's public address for each request a
 process made, sends it to the local port, and streams the answer back. Only the forwarded ports are reachable
-this way, and every credential stays on the Reef side of them.
+this way, and every credential stays on the Reef side of them. A request to the relay carries its secret and the
+headers that the provider requires at that address (:meth:`RemoteSession.tunnel_headers`), and never follows a
+redirect.
 
 A sandbox carries its deployment as ``owner``; a Reef that stopped mid run never closed its sandbox, so before a
 process starts its first sandbox it stops the ones its deployment left (:meth:`RemoteExecutor.reap_once`), and
@@ -30,6 +32,7 @@ import base64
 import hashlib
 import io
 import logging
+import re
 import secrets
 import shlex
 import shutil
@@ -45,13 +48,14 @@ from typing import Any, ClassVar, Self
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, ClientSession, ClientTimeout
 
+from reef.execution.sandbox.bwrap import TOOL_ISOLATION
 from reef.execution.sandbox.process import (
     ISOLATION_ENV,
     ProcessOutcome,
     ProgramExecutor,
     ProgramLaunchError,
     SandboxProgram,
-    SandboxUnavailable,
+    SandboxUnavailableError,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +63,28 @@ logger = logging.getLogger(__name__)
 RELAY_SCRIPT = Path(__file__).with_name("relay.py")
 #: Where a process's root lands in the sandbox: one directory per root, named as the local one.
 REMOTE_BASE = "/home/user/reef"
+#: What every remote run jail unshares and mounts before the run's binds; the startup probe shares it.
+#: The root is bound first, so that the later mounts stay visible.
+REMOTE_ISOLATION: tuple[str, ...] = (
+    "--unshare-user",
+    "--unshare-pid",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--die-with-parent",
+    "--new-session",
+    "--ro-bind",
+    "/",
+    "/",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+    "--clearenv",
+)
+#: The PATH in a remote run jail, which clears the sandbox's environment.
+REMOTE_PATH = "/usr/local/bin:/usr/bin:/bin"
 #: The first sandbox port a relay's tunnel listens on; the provider exposes it at a public address.
 TUNNEL_PORT_BASE = 21080
 #: Concurrent polls per forwarded port: a long request (a trial) must not hold up the calls it makes itself.
@@ -74,6 +100,12 @@ REAP_LOCK = threading.Lock()
 HOP_BY_HOP = frozenset(
     {"connection", "content-length", "host", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade"}
 )
+#: The header with the relay's secret; :mod:`reef.execution.sandbox.relay` reads it.
+RELAY_SECRET_HEADER = "x-relay-secret"
+#: An HTTP header name: an RFC 9110 token.
+HEADER_NAME = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+#: A header value of the tunnel: visible ASCII characters, with spaces only between them.
+HEADER_VALUE = re.compile(r"[!-~]+(?: +[!-~]+)*")
 #: The Harbor environment types that run a task's containers on a cloud provider, each with the environment
 #: variables its credentials come from. A process that runs Harbor tasks in one of them needs these variables.
 REMOTE_TASK_ENVIRONMENTS: Mapping[str, tuple[str, ...]] = {
@@ -113,25 +145,7 @@ def protected_command(
     The PID namespace retires tool children when the command is stopped. Bubblewrap
     also prevents privilege escalation, so sudo cannot undo the read-only mounts.
     """
-    arguments = [
-        "bwrap",
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--die-with-parent",
-        "--new-session",
-        "--ro-bind",
-        "/",
-        "/",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--clearenv",
-    ]
+    arguments = ["bwrap", *REMOTE_ISOLATION]
     remote = remote_root(root)
     for path in (workspace, *writable_paths):
         target = f"{remote}/{path.relative_to(root).as_posix()}"
@@ -140,7 +154,7 @@ def protected_command(
         target = f"{remote}/{path.relative_to(root).as_posix()}"
         arguments.extend(("--ro-bind", target, target))
     for name, value in {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "PATH": REMOTE_PATH,
         **env,
         ISOLATION_ENV: "bwrap",
         "REEF_NATIVE_ENFORCE": "bwrap",
@@ -186,46 +200,36 @@ def unpack(data: bytes, directory: Path) -> None:
 
 
 def probe_command(binary: str) -> str:
-    """The startup check of a remote sandbox: a nested bubblewrap jail starts, and ``binary`` is on ``PATH``."""
-    jail = "bwrap --unshare-user --unshare-pid --ro-bind / / --proc /proc --dev /dev --"
-    command = f"{jail} {jail} /bin/true"
+    """The startup check of a remote sandbox: a tool jail starts inside the run jail, and ``binary`` is on ``PATH``.
+
+    The run jail is :func:`protected_command`'s. The tool jail is the native enforcer's (``TOOL_ISOLATION``)
+    without network, over a read-only root that comes before its /proc bind.
+    """
+    run_jail = ["bwrap", *REMOTE_ISOLATION, "--setenv", "PATH", REMOTE_PATH, "--"]
+    tool_jail = ["bwrap", "--ro-bind", "/", "/", *TOOL_ISOLATION, "--unshare-net", "--", "/bin/true"]
+    command = shlex.join([*run_jail, *tool_jail])
     if binary:
         command += f" && command -v {shlex.quote(binary)} >/dev/null"
     return command
 
 
 def parse_forward_ports(section: Mapping[str, object]) -> tuple[int, ...]:
-    """``sandbox.forward_ports``: distinct TCP ports, in order; ``SandboxUnavailable`` for another value."""
+    """``sandbox.forward_ports``: distinct TCP ports, in order; ``SandboxUnavailableError`` for another value."""
     ports = section.get("forward_ports", [])
     if not isinstance(ports, (list, tuple)) or any(
         isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535 for port in ports
     ):
-        raise SandboxUnavailable("sandbox.forward_ports must list TCP ports between 1 and 65535")
+        raise SandboxUnavailableError("sandbox.forward_ports must list TCP ports between 1 and 65535")
     return tuple(dict.fromkeys(ports))
-
-
-def parse_env_from(section: Mapping[str, object], environ: Mapping[str, str]) -> dict[str, str]:
-    """``sandbox.env_from``: the named host variables and their values; each must be set and non-empty."""
-    names = section.get("env_from", [])
-    if not isinstance(names, (list, tuple)) or not all(
-        isinstance(name, str) and name.isidentifier() for name in names
-    ):
-        raise SandboxUnavailable("sandbox.env_from must list environment variable names")
-    env = {}
-    for name in names:
-        if not environ.get(name):
-            raise SandboxUnavailable(f"sandbox.env_from requires environment variable {name!r}")
-        env[name] = environ[name]
-    return env
 
 
 def check_options(provider: str, section: Mapping[str, object], provider_options: frozenset[str]) -> None:
     """Refuse an option no remote sandbox takes, and the local sandbox's ``egress_hosts`` and ``limits``."""
     unknown = set(section) - provider_options - {"forward_ports", "env_from", "egress_hosts", "limits"}
     if unknown:
-        raise SandboxUnavailable(f"unknown {provider} sandbox options: {', '.join(sorted(unknown))}")
+        raise SandboxUnavailableError(f"unknown {provider} sandbox options: {', '.join(sorted(unknown))}")
     if section.get("egress_hosts") or section.get("limits"):
-        raise SandboxUnavailable(
+        raise SandboxUnavailableError(
             f"{provider} does not implement sandbox.egress_hosts or sandbox.limits; "
             "it uses the image's resources and permits outbound internet"
         )
@@ -286,7 +290,7 @@ class RemoteExecutor(ProgramExecutor):
     def for_program(self, program: SandboxProgram, *, binary: str | None = None) -> tuple[ProgramExecutor, str]:
         """Resolve the program in the sandbox's image, without installing it on the Reef host."""
         if program.self_isolating:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 f"{program.name!r} manages its own containers on the Reef host and cannot run in a "
                 f"{self.provider} sandbox"
             )
@@ -295,7 +299,7 @@ class RemoteExecutor(ProgramExecutor):
             bound = self if remote_binary == self.binary else replace(self, binary=remote_binary)
             return bound, remote_binary
         if not program.npm_package:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 f"running {program.name!r} in {self.provider} requires an explicit {self.image_option} containing "
                 "its binary, bubblewrap and python3"
             )
@@ -365,7 +369,8 @@ class RemoteSession(ProgramExecutor):
 
     ``env`` is the deployment's explicit environment; every process gets it over the caller's. A subclass
     implements the provider's primitives (:meth:`write_file`, :meth:`read_file`, :meth:`run`, :meth:`start`,
-    :meth:`public_url`, :meth:`stop`) and :meth:`launch`; this class forwards ports, copies roots and closes.
+    :meth:`public_url`, :meth:`stop`) and :meth:`launch`, and overrides :meth:`tunnel_headers` for a provider that
+    requires headers at a public address; this class forwards ports, copies roots and closes.
     """
 
     #: The provider's name, for messages.
@@ -400,6 +405,15 @@ class RemoteSession(ProgramExecutor):
     def stop(self) -> None:
         """Stop the sandbox."""
 
+    def tunnel_headers(self) -> dict[str, str]:
+        """The headers that the provider requires on each request to a :meth:`public_url`, besides the relay's
+        secret; none by default.
+
+        :meth:`forward` gives them to the port's :class:`TunnelPump`, which sends them to the relay only, never to
+        the Reef host's port. They must hold no credential of the deployment, such as the provider's API key.
+        """
+        return {}
+
     def preflight(self) -> None:
         return None
 
@@ -419,10 +433,9 @@ class RemoteSession(ProgramExecutor):
                 f"python3 /root/reef-relay.py --port {port} --tunnel-port {tunnel_port} --secret-file {secret_file}",
                 as_root=True,
             )
-            url = self.public_url(tunnel_port)
+            pump = TunnelPump(self.public_url(tunnel_port), secret, port, tunnel_headers=self.tunnel_headers())
         except Exception as exc:
             raise ProgramLaunchError(f"the {self.provider} relay for port {port} did not start: {exc}") from exc
-        pump = TunnelPump(url, secret, port)
         pump.start()
         self.pumps.append(pump)
 
@@ -465,13 +478,44 @@ class RemoteSession(ProgramExecutor):
 
 class TunnelPump:
     """Answer the relay's requests from the Reef host: poll ``/next``, send each to the local port, stream the
-    answer back as ``/reply`` pieces. Runs its own event loop on a thread."""
+    answer back as ``/reply`` pieces. Runs its own event loop on a thread.
 
-    def __init__(self, url: str, secret: str, port: int, *, pollers: int = POLLERS) -> None:
+    Values: ``url`` is the relay's public address and ``port`` the Reef host's loopback port. ``headers`` holds
+    ``tunnel_headers`` and the relay's ``secret`` in :data:`RELAY_SECRET_HEADER`. In ``tunnel_headers``, each name
+    is an HTTP token and each value visible ASCII text (:data:`HEADER_VALUE`). No two names are equal ignoring case,
+    and no name is :data:`RELAY_SECRET_HEADER`. The constructor raises ``ValueError`` for other headers; its message
+    names a header and never its value.
+    Purpose: :meth:`RemoteSession.forward` makes one for each forwarded port. Each request to the relay (``/ready``,
+    ``/next``, ``/reply``) carries ``headers`` and never follows a redirect: a redirect fails the request, so no
+    header reaches another address. A request to the local port carries only the headers that the sandbox's process
+    sent.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        secret: str,
+        port: int,
+        *,
+        pollers: int = POLLERS,
+        tunnel_headers: Mapping[str, str] | None = None,
+    ) -> None:
+        folded_names: set[str] = set()
+        for name, value in (tunnel_headers or {}).items():
+            if not isinstance(name, str) or not HEADER_NAME.fullmatch(name):
+                raise ValueError(f"the tunnel header name {name!r} is not an HTTP token")
+            if not isinstance(value, str) or not HEADER_VALUE.fullmatch(value):
+                raise ValueError(f"the value of the tunnel header {name} is not visible ASCII text")
+            folded_name = name.lower()
+            if folded_name == RELAY_SECRET_HEADER:
+                raise ValueError(f"a tunnel header cannot replace {RELAY_SECRET_HEADER}")
+            if folded_name in folded_names:
+                raise ValueError(f"the tunnel header {name} occurs twice, ignoring case")
+            folded_names.add(folded_name)
         self.url = url
         self.port = port
         self.pollers = pollers
-        self.headers = {"x-relay-secret": secret}
+        self.headers = {**(tunnel_headers or {}), RELAY_SECRET_HEADER: secret}
         self.ready = threading.Event()
         self.failure: str | None = None
         self.loop = asyncio.new_event_loop()
@@ -510,7 +554,7 @@ class TunnelPump:
         deadline = self.loop.time() + RELAY_READY_S
         while self.loop.time() < deadline:
             try:
-                async with tunnel.get(f"{self.url}/ready", headers=self.headers) as response:
+                async with tunnel.get(f"{self.url}/ready", headers=self.headers, allow_redirects=False) as response:
                     if response.status == 200:
                         # A poll made before the relay listened failed; the tunnel is up now.
                         self.failure = None
@@ -525,7 +569,7 @@ class TunnelPump:
         while True:
             try:
                 async with tunnel.get(
-                    f"{self.url}/next", headers=self.headers, timeout=ClientTimeout(total=60)
+                    f"{self.url}/next", headers=self.headers, allow_redirects=False, timeout=ClientTimeout(total=60)
                 ) as response:
                     if response.status == 204:
                         continue
@@ -552,12 +596,21 @@ class TunnelPump:
                         reply,
                         json={**piece, "sequence": sequence},
                         headers=self.headers,
+                        allow_redirects=False,
                         timeout=ClientTimeout(total=30),
                     ) as response:
                         # A final piece can reach the client before its acknowledgement is lost.
                         if response.status == 410 and piece.get("end") and attempt:
                             return
-                        response.raise_for_status()
+                        # A redirect fails as an error status does: the relay did not take the piece.
+                        if response.status >= 300:
+                            raise ClientResponseError(
+                                response.request_info,
+                                response.history,
+                                status=response.status,
+                                message=response.reason or "",
+                                headers=response.headers,
+                            )
                         await response.read()
                     sequence += 1
                     return

@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 
 import pytest
-from tests.support.harness_steps import build_harness_backend, harness_recipe
+from tests.support.harness_jobs import build_harness_backend, harness_recipe
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
 from reef.evaluation.harness import EvaluationWorkerPool, TaskScorer, evaluation_selection
@@ -17,7 +17,7 @@ from reef.execution.executor.config import ExecutorSettings
 def run_requests(evaluator, *pairings):
     """One run request for each ``(files, task)``, on the evaluator's adapter and served model."""
     return [
-        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.served_model, task)
+        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.policy_model, task)
         for files, task in pairings
     ]
 
@@ -120,7 +120,7 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
         f"with open({str(roots)!r}, 'a') as log: log.write(os.getcwd()+'\\n')\n"
     )
     binary.chmod(0o755)
-    recipe = harness_recipe(
+    recipe, live = harness_recipe(
         tmp_path,
         lambda workspace, services: None,
         score=IsolationScorer(),
@@ -128,7 +128,7 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
         worker_executor=ExecutorSettings(executor_backend, workers=workers),
         binary=str(binary),
     )
-    backend = build_harness_backend(recipe, "test")
+    backend = build_harness_backend(recipe, live, "test")
     pool = backend.evaluator.worker_pool
     try:
         for cycle in range(2):
@@ -142,7 +142,7 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
             assert [row.score.value for row in scores] == expected
         evaluator = backend.evaluator
         for request, message in (
-            (RolloutRequest(PolicyHarness("claude"), evaluator.served_model, "task"), "adapter"),
+            (RolloutRequest(PolicyHarness("claude"), evaluator.policy_model, "task"), "adapter"),
             (RolloutRequest(PolicyHarness("pi"), PolicyModel("another-model"), "task"), "serves"),
         ):
             with pytest.raises(ValueError, match=message):

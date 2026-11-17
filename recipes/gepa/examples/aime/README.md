@@ -139,12 +139,12 @@ Everything under `./work`, and a rerun resumes from it:
   run, every decision) and its step records. The history is the score
   cache, and the next step settles the archive from it. Each step record's
   `calls.json` keeps the reflection's prompt and reply.
-- `artifacts/` - the release chain.
+- `artifacts/` - the snapshot chain.
 - `heldout/{frozen,selected}/example-NNNN.json` - one checkpoint per test
   run, keyed by the problem and the tree it ran on; a checkpoint written
   for a different tree is refused, never folded into the score.
 - `seed/`, `served/`, `selected/` - the seed tree the recipe boots from,
-  which the scenario's root release holds, and the source trees the last
+  which the scenario's root snapshot holds, and the source trees the last
   round and the test pass pulled.
 - `summary.json` - validation seed and selected means from the archive, both
   test scores, the candidate count, the metric calls, and the retained official

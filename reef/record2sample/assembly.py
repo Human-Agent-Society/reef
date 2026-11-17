@@ -14,9 +14,9 @@ from typing import Any
 
 from reef.core.config import config_option
 from reef.core.job_data import TrajectorySample
+from reef.core.plugins import PluginSettings
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
-from reef.record2sample.base import Record2SampleSettings
 from reef.record2sample.reports import ReportContext
 from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 
@@ -41,9 +41,12 @@ def reported_task(metadata: object) -> dict[str, Any] | None:
 
 
 @dataclass(frozen=True)
-class SampleAssemblySettings(Record2SampleSettings):
-    """The sample-assembly keys of a record-to-sample stage's config, with ``max_staleness``. A stage's settings
-    extend this class."""
+class SampleAssemblySettings(PluginSettings):
+    """The sample-assembly keys of a record-to-sample stage's config. A stage's settings extend this class.
+
+    Values: ``realign_threshold`` and ``scaffold_tolerance`` are non-negative; the constructor refuses other values.
+    Purpose: a stage that builds policy samples parses it and gives it to ``SampleAssembly``.
+    """
 
     accept_multi_turn_policy_samples: bool = config_option(
         False,
@@ -56,11 +59,14 @@ class SampleAssemblySettings(Record2SampleSettings):
         1024, help="Tokens a multi-turn sample may realign where a later prompt rewrote an earlier response."
     )
     scaffold_tolerance: int = config_option(
-        0, help="Masked tokens the assembly may realign before a response, for a thinking template's scaffold."
+        0,
+        help=(
+            "Tokens at the end of a prompt that the next prompt's history may drop, such as a thinking template's "
+            "scaffold; the sample keeps them, and the response after them trains."
+        ),
     )
 
     def __post_init__(self) -> None:
-        super().__post_init__()
         if self.realign_threshold < 0:
             raise ValueError("realign_threshold must be non-negative")
         if self.scaffold_tolerance < 0:
@@ -73,9 +79,10 @@ class SampleAssembly:
     ``build`` makes the ATIF sample of a report that serving recorded, which the training component renders: the
     trajectory's last call, or with ``accept_multi_turn_policy_samples`` every call. ``assemble`` builds the tensor
     sample of the calls of a training component's own task rollout, which carry the tokens that its engine sampled:
-    one call becomes one sample (``single_sample``), and the ordered calls of a trajectory one multi-turn sample,
-    realigned within ``realign_threshold`` and ``scaffold_tolerance``. An unassemblable trajectory raises a training
-    data error. A recipe whose single sample carries more fields overrides ``single_sample``.
+    one call becomes one sample (``single_sample``), and the ordered calls of a trajectory one multi-turn sample
+    (``make_multi_turn_policy_trajectory`` with ``realign_threshold`` and ``scaffold_tolerance``). An unassemblable
+    trajectory raises a training data error. A recipe whose single sample carries more fields overrides
+    ``single_sample``.
     """
 
     def __init__(self, settings: SampleAssemblySettings) -> None:

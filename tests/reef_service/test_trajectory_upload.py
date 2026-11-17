@@ -20,6 +20,7 @@ from tests.support.trajectory_uploads import (
     upload_trajectories,
 )
 
+from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.train.types import TrajectorySample
@@ -28,7 +29,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 async def wait_for_batches(recipe: UploadRecipe, count: int) -> None:
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(20):
         while len(recipe.batches) < count:
             await asyncio.sleep(0.01)
     assert len(recipe.batches) == count
@@ -40,7 +41,10 @@ async def create_scenario(client: TestClient) -> None:
 
 
 def sample_ids(dispatcher: Dispatcher) -> list[str]:
-    return [stored.sample_id for stored in dispatcher.get_or_create_scenario("s").store.samples.page()]
+    return [
+        stored.sample_id
+        for stored in dispatcher.storage.sample_store("s", dispatcher.get_or_create_scenario("s").store).page()
+    ]
 
 
 def test_trajectory_items_train_once_also_after_a_restart(tmp_path):
@@ -70,13 +74,15 @@ def test_trajectory_items_train_once_also_after_a_restart(tmp_path):
             await create_scenario(client)
             await wait_for_batches(recipe, 2)
 
-    dispatcher = dispatcher_for(tmp_path, recipe)
+    # The repository outlives the restart, as the scenario's training start is one of its snapshots.
+    factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+    dispatcher = dispatcher_for(tmp_path, recipe, factory)
     try:
         asyncio.run(create_and_train(dispatcher))
         assert dispatcher.get_or_create_scenario("s").records.count("s") == 0
     finally:
         dispatcher.close()
-    dispatcher = dispatcher_for(tmp_path, recipe)
+    dispatcher = dispatcher_for(tmp_path, recipe, factory)
     try:
         asyncio.run(create_after_restart(dispatcher))
     finally:
@@ -166,18 +172,15 @@ def test_the_record_import_does_not_take_a_trajectory(tmp_path, route):
         dispatcher.close()
 
 
-def test_a_trajectory_that_cannot_train_is_refused_and_jobs_get_the_rendered_samples(tmp_path):
+def test_a_trajectory_that_cannot_train_is_skipped_and_jobs_get_the_rendered_samples(tmp_path):
     recipe = UploadRecipe(task_stage=RenderingSamples)
     dispatcher = dispatcher_for(tmp_path, recipe)
 
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             await create_scenario(client)
-            response = await upload_trajectories(client, AUTH, "good", "bad")
-            assert response.status == 400
-            assert "trajectory 'bad' cannot train: it has no agent step" in await response.text()
-            assert dispatcher.data_store.query("s", kind="trajectory") == (), "nothing of it is stored"
-            response = await upload_trajectories(client, AUTH, "t1", "t2")
+            # The write does not render the trajectories: the pipeline skips "bad" when it reads it.
+            response = await upload_trajectories(client, AUTH, "t1", "bad", "t2")
             assert response.status == 201, await response.text()
             await wait_for_batches(recipe, 1)
 

@@ -1,8 +1,8 @@
 """opencode adapter render steps: agent and command shapes, frontmatter, and Reef's plugin.
 
-A release is an opencode plugin in ``plugin/``. ``finalize_render`` adds
+A snapshot is an opencode plugin in ``plugin/``. ``finalize_render`` adds
 Reef's own plugin there (``index.ts`` and its ``package.json``), whose config
-hook merges the release's ``config.json`` over opencode's, adds
+hook merges the snapshot's ``config.json`` over opencode's, adds
 ``AGENTS.md`` to the instructions, the commands of ``commands.json`` (each
 command file, as opencode reads one) and the ``skill/`` directory, and which
 merges the hooks and tools of the modules in ``extensions/``.
@@ -62,12 +62,12 @@ from reef.harness.adapters.common.frontmatter import skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
-#: opencode's own opencode.json, which holds the model binding, and the release's config, which Reef's plugin merges.
+#: opencode's own opencode.json, which holds the model binding, and the snapshot's config, which Reef's plugin merges.
 AGENT_CONFIG = "opencode/opencode.json"
 TREE_CONFIG = "plugin/config.json"
 COMMAND_DIR = "plugin/command/"
 SKILL_DIR = "plugin/skill/"
-#: Reef's plugin: the release's parts through the config hook, and the merged hooks and tools of its extensions.
+#: Reef's plugin: the snapshot's parts through the config hook, and the merged hooks and tools of its extensions.
 PLUGIN_ENTRY = """\
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";

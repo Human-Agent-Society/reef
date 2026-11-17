@@ -99,7 +99,7 @@ collisions.
 
 ## requires.json
 
-Each item carries a `prompt`: one sentence, under 200 characters, that the release page shows the user before
+Each item carries a `prompt`: one sentence, under 200 characters, that the snapshot page shows the user before
 they use the change; the extension itself never asks. The kinds:
 
 - `{"name": "AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}`: a value

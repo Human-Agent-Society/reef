@@ -1,6 +1,6 @@
 """Cookbook methods, one package each.
 
-``recipes/<method>/`` holds a method's recipe, processor, objective and (for
+``recipes/<method>/`` holds a method's recipe, processor and (for
 weight methods) its ``slime/`` backend half, plus ``examples/`` — the
 runnable Harbor task + harness stacks that drive it. ``recipes/basic`` is the
 example for the core record-only ``recipe``, which has no method package.

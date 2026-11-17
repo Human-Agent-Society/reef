@@ -97,12 +97,11 @@ def _group_alive(group: int) -> bool:
     return any(_in_group(process, group) for process in psutil.process_iter())
 
 
-def _retire_group(group: int, owner_started: float | None) -> None:
-    """SIGKILL the process group ``group`` and wait until no process of it is left.
+def _kill_group(group: int, owner_started: float | None) -> bool:
+    """SIGKILL the process group ``group``. Return False if its live leader is a reused PID, which is left alone.
 
-    ``owner_started`` is the creation time of the group's leader, the worker; a live leader of another start time
-    is a reused PID, whose group is left alone. ``None`` says the leader has exited: a group ID stays reserved while
-    any member lives, so the group's other processes are the worker's.
+    ``owner_started`` is the creation time of the group's leader, the worker; ``None`` says the leader has exited: a
+    group ID stays reserved while any member lives, so the group's other processes are the worker's.
     """
     import psutil
 
@@ -113,7 +112,7 @@ def _retire_group(group: int, owner_started: float | None) -> None:
     # A live group reserves its numeric ID. A reused leader PID means that
     # the old group has vanished; never signal the new process's group.
     if leader_started is not None and owner_started is not None and leader_started != owner_started:
-        return
+        return False
     try:
         os.killpg(group, signal.SIGKILL)
     except ProcessLookupError:
@@ -122,6 +121,13 @@ def _retire_group(group: int, owner_started: float | None) -> None:
         # Darwin can report EPERM when concurrent cleanup leaves only zombies.
         if _group_alive(group):
             raise
+    return True
+
+
+def _retire_group(group: int, owner_started: float | None) -> None:
+    """SIGKILL the process group ``group`` and wait until no process of it is left (``_kill_group``)."""
+    if not _kill_group(group, owner_started):
+        return
     deadline = time.monotonic() + 20
     while _group_alive(group):
         if time.monotonic() >= deadline:
@@ -129,46 +135,65 @@ def _retire_group(group: int, owner_started: float | None) -> None:
         time.sleep(0.05)
 
 
-def retire(token: str, timeout_s: float = 30) -> None:
-    """Retire and confirm all leased process groups on the current node.
+def retire(token: str, timeout_s: float = 30) -> dict[str, float | int]:
+    """Retire and confirm all leased process groups on the current node, and return what that took.
 
     Called on each deployment node by an unguarded cleanup worker. A tombstone
     prevents workers that are still starting from joining this generation.
     Missing or failed guards fail cleanup closed instead of permitting reuse.
+    All groups retire at the same time and share one deadline: no group waits for another.
     """
     import psutil
 
     directory = _directory(token)
     directory.mkdir(mode=0o700, exist_ok=True)
     (directory / "closing").touch()
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
+    deadline = started + timeout_s
+    signaled: set[int] = set()
+    missing_guards: set[int] = set()
     while True:
-        pending = False
+        waiting = []
         for record in directory.glob("*.json"):
             if record.with_suffix(".done").exists():
                 continue
+            group = int(record.stem)
             metadata = json.loads(record.read_text())
             try:
                 guard = psutil.Process(metadata["guard_pid"])
                 if guard.create_time() != metadata["guard_started"]:
                     raise RuntimeError("model process guard identity changed")
-                guard.send_signal(signal.SIGTERM)
+                if guard.status() == psutil.STATUS_ZOMBIE:
+                    raise psutil.NoSuchProcess(metadata["guard_pid"])
+                if group not in signaled:
+                    guard.send_signal(signal.SIGTERM)
+                    signaled.add(group)
             except psutil.NoSuchProcess as exc:
                 if record.with_suffix(".done").exists():
                     continue
                 # Ray kills an exiting worker's children, its guard among them, before the guard retires the
                 # worker's group, whose other processes then outlive both. With the worker gone, retire them here.
-                group = int(record.stem)
                 if _worker_alive(group):
                     raise RuntimeError("model process guard disappeared before confirming cleanup") from exc
-                _retire_group(group, None)
-                record.with_suffix(".done").touch()
+                missing_guards.add(group)
+                _kill_group(group, None)
+                if _group_alive(group):
+                    waiting.append(group)
+                else:
+                    record.with_suffix(".done").touch()
                 continue
-            pending = True
-        if not pending:
-            return
+            waiting.append(group)
+        if not waiting:
+            return {
+                "seconds": time.monotonic() - started,
+                "groups": len(signaled | missing_guards),
+                "missing_guards": len(missing_guards),
+            }
         if time.monotonic() >= deadline:
-            raise TimeoutError("model process groups did not retire before the cleanup deadline")
+            raise TimeoutError(
+                f"model process groups {sorted(waiting)} did not retire before the cleanup deadline of {timeout_s} "
+                f"seconds; {len(missing_guards)} of {len(signaled | missing_guards)} groups had no guard"
+            )
         time.sleep(0.05)
 
 

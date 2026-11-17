@@ -10,13 +10,21 @@ marker score 0.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._strategies import resolve_task_scorer
+from tests.support.harness_jobs import (
+    COMPONENT,
+    TreeArtifacts,
+    build_harness_backend,
+    configured_live,
+    harness_component,
+    harness_recipe,
+    head_of,
+    rebuilt_recipe,
+)
 from tests.support.harness_methods import (
     ALTERNATE,
     IMPROVED,
@@ -29,7 +37,9 @@ from tests.support.harness_methods import (
     served_runtime,
 )
 from tests.support.harness_service import backend_step, drive_job, harness_dispatcher, report_once, seed_root
-from tests.support.harness_steps import COMPONENT, TreeReleases, build_harness_backend, harness_recipe, head_of
+from tests.support.records import memory_records
+from tests.support.strategies import resolve_task_scorer
+from tests.support.trainers import recipe_trainer
 
 import recipes.meta_harness
 from recipes.meta_harness import MetaHarness, MetaHarnessSettings
@@ -38,15 +48,14 @@ from reef.core.plugins import PluginConfigError
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.harness import ComparePolicy
 from reef.harness.tree import HarnessTree
-from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.recipe.registry import build_recipe
-from reef.storage.sqlite import SQLiteRecordStore
+from reef.recipe.loading import build_recipe
+from reef.scenario.live_objects import LiveObjects
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 #: A tree without the marker: it scores 0 like the seed, so compare rejects it.
 LOSER = HarnessTree({"rules.md": "Answer quickly.\n"})
@@ -54,31 +63,31 @@ LOSER = HarnessTree({"rules.md": "Answer quickly.\n"})
 
 def meta_harness_backend(
     tmp_path: Path, chat: QueueChat, *, seed: HarnessTree = SEED, **settings: Any
-) -> tuple[HarnessBackend, TreeReleases]:
+) -> tuple[HarnessBackend, TreeArtifacts]:
     """The backend of one scenario whose method is ``MetaHarness(settings)`` and whose proposer model is ``chat``."""
     method = MetaHarness(MetaHarnessSettings(**settings))
-    recipe = harness_recipe(tmp_path, method, seed=seed, score=MarkerScorer(), tasks=(TASK,))
-    recipe = dataclasses.replace(recipe, models={"proposer": chat})
-    releases = TreeReleases(recipe.seed)
-    return build_harness_backend(recipe, "demo", releases), releases
+    recipe, live = harness_recipe(tmp_path, method, seed=seed, score=MarkerScorer(), tasks=(TASK,))
+    recipe, live = rebuilt_recipe(recipe, live, models={"proposer": chat})
+    artifacts = TreeArtifacts(recipe.seed)
+    return build_harness_backend(recipe, live, "demo", artifacts), artifacts
 
 
 def run(
     backend: HarnessBackend,
-    releases: TreeReleases,
+    artifacts: TreeArtifacts,
     state: Any,
     number: int,
     *,
     policy: ComparePolicy | None = None,
     request: TrainingRequest | None = None,
-) -> TrainStepResult:
+) -> TrainingCommit:
     """Step ``number``, which answers ``request`` (else a request of its own), decided on means; a selected tree
-    becomes the next release."""
+    becomes the next snapshot."""
     request = TrainingRequest("Propose the next candidate.", "", "", f"ask-{number}") if request is None else request
-    data = JobData(f"demo:instruction:{request.id}", (), request=request)
+    data = JobData(f"demo:request:{request.id}", (), request=request)
     result = backend_step(backend, data, state, ComparePolicy(backend, statistic="mean") if policy is None else policy)
     if result.artifact is not None and result.artifact.local_path is not None:
-        releases.publish(f"r{number}", HarnessTree.read(result.artifact.local_path))
+        artifacts.publish(f"r{number}", HarnessTree.read(result.artifact.local_path))
     return result
 
 
@@ -90,10 +99,10 @@ def search_state(prompt: str) -> dict[str, Any]:
 
 def test_a_step_proposes_a_complete_tree_and_the_history_keeps_what_the_proposer_said(tmp_path: Path) -> None:
     chat = QueueChat(proposal_reply(SEED, IMPROVED, hypothesis="the marker helps"))
-    backend, releases = meta_harness_backend(tmp_path, chat)
+    backend, artifacts = meta_harness_backend(tmp_path, chat)
     request = TrainingRequest("Prefer short answers.", "s", "base", "ask-1")
 
-    result = run(backend, releases, HarnessState().to_json(), 1, request=request)
+    result = run(backend, artifacts, HarnessState().to_json(), 1, request=request)
 
     assert result.metrics["selected"] is True and result.metrics["selection"]["policy"] == "compare"
     assert (result.metrics["candidate_mean"], result.metrics["current_mean"]) == (1.0, 0.0)
@@ -118,10 +127,10 @@ def test_a_step_proposes_a_complete_tree_and_the_history_keeps_what_the_proposer
 
 def test_full_history_branches_from_a_rejected_candidate_and_reads_its_run_records(tmp_path: Path) -> None:
     chat = QueueChat(proposal_reply(SEED, LOSER), proposal_reply(LOSER, IMPROVED))
-    backend, releases = meta_harness_backend(tmp_path, chat, max_runs=2, run_chars=300)
+    backend, artifacts = meta_harness_backend(tmp_path, chat, max_runs=2, run_chars=300)
 
-    first = run(backend, releases, HarnessState().to_json(), 1)
-    second = run(backend, releases, first.state, 2)
+    first = run(backend, artifacts, HarnessState().to_json(), 1)
+    second = run(backend, artifacts, first.state, 2)
 
     assert first.metrics["selected"] is False and second.metrics["selected"] is True
     assert second.metrics["method_notes"]["parent_id"] == LOSER.checksum()
@@ -147,11 +156,11 @@ def test_full_history_branches_from_a_rejected_candidate_and_reads_its_run_recor
 
 def test_incumbent_only_branches_from_the_served_tree_and_shows_the_refused_reply_next(tmp_path: Path) -> None:
     chat = QueueChat(proposal_reply(SEED, LOSER), proposal_reply(LOSER, ALTERNATE), proposal_reply(SEED, IMPROVED))
-    backend, releases = meta_harness_backend(tmp_path, chat, mode="incumbent_only")
+    backend, artifacts = meta_harness_backend(tmp_path, chat, mode="incumbent_only")
 
-    first = run(backend, releases, HarnessState().to_json(), 1)
-    second = run(backend, releases, first.state, 2)
-    third = run(backend, releases, second.state, 3)
+    first = run(backend, artifacts, HarnessState().to_json(), 1)
+    second = run(backend, artifacts, first.state, 2)
+    third = run(backend, artifacts, second.state, 3)
 
     error = "parent_id must name a candidate of the population (incumbent_only mode)"
     assert second.metrics["skipped"] == "the method left the head tree unchanged"
@@ -166,9 +175,9 @@ def test_a_proposal_keeps_the_parent_files_of_the_parts_it_may_not_change(tmp_pa
     seed = HarnessTree({**SEED.files, "config/primary.json": json.dumps({}) + "\n"})
     changed = HarnessTree({**IMPROVED.files, "config/primary.json": json.dumps({"defaultTools": []}) + "\n"})
     chat = QueueChat(proposal_reply(seed, changed))
-    backend, releases = meta_harness_backend(tmp_path, chat, seed=seed, components=("rules",))
+    backend, artifacts = meta_harness_backend(tmp_path, chat, seed=seed, components=("rules",))
 
-    result = run(backend, releases, HarnessState().to_json(), 1)
+    result = run(backend, artifacts, HarnessState().to_json(), 1)
 
     assert result.metrics["method_notes"] == {
         "status": "refused",
@@ -179,12 +188,12 @@ def test_a_proposal_keeps_the_parent_files_of_the_parts_it_may_not_change(tmp_pa
 def test_an_invalid_or_repeated_tree_leaves_the_head_unchanged_and_joins_the_attempts(tmp_path: Path) -> None:
     empty_skill = HarnessTree({**SEED.files, "skills/empty/SKILL.md": "\n"})
     chat = QueueChat("not json at all", proposal_reply(SEED, empty_skill), proposal_reply(SEED, SEED))
-    backend, releases = meta_harness_backend(tmp_path, chat)
+    backend, artifacts = meta_harness_backend(tmp_path, chat)
 
     state = HarnessState().to_json()
     results = []
     for number in (1, 2, 3):
-        result = run(backend, releases, state, number)
+        result = run(backend, artifacts, state, number)
         results.append(result)
         state = result.state
 
@@ -206,11 +215,11 @@ def test_a_retried_step_proposes_again_the_tree_its_failed_attempt_proposed(tmp_
             raise RuntimeError("the decision is unavailable")
 
     chat = QueueChat(proposal_reply(SEED, IMPROVED), proposal_reply(SEED, IMPROVED))
-    backend, releases = meta_harness_backend(tmp_path, chat)
+    backend, artifacts = meta_harness_backend(tmp_path, chat)
     with pytest.raises(RuntimeError, match="unavailable"):
-        run(backend, releases, HarnessState().to_json(), 1, policy=FailingDecision(backend, statistic="mean"))
+        run(backend, artifacts, HarnessState().to_json(), 1, policy=FailingDecision(backend, statistic="mean"))
 
-    retried = run(backend, releases, HarnessState().to_json(), 1)
+    retried = run(backend, artifacts, HarnessState().to_json(), 1)
 
     assert retried.metrics["selected"] is True and len(chat.prompts) == 2
     # Both trees' scores come from the failed attempt's runs.
@@ -249,8 +258,8 @@ def test_a_proposer_model_that_the_deployment_does_not_declare_is_refused(tmp_pa
     backend, _ = meta_harness_backend(tmp_path, QueueChat(), model="typo")
     with pytest.raises(ValueError, match=r"is not declared under evolution\.models"):
         request = TrainingRequest("Propose the next candidate.", "", "", "ask-1")
-        backend.prepare_step(
-            JobData("demo:instruction:ask-1", (), request=request), HarnessState().to_json(), 0, head=head_of(backend)
+        backend.prepare_job(
+            JobData("demo:request:ask-1", (), request=request), HarnessState().to_json(), 0, head=head_of(backend)
         )
 
 
@@ -258,14 +267,19 @@ def test_a_proposer_model_that_the_deployment_does_not_declare_is_refused(tmp_pa
 def test_a_deployment_names_the_method_for_any_adapter(tmp_path: Path, adapter: str) -> None:
     config = meta_harness_sections(tmp_path, adapter=adapter, mode="incumbent_only", components=["rules"])
     api = "openai"
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=served_runtime(api))
+    recipe = build_recipe(config["implementation"], {}, config=config)
 
-    assert isinstance(recipe, HarnessEvolutionRecipe) and isinstance(recipe.method, MetaHarness)
-    assert recipe.method.settings == MetaHarnessSettings(mode="incumbent_only", components=("rules",))
+    live = configured_live(recipe, LiveObjects(runtime=served_runtime(api)))
+    method = harness_component(live).method
+    assert isinstance(method, MetaHarness)
+    assert method.settings == MetaHarnessSettings(mode="incumbent_only", components=("rules",))
     assert recipe.evolution.adapter == adapter and recipe.seed == SEED
-    releases = ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
+    artifacts = ComponentArtifacts(TreeArtifacts(recipe.seed), COMPONENT)
     assert isinstance(
-        recipe.build("general-task", SQLiteRecordStore(), releases=releases, root=seed_root(recipe)), Trainer
+        recipe_trainer(
+            recipe, live, "general-task", memory_records("general-task"), artifacts=artifacts, root=seed_root(recipe)
+        ),
+        Trainer,
     )
 
 
@@ -281,7 +295,8 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
     from harbor.utils.import_path import import_class
     from reef_terminus import runner
 
-    from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
+    from reef.execution.sandbox.bwrap import BwrapExecutor
+    from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()
     proposed = HarnessTree({**SEED.files, "extensions/agent.py": code})
@@ -320,8 +335,9 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
             return ProcessOutcome(runner.run(argv[-1]), "", "")
 
     monkeypatch.setattr("reef_eval.Lab", Lab)
-    monkeypatch.setattr(SandboxExecutor, "preflight", lambda self: None)
-    monkeypatch.setattr(SandboxExecutor, "launch", launch)
+    monkeypatch.setattr("reef.execution.sandbox.config.host_sandbox", lambda: BwrapExecutor)
+    monkeypatch.setattr(BwrapExecutor, "preflight", lambda self: None)
+    monkeypatch.setattr(BwrapExecutor, "launch", launch)
     config = meta_harness_sections(tmp_path, adapter="terminus")
     evolution = config["evolution"]
     evolution.pop("binary")
@@ -330,18 +346,15 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
         sandbox={"egress_hosts": ["api.e2b.dev"], "env_from": ["REEF_TERMINUS_ENVIRONMENT", "E2B_API_KEY"]},
     )
     evolution["evaluation"].update(task_timeout_s=17, forbid_residue=True, tasks=["test/hello-world"])
-    recipe = build_recipe(
-        config["implementation"],
-        {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"},
-        config=config,
-        runtime=served_runtime(),
-    )
-    recipe = dataclasses.replace(
+    environ = {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"}
+    recipe = build_recipe(config["implementation"], environ, config=config)
+    recipe, live = rebuilt_recipe(
         recipe,
+        configured_live(recipe, LiveObjects(runtime=served_runtime()), environ),
         scorer=resolve_task_scorer(lambda task, result: result.trajectory[0]["reward"]),
         models={"proposer": QueueChat(proposal_reply(SEED, proposed))},
     )
-    dispatcher = harness_dispatcher(tmp_path, recipe, hold_local_cycles=True)
+    dispatcher = harness_dispatcher(tmp_path, recipe, live, hold_local_cycles=True)
     try:
         scenario = dispatcher.get_or_create_scenario("terminus-meta")
         report_once(scenario, "1")

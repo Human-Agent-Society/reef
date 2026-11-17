@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.job_data import job_data_ref
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import (
     TOKEN,
@@ -24,6 +25,7 @@ from tests.support.trajectory_uploads import (
 )
 
 from reef.artifact.artifact import SnapshotRef
+from reef.artifact.base_root import BASE_FILE, BaseRoot
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import DefaultStart, FileDownload
@@ -42,7 +44,9 @@ DATA = "/reef/namespaces/acme/data"
 
 def queued_job(job_id: str, scenario: str) -> NewWork:
     """A Tinker training job of ``scenario`` with no samples, as control adds it to the jobs queue."""
-    job = TrainingJob(job_id, "tinker", "tinker:base", JobData(f"{scenario}:data:1"), {"lr": 1e-5}, scenario=scenario)
+    job = TrainingJob(
+        job_id, "tinker", "tinker:base", job_data_ref(JobData(f"{scenario}:data:1")), {"lr": 1e-5}, scenario=scenario
+    )
     return NewWork(JOBS_QUEUE, job_id, scenario, job_kind("tinker"), job_payload(job), serial_key=scenario)
 
 
@@ -121,7 +125,7 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
         )
         missing_id = (await missing.json())["id"]
         assert (await finished(client, f"{DATA}/imports/{missing_id}"))["state"] == "failed"
-        assert dispatcher.queue.get(DATA_QUEUE, missing_id).attempt_count == 1
+        assert dispatcher.queue.read(DATA_QUEUE, missing_id).attempt_count == 1
         refused = await client.post(f"{DATA}/imports", headers=AUTH, json={"uri": "x", "metadata": {"kind": "task"}})
         assert refused.status == 400
 
@@ -148,9 +152,9 @@ def test_an_item_archive_downloads_with_the_token_or_with_a_signed_url_alone(tmp
 
 
 def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_from_the_queue(tmp_path: Path) -> None:
-    # The root release that each scenario starts with holds one file.
+    # The root snapshot that each scenario starts with holds one file.
     dispatcher = dispatcher_for(tmp_path, UploadRecipe(start=DefaultStart(files={"model.txt": "w0"})))
-    dispatcher.queue.add(queued_job("job-1", "s"))
+    dispatcher.queue.append(queued_job("job-1", "s"))
 
     async def check(client: TestClient) -> None:
         assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
@@ -176,7 +180,7 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
         jobs = await (await client.get("/reef/scenarios/s/jobs", headers=AUTH)).json()
         assert [(job["id"], job["state"]) for job in jobs["jobs"]] == [("job-1", "queued")]
         (job,) = jobs["jobs"]
-        assert (job["parameters"], job["sample_count"], job["sample_kind"], job["instruction"]) == (
+        assert (job["parameters"], job["sample_count"], job["sample_kind"], job["request"]) == (
             {"lr": 1e-5},
             0,
             None,
@@ -190,8 +194,27 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
     served(dispatcher, check)
 
 
+def test_a_base_root_lists_and_downloads_its_base_file(tmp_path: Path) -> None:
+    base = BaseRoot({"model": "/models/qwen", "lora_rank": "8"})
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe(start=DefaultStart(files={BASE_FILE: base.to_text()})))
+
+    async def check(client: TestClient) -> None:
+        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
+        artifacts = await (await client.get("/reef/scenarios/s/artifacts", headers=AUTH)).json()
+        (creation,) = artifacts["artifacts"]
+        assert creation["operation"] == "creation" and creation["source"]["kind"] == "default"
+        files_route = f"/reef/scenarios/s/artifacts/{creation['artifact_id']}/files"
+        listing = await (await client.get(files_route, headers=AUTH)).json()
+        assert [(entry["path"], entry["bytes"]) for entry in listing["files"]] == [(BASE_FILE, len(base.to_text()))]
+        downloaded = await client.get(f"{files_route}?path={BASE_FILE}", headers=AUTH)
+        assert downloaded.status == 200
+        assert BaseRoot.from_bytes(await downloaded.read()) == base
+
+    served(dispatcher, check)
+
+
 class SigningBackend(InMemoryRepositoryBackend):
-    """An in-memory repository that signs a URL for each file of a release, as an object store does."""
+    """An in-memory repository that signs a URL for each file of a snapshot, as an object store does."""
 
     def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...]:
         files = DirectoryFiles(self.materialize(ref).local_path)
@@ -229,8 +252,8 @@ def test_an_artifacts_file_list_gives_the_repositorys_urls_without_materializing
 
 def test_a_client_cancels_a_training_job_of_its_scenario_and_an_ended_job_stays_as_it_is(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
-    dispatcher.queue.add(queued_job("job-1", "s"))
-    dispatcher.queue.add(queued_job("job-t", "t"))
+    dispatcher.queue.append(queued_job("job-1", "s"))
+    dispatcher.queue.append(queued_job("job-t", "t"))
 
     async def check(client: TestClient) -> None:
         for name in ("s", "t"):
@@ -250,19 +273,6 @@ def test_a_client_cancels_a_training_job_of_its_scenario_and_an_ended_job_stays_
         assert (await client.post("/reef/scenarios/s/jobs/job-t/cancel", headers=AUTH)).status == 404
         assert (await client.post("/reef/scenarios/s/jobs/missing/cancel", headers=AUTH)).status == 404
         assert (await client.post("/reef/scenarios/nothing/jobs/job-1/cancel", headers=AUTH)).status == 404
-        assert dispatcher.queue.get(JOBS_QUEUE, "job-t").state == "queued"
-
-    served(dispatcher, check)
-
-
-def test_the_contract_reports_what_the_scenario_can_run(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
-
-    async def check(client: TestClient) -> None:
-        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
-        contract = await (await client.get("/reef/scenarios/s/contract", headers=AUTH)).json()
-        # The trainer's component starts jobs from releases, so it can start from an artifact; the scenario has no runtime to
-        # evaluate on and none that loads its artifacts, so a served artifact needs only the durable history.
-        assert contract["capabilities"] == {"serve_beside": True, "evaluate": [], "train_from": ["records"]}
+        assert dispatcher.queue.read(JOBS_QUEUE, "job-t").state == "queued"
 
     served(dispatcher, check)

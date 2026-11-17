@@ -1,11 +1,8 @@
 """vLLM's token-native ``/inference/v1/generate`` behind Reef's chat facades.
 
-vLLM returns the sampled token ids and one log probability per token; the
-per-token weight versions arrive in ``kv_transfer_params`` once Reef's
-connector is selected on the engine. vLLM returns no decoded text on this
-route, so the handler decodes the ids with its own tokenizer for the client.
-Streaming is served from the buffered result because vLLM's stream frames
-carry no ``kv_transfer_params``.
+vLLM returns the sampled token ids and one log probability per token. vLLM
+returns no decoded text on this route, so the handler decodes the ids with its
+own tokenizer for the client. Streaming is served from the buffered result.
 """
 
 from __future__ import annotations
@@ -24,8 +21,6 @@ from reef.inference.chat import (
     positive_max_tokens,
 )
 from reef.inference.http import RequestHeadersFactory
-from reef.inference.interfaces import InferenceArtifact
-from reef.inference.vllm.versions import TOKEN_RUNTIME_LOAD_IDS_KEY, UNKNOWN_RUNTIME_LOAD_ID
 
 VLLM_GENERATE_PATH = "/inference/v1/generate"
 #: vLLM renders logprob tokens as ``token_id:N`` on this route.
@@ -110,7 +105,7 @@ class VLLMGenerateClient(NativeGenerateClient):
             native_payload["request_id"] = request["rid"]
         return native_payload
 
-    def parse(self, artifact: InferenceArtifact, response: Mapping[str, Any]) -> CapturedGeneration:
+    def parse(self, response: Mapping[str, Any]) -> CapturedGeneration:
         choices = response.get("choices")
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], Mapping):
             raise ValueError("vLLM generate response must carry exactly one choice")
@@ -131,7 +126,6 @@ class VLLMGenerateClient(NativeGenerateClient):
             )
             for index, entry in enumerate(entries)
         ]
-        stamped = self.token_runtime_load_ids(artifact, response, len(output_ids))
         public_meta = {
             key: value
             for key, value in (
@@ -144,34 +138,10 @@ class VLLMGenerateClient(NativeGenerateClient):
         return CapturedGeneration(
             output_ids=output_ids,
             rollout_log_probs=rollout_log_probs,
-            token_runtime_load_ids=stamped,
             finish_reason=finish_reason,
             text=None,
             public_meta=public_meta,
         )
-
-    @staticmethod
-    def token_runtime_load_ids(artifact: InferenceArtifact, response: Mapping[str, Any], count: int) -> list[str]:
-        params = response.get("kv_transfer_params")
-        stamped = params.get(TOKEN_RUNTIME_LOAD_IDS_KEY) if isinstance(params, Mapping) else None
-        if stamped is None:
-            if artifact.require_token_runtime_load_ids:
-                raise ValueError(
-                    "vLLM generate response lacks per-token runtime load IDs; "
-                    "select Reef's connector in the engine's --kv-transfer-config"
-                )
-            # A local artifact is fixed throughout this call.
-            return [artifact.artifact_id] * count
-        if (
-            not isinstance(stamped, list)
-            or len(stamped) != count
-            or any(
-                not isinstance(version, str) or not version or version == UNKNOWN_RUNTIME_LOAD_ID
-                for version in stamped
-            )
-        ):
-            raise ValueError("vLLM generate response has incomplete token runtime load IDs")
-        return list(stamped)
 
     def tool_parser(self, tools: list[dict[str, Any]], parser_name: str, tokenizer: Any) -> Any:
         """Build the parser vLLM registers under ``--tool-call-parser``'s name, for buffered parsing."""
@@ -248,7 +218,6 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
 
 
 __all__ = [
-    "TOKEN_RUNTIME_LOAD_IDS_KEY",
     "VLLM_GENERATE_PATH",
     "VLLMGenerateClient",
     "VLLMInferenceHandler",

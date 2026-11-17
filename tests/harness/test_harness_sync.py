@@ -53,10 +53,10 @@ def test_an_import_replaces_the_heads_files_and_ignores_what_no_part_renders_to(
 def test_codex_reads_a_file_where_a_skill_and_a_command_both_render_as_the_part_the_base_has() -> None:
     codex = get_adapter("codex")
     files = {"plugin/skills/ship/SKILL.md": COMMAND}
-    # A command the release had stays a command, so an unchanged sync changes nothing.
+    # A command the snapshot had stays a command, so an unchanged sync changes nothing.
     base = HarnessTree({"commands/ship.md": COMMAND})
     assert import_files(files, base, codex).tree == base
-    # A file the release did not have is the part declared first, the skill.
+    # A file the snapshot did not have is the part declared first, the skill.
     assert import_files(files, HarnessTree({}), codex).tree == HarnessTree({"skills/ship/SKILL.md": COMMAND})
 
 
@@ -92,7 +92,7 @@ BINDINGS = {"claude": "anthropic", "codex": "responses", "opencode": "openai", "
 
 
 @pytest.mark.parametrize("adapter", sorted(BINDINGS))
-def test_a_layer_installs_the_release_as_the_agents_plugin_with_the_token_off_the_command_line(adapter) -> None:
+def test_a_layer_installs_the_artifact_as_the_agents_plugin_with_the_token_off_the_command_line(adapter) -> None:
     descriptor = get_adapter(adapter)
     served = ModelBinding(base_url="http://upstream.invalid", model="m1", api=BINDINGS[adapter])
     tree = HarnessTree({"skills/fix/SKILL.md": SKILL})

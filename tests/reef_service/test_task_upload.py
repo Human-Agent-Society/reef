@@ -6,24 +6,27 @@ import asyncio
 import io
 import json
 import tarfile
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_steps import evolution_config, runtime
+from tests.support.harness_jobs import configured_live, evolution_config
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import dispatcher_for
 
+from reef.core.plugins import PluginReference
 from reef.core.tasks import write_harbor_task
 from reef.recipe import Recipe
 from reef.recipe.harness import HarnessEvolutionRecipe
+from reef.recipe.loading import load_recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
-from reef.train import JobData, Trainer
-from reef.train.pipeline import TrainingPipeline
+from reef.storage.item_kinds import task_partition
+from reef.train import JobData
+from reef.train.pipeline import PipelineSettings
 
 TOKEN = "task-upload-test-token"
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -33,6 +36,10 @@ GZIP = {**AUTH, "Content-Type": "application/gzip"}
 class TaskReadingJobData(Sample2Job):
     accepts_imported_tasks = True
 
+    @classmethod
+    def from_config(cls, config, *, context, record2sample, environ):
+        return cls(context, None, None)
+
     def make_job_data(self, samples, data_id):
         return JobData(data_id, samples)
 
@@ -41,34 +48,13 @@ class RecordOnlyJobData(TaskReadingJobData):
     accepts_imported_tasks = False
 
 
-@dataclass(frozen=True, kw_only=True)
-class TaskRecipe(Recipe):
-    batch_stage: type[Sample2Job] = TaskReadingJobData
-
-    def build(
-        self,
-        scenario,
-        records,
-        *,
-        algorithm_state=None,
-        experiment_logger=None,
-        task_storage=None,
-        releases=None,
-        samples=None,
-        root=None,
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=lambda context: TrainingPipeline(
-                context, record2sample=NoSamples(), sample2job=self.batch_stage(context, None, None)
-            ),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            task_storage=task_storage,
-            samples=samples,
-            root=root,
+def task_recipe(sample2job: type[Sample2Job] = TaskReadingJobData) -> Recipe:
+    """A recipe that trains nothing, whose sample-to-job stage is ``sample2job``."""
+    return Recipe(
+        pipeline_stages=PipelineSettings(
+            record2sample=PluginReference(NoSamples, {}), sample2job=PluginReference(sample2job, {})
         )
+    )
 
 
 def tasks_url(split: str | None = "train", scenario: str = "s", **metadata: object) -> str:
@@ -92,6 +78,13 @@ def archive(root: Path, *names: str, port: int = 9000) -> bytes:
     return buffer.getvalue()
 
 
+def stored_task(dispatcher, root: Path, name: str, port: int = 9000) -> str:
+    """Write one Harbor task directory into the partition of owner ``s`` in the task file store, as a client that
+    writes the store itself does; return its files digest."""
+    directory = write_harbor_task(task_for(name, "record-1", port), root / f"stored-{port}")
+    return dispatcher.data_store.task_files.write(task_partition("s"), directory)
+
+
 def raw_archive(*entries: tarfile.TarInfo) -> bytes:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
@@ -107,7 +100,7 @@ def entry(name: str, kind: bytes = tarfile.REGTYPE, size: int = 1, link: str = "
 
 
 def test_task_items_join_the_split_and_a_retry_changes_nothing(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, TaskRecipe())
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
@@ -146,8 +139,42 @@ def test_task_items_join_the_split_and_a_retry_changes_nothing(tmp_path: Path) -
         dispatcher.close()
 
 
+def test_a_task_items_files_are_replaced_in_place_and_a_bad_replace_changes_nothing(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await create_scenario(client)
+            assert (await client.post(tasks_url("eval"), headers=GZIP, data=archive(tmp_path, "task-a"))).status == 201
+            created = dispatcher.data_store.read("s", "task-a")
+            url = "/reef/namespaces/s/data/tasks/task-a"
+
+            response = await client.put(url, headers=GZIP, data=archive(tmp_path, "task-a", port=9200))
+            assert response.status == 200, await response.text()
+            receipt = await response.json()
+            replaced = dispatcher.data_store.read("s", "task-a")
+            assert receipt["item"]["id"] == "task-a" and receipt["item"]["digest"] == replaced.digest
+            assert replaced.digest != created.digest and replaced.metadata == created.metadata
+            assert dispatcher.data_store.task_path(replaced) != dispatcher.data_store.task_path(created)
+
+            # Another name, several tasks, an unknown item or another content type change nothing.
+            for target, body, status in (
+                (url, archive(tmp_path, "task-b"), 400),
+                (url, archive(tmp_path, "task-a", "task-b", port=9300), 400),
+                ("/reef/namespaces/s/data/tasks/missing", archive(tmp_path, "missing"), 404),
+            ):
+                assert (await client.put(target, headers=GZIP, data=body)).status == status
+            assert (await client.put(url, headers=AUTH, data=b"{}")).status == 415
+            assert dispatcher.data_store.read("s", "task-a").digest == replaced.digest
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
 def test_a_train_use_needs_a_recipe_that_reads_imported_tasks_and_an_eval_use_does_not(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, TaskRecipe(batch_stage=RecordOnlyJobData))
+    dispatcher = dispatcher_for(tmp_path, task_recipe(RecordOnlyJobData))
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
@@ -159,7 +186,7 @@ def test_a_train_use_needs_a_recipe_that_reads_imported_tasks_and_an_eval_use_do
             # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
             evaluated = await client.post(tasks_url("eval"), headers=GZIP, data=archive(tmp_path, "t"))
             assert evaluated.status == 201
-            samples = dispatcher.get_or_create_scenario("s").store.samples
+            samples = dispatcher.storage.sample_store("s", dispatcher.get_or_create_scenario("s").store)
             assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["t"]
 
     try:
@@ -184,8 +211,8 @@ def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_
     evaluation = {"tasks": [], "imported_tasks": True}
     config = {**evolution_config(evaluation=evaluation, state_dir=str(tmp_path / "state")), **pipeline}
     # In manual mode no train task starts a step while the test runs.
-    recipe = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
-    dispatcher = dispatcher_for(tmp_path, replace(recipe, training_mode="manual"))
+    recipe = load_recipe(HarnessEvolutionRecipe, config, {})
+    dispatcher = dispatcher_for(tmp_path, replace(recipe, training_mode="manual"), live=configured_live(recipe))
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
@@ -194,7 +221,7 @@ def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_
             assert response.status == (201 if published else 400), await response.text()
             held_out = archive(tmp_path, "held-out", port=9100)
             assert (await client.post(tasks_url("eval"), headers=GZIP, data=held_out)).status == 201
-            samples = dispatcher.get_or_create_scenario("s").store.samples
+            samples = dispatcher.storage.sample_store("s", dispatcher.get_or_create_scenario("s").store)
             assert [task.sample_id for task in samples.imported_tasks(split="train")] == published
             assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["held-out"]
 
@@ -205,7 +232,7 @@ def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_
 
 
 def test_an_invalid_task_create_is_refused_and_stores_nothing(tmp_path: Path) -> None:
-    dispatcher = dispatcher_for(tmp_path, TaskRecipe())
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
     good = archive(tmp_path, "task-a")
 
     async def run() -> None:
@@ -244,14 +271,128 @@ def test_an_invalid_task_create_is_refused_and_stores_nothing(tmp_path: Path) ->
         dispatcher.close()
 
 
-def test_a_body_over_the_unpacked_limit_is_refused_before_it_unpacks(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("reef.service.routes.data.MAX_UNPACKED_BYTES", 64)
-    dispatcher = dispatcher_for(tmp_path, TaskRecipe())
+def test_a_body_over_the_archive_setting_is_refused_and_a_task_over_a_file_limit_is_not_unpacked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
+    monkeypatch.setattr("reef.storage.tasks.MAX_TASK_DIRECTORY_ENTRIES", 2)
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, max_task_archive_bytes=64))) as client:
+            response = await client.post(tasks_url(), headers=GZIP, data=archive(tmp_path, "task-a"))
+            assert response.status == 413
+            replace = await client.put("/reef/namespaces/s/data/tasks/task-a", headers=GZIP, data=b"x" * 65)
+            assert replace.status == 413
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            body = raw_archive(*(entry(f"task/{name}") for name in ("a", "b", "c")))
+            response = await client.post(tasks_url(), headers=GZIP, data=body)
+            assert response.status == 400
+            assert "task 'task' breaks a limit: The task directory has 3 entries. The limit is 2." in (
+                await response.text()
+            )
+            assert dispatcher.data_store.query("s", kind="task") == ()
+            # A small gzip body can unpack to far more bytes than the data service takes on its disk.
+            monkeypatch.setattr("reef.service.tasks.MAX_ARCHIVE_UNPACKED_BYTES", 8)
+            response = await client.post(tasks_url(), headers=GZIP, data=archive(tmp_path, "task-a"))
+            assert response.status == 400
+            assert "the archive unpacks to more than 8 bytes" in await response.text()
+            assert dispatcher.data_store.query("s", kind="task") == ()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_task_items_are_created_by_reference_to_the_files_in_the_task_file_store(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
+    digests = {
+        name: stored_task(dispatcher, tmp_path, name, port) for name, port in (("task-b", 9000), ("task-a", 9001))
+    }
+    url = "/reef/namespaces/s/data/tasks"
+    body = {
+        "tasks": [{"name": name, "digest": digest} for name, digest in digests.items()],
+        "metadata": {"scenarios": {"s": "train"}},
+    }
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            response = await client.post(tasks_url(), headers=GZIP, data=archive(tmp_path, "task-a"))
-            assert response.status == 413
+            await create_scenario(client)
+            response = await client.post(url, headers=AUTH, json=body)
+            assert response.status == 201, await response.text()
+            receipt = await response.json()
+            assert [(item["id"], item["digest"]) for item in receipt["items"]] == [
+                ("task-a", digests["task-a"]),
+                ("task-b", digests["task-b"]),
+            ]
+            assert receipt["items"][0]["metadata"] == {"kind": "task", "owner": "s", "scenarios": {"s": "train"}}
+            assert receipt["synced"] is True
+            assert await (await client.post(url, headers=AUTH, json=body)).json() == receipt
+            listing = await (await client.get("/reef/scenarios/s/tasks", headers=AUTH)).json()
+            assert [(task["name"], task["split"]) for task in listing["tasks"]] == [
+                ("task-a", "train"),
+                ("task-b", "train"),
+            ]
+            # The same files as an archive give the same item.
+            archived = await client.post(tasks_url("train"), headers=GZIP, data=archive(tmp_path, "task-b"))
+            assert archived.status == 201 and (await archived.json())["items"] == receipt["items"][1:]
+
+            # A task that the store does not hold, under that name or at all, stores nothing.
+            other = stored_task(dispatcher, tmp_path, "task-c", 9002)
+            for name, digest in (("task-d", other), ("task-d", "0" * 64)):
+                tasks = [{"name": "task-c", "digest": other}, {"name": name, "digest": digest}]
+                refused = await client.post(url, headers=AUTH, json={"tasks": tasks})
+                assert refused.status == 404, await refused.text()
+            for refused_body, reason in (
+                ({"tasks": []}, "1 to 1000 tasks"),
+                ({"tasks": [{"name": "task-c"}]}, "only 'name' and 'digest'"),
+                ({"tasks": [{"name": "Task_C", "digest": other}]}, "is not a task name"),
+                ({"tasks": [{"name": "task-c", "digest": "abc"}]}, "64 lowercase hexadecimal"),
+                ({"tasks": [{"name": "task-c", "digest": other}], "split": "train"}, "optionally 'metadata'"),
+                ({"tasks": [{"name": "task-c", "digest": other}], "metadata": {"kind": "trajectory"}}, "kind is task"),
+                ({"tasks": [{"name": "task-c", "digest": other}], "metadata": {"scenarios": {"s": "test"}}}, "test"),
+            ):
+                refused = await client.post(url, headers=AUTH, json=refused_body)
+                assert refused.status == 400 and reason in await refused.text(), reason
+            assert dispatcher.data_store.read("s", "task-c") is None
+            assert (await client.post(url, headers=AUTH, data=b"tasks")).status == 415
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_a_task_items_files_are_replaced_by_reference_to_the_files_in_the_task_file_store(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, task_recipe())
+    created, replaced, other = (
+        stored_task(dispatcher, tmp_path, name, port)
+        for name, port in (("task-a", 9000), ("task-a", 9001), ("task-b", 9002))
+    )
+    url = "/reef/namespaces/s/data/tasks/task-a"
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await create_scenario(client)
+            body = {"tasks": [{"name": "task-a", "digest": created}], "metadata": {"scenarios": {"s": "eval"}}}
+            assert (await client.post("/reef/namespaces/s/data/tasks", headers=AUTH, json=body)).status == 201
+            response = await client.put(url, headers=AUTH, json={"digest": replaced})
+            assert response.status == 200, await response.text()
+            receipt = await response.json()
+            assert (receipt["item"]["id"], receipt["item"]["digest"], receipt["synced"]) == ("task-a", replaced, True)
+            listing = await (await client.get("/reef/scenarios/s/tasks", headers=AUTH)).json()
+            assert [task["files_digest"] for task in listing["tasks"]] == [replaced]
+
+            for target, refused_body, status in (
+                (url, {"digest": other}, 404),
+                (url, {"digest": "0" * 64}, 404),
+                ("/reef/namespaces/s/data/tasks/missing", {"digest": replaced}, 404),
+                (url, {"digest": replaced, "name": "task-a"}, 400),
+                (url, {"digest": "abc"}, 400),
+            ):
+                refused = await client.put(target, headers=AUTH, json=refused_body)
+                assert refused.status == status, await refused.text()
+            assert dispatcher.data_store.read("s", "task-a").digest == replaced
 
     try:
         asyncio.run(run())

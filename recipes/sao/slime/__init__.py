@@ -13,8 +13,13 @@ from typing import Any
 
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
-from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, TrainResult, register_loss_family
-from reef.train.slime_backend.data_builder import build_policy_rollout_data, validate_policy_columns
+from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, TrainResult
+from reef.train.slime_backend.loss_families import register_loss_family
+from reef.train.slime_backend.objectives import SlimeObjective
+from reef.train.slime_backend.policy_rows import build_policy_rollout_data, validate_policy_columns
+from reef.train.slime_backend.schedule import next_steps
+from reef.train.slime_backend.signals import TrainingSignal
+from reef.train.types import JobData, trajectories
 
 _logger = logging.getLogger(__name__)
 
@@ -159,7 +164,7 @@ def build_sao_rollout_data(
         producing_artifact_ids.append(None if producing_artifact_id is None else str(producing_artifact_id))
         rollout_created_ats.append(None if rollout_created_at is None else float(rollout_created_at))
 
-    data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec)
+    data = build_policy_rollout_data({**dict(payload), "samples": base_rows}, base_rows, spec.loss_family)
     data["action_masks"] = action_masks
     data["producing_artifact_ids"] = producing_artifact_ids
     data["rollout_created_ats"] = rollout_created_ats
@@ -426,4 +431,28 @@ def _apply_attention_freeze(critic_args: Namespace) -> None:
     _logger.info("SAO: freezing critic attention via patterns %s", patterns)
 
 
-__all__ = ["SaoAlgorithm", "SaoSchedule", "SaoSettings", "SaoStepPlan", "build_sao_rollout_data", "sao_sample_row"]
+class SaoObjective(SlimeObjective):
+    name = "sao"
+    loss_family = "sao"
+    # The SAO ratio is clipped on both sides, so passes after the first stay bounded.
+    supports_multiple_epochs = True
+
+    def prepare(self, data: JobData, state: Mapping[str, Any]) -> TrainingSignal:
+        samples = trajectories(data)
+        steps = next_steps(state)
+        return TrainingSignal(
+            "train",
+            {"steps": steps},
+            {"steps": steps, "rollouts": len(samples)},
+        )
+
+
+__all__ = [
+    "SaoAlgorithm",
+    "SaoObjective",
+    "SaoSchedule",
+    "SaoSettings",
+    "SaoStepPlan",
+    "build_sao_rollout_data",
+    "sao_sample_row",
+]

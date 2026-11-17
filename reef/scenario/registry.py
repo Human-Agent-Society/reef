@@ -30,17 +30,21 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
 )
 from reef.core.activation import ActivationRule
-from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
+from reef.core.errors import ReefError, ScenarioCapacityFullError, ScenarioNotFoundError
+from reef.core.plugins import PluginConfigError
 from reef.evaluation.activation import EvaluatedActivation, activation_setting, scenario_activation_reference
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
+from reef.recipe.deployment import harness_adapter
+from reef.recipe.errors import RecipeConfigError
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
 from reef.scenario.factory import ItemStart, ScenarioFactory
+from reef.scenario.live_objects import LiveObjects
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.served_models import ServedModels
-from reef.train.instructions import InstructionQueue
+from reef.train.training_requests import TrainingRequestQueue
 
 logger = logging.getLogger(__name__)
 
@@ -79,28 +83,6 @@ class ScenarioLifecycle(ABC):
         """
 
 
-class StandaloneLifecycle(ScenarioLifecycle):
-    """The lifecycle of a registry without an owner: replaced instances close at once, and nothing unloads.
-
-    Without a dispatcher, the registry cannot know that a scenario is idle.
-    """
-
-    def scenario_loaded(self, instance: Scenario) -> None:
-        return None
-
-    def scenario_reloaded(self, instance: Scenario) -> None:
-        return None
-
-    def scenario_committed(self, instance: Scenario) -> None:
-        return None
-
-    def close_replaced(self, instance: Scenario) -> None:
-        instance.close()
-
-    def unload_if_idle(self, scenario: str) -> bool:
-        return False
-
-
 class InstanceState(Enum):
     """Whether a scenario instance is still the one in the registry's table."""
 
@@ -126,15 +108,15 @@ class ScenarioRegistry:
         recipe: Recipe,
         backend_factory: RepositoryBackendFactory,
         *,
+        live: LiveObjects | None = None,
         local_artifact_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
         admission: ScenarioAdmission | None = None,
-        lifecycle: ScenarioLifecycle | None = None,
-        activates_runtime: bool = True,
+        lifecycle: ScenarioLifecycle,
         served_models: ServedModels | None = None,
-        instructions: InstructionQueue | None = None,
+        training_requests: TrainingRequestQueue | None = None,
     ) -> None:
         self._storage = scenario_storage
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
@@ -143,13 +125,13 @@ class ScenarioRegistry:
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
+            live=live,
             local_artifact_dir=local_artifact_dir,
             scenario_storage=scenario_storage,
             experiment_reports=self.experiment_reports,
             experiment_tracker=tracker,
-            activates_runtime=activates_runtime,
             served_models=served_models,
-            instructions=instructions,
+            training_requests=training_requests,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe
@@ -159,7 +141,7 @@ class ScenarioRegistry:
         #: Every training scenario in binding order; the first is the one a single-scenario runtime binds.
         self._training_scenarios: list[str] = []
         self._preload_errors: dict[str, str] = {}
-        self.lifecycle = lifecycle if lifecycle is not None else StandaloneLifecycle()
+        self.lifecycle = lifecycle
         self._allow_implicit_creation = allow_implicit_creation
         self.admission = admission if admission is not None else ScenarioLimits()
         #: Makes admission serial, so that two loads cannot both take the last load slot.
@@ -247,22 +229,24 @@ class ScenarioRegistry:
         start: ItemStart | None = None,
         *,
         allow_implicit_creation: bool | None = None,
+        serves: bool = True,
     ) -> Scenario | None:
         """Resolve a scenario, creating it when allowed.
 
         A missing scenario is created when ``allow_implicit_creation`` is true
         (defaulting to the registry's deployment flag); otherwise ``None`` is
         returned so the caller can surface an unknown-scenario error. A
-        created scenario's root release holds the artifact item ``start``, or
+        created scenario's root snapshot holds the artifact item ``start``, or
         the recipe's default start when ``start`` is ``None``
-        (``ScenarioFactory.load_or_create``).
+        (``ScenarioFactory.load_or_create``). A created scenario serves its start when ``serves`` is true, and
+        nothing when it is false (``ScenarioSettings.serves``); an existing scenario ignores ``serves``.
         """
         if allow_implicit_creation is None:
             allow_implicit_creation = self._allow_implicit_creation
         with self.lock_for(scenario):
             if not allow_implicit_creation and not self.has(scenario):
                 return None
-            return self._resolve(scenario, start)
+            return self._resolve(scenario, start, serves)
 
     def get_loaded(self, scenario: str) -> Scenario | None:
         """The loaded instance, or None: nothing is created or recovered, and the scenario's lock is not taken.
@@ -278,10 +262,10 @@ class ScenarioRegistry:
         return current
 
     def require(self, scenario: str) -> Scenario:
-        """Resolve an existing scenario; raise UnknownScenario if not found."""
+        """Resolve an existing scenario; raise ScenarioNotFoundError if not found."""
         if not self.has(scenario):
-            raise UnknownScenario(f"unknown scenario {scenario!r}")
-        return self._resolve(scenario, None)
+            raise ScenarioNotFoundError(f"unknown scenario {scenario!r}")
+        return self._resolve(scenario, None, True)
 
     def list(self) -> tuple[dict[str, Any], ...]:
         """Known scenarios: loaded ones with their binding, durable ones by name, each with the harness adapter.
@@ -294,7 +278,7 @@ class ScenarioRegistry:
             registered = self._backend_factory.list_registrations()
         with self._lock:
             loaded = dict(self._scenarios)
-        adapter = self._recipe.harness_adapter
+        adapter = harness_adapter(self._recipe)
         rows = []
         for name in sorted(set(registered) | set(loaded)):
             current = loaded.get(name)
@@ -328,7 +312,7 @@ class ScenarioRegistry:
         """Select an existing scenario's mode and store it, so reloads and restarts apply it again."""
         with self.lock_for(scenario):
             current = self.require(scenario)
-            current.set_training_mode(training_mode, fill_manual_buffer=True)
+            current.set_training_mode(training_mode)
             settings = self._storage.read_settings(scenario)
             self._storage.write_settings(scenario, replace(settings, training_mode=training_mode))
             return current
@@ -382,6 +366,80 @@ class ScenarioRegistry:
             current.effective_serving_config(config)
             self._storage.write_settings(scenario, replace(settings, serving_config=config))
             current.set_serving_config(config)
+            return current
+
+    def set_record2sample_config(self, scenario: str, config: Mapping[str, Mapping[str, Any]]) -> Scenario:
+        """Store ``config`` as the ``ScenarioSettings.record2sample_config`` of an existing scenario, and load the
+        scenario again, so that its trainers build their record-to-sample stages with it.
+
+        The new instance recovers as a restart does: each trainer reads the records after its committed progress
+        again. ``config`` replaces the stored mapping as a whole; an empty mapping goes back to the deployment's
+        config. Raise ``ValueError`` when ``config`` names a component that has no trainer, or when a stage refuses
+        its config; then the stored setting and the loaded instance stay as they were.
+
+        A scenario whose stored config no longer loads, such as one that sets a removed key, loads with ``config``
+        in its place, so this call repairs it.
+        """
+        with self.lock_for(scenario):
+            settings = self._storage.read_settings(scenario)
+            changed = replace(settings, record2sample_config=config)
+            try:
+                current = self.require(scenario)
+            except (PluginConfigError, RecipeConfigError):
+                return self.replace_refused_record2sample_config(scenario, settings, changed)
+            trainers = {component_trainer.component for component_trainer in current.trainers}
+            unknown = sorted(set(changed.record2sample_config) - trainers)
+            if unknown:
+                raise ValueError(
+                    f"record2sample_config names {unknown}; scenario {scenario!r} has trainers for {sorted(trainers)}"
+                )
+            if changed.record2sample_config == current.record2sample_config:
+                return current
+            self._storage.write_settings(scenario, changed)
+            try:
+                return self.reload(scenario)
+            except BaseException as exc:
+                # The new instance failed before it replaced ``current``, which keeps serving with its own config.
+                # A stored config that no instance builds with would fail every later load.
+                self._storage.write_settings(scenario, settings)
+                if isinstance(exc, RecipeConfigError):
+                    raise ValueError(f"scenario {scenario!r} refused record2sample_config: {exc}") from exc
+                raise
+
+    def replace_refused_record2sample_config(
+        self, scenario: str, settings: ScenarioSettings, changed: ScenarioSettings
+    ) -> Scenario:
+        """Store ``changed`` in place of ``settings``, whose record-to-sample config the scenario refuses to load
+        with, and load the scenario with it. Raise ``ValueError``, and store ``settings`` again, when the scenario
+        refuses ``changed`` too or when it names a component that has no trainer. The caller holds the scenario's
+        lock."""
+        self._storage.write_settings(scenario, changed)
+        try:
+            current = self.require(scenario)
+        except (PluginConfigError, RecipeConfigError) as exc:
+            self._storage.write_settings(scenario, settings)
+            raise ValueError(f"scenario {scenario!r} refused record2sample_config: {exc}") from exc
+        trainers = {component_trainer.component for component_trainer in current.trainers}
+        unknown = sorted(set(changed.record2sample_config) - trainers)
+        if unknown:
+            self._storage.write_settings(scenario, settings)
+            dropped = self.remove(scenario)
+            if dropped is not None:
+                dropped.close()
+            raise ValueError(
+                f"record2sample_config names {unknown}; scenario {scenario!r} has trainers for {sorted(trainers)}"
+            )
+        return current
+
+    def set_serves(self, scenario: str, serves: bool) -> Scenario:
+        """Store ``serves`` for an existing scenario (``ScenarioSettings.serves``) and apply it to the loaded
+        instance, so reloads and restarts apply it again."""
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            settings = self._storage.read_settings(scenario)
+            if settings.serves != serves:
+                self._storage.write_settings(scenario, replace(settings, serves=serves))
+            current.set_serves(serves)
             return current
 
     def stored_settings(self, scenario: str) -> ScenarioSettings:
@@ -447,11 +505,46 @@ class ScenarioRegistry:
             self.last_used_at.pop(scenario, None)
         return dropped
 
-    def archive_registration(self, scenario: str) -> tuple[str, ...]:
-        """Move the scenario's durable registration aside and forget its cached backend; what was archived."""
-        if not isinstance(self._backend_factory, CachedRepositoryBackendFactory):
+    def require_archivable(self) -> None:
+        """Raise ``NotImplementedError`` when the repository backend cannot archive a scenario's registration, so a
+        delete refuses before it changes anything."""
+        factory = self._backend_factory
+        if not isinstance(factory, CachedRepositoryBackendFactory) or not factory.archives_registrations:
             raise NotImplementedError("this repository backend cannot archive a scenario")
-        return self._backend_factory.archive_registration(scenario)
+
+    def archive_registration(self, scenario: str) -> tuple[str, ...]:
+        """Move the scenario's durable registration aside and forget its cached backend; what was archived. The
+        archived registration marks the scenario deleted (``was_deleted``)."""
+        factory = self._backend_factory
+        if not isinstance(factory, CachedRepositoryBackendFactory) or not factory.archives_registrations:
+            raise NotImplementedError("this repository backend cannot archive a scenario")
+        return factory.archive_registration(scenario)
+
+    def was_deleted(self, scenario: str) -> bool:
+        """Whether a delete archived the scenario's registration
+        (``CachedRepositoryBackendFactory.has_archived_registration``). It stays true for good."""
+        factory = self._backend_factory
+        return isinstance(factory, CachedRepositoryBackendFactory) and factory.has_archived_registration(scenario)
+
+    def drop_deleted(self, scenario: str) -> bool:
+        """When ``was_deleted(scenario)``, close its loaded instance, if any, drop its backend and its local state
+        (``RepositoryBackendFactory.forget_scenario``), and return True; else change nothing and return False. A
+        process that does not run control calls it."""
+        if not self.was_deleted(scenario):
+            return False
+        with self.lock_for(scenario):
+            dropped = self.remove(scenario)
+            if dropped is not None:
+                dropped.close()
+            self._backend_factory.forget_scenario(scenario)
+        self.forget_lock(scenario)
+        return True
+
+    def drop_deleted_local_scenarios(self) -> None:
+        """``drop_deleted`` for every scenario of which the backend factory keeps something in this process
+        (``RepositoryBackendFactory.local_scenarios``), such as a clone that an earlier run left."""
+        for scenario in self._backend_factory.local_scenarios():
+            self.drop_deleted(scenario)
 
     def forget_lock(self, scenario: str) -> None:
         """Release the per-scenario lock's slot once nothing holds it; a later create makes a fresh one."""
@@ -467,12 +560,11 @@ class ScenarioRegistry:
             return tuple(self._scenarios.values())
 
     def apply_stored_settings(self, instance: Scenario) -> None:
-        """Select the training mode, the activation rule and the serving config a person stored for the scenario
-        on a newly built instance.
+        """Select the training mode, the activation rule, the serving config and ``serves`` that are stored for
+        the scenario on a newly built instance.
 
-        A mode the recipe no longer supports, or that Reef no longer has (such as
-        ``hybrid``), keeps the recipe's default, so the scenario still loads and
-        a person can select another mode. A scenario
+        A mode the recipe does not implement keeps the recipe's default, so the
+        scenario still loads and a person can select another mode. A scenario
         whose rule is ``evaluated`` without ``artifact_evaluation`` loads with a
         warning: it activates no new artifact. A serving config that the runtime
         now refuses loads with a warning: the scenario serves with the
@@ -484,7 +576,7 @@ class ScenarioRegistry:
             if settings.training_mode is not None and instance.training_mode != settings.training_mode:
                 try:
                     instance.set_training_mode(settings.training_mode)
-                except (ValueError, NotImplementedError) as exc:
+                except NotImplementedError as exc:
                     logger.warning(
                         "Scenario %r keeps its default training mode: the stored mode %r is not supported (%s)",
                         instance.name,
@@ -493,6 +585,7 @@ class ScenarioRegistry:
                     )
             rule = self.activation_rule(settings)
             instance.set_activation_rule(rule)
+            instance.set_serves(settings.serves)
             try:
                 instance.set_serving_config(settings.serving_config)
             except ValueError as exc:
@@ -510,17 +603,21 @@ class ScenarioRegistry:
                 instance.name,
             )
 
-    def _resolve(self, scenario: str, start: ItemStart | None) -> Scenario:
+    def _resolve(self, scenario: str, start: ItemStart | None, serves: bool) -> Scenario:
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
             self.touch(scenario)
             return current
-        if not self._scenario_factory.has_registration(scenario):
+        created = not self._scenario_factory.has_registration(scenario)
+        if created:
             self.check_creation(scenario)
         self.take_load_slot(scenario)
         try:
             current = self._scenario_factory.load_or_create(scenario, start)
+            if created and not serves:
+                # The setting is stored before control can see the instance, so control never asks for its engine.
+                self._storage.write_settings(scenario, replace(self._storage.read_settings(scenario), serves=False))
             self.apply_stored_settings(current)
         finally:
             with self._lock:
@@ -568,7 +665,7 @@ class ScenarioRegistry:
 
         Admission tells how many loaded scenarios must unload first. This
         method unloads idle candidates until there are enough. If there are
-        too few, it raises ``ScenarioCapacityFull``.
+        too few, it raises ``ScenarioCapacityFullError``.
 
         Lock order: the lock of ``scenario``, then the admission lock. The
         lifecycle's ``unload_if_idle`` only tries the locks of other scenarios
@@ -594,7 +691,7 @@ class ScenarioRegistry:
                     unloaded_count += 1
             if unloaded_count < load_admission.unload_count:
                 logger.warning("refused to load scenario %r: too few loaded scenarios are idle", scenario)
-                raise ScenarioCapacityFull(
+                raise ScenarioCapacityFullError(
                     f"cannot load scenario {scenario!r}: {len(loaded)} scenarios are loaded, and too few of them "
                     "are idle to free a load slot; retry later"
                 )

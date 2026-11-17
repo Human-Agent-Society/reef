@@ -1,8 +1,8 @@
 """The layout both harness pages share: the document wrapper, the design tokens and the status vocabulary.
 
-``GET /reef/harness/releases/{step}/page`` and
+``GET /reef/harness/artifacts/{step}/page`` and
 ``GET /reef/harness/requests/{record_id}/page`` are two views of one thing, a
-request becoming a release, and a person moves between them by the link each
+request becoming a snapshot, and a person moves between them by the link each
 carries. They therefore share this module's header, palette, card shapes and
 status wording, and each adds only the CSS its own sections need.
 
@@ -167,12 +167,12 @@ def document(
     ``style`` is appended to :data:`BASE_STYLE`, so a page declares only what
     its own sections need. ``breadcrumb`` is the section the page sits under
     and ``context`` the scenario shown beside it. ``home`` is where the logo
-    and the "Harness" crumb lead, the page of the active release; both stay
+    and the "Harness" crumb lead, the page of the active selection; both stay
     plain text when it is empty, since the only pages a browser can open are
-    the two ``/page`` routes and a catalog may have no active release.
+    the two ``/page`` routes and a catalog may have no active selection.
     ``head`` adds elements to
     the document head, a reload for instance, and ``tail`` follows the footer,
-    where the release page puts its inline data. ``subtitle``, ``body``,
+    where the snapshot page puts its inline data. ``subtitle``, ``body``,
     ``head`` and ``tail`` are HTML the caller has already escaped; every other
     argument is escaped here. Pure ASCII out: other characters leave as
     numeric references.

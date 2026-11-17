@@ -1,5 +1,7 @@
 """Dataset jobs on Slime: a prompt dataset that Slime rolls out, rewards and trains on its own.
 
+A task job runs in the same way, and its prompts are Harbor tasks (``reef.train.slime_backend.harbor_rollouts``).
+
 A dataset job has no samples and the job parameter ``dataset``:
 ``{"path": <JSONL>, "epochs": <positive int, default 1>}``. The JSONL is in
 Slime's prompt-data format, whose fields ``training.options`` names
@@ -8,10 +10,11 @@ deployment's loss family is ``slime`` (``reef.train.slime_backend.native``).
 
 The job's driver records the job in the save root's ``DATASET_FILE``:
 ``job_id``, ``path``, ``skip_rollouts`` (the job's rollouts trained before
-this driver) and ``token``, new for each driver. The serving session's rollout
-manager reads the dataset through ``ReefDatasetSource``
-(``reef.train.slime_backend.dataset_source``), which loads it again when the
-token changes and skips the prompts of the skipped rollouts.
+this driver) and ``token``, new for each driver. A task job's record holds
+``TaskJobSource`` instead of ``path``. The serving session's rollout manager
+reads the record through ``ReefDatasetSource``
+(``reef.train.slime_backend.dataset_source``), which loads the job's prompts again
+when the token changes and skips the prompts of the skipped rollouts.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-#: The dataset job that the serving session's rollout manager serves, in the save root.
+#: The dataset job or task job that the serving session's rollout manager serves, in the save root.
 DATASET_FILE = "reef-dataset.json"
 
 

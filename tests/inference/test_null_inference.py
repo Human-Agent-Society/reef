@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from reef.artifact import Artifact
-from reef.core.errors import InferenceUnavailable
+from reef.core.errors import InferenceUnavailableError
 from reef.inference.null import NULL_INFERENCE_URL, NullInferenceHandler, NullInferenceRuntime
 from reef.inference.registry import RuntimeRegistry
 
@@ -23,17 +23,19 @@ def test_the_factory_builds_a_runtime_that_serves_nothing_and_loads_nothing(tmp_
     # Nothing is served, so several training scenarios can share the runtime.
     assert runtime.shared_by_training_scenarios is True
     assert runtime.per_scenario_adapters is False
-    release = Artifact.local(tmp_path)
-    assert runtime.activate_checkpoint(release, scenario="math") == release.artifact_id
+    artifact = Artifact.local(tmp_path)
+    assert runtime.activate_checkpoint(artifact, scenario="math") == artifact.artifact_id
+    # An activation establishes no binding: nothing serves the snapshot.
+    assert runtime.served_artifact(artifact.artifact_id, "math") is None
     runtime.shutdown()
 
 
 def test_admission_and_the_handler_refuse_every_request(tmp_path):
-    # The HTTP contract (503 on every inference route) is in tests/reef_service/test_runtime_registry.py.
+    # The HTTP contract (503 on every inference route) is in tests/reef_service/inference/test_runtime_registry.py.
     runtime = NullInferenceRuntime()
-    with pytest.raises(InferenceUnavailable, match=r"inference\.backend: none"):
+    with pytest.raises(InferenceUnavailableError, match=r"inference\.backend: none"):
         asyncio.run(runtime.acquire_inference())
     handler = runtime.inference_handler
     assert isinstance(handler, NullInferenceHandler)
-    with pytest.raises(InferenceUnavailable, match=r"inference\.backend: none"):
+    with pytest.raises(InferenceUnavailableError, match=r"inference\.backend: none"):
         asyncio.run(handler.inference(Artifact.local(tmp_path), "/v1/chat/completions", {}))

@@ -27,7 +27,7 @@ Environment:
   SAO_RECORDS_PATH  where one JSON line per scored rollout is appended
   SAO_SEED          sampling seed for the problem order (default 0)
   SAO_BATCH         rollouts per optimizer step (the global batch size); the
-                    driver waits for BUDGET // SAO_BATCH training releases
+                    driver waits for BUDGET // SAO_BATCH training snapshots
                     before exiting, so the stack is not torn down mid-step
   SAO_TRAIN_DRAIN_TIMEOUT_S  how long to wait for that drain (default 14400)
   SAO_PROGRESS_FILE  optional file holding the number of optimizer steps done
@@ -133,7 +133,7 @@ def training_step_count() -> int | None:
     except (urllib.error.URLError, TimeoutError):
         return None
     scenario = payload["scenarios"].get(SCENARIO)
-    return 0 if scenario is None else int(scenario["scenario_step"])
+    return 0 if scenario is None else int(scenario["commit_number"])
 
 
 def serving_artifact() -> str | None:
@@ -145,7 +145,7 @@ def serving_artifact() -> str | None:
 class TrainerPacer:
     """Hold new submissions while more than AHEAD batches are out beyond the trainer.
 
-    Reef drops rollouts that exceed pipeline.record2sample.config.max_staleness, and the driver
+    Reef drops rollouts that exceed pipeline.record2sample.config.max_artifact_lag, and the driver
     cannot see that, so an idle trainer (no progress for STALL_S) releases one
     batch of credit; otherwise a burst of dropped rollouts would deadlock.
     """

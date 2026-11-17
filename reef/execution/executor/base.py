@@ -5,13 +5,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from importlib import import_module
 from time import monotonic
 from typing import Any, Literal, overload
 
+from reef.core.plugins import import_plugin_class, resolve_plugin_class
+from reef.execution.executor.config import ExecutorSettings, select_worker_executor
 from reef.execution.executor.failure import ExecutorFailure, ExecutorFailureListener, FailureState
+from reef.execution.executor.requirements import ExecutionRequirements
 
-#: Import paths of the bundled executors, keyed by their short config names.
+#: The bundled executors by their short config names, as references so that no backend is imported here.
 BUILTIN_BACKENDS = {
     "uni": "reef.execution.executor.uniproc:UniProcExecutor",
     "mp": "reef.execution.executor.multiproc:MultiprocExecutor",
@@ -30,7 +32,7 @@ class WorkerSpec:
 
     def __post_init__(self) -> None:
         if not isinstance(self.worker_cls, (str, type)) or not self.worker_cls:
-            raise TypeError("worker_cls must be a class or a non-empty Python import path")
+            raise TypeError("worker_cls must be a class or a non-empty 'package.module:ClassName' reference")
         if not isinstance(self.args, Sequence) or isinstance(self.args, (str, bytes)):
             raise TypeError("worker args must be a sequence")
         if not isinstance(self.kwargs, Mapping) or not isinstance(self.options, Mapping):
@@ -41,8 +43,15 @@ class WorkerSpec:
 
 
 @dataclass(frozen=True)
-class ExecutorConfig:
-    """Worker topology and executor selection; workers define rank order.
+class ExecutorLaunch:
+    """What one executor launches: its backend and its workers, which define rank order.
+
+    Values: ``backend`` is an ``Executor`` class or a non-empty built-in name or import path; ``workers`` is a
+    tuple of ``WorkerSpec``; ``options`` is a mapping; ``launch_timeout_s`` is positive or ``None``; ``node_id``
+    is a non-empty string or ``None``. Construction refuses other values with ``ValueError`` and copies
+    ``workers`` and ``options``.
+    Purpose: the code that needs a worker group makes it, from ``ExecutorSettings`` where a deployment selects
+    the backend; ``Executor.create`` and the executor read it.
 
     ``options`` contains backend-specific defaults. For Ray these are actor
     options, overridden per worker by ``WorkerSpec.options``. ``node_id``
@@ -58,17 +67,17 @@ class ExecutorConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.backend, (str, type)) or not self.backend:
-            raise TypeError("executor backend must be a class or a non-empty name/import path")
+            raise ValueError("executor backend must be a class, a built-in name or 'package.module:ClassName'")
         if not isinstance(self.workers, Sequence) or isinstance(self.workers, (str, bytes)):
-            raise TypeError("executor workers must be a sequence of WorkerSpec objects")
+            raise ValueError("executor workers must be a sequence of WorkerSpec objects")
         if any(not isinstance(worker, WorkerSpec) for worker in self.workers):
-            raise TypeError("executor workers must contain WorkerSpec objects")
+            raise ValueError("executor workers must contain WorkerSpec objects")
         if not isinstance(self.options, Mapping):
-            raise TypeError("executor options must be a mapping")
+            raise ValueError("executor options must be a mapping")
         if self.launch_timeout_s is not None and self.launch_timeout_s <= 0:
             raise ValueError("executor launch_timeout_s must be positive or None")
         if self.node_id is not None and (not isinstance(self.node_id, str) or not self.node_id):
-            raise TypeError("executor node_id must be a non-empty string or None")
+            raise ValueError("executor node_id must be a non-empty string or None")
         object.__setattr__(self, "workers", tuple(self.workers))
         object.__setattr__(self, "options", dict(self.options))
 
@@ -116,22 +125,13 @@ def check_rank(rank: Any, count: int) -> None:
 
 
 def resolve_class(value: type | str) -> type:
-    """Resolve a plugin class at the import boundary, without loading backends."""
+    """The worker class that ``value`` is, or that it names as ``package.module:ClassName``.
+
+    Raise ``PluginConfigError`` for a string that names no class.
+    """
     if isinstance(value, type):
         return value
-    if not isinstance(value, str) or not value:
-        raise TypeError("expected a class or a non-empty Python import path")
-    module_name, separator, class_name = value.partition(":")
-    if not separator:
-        module_name, separator, class_name = value.rpartition(".")
-    if not module_name or not separator or not class_name:
-        raise ValueError(f"invalid class import path {value!r}; use 'module:Class' or 'module.Class'")
-    # Plugin import paths necessarily cross a dynamic boundary. Worker RPC
-    # dispatch is similarly confined to the concrete executor implementations.
-    candidate = getattr(import_module(module_name), class_name)
-    if not isinstance(candidate, type):
-        raise TypeError(f"{value!r} does not name a class")
-    return candidate
+    return import_plugin_class(value, object, setting="worker class")
 
 
 class Executor(ABC):
@@ -142,7 +142,7 @@ class Executor(ABC):
     does not promise live changes to the model's distributed process groups.
     """
 
-    def __init__(self, config: ExecutorConfig) -> None:
+    def __init__(self, config: ExecutorLaunch) -> None:
         self.config = config
         self._failure_state = FailureState()
         self._closed = False
@@ -167,18 +167,25 @@ class Executor(ABC):
 
     @staticmethod
     def get_class(backend: str | type[Executor]) -> type[Executor]:
-        candidate = resolve_class(BUILTIN_BACKENDS.get(backend, backend) if isinstance(backend, str) else backend)
-        if not issubclass(candidate, Executor):
-            raise TypeError("executor backend must be an Executor subclass")
-        return candidate
+        """The executor class that ``backend`` is, or that it names: a built-in name or ``package.module:ClassName``.
+
+        Raise ``TypeError`` for a class that is not an ``Executor`` subclass, and ``PluginConfigError`` for a name
+        that selects no such class.
+        """
+        if isinstance(backend, type):
+            if not issubclass(backend, Executor):
+                raise TypeError("executor backend must be an Executor subclass")
+            return backend
+        return resolve_plugin_class(
+            backend,
+            builtins=BUILTIN_BACKENDS,
+            base=Executor,  # type: ignore[type-abstract]  # the base is a value; the result is concrete
+            setting="executor backend",
+        )
 
     @classmethod
-    def create(cls, config: ExecutorConfig) -> Executor:
+    def create(cls, config: ExecutorLaunch) -> Executor:
         if config.backend == "auto":
-            # Selection policy imports this module; resolve it lazily.
-            from reef.execution.executor.config import ExecutorSettings, select_worker_executor
-            from reef.execution.executor.requirements import ExecutionRequirements
-
             options = bool(config.options or any(worker.options for worker in config.workers))
             selected = select_worker_executor(
                 ExecutorSettings(), ExecutionRequirements(workers=max(1, len(config.workers)), cluster=options)

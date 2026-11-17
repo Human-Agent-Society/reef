@@ -2,18 +2,13 @@
 
 from __future__ import annotations
 
+from tests.support.records import inference
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
 from reef.record2sample.assembly import ReportContext, SampleAssembly, SampleAssemblySettings
 from reef.train.types import TrajectorySample
 
 TASK = {"name": "openenv-00012-003-deduction", "path": "/tasks/openenv-00012-003-deduction", "digest": "ab" * 32}
-
-
-def inference(record_id: str) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="play", request_type=RequestType.INFERENCE, payload={}, agent_record_id=record_id
-    )
 
 
 def report(*references: str, metadata: dict[str, object] | None = None) -> AgentRecord:
@@ -34,7 +29,7 @@ class PlainAssembly(SampleAssembly):
 
 def assembled(metadata: dict[str, object] | None) -> TrajectorySample:
     assembly = PlainAssembly(SampleAssemblySettings())
-    record = inference("rec-1")
+    record = inference("rec-1", scenario="play")
     context = ReportContext(report=report("rec-1", metadata=metadata), score=1.0, inferences=(record,))
     return assembly.build(context, 1.0)
 

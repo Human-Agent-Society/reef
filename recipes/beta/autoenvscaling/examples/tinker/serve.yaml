@@ -34,6 +34,8 @@ recipe:
   implementation: reef.recipe.generated_tasks:GeneratedTaskRecipe
   config:
     job_parameters:
+      # The method that trains the rollouts. Replace this reference with a TinkerObjective that you provide.
+      objective: my_methods.objectives:MyObjective
       # Tinker's own rollout of each task job: the rollouts run on Tinker's sampler at the job's start weights.
       rollout:
         # The training rollouts of each task form one group.
@@ -69,7 +71,6 @@ pipeline:
         module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
         config:
           generator_url: ${endpoints.generator}
-          state_dir: ${REEF_AUTOENVSCALING_STATE_DIR}/generations
           sources_path: ${REEF_AUTOENVSCALING_SOURCES_PATH}
           count: 8
           # A task that ran is in the band when the Reasoning Agent passes a quarter to three quarters of its rollouts.

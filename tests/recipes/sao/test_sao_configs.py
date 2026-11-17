@@ -285,8 +285,10 @@ def _slime_tokens(config: dict) -> tuple[list[str], str, str]:
     recipe_type = recipe_class_for(recipe)
     weight_type = None if recipe_type is None else selected_weight_training(recipe_type, config)
     assert weight_type is not None, f"reef.recipe {recipe!r} must train weights"
-    loss_family = weight_type.training_spec().loss_family.strip()
-    runtime = SlimeDeployment().component_config(asdict(service_config_from_mapping(config)), loss_family=loss_family)
+    runtime = SlimeDeployment().component_config(
+        asdict(service_config_from_mapping(config)), default_parameters=weight_type.default_parameters()
+    )
+    loss_family = runtime["loss_family"]
     assert runtime["recipe"] == recipe
     # The teacher's address reaches the HTTP service as an environment variable once its service is up.
     environ = {TEACHER_URL_ENV: "http://127.0.0.1:30010"}
@@ -439,12 +441,13 @@ def test_user_facing_example_deployments_are_discovered() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize("config_path", EXAMPLE_DEPLOYMENTS, ids=_config_id)
 def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
-    from reef.recipe import load_recipe_config
+    from reef.recipe import WeightTrainingRecipe, load_recipe_config
     from reef.recipe.registry import recipe_class_for
     from reef.service.assembly import _recipe_owned_settings
     from reef.service.deploy.execution import validate_services
     from reef.service.deploy.service_config import service_config_from_mapping
     from reef.service.deploy.serving import inference_handler_factory_for
+    from reef.service.deploy.training import training_recipe_config
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
         config = load_deployment(config_path)
@@ -483,8 +486,8 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
             assert named_recipe.is_file(), f"{config_path} selects unknown recipe {settings.recipe!r}"
             recipe_type = recipe_class_for(load_recipe_config(named_recipe)["implementation"])
     assert recipe_type is not None
-    if settings.model_path is not None and hasattr(recipe_type, "service_config"):
-        recipe_type.service_config(_recipe_owned_settings(settings), model_path=settings.model_path)
+    if settings.model_path is not None and issubclass(recipe_type, WeightTrainingRecipe):
+        training_recipe_config(recipe_type, _recipe_owned_settings(settings), model_path=settings.model_path)
 
 
 @pytest.mark.unit

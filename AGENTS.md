@@ -61,7 +61,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
 | `reef/execution/` | Shared job scheduling, local process ownership, worker executors, sandbox isolation, file transfer, and cleanup |
 | `reef/record2sample/` | The record-to-sample stage (`Record2Sample`): which records Reef uses, which train together (report grouping, judging, eligibility checks, the staleness check), and their samples; the samples service (`service/`); and the generator service that writes, checks, and plays Harbor tasks (`generator/`) |
-| `reef/sample2job/` | The sample-to-job stage: the samples of the buffer into one training job's data (`Sample2Job`), and the job size `job_samples` |
+| `reef/sample2job/` | The sample-to-job stage: the samples of the next job into one training job's data (`Sample2Job`), and the job size `job_samples` |
 | `reef/pipeline_context.py` | The context that the training pipeline and its stages read for one scenario |
 | `recipes/`, `tutorials/` | Method implementations, runnable examples, and tutorials |
 | `tests/`, `docs/`, `docker/` | Verification, documentation, and deployment environments |

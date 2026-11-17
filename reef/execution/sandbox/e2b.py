@@ -7,6 +7,17 @@ The template is the harness's pinned binary on Node 22; one Reef builds on
 first use (about a minute) when the alias does not exist yet. E2B grants a
 sandbox at most an hour when it is created, so a session that runs longer
 asks for the hour again before it ends (:class:`SandboxKeeper`).
+
+``KillOnTimeoutE2BEnvironment`` reuses Harbor's E2B environment for task trials. It requests deletion at timeout,
+so AgentENV deletes an abandoned sandbox instead of pausing it. The shared ``environment_config`` selects this
+class for Reef's Harbor rollouts and generator checks through ``import_path``. A standalone Harbor trial that
+selects only ``e2b`` uses Harbor's own class.
+
+A service can keep a sandbox's ports private and return a traffic access token for them. An :class:`E2BSession`
+then sends that token with each request to the sandbox's relays (:meth:`E2BSession.tunnel_headers`).
+
+This module can load without the optional E2B SDK. Opening a sandbox requires the SDK; the Harbor subclass also
+requires Harbor 0.25, installed through ``reef-infra[e2b]``.
 """
 
 from __future__ import annotations
@@ -17,14 +28,19 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, override
+
+from harbor.environments.e2b import E2BEnvironment
+from harbor.models.task.config import NetworkMode
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramLaunchError,
-    ProgramTimeout,
+    ProgramTimeoutError,
     SandboxProgram,
-    SandboxUnavailable,
+    SandboxUnavailableError,
+    parse_env_from,
 )
 from reef.execution.sandbox.remote import (
     SANDBOX_MARGIN_S,
@@ -32,7 +48,6 @@ from reef.execution.sandbox.remote import (
     RemoteExecutor,
     RemoteSession,
     check_options,
-    parse_env_from,
     parse_forward_ports,
     probe_command,
     protected_command,
@@ -47,6 +62,8 @@ logger = logging.getLogger(__name__)
 SANDBOX_MAX_TIMEOUT_S = 3600
 #: How long before that deadline the keeper asks for it again, so a slow extension still lands in time.
 SANDBOX_RENEW_MARGIN_S = 300
+#: The header that carries a sandbox's traffic access token to a port of a private sandbox.
+TRAFFIC_ACCESS_TOKEN_HEADER = "e2b-traffic-access-token"
 
 
 def template_alias(adapter: str, version: str) -> str:
@@ -92,11 +109,11 @@ class E2BExecutor(RemoteExecutor):
         check_options("E2B", section, cls.provider_options)
         key_name = section.get("e2b_api_key_env", "E2B_API_KEY")
         if not isinstance(key_name, str) or not key_name.isidentifier():
-            raise SandboxUnavailable("e2b_api_key_env must name an environment variable")
+            raise SandboxUnavailableError("e2b_api_key_env must name an environment variable")
         api_key = section.get("e2b_api_key") or environ.get(key_name, "")
         template = section.get("e2b_template", "")
         if not isinstance(api_key, str) or not isinstance(template, str):
-            raise SandboxUnavailable("e2b_api_key and e2b_template must be strings")
+            raise SandboxUnavailableError("e2b_api_key and e2b_template must be strings")
         return cls(
             api_key=api_key.strip(),
             template=template.strip(),
@@ -132,13 +149,15 @@ class E2BExecutor(RemoteExecutor):
 
     def preflight(self) -> None:
         if not self.api_key:
-            raise SandboxUnavailable(
+            raise SandboxUnavailableError(
                 "an E2B sandbox needs an API key: set E2B_API_KEY or the selected sandbox's e2b_api_key"
             )
         try:
             import e2b
         except ImportError as exc:
-            raise SandboxUnavailable("an E2B sandbox needs the e2b package: pip install 'reef-infra[e2b]'") from exc
+            raise SandboxUnavailableError(
+                "an E2B sandbox needs the e2b package: pip install 'reef-infra[e2b]'"
+            ) from exc
         if not self.template or self.validated:
             return
         # Probing must not reap a running deployment's sandboxes or require its HTTP server to be listening yet.
@@ -147,13 +166,13 @@ class E2BExecutor(RemoteExecutor):
             session = replace(self, owner="", forward_ports=(), timeout_s=60).open()
             session.sandbox.commands.run(probe_command(self.binary), timeout=30)
         except (e2b.SandboxException, ProgramLaunchError) as exc:
-            raise SandboxUnavailable(f"E2B startup check failed: {exc}") from exc
+            raise SandboxUnavailableError(f"E2B startup check failed: {exc}") from exc
         finally:
             if session is not None:
                 try:
                     session.close()
                 except ProgramLaunchError as exc:
-                    raise SandboxUnavailable("E2B startup probe could not be cleaned up") from exc
+                    raise SandboxUnavailableError("E2B startup probe could not be cleaned up") from exc
         object.__setattr__(self, "validated", True)
 
     def open(self) -> E2BSession:
@@ -245,6 +264,12 @@ class E2BSession(RemoteSession):
     def public_url(self, port: int) -> str:
         return f"https://{self.sandbox.get_host(port)}"
 
+    def tunnel_headers(self) -> dict[str, str]:
+        """The sandbox's traffic access token, when the service returned a non-empty one; a private sandbox's ports
+        require it. The E2B API key is never one of these headers."""
+        token = self.sandbox.traffic_access_token
+        return {TRAFFIC_ACCESS_TOKEN_HEADER: token} if token else {}
+
     def stop(self) -> None:
         self.keeper.stop()
         self.sandbox.kill()
@@ -296,7 +321,7 @@ class E2BSession(RemoteSession):
             finished = True
             return ProcessOutcome(exc.exit_code, exc.stdout, exc.stderr)
         except TimeoutException as exc:
-            raise ProgramTimeout(f"the process ran past its {timeout:g} s limit in the E2B sandbox") from exc
+            raise ProgramTimeoutError(f"the process ran past its {timeout:g} s limit in the E2B sandbox") from exc
         except Exception as exc:
             raise ProgramLaunchError(f"the E2B sandbox could not run the process: {exc}") from exc
         finally:
@@ -313,4 +338,43 @@ class E2BSession(RemoteSession):
                 logger.warning("could not copy %s back from the failed E2B process", root.name)
 
 
-__all__ = ["E2BExecutor", "E2BSession", "SandboxKeeper", "ensure_template", "template_alias"]
+class KillOnTimeoutE2BEnvironment(E2BEnvironment):
+    """Harbor's ``E2BEnvironment`` whose sandbox is created with ``lifecycle={"on_timeout": "kill"}``.
+
+    Values: those of ``E2BEnvironment``. Harbor makes one from a trial's environment config, so the template, the
+    sandbox's lifetime (``sandbox_timeout_secs``), its metadata, its startup environment and its network options are
+    the parent's, and ``type()`` is ``e2b``.
+    Purpose: Harbor's ``EnvironmentFactory`` makes one for an ``e2b`` trial whose environment config names this class
+    as its ``import_path``. ``start`` creates the sandbox with ``_create_sandbox``, and ``stop`` deletes it, as before.
+    """
+
+    # Harbor 0.25.0 names this method and the attributes that it reads; an override cannot rename them. The body is
+    # Harbor's create call with one more argument, and the decorator is Harbor's retry policy, because Harbor's
+    # decorator wraps its own method and not this one. When Harbor adds an argument to the call, add it here too: the
+    # parity test in tests/sandbox/test_task_environment.py compares the two calls.
+    @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
+    @override
+    async def _create_sandbox(self) -> None:
+        # Keep this optional SDK import inside sandbox creation.
+        from e2b import AsyncSandbox
+
+        self._sandbox = await AsyncSandbox.create(
+            template=self._template_name,
+            metadata={"environment_name": self.environment_name, "session_id": self.session_id},
+            envs=self._startup_env(),
+            timeout=self._sandbox_timeout,
+            allow_internet_access=self.network_policy.network_mode != NetworkMode.NO_NETWORK,
+            network=self._sandbox_create_network_options(),
+            lifecycle={"on_timeout": "kill"},
+        )
+
+
+__all__ = [
+    "TRAFFIC_ACCESS_TOKEN_HEADER",
+    "E2BExecutor",
+    "E2BSession",
+    "KillOnTimeoutE2BEnvironment",
+    "SandboxKeeper",
+    "ensure_template",
+    "template_alias",
+]

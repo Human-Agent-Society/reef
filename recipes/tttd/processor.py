@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class TTTDSettings(SampleAssemblySettings):
-    """The config of ``TTTDSamples``: the step grid, the sample assembly, and the staleness limit.
+    """The config of ``TTTDSamples``: the step grid and the sample assembly.
 
     Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two; the other keys
     are as in ``SampleAssemblySettings``. The constructor refuses other values.
@@ -53,7 +53,7 @@ class TTTDGrouping(ReportGrouping):
 
     A step is ready when every one of its ``groups_per_step`` x
     ``rollouts_per_group`` slots is filled. A complete step whose reports span
-    releases is discarded wholesale, because mixed-version rewards are not
+    artifacts is discarded wholesale, because mixed-version rewards are not
     comparable.
     """
 
@@ -116,7 +116,6 @@ class TTTDSamples(ReportSamples):
             context,
             TTTDGrouping(settings.groups_per_step, settings.rollouts_per_group),
             exclusive_sources=True,
-            max_staleness=settings.max_staleness,
         )
         #: The comparison groups in one step.
         self.groups_per_step = settings.groups_per_step

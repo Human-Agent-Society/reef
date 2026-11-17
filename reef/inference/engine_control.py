@@ -14,10 +14,9 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Generic, TypeVar
 
 from reef.core.weight_layout import WeightFiles
-from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec
 from reef.execution.executor.config import ExecutorSettings, select_executor
 from reef.execution.executor.delegating import DelegatingExecutor
-from reef.execution.executor.placement import DeploymentResources
 from reef.execution.executor.ray import RayExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
 from reef.inference.deployment import InferenceConnection, InferenceResources, InferenceService
@@ -28,7 +27,7 @@ from reef.inference.process import RayHealthProbe
 CONTROL_TIMEOUT_S = 14_400
 
 
-class EngineConfig:
+class EngineSettings:
     """Settings that the shared control reads from every engine configuration."""
 
     env_vars: dict[str, str]
@@ -36,7 +35,7 @@ class EngineConfig:
     executor_options: dict[str, Any]
 
 
-ConfigT = TypeVar("ConfigT", bound=EngineConfig)
+SettingsT = TypeVar("SettingsT", bound=EngineSettings)
 
 
 class EngineInferenceBackend(InferenceBackend):
@@ -117,7 +116,7 @@ class EngineInferenceBackend(InferenceBackend):
         return self._executor.rpc(0, method, args=args, timeout=CONTROL_TIMEOUT_S)
 
 
-class EngineInferenceService(InferenceService, Generic[ConfigT]):
+class EngineInferenceService(InferenceService, Generic[SettingsT]):
     """Own engines and the control actor; borrow the deployment allocation."""
 
     #: The engine name in error messages.
@@ -126,7 +125,7 @@ class EngineInferenceService(InferenceService, Generic[ConfigT]):
     control_worker_cls: str
     backend_type: type[EngineInferenceBackend]
 
-    def __init__(self, config: ConfigT) -> None:
+    def __init__(self, config: SettingsT) -> None:
         self.config = config
         self._inference: RayExecutor | None = None
         self._started = False
@@ -137,14 +136,14 @@ class EngineInferenceService(InferenceService, Generic[ConfigT]):
     def engine_environment(self) -> dict[str, str]:
         """Return the environment variables of the control actor and its engines."""
 
-    def start(self, resources: DeploymentResources) -> InferenceConnection:
+    def start(self, resources: InferenceResources) -> InferenceConnection:
         if self._started or self._closed:
             raise RuntimeError("inference service can only be started once")
-        if not isinstance(resources, InferenceResources) or resources.inference_placement is None:
+        if resources.inference_placement is None:
             raise ValueError(f"{self.engine_name} inference requires its supplied model reservations")
         self._started = True
         self._inference = RayExecutor(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend=RayExecutor,
                 workers=(
                     WorkerSpec(worker_cls=self.control_worker_cls, args=(self.config, resources.inference_placement)),
@@ -157,11 +156,11 @@ class EngineInferenceService(InferenceService, Generic[ConfigT]):
                 launch_timeout_s=CONTROL_TIMEOUT_S,
             )
         )
-        return InferenceConnection(self.connection_protocol, RayExecutor.from_workers(self._inference.workers))
+        return InferenceConnection(RayExecutor.from_workers(self._inference.workers))
 
     def _control(self, connection: InferenceConnection) -> Executor:
-        if connection.protocol != self.connection_protocol or connection.control is None:
-            raise ValueError(f"incompatible {self.engine_name} inference connection: {connection.protocol!r}")
+        if connection.control is None:
+            raise ValueError(f"the {self.engine_name} inference connection has no control executor")
         return connection.control
 
     def backend(self, connection: InferenceConnection) -> EngineInferenceBackend:
@@ -193,15 +192,15 @@ class EngineInferenceService(InferenceService, Generic[ConfigT]):
                 self._inference.shutdown()
 
 
-class EngineControl(Generic[ConfigT]):
+class EngineControl(Generic[SettingsT]):
     """Own the selected serving executor inside Reef's inference control actor.
 
     Every method forwards one control operation to the serving worker.
     """
 
-    def __init__(self, config: ConfigT, pg: Any) -> None:
+    def __init__(self, config: SettingsT, pg: Any) -> None:
         self._serving = Executor.create(
-            ExecutorConfig(
+            ExecutorLaunch(
                 backend=config.executor,
                 options={**config.executor_options, "config": config, "pg": pg},
             )

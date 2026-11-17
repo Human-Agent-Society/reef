@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.errors import DeployConfigError
-from reef.execution.executor import Executor, ExecutorConfig, WorkerSpec
+from reef.execution.executor import Executor, ExecutorLaunch, WorkerSpec
 from reef.execution.executor.config import (
     ExecutorSelection,
     ExecutorSettings,
@@ -70,7 +70,7 @@ def service_executor_config(
     *,
     selection: ExecutorSelection | None = None,
     source_root: Path | None = None,
-) -> ExecutorConfig:
+) -> ExecutorLaunch:
     selected = selection or service_executor_selection(config, service)
     settings = selected.settings
     backend = Executor.get_class(settings.backend)
@@ -87,7 +87,7 @@ def service_executor_config(
         if options.get("max_restarts", 0) != 0 or options.get("max_task_retries", 0) != 0:
             raise ValueError("service executors must not replay process launches")
     worker_class = RayProcessWorker if issubclass(backend, RayExecutor) else ProcessWorker
-    return ExecutorConfig(
+    return ExecutorLaunch(
         backend=backend,
         options=settings.options,
         launch_timeout_s=float(service.get("ready_timeout", timeout)),

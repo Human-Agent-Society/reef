@@ -7,33 +7,39 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, dispatcher, train
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import live_objects
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import (
+    BASE_FILE,
     REFERENCE_FILE,
     ArtifactSourceReader,
     ArtifactSources,
+    BaseRoot,
     DirectorySource,
     SourceFiles,
     directory_checksum,
+    read_base_root,
     read_reference,
 )
-from reef.core.errors import CommitPending, UnknownScenario
+from reef.artifact.artifact import training_starts_of
+from reef.core.errors import CommitPendingError, ScenarioNotFoundError
+from reef.core.snapshot import ItemIdentity
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.component import SnapshotStart
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 
 
 def weights(directory: Path, content: bytes = b"w9") -> Path:
-    """A full-weight release: the layout of ``StubTrainingComponent``'s releases."""
+    """A full-weight artifact: the layout of ``StubTrainingComponent``'s artifacts."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -60,6 +66,53 @@ def store(tmp_path: Path) -> Path:
 
 
 @pytest.mark.unit
+def test_a_training_artifact_names_its_training_starts(tmp_path) -> None:
+    """RFC #1263: an artifact that training makes names its training start, then that start's own starts."""
+    value, _, _ = dispatcher(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    files = weights(tmp_path / "qwen")
+    imported = value.import_artifact(
+        "math", opened(files), None, source=source(files), directory=store(tmp_path), item=ItemIdentity("qwen-base")
+    )
+    value.train_from("math", imported.artifact_id)
+    train(value, 1)
+    first = value.list_artifacts("math")[0]["artifact_id"]
+    value.train_from("math", first)
+    train(value, 2)
+    second = value.list_artifacts("math")[0]["artifact_id"]
+
+    def starts(artifact_id: str) -> tuple[str, ...]:
+        return training_starts_of(scenario.resolve_artifact(artifact_id)[1])
+
+    assert starts(imported.artifact_id) == ()
+    assert starts(first) == (imported.artifact_id,)
+    assert starts(second) == (first, imported.artifact_id)
+    value.close()
+
+
+@pytest.mark.unit
+def test_a_base_root_is_imported_only_into_the_deployment_whose_default_start_it_names(tmp_path) -> None:
+    value, _, _ = dispatcher(tmp_path)
+    scenario = value.get_or_create_scenario("math")
+    for name, model in (("same", "stub"), ("other", "qwen")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / BASE_FILE).write_text(BaseRoot({"model": model}).to_text())
+    imported = value.import_artifact(
+        "math", opened(tmp_path / "same"), None, source=source(tmp_path / "same"), directory=store(tmp_path)
+    )
+    row = value.list_artifacts("math")[0]
+    assert (row["operation"], row["artifact_id"]) == ("import", imported.artifact_id)
+    _, stored_artifact = scenario.resolve_artifact(imported.artifact_id)
+    assert read_base_root(stored_artifact.materialize().local_path) == BaseRoot({"model": "stub"})
+    with pytest.raises(ValueError, match="model: 'qwen', not 'stub'"):
+        value.import_artifact(
+            "math", opened(tmp_path / "other"), None, source=source(tmp_path / "other"), directory=store(tmp_path)
+        )
+    assert len(value.list_artifacts("math")) == 2
+    value.close()
+
+
+@pytest.mark.unit
 def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path) -> None:
     value, runtime, backend_factory = dispatcher(tmp_path)
     train(value, 1)
@@ -75,7 +128,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
         "math", opened(weights(tmp_path / "w9")), None, source=source(tmp_path / "w9"), directory=store(tmp_path)
     )
 
-    # Nothing serves, trains from or moves to the artifact: the active release, the chain tip and the start stay.
+    # Nothing serves, trains from or moves to the artifact: the active selection, the chain tip and the start stay.
     assert scenario.current_snapshot() == served
     assert scenario.repository.checkpoint_artifact == checkpoint
     assert scenario.trainer.state == trainer_state
@@ -95,7 +148,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     assert "release_id" not in row and "content_id" not in row
     assert imported.artifact_id != record.snapshot.revision
     _, stored_artifact = scenario.resolve_artifact(imported.artifact_id)
-    assert directory_checksum(stored_artifact.local_path) == directory_checksum(tmp_path / "w9")
+    assert directory_checksum(stored_artifact.materialize().local_path) == directory_checksum(tmp_path / "w9")
     assert (row["source"], row["active"], row["activated"]) == (source(tmp_path / "w9"), False, False)
 
     # Importing the same bytes again creates another artifact identity.
@@ -104,20 +157,24 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     )
     assert again.artifact_id != imported.artifact_id
     _, another_artifact = scenario.resolve_artifact(again.artifact_id)
-    assert directory_checksum(another_artifact.local_path) == directory_checksum(stored_artifact.local_path)
+    assert directory_checksum(another_artifact.materialize().local_path) == directory_checksum(
+        stored_artifact.materialize().local_path
+    )
 
     # The artifact is then an ordinary row: it serves and trains as any other.
     activated = value.activate("math", imported.artifact_id)
     assert scenario.serving_artifact_id() == imported.artifact_id == activated.artifact_id
     value.train_from("math", imported.artifact_id)
-    assert JobLoopState.from_dict(scenario.trainer.state).start == str(runtime.imported[-1])
+    # The training start names the imported artifact's snapshot; the training service imports it for a job.
+    assert SnapshotStart.from_text(JobLoopState.from_dict(scenario.trainer.state).start) is not None
     value.close()
 
     # A restart keeps the chain tip at the last training step and lists the imports.
     component = ImportingComponent(tmp_path / "restarted-export")
     restarted = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        TestPolicyRecipe(),
         backend_factory,
+        live=live_objects(component, component.inference),
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
@@ -132,9 +189,9 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
             "training",
             "creation",
         ]
-        # Control resumes training before inference loads the selected import.
+        # Control names the training start and imports nothing; inference loads the selected import.
         wait_for_serving(restarted)
-        assert component.restore_order == ["training", "inference"]
+        assert component.restore_order == ["inference"]
         request = restarted.coordination.served_models.current_request("math")
         assert request.payload["artifact_id"] == imported.artifact_id
     finally:
@@ -164,7 +221,7 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
                 directory=store(tmp_path),
             )
         monkeypatch.setattr(Trainer, "has_pending_commit", property(lambda self: True))
-        with pytest.raises(CommitPending, match="cannot import an artifact"):
+        with pytest.raises(CommitPendingError, match="cannot import an artifact"):
             value.import_artifact(
                 "math", opened(tmp_path / "good"), None, source=source(tmp_path / "good"), directory=store(tmp_path)
             )
@@ -175,7 +232,7 @@ def test_a_refused_import_changes_nothing(tmp_path, monkeypatch) -> None:
 
 
 class CountingReader(ArtifactSourceReader):
-    """Opens ``mem://`` URIs as the full-weight release in ``directory`` and keeps each URI it opened."""
+    """Opens ``mem://`` URIs as the full-weight artifact in ``directory`` and keeps each URI it opened."""
 
     def __init__(self, directory: Path) -> None:
         self.directory = weights(directory)
@@ -199,7 +256,7 @@ def test_an_import_the_scenario_cannot_take_reads_nothing(tmp_path) -> None:
     try:
         with pytest.raises(ValueError, match="has no component 'wieghts'"):
             imports.import_source(value, "math", "wieghts", "mem://model")
-        with pytest.raises(UnknownScenario):
+        with pytest.raises(ScenarioNotFoundError):
             imports.import_source(value, "other", None, "mem://model")
         assert reader.read == []
         assert imports.import_source(value, "math", None, "mem://model")["scenario"] == "math"
@@ -289,7 +346,7 @@ def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_pa
             assert read_reference(stored) is not None and (stored / REFERENCE_FILE).is_file()
             assert not (stored / "model.safetensors").exists()
 
-            # The revision must have the layout of the component's releases, and resolve.
+            # The revision must have the layout of the component's snapshots, and resolve.
             del hub.files["config.json"]
             refused = await client.post("/reef/scenarios/math/artifacts", json={"source": uri})
             assert refused.status == 400 and "config.json and weight files" in await refused.text()

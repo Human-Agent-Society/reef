@@ -9,9 +9,10 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.polling import wait_until
+from tests.support.runtime_stubs import live_objects
 from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -19,9 +20,10 @@ from reef.artifact.artifact import SnapshotRef
 from reef.artifact.files import directory_checksum
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.recipe import Recipe
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
-from reef.service.data_service import DataWorker, data_jobs
+from reef.service.data_service import DataWorker, copy_scenario_artifacts, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_coordination import memory_coordination
@@ -33,15 +35,15 @@ DATA = "/reef/namespaces/acme/data"
 
 
 class UriBackend(InMemoryRepositoryBackend):
-    """An in-memory repository that names each release's directory with a ``file`` URI, as an object store names it
+    """An in-memory repository that names each snapshot's directory with a ``file`` URI, as an object store names it
     with an ``s3`` URI."""
 
-    def release_uri(self, ref: SnapshotRef) -> str:
+    def snapshot_uri(self, ref: SnapshotRef) -> str:
         return self.materialize(ref).local_path.as_uri() + "/"
 
 
 def weights(directory: Path, content: bytes) -> Path:
-    """A full-weight release: the layout of the test policy's releases."""
+    """A full-weight artifact: the layout of the test policy's artifacts."""
     directory.mkdir(parents=True)
     (directory / "config.json").write_text("{}")
     (directory / "model.safetensors").write_bytes(content)
@@ -58,14 +60,14 @@ def cell(tmp_path: Path, name: str) -> Dispatcher:
     runtime = ImportingComponent(root / "exported")
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
-    storage = SQLiteScenarioStorage(root / "records", task_files=task_files)
+    storage = SQLiteScenarioStorage(root / "records", task_files=task_files, data=data)
     dispatcher = Dispatcher(
-        TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
+        TestPolicyRecipe(),
         UriBackend.factory(directory=root / "repository"),
+        live=live_objects(runtime, runtime.inference, data_store=data),
         local_artifact_dir=root / "staged",
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
-        data_store=data,
         coordination=memory_coordination(),
     )
     dispatcher.workers.add(
@@ -125,22 +127,37 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             refused = await client.delete(f"{DATA}/{item_id}")
             assert refused.status == 400 and "still exists" in await refused.text()
 
-            # A scenario of the owner in the other Cell imports the item: a copy of the same content, which names
-            # the item.
+            # A scenario of the owner in the other Cell imports the item: the same artifact, under the same ID, and
+            # the library keeps one item of it (RFC #1218).
             into = await other_cell.post("/reef/scenarios/other/artifacts", json={"item": item_id})
             assert into.status == 201, await into.text()
             receipt = await into.json()
-            copied = await library_item(client, f"other/{receipt['artifact_id']}")
-            assert "content_id" not in copied["content"]
+            assert receipt["artifact_id"] == imported["artifact_id"]
             listed = (await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]
             assert listed[0]["source"] == {"uri": content["source_uri"], "version": "", "item": item_id}
-            # The import is an artifact of "other", so it enters the library too.
-            await library_item(client, f"other/{receipt['artifact_id']}")
+            again = await other_cell.post("/reef/scenarios/other/artifacts", json={"item": item_id})
+            assert (await again.json())["artifact_id"] == imported["artifact_id"]
+            assert len((await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]) == len(
+                listed
+            )
+            # The data service copies the scenario's first artifact in the background: wait until it did.
+            first_artifact = next(row for row in listed if not row["source"].get("item"))
+            await library_item(other_cell, f"other/{first_artifact['artifact_id']}")
+            assert copy_scenario_artifacts(second, "other") == 0
+            missing = await client.get(f"{DATA}/other/{receipt['artifact_id']}")
+            assert missing.status == 404
 
             # A client adds files that it stored as an item of its own, imports it, and deletes it.
             body = upload_item("upload-1", weights(tmp_path / "upload", b"w10"))
             assert (await client.post(DATA, json=body)).status == 201
-            assert (await other_cell.post("/reef/scenarios/other/artifacts", json={"item": "upload-1"})).status == 201
+            first_use = await (
+                await other_cell.post("/reef/scenarios/other/artifacts", json={"item": "upload-1"})
+            ).json()
+            # An upload gets one ID at its first use, and it keeps it.
+            stored = await (await client.get(f"{DATA}/upload-1")).json()
+            assert stored["metadata"]["artifact_id"] == first_use["artifact_id"]
+            patch = {"ids": ["upload-1"], "patch": {"artifact_id": "artifact:other"}}
+            assert (await client.post(f"{DATA}/metadata", json=patch)).status == 400
             assert (await client.delete(f"{DATA}/upload-1")).status == 200
 
             # A scenario uses an artifact item by importing it, not through metadata.scenarios.
@@ -160,13 +177,13 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
 
 def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
     """The body that stores ``directory`` as the client's artifact item ``item_id``."""
-    content = {"source_uri": directory.as_uri(), "kind": "model", "component": None, "content_id": None}
+    content = {"source_uri": directory.as_uri(), "kind": "model", "component": None}
     return {"items": [{"id": item_id, "content": content, "metadata": {"kind": "artifact"}}]}
 
 
 @pytest.mark.integration
 def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path) -> None:
-    """RFC #1062, RFC #1070: the item is the scenario's root release, so it is the active artifact and the training
+    """RFC #1062, RFC #1070: the item is the scenario's root snapshot, so it is the active artifact and the training
     start, and the creation row names the item as its source.
 
     A process trains one scenario, so each new scenario has a Cell of its own; the Cells share the data store.
@@ -195,6 +212,8 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert created.status == 201, await created.text()
                 answer = await created.json()
                 started = answer["artifact_id"]
+                if name == "from-scenario":
+                    assert started == imported["artifact_id"]
                 assert answer == {
                     "scenario": name,
                     "owner": "acme",
@@ -216,8 +235,8 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 (root,) = [row for row in listed if row["artifact_id"] == started]
                 assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
-                # The root is the only release: no default start was written first.
-                assert len(scenario.release_queries.snapshot_rows(scenario.scenario_step)) == 1
+                # The root is the only snapshot: no default start was written first.
+                assert len(scenario.snapshot_queries.snapshot_rows(scenario.commit_number)) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
                 again = await client.post(
@@ -270,24 +289,17 @@ def test_a_new_owner_gets_the_artifact_items_that_a_copy_made_for_the_default_ow
         item_id = f"s/{scenario.artifacts()[0]['artifact_id']}"
         store = dispatcher.data_store
         assert store is not None
-        wait_until(lambda: store.read("s", item_id) is not None)
+        wait_until(lambda: store.read("s", item_id) is not None, message="the data service did not copy the item")
         dispatcher.set_scenario_owner("s", "acme")
-        wait_until(lambda: store.read("acme", item_id) is not None)
+        wait_until(lambda: store.read("acme", item_id) is not None, message="the data service did not copy the item")
     finally:
         dispatcher.close()
 
 
-def wait_until(condition, seconds: float = 10.0) -> None:
-    deadline = time.monotonic() + seconds
-    while not condition():
-        if time.monotonic() >= deadline:
-            raise AssertionError("the data service did not copy the item")
-        time.sleep(0.05)
-
-
 def test_an_artifact_item_without_a_source_uri_is_listed_but_not_imported(tmp_path: Path) -> None:
-    # The in-memory repository names no URI, so its artifacts are in the library without a source_uri.
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    # The in-memory repository names no URI, so its artifacts are in the library without a source_uri. A recipe
+    # that only reads records serves no component, so the artifact has no kind.
+    dispatcher = dispatcher_for(tmp_path, Recipe())
 
     async def run() -> None:
         async with client_of(dispatcher, tmp_path) as client:

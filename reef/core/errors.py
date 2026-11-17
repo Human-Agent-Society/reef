@@ -1,9 +1,12 @@
 """Common error hierarchy for Reef.
 
 All Reef-raised exceptions derive from :class:`ReefError` so callers can
-catch any domain error with one exception type. ``inference_aborted`` reads
-how a response reports an engine abort, for the service, the training
-pipeline and the training components alike.
+catch any domain error with one exception type. Each class name ends in
+``Error``. :class:`ConfigError` is the base of every configuration error.
+:class:`InternalError` is the base of every failure that the caller's
+request did not cause. ``inference_aborted`` reads how a response reports
+an engine abort, for the service, the training pipeline and the training
+components alike.
 """
 
 from collections.abc import Mapping
@@ -13,15 +16,29 @@ class ReefError(Exception):
     """Base class for all Reef-raised exceptions."""
 
 
-class UnknownScenario(ReefError):
+class InternalError(ReefError):
+    """A failure inside Reef or its environment that the caller's request did not cause.
+
+    It names a failure of a process, an engine, a sandbox, a store or a deployment step. Its one purpose is to
+    separate such a failure from a refused request: the HTTP layer does not translate it, so a route answers 500,
+    and a worker handles it as any other unexpected error.
+    """
+
+
+class ScenarioNotFoundError(ReefError):
     """The scenario does not exist and the caller may not create it implicitly."""
 
 
-class ScenarioLimitReached(ReefError):
+class ScenarioDeletedError(ReefError):
+    """The scenario ID belonged to a scenario that was deleted. A scenario ID is never used again after its delete,
+    so a new scenario needs a new ID."""
+
+
+class ScenarioLimitReachedError(ReefError):
     """The service holds its maximum number of registered scenarios. It refuses a new scenario."""
 
 
-class ScenarioCapacityFull(ReefError):
+class ScenarioCapacityFullError(ReefError):
     """The service holds its maximum number of loaded scenarios, and too few of them are idle to unload."""
 
     def __init__(self, message: str, *, retry_after_seconds: int = 30) -> None:
@@ -29,23 +46,27 @@ class ScenarioCapacityFull(ReefError):
         self.retry_after_seconds = retry_after_seconds
 
 
-class DeployConfigError(ReefError):
+class ConfigError(ReefError, ValueError):
+    """A configuration cannot be loaded or is invalid.
+
+    Each subclass names the configuration: a deployment, a ``runtime`` section or training component, a recipe, or
+    a plugin setting. It is a ``ValueError``, so code that reads a config value can refuse it in one way.
+    """
+
+
+class DeployConfigError(ConfigError):
     """A ``reef serve`` deployment config cannot be loaded or is invalid."""
 
 
-class InferenceUnavailable(ReefError):
+class InferenceUnavailableError(ReefError):
     """The deployment serves no inference requests, for example one with ``inference.backend: none``."""
 
 
-class CommitPending(ReefError):
+class CommitPendingError(ReefError):
     """A training result waits for its scenario commit, so an activation or a new training start must wait too."""
 
 
-class ManualBufferRefused(ReefError):
-    """A client asked to change a trainer's buffer by hand while it trains in automatic mode."""
-
-
-class TrainingStartRefused(ReefError):
+class TrainingStartRefusedError(ReefError):
     """A trainer cannot start training from the artifact it was given; nothing changed."""
 
 
@@ -65,7 +86,7 @@ class UpstreamStatusError(ReefError):
         self.status = status
 
 
-class RuntimeConfigError(ReefError):
+class RuntimeConfigError(ConfigError):
     """A ``runtime`` section or a training component config is invalid or misses a required key."""
 
 
@@ -101,4 +122,18 @@ def inference_aborted(response: Mapping[str, object]) -> bool:
             or (isinstance(choice.get("meta_info"), Mapping) and aborted(choice["meta_info"].get("finish_reason")))
         )
         for choice in choices
+    )
+
+
+def inference_incomplete(response: Mapping[str, object]) -> bool:
+    """Whether a response explicitly reports an abort or incomplete stream delivery.
+
+    Diagnostic records remain readable but cannot become training samples. Older buffered records without
+    delivery metadata retain their existing eligibility; a provider's own ``complete`` field is not a receipt.
+    """
+    delivery = response.get("stream_delivery")
+    return (
+        inference_aborted(response)
+        or (isinstance(delivery, Mapping) and delivery.get("complete") is False)
+        or (response.get("stream") is True and response.get("complete") is False)
     )

@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from reef.artifact.artifact import Artifact
 from reef.core.artifact_selection import ArtifactSelection
 
 
@@ -14,19 +15,20 @@ class TrainingExperimentContext:
     """The training starts and run position known before one training commit.
 
     ``source_artifacts`` is an immutable, nonempty component-to-artifact-ID
-    mapping. It names each trainer's start before the step. The committer
+    mapping. It names each trainer's start before the commit. ``commit_number``
+    is the number that the commit takes in the scenario's commit history. The committer
     makes the context; experiment trackers use it to associate metrics.
     """
 
     scenario: str
     recipe: str
-    step: int
+    commit_number: int
     source_artifacts: ArtifactSelection
     run_segment: int = 0
     run_step: int = 0
     backend: str | None = None
     backend_config: Mapping[str, Any] | None = None
-    #: The release component whose trainer made the step, when the scenario runs several trainers.
+    #: The snapshot component whose trainer made the step, when the scenario runs several trainers.
     component: str | None = None
 
     def __post_init__(self) -> None:
@@ -40,6 +42,10 @@ class TrainingExperimentEvent:
 
     ``produced_artifacts`` is an ``ArtifactSelection``. Only the changed
     component advances; a step without an artifact keeps its previous start.
+    ``checkpoint`` is the snapshot that the commit published, bound to the scenario's repository and not made
+    local, or None for a commit that published none. A tracker that uploads a checkpoint's files makes it local
+    (``Artifact.materialize``), which reads them from the artifact store, and takes the directory of
+    ``context.component``.
     Commit observers make these events; trackers record their IDs and metrics.
     """
 
@@ -48,18 +54,20 @@ class TrainingExperimentEvent:
     metrics: Mapping[str, Any]
     outcome: str
     training_job_id: str | None = None
-    checkpoint_path: str | None = None
+    checkpoint: Artifact | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.produced_artifacts, ArtifactSelection):
             raise TypeError("produced_artifacts must be an ArtifactSelection")
+        if self.checkpoint is not None and not isinstance(self.checkpoint, Artifact):
+            raise TypeError("checkpoint must be an Artifact or None")
 
 
 @dataclass(frozen=True, slots=True)
 class TrainFromExperimentEvent:
     """A committed new training start, which ends one training-curve segment and opens the next.
 
-    ``step`` is the step of the ``"train_from"`` commit, which numbers the
+    ``commit_number`` is the commit number of the ``"train_from"`` commit, which numbers the
     next segment, and ``run_segment`` is the segment it ends.
     ``start_artifacts`` is the complete ``ArtifactSelection`` of training starts
     after the change. Only the selected component changes. ``component`` names
@@ -70,7 +78,7 @@ class TrainFromExperimentEvent:
 
     scenario: str
     recipe: str
-    step: int
+    commit_number: int
     run_segment: int
     start_artifacts: ArtifactSelection
     component: str | None = None

@@ -76,7 +76,7 @@ model's chat template.
 The task judge executes the generated program and computes its reward. The
 harness reports that reward with the inference receipt and the rollout's step,
 group, and position. The record-to-sample stage, ``TTTDSamples``, waits for
-every position in the grid. It rejects a grid that contains more than one release.
+every position in the grid. It rejects a grid that contains more than one snapshot.
 ``TTTDJobData`` removes the groups with one reward value across all siblings
 after the grid reaches the barrier. If every group is constant, ``TTTDJobData``
 keeps one group so that the training runtime receives zero-signal job data.
@@ -85,15 +85,15 @@ Slime computes adaptive-beta entropic leave-one-out advantages within each
 group. The loss uses the old-policy log probabilities without PPO clipping and
 adds centered token KL against the frozen base model. The training component
 computes the old-policy log probabilities with the weights of the step's
-start; with the default ``max_staleness`` of 0, these are the weights that
-sampled the grid. Slime refuses ``--use-rollout-logprobs``. Megatron updates rank-32 LoRA
+start. The stage is on-policy, so these are the weights that sampled the
+grid. Slime refuses ``--use-rollout-logprobs``. Megatron updates rank-32 LoRA
 matrices on the attention and MLP projections. Reef publishes the adapter to
 SGLang after the optimizer step succeeds.
 
 The controller writes the updated PUCT archive to
-``tttd-search-state.json`` with phase ``pending``. It waits for Reef's scenario
-step to advance and for the served artifact (``served_artifact_id``) to
-change. It then records phase ``committed`` with the new scenario step and
+``tttd-search-state.json`` with phase ``pending``. It waits for Reef's commit
+number to advance and for the served artifact (``served_artifact_id``) to
+change. It then records phase ``committed`` with the new commit number and
 starts the next search step.
 
 Configuration
@@ -124,9 +124,6 @@ the record-to-sample stage. ``TTTDJobData`` reads the grid from
 
    ``pipeline.record2sample.config.rollouts_per_group`` : 64
        siblings per group; at least two, since a group of one has no relative reward.
-
-   ``pipeline.record2sample.config.max_staleness`` : 0
-       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
    ``pipeline.record2sample.config.accept_multi_turn_policy_samples`` : false
        train a report's trajectory of several model calls as one multi-turn sample; otherwise the report trains only the trajectory's last call.
@@ -205,7 +202,7 @@ following commands from the repository root:
 
    git submodule update --init third_party/reef-client
    python -m pip install -e ./third_party/reef-client
-   python -m pip install -e . "reef-eval[harbor]"
+   python -m pip install -e .
    cd recipes/tttd/examples/tttd
 
 ``run.sh`` downloads ``Qwen/Qwen3-8B`` into ``work/model`` on its first run,
@@ -224,7 +221,7 @@ groups of two rollouts, one step, and thinking disabled; that run checks the
 integration path rather than the sampling budget used for the formal results.
 
 Reef writes its service log to ``work/erdos_min_overlap/reef.log``. The public
-status endpoint reports the scenario step and the served artifact
+status endpoint reports the commit number (``commit_number``) and the served artifact
 (``served_artifact_id``):
 
 .. code:: bash
@@ -233,8 +230,8 @@ status endpoint reports the scenario step and the served artifact
      -H "Authorization: Bearer reef-local" \
      http://127.0.0.1:8900/reef/status
 
-The controller returns an error when the rollout count, scenario step, served
-release, or stored search identity does not match the current run. A successful
+The controller returns an error when the rollout count, commit number, served
+artifact, or stored search identity does not match the current run. A successful
 exit confirms that Reef committed the requested number of training steps.
 
 Choose a problem
@@ -454,8 +451,8 @@ project and an optional entity:
 
 Export ``WANDB_API_KEY`` or log in through the cluster's credential store. Do
 not put the key in YAML, tags, run names, or Slime flags. Reef assigns one W&B
-run identity to a scenario and resumes it after a service restart. Checkpoint
-paths are logged as metadata when ``upload_checkpoints`` is false. `Experiment
+run identity to a scenario and resumes it after a service restart. A run names
+its checkpoints by their artifact IDs when ``upload_checkpoints`` is false. `Experiment
 tracking <../../reference/configuration.rst#experiment-tracking>`__ describes grouping,
 run segments, offline mode, and metric names.
 
@@ -514,11 +511,11 @@ before it can use an incompatible archive.
 
 A ``pending`` state contains the evaluated children for a step that the
 controller has not observed as committed. On restart, the controller waits for
-that transaction. A ``committed`` state records the scenario step and the
+that transaction. A ``committed`` state records the commit number and the
 served artifact ID that completed it. The served artifact can change without a
 step, for example when an operator activates another artifact. On restart, the
 controller accepts the artifact that serves after Reef restores the expected
-scenario step, and records it. The controller refuses a state file of an older
+commit number, and records it. The controller refuses a state file of an older
 format, such as one that names a runtime load ID.
 
 The repository example creates a checkpoint every two versions and retains the
@@ -563,4 +560,4 @@ Related guides
 - `Train model weights from agent feedback <../evolve-your-model.rst>`__:
   set up the GPU stack and inspect published updates.
 - `HTTP API reference <../../reference/http-api.rst>`__: connect your agent
-  and query feedback, scenarios, and releases.
+  and query feedback, scenarios, and artifacts.

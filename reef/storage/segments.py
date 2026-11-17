@@ -10,17 +10,20 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shutil
+import tempfile
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import unquote, urlparse
 
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings, Plugin
 
 
-class SegmentNotFound(ReefError):
+class SegmentNotFoundError(ReefError):
     """A segment that the store does not hold, or a range past its end."""
 
 
@@ -72,11 +75,21 @@ class SegmentStore(Plugin, ABC):
 
     Operations:
 
-    * ``put(partition, segment_id, data)`` stores ``data``. The segment is durable when the method returns. The data
-      store gives each segment a new ID, so it never puts one ID twice.
+    * ``write(partition, segment_id, data)`` stores ``data``. The segment is durable when the method returns. The data
+      store gives each segment a new ID, so it never writes one ID twice.
     * ``read(partition, lines)`` returns the bytes of each ``SegmentLine`` of ``lines``, in order, without the
-      newline. A missing segment or a line past its end is a ``SegmentNotFound``.
+      newline. A missing segment or a line past its end is a ``SegmentNotFoundError``.
     * ``delete(partition, segment_id)`` removes the segment. A missing segment is not an error.
+
+    The store also keeps directories of files, such as the data directories of training jobs
+    (``reef.storage.job_data``). A key names each directory; it is ``/``-separated words, with no ``.`` or ``..``:
+
+    * ``read_directory_uri(key)`` is the URI of the directory ``key``, or None when the store does not hold all of it.
+    * ``write_directory(key, source)`` keeps a copy of the files under ``source`` as the directory ``key`` and returns
+      its URI. A write of a key that the store holds keeps the first copy.
+    * ``open_directory(uri)`` returns a local directory with the files of the directory at ``uri``. A remote store
+      copies them into its local cache.
+    * ``delete_directory(key)`` removes the directory. A missing directory is not an error.
 
     Purpose: a deployment names a subclass in ``storage.segment_backend``. The service builds it at startup, gives it
     to the data store, and closes it at shutdown.
@@ -92,7 +105,7 @@ class SegmentStore(Plugin, ABC):
         """
 
     @abstractmethod
-    def put(self, partition: str, segment_id: str, data: bytes) -> None: ...
+    def write(self, partition: str, segment_id: str, data: bytes) -> None: ...
 
     @abstractmethod
     def read(self, partition: str, lines: Sequence[SegmentLine]) -> tuple[bytes, ...]: ...
@@ -100,8 +113,28 @@ class SegmentStore(Plugin, ABC):
     @abstractmethod
     def delete(self, partition: str, segment_id: str) -> None: ...
 
+    @abstractmethod
+    def read_directory_uri(self, key: str) -> str | None: ...
+
+    @abstractmethod
+    def write_directory(self, key: str, source: Path) -> str: ...
+
+    @abstractmethod
+    def open_directory(self, uri: str) -> Path: ...
+
+    @abstractmethod
+    def delete_directory(self, key: str) -> None: ...
+
     def close(self) -> None:
         """Release the resources of the store. The default holds none."""
+
+
+def directory_key(key: str) -> str:
+    """``key`` when it names a directory of a segment store: ``/``-separated words, none ``.``, ``..`` or empty."""
+    parts = key.split("/") if isinstance(key, str) else [""]
+    if any(part in ("", ".", "..") or part.startswith(".") for part in parts):
+        raise ValueError(f"a directory key is /-separated names, got {key!r}")
+    return key
 
 
 @dataclass(frozen=True)
@@ -126,10 +159,11 @@ class SegmentPartition:
 
 
 class LocalSegmentStore(SegmentStore):
-    """Keeps the segments in a local directory, as ``<directory>/<sha256 of partition>/<segment_id>.jsonl``.
+    """Keeps the segments in a local directory, as ``<directory>/<sha256 of partition>/<segment_id>.jsonl``, and
+    each directory ``key`` as ``<directory>/directories/<key>``, with the URI ``file://<absolute path>``.
 
-    The store writes a file under a temporary name, syncs it, and renames it into place. Only the processes of one
-    host can share it.
+    The store writes a file or a directory under a temporary name and renames it into place. Only the processes of
+    one host, or of one shared volume, can share it.
     """
 
     def __init__(self, directory: Path) -> None:
@@ -146,7 +180,7 @@ class LocalSegmentStore(SegmentStore):
             raise ValueError("a segment's partition and ID are non-empty, and the ID is a plain file name")
         return self.directory / hashlib.sha256(partition.encode("utf-8")).hexdigest() / f"{segment_id}.jsonl"
 
-    def put(self, partition: str, segment_id: str, data: bytes) -> None:
+    def write(self, partition: str, segment_id: str, data: bytes) -> None:
         target = self.path(partition, segment_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = target.with_name(f".{segment_id}.partial")
@@ -164,21 +198,54 @@ class LocalSegmentStore(SegmentStore):
                     file.seek(line.offset)
                     data = file.read(line.length)
             except FileNotFoundError:
-                raise SegmentNotFound(f"no segment {line.segment_id!r} in partition {partition!r}") from None
+                raise SegmentNotFoundError(f"no segment {line.segment_id!r} in partition {partition!r}") from None
             if len(data) != line.length:
-                raise SegmentNotFound(f"segment {line.segment_id!r} ends before byte {line.offset + line.length}")
+                raise SegmentNotFoundError(f"segment {line.segment_id!r} ends before byte {line.offset + line.length}")
             found.append(data)
         return tuple(found)
 
     def delete(self, partition: str, segment_id: str) -> None:
         self.path(partition, segment_id).unlink(missing_ok=True)
 
+    def directory_path(self, key: str) -> Path:
+        return (self.directory / "directories" / directory_key(key)).resolve()
+
+    def read_directory_uri(self, key: str) -> str | None:
+        path = self.directory_path(key)
+        return path.as_uri() if path.is_dir() else None
+
+    def write_directory(self, key: str, source: Path) -> str:
+        target = self.directory_path(key)
+        if not target.is_dir():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging = Path(tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent))
+            try:
+                shutil.copytree(source, staging, dirs_exist_ok=True)
+                os.replace(staging, target)
+            except OSError:
+                shutil.rmtree(staging, ignore_errors=True)
+                # Another writer of the same key renamed its copy into place first.
+                if not target.is_dir():
+                    raise
+        return target.as_uri()
+
+    def open_directory(self, uri: str) -> Path:
+        parsed = urlparse(uri)
+        path = Path(unquote(parsed.path))
+        if parsed.scheme != "file" or not path.is_dir():
+            raise FileNotFoundError(f"no directory at {uri}")
+        return path
+
+    def delete_directory(self, key: str) -> None:
+        shutil.rmtree(self.directory_path(key), ignore_errors=True)
+
 
 __all__ = [
     "LocalSegmentStore",
     "SegmentLine",
-    "SegmentNotFound",
+    "SegmentNotFoundError",
     "SegmentPartition",
     "SegmentStore",
+    "directory_key",
     "segment_lines",
 ]

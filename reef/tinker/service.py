@@ -1,4 +1,5 @@
-"""SDK sessions on a Tinker-compatible service: the SDK module, and closing a ``ServiceClient``.
+"""SDK sessions on a Tinker-compatible service: the SDK module, the context windows of the models that a
+``ServiceClient`` serves, and closing a ``ServiceClient``.
 
 This module and the SDK classes that use it (``reef.tinker.sampling.TinkerSDKSampler``,
 ``reef.tinker.weights.TinkerSamplerWeights`` and ``reef.train.tinker_backend.client.TinkerSDKClient``) are the only
@@ -17,6 +18,17 @@ def tinker_sdk() -> Any:
         return importlib.import_module("tinker")
     except ImportError as exc:
         raise RuntimeError("install Tinker support with uv pip install 'reef-infra[tinker]'") from exc
+
+
+def served_context_windows(service: Any) -> dict[str, int]:
+    """The context window in tokens, prompt and reply together, of each model that the SDK ``ServiceClient``
+    ``service`` serves and states a window for, by model name."""
+    capabilities = service.get_server_capabilities()
+    return {
+        model.model_name: int(model.max_context_length)
+        for model in capabilities.supported_models
+        if model.max_context_length
+    }
 
 
 def close_service(sdk: Any, service: Any, status: str, *, timeout_s: float | None) -> None:

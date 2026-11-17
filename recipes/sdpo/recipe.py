@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from recipes.sdpo.processor import SDPOJobData, SDPOSamples
 from recipes.sdpo.report import SDPOReport
 from reef.core.reports import ReportBase
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-from reef.recipe.errors import RecipeConfigError
+from reef.recipe.base import WeightTrainingRecipe
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -23,7 +23,7 @@ class SDPORecipe(WeightTrainingRecipe):
     next-token distributions over the student's on-policy response become the
     target of a per-token divergence. A step is a complete sampling grid,
     ``groups_per_step`` questions by ``rollouts_per_group`` attempts from one
-    policy release; each report carries one rollout's receipt, its score and
+    policy artifact; each report carries one rollout's receipt, its score and
     its coordinates, and the grid trains as one optimizer step once complete.
 
     The recipe binds the objective, the step schedule, and the report
@@ -39,22 +39,20 @@ class SDPORecipe(WeightTrainingRecipe):
     """
 
     name: str = "sdpo"
+    refused_sections: ClassVar[Mapping[str, str]] = {
+        "optimization": (
+            "SDPO objective options are backend-owned; configure the Slime implementation with training.options"
+        )
+    }
 
     @property
     def report_type(self) -> type[ReportBase]:
         return SDPOReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(objective="sdpo")
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "sdpo"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2sample=SDPOSamples, sample2job=SDPOJobData)
-
-    @classmethod
-    def _validate_config(cls, settings: Mapping[str, Any]) -> None:
-        if settings.get("optimization"):
-            raise RecipeConfigError(
-                "SDPO objective options are backend-owned; configure the Slime implementation with training.options"
-            )

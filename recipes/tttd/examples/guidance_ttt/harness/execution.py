@@ -182,7 +182,7 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
                 if not isinstance(data, dict):
                     raise ValueError("executor returned a non-object JSON response")
                 if data.get("error"):
-                    raise _RetryableExecutorResponse("executor returned an API error object")
+                    raise _RetryableExecutorResponseError("executor returned an API error object")
                 return data, attempt + 1, time.monotonic() - started_at
             except urllib.error.HTTPError as exc:
                 retryable = exc.code in {408, 429, 500, 502, 503, 504}
@@ -196,7 +196,7 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
                 OSError,
                 UnicodeError,
                 ValueError,
-                _RetryableExecutorResponse,
+                _RetryableExecutorResponseError,
             ) as exc:
                 if attempt >= self.backend.max_retries:
                     raise ExecutorUnavailableError(
@@ -213,5 +213,5 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
         time.sleep(max(0.0, delay))
 
 
-class _RetryableExecutorResponse(RuntimeError):
+class _RetryableExecutorResponseError(RuntimeError):
     pass

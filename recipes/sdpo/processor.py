@@ -52,7 +52,7 @@ class SDPOGrouping(ReportGrouping):
     """One sampling step is one group, and its (group, rollout) coordinates are the slots.
 
     A step is ready when its grid is complete, it was sampled from one policy
-    release, and the rollouts of each question share one request. Otherwise the
+    artifact, and the rollouts of each question share one request. Otherwise the
     complete step is discarded and listed in ``failed_steps``.
     """
 
@@ -72,9 +72,9 @@ class SDPOGrouping(ReportGrouping):
             return GroupDecision.INCOMPLETE
         if not isinstance(key, int):
             raise TypeError("SDPO step must be an integer")
-        releases = {member.ends[0].artifact_id for member in members}
+        artifact_ids = {member.ends[0].artifact_id for member in members}
         reason = ""
-        if None in releases or len(releases) != 1:
+        if None in artifact_ids or len(artifact_ids) != 1:
             reason = "missing_or_mixed_artifact_ids"
         reports = [(member, parsed) for member in members if isinstance(parsed := member.parsed_report, SDPOReport)]
         for group in range(self.groups_per_step):
@@ -94,8 +94,8 @@ class SDPOGrouping(ReportGrouping):
 
 @dataclass(frozen=True)
 class SDPOSettings(SampleAssemblySettings):
-    """The config of ``SDPOSamples``: the sampling grid of one step, the teacher's windows, the sample assembly, and
-    the staleness limit.
+    """The config of ``SDPOSamples``: the sampling grid of one step, the teacher's windows, and the sample
+    assembly.
 
     Values: ``groups_per_step`` is a positive int; ``rollouts_per_group`` is an int of at least two;
     ``0 < max_teacher_prompt_tokens <= max_teacher_tokens``; the other keys are as in ``SampleAssemblySettings``.
@@ -130,7 +130,7 @@ class SDPOSamples(ReportSamples):
     def __init__(self, context: PipelineContext, settings: SDPOSettings) -> None:
         #: The grouping of sampling steps.
         self.step_grouping = SDPOGrouping(settings.groups_per_step, settings.rollouts_per_group)
-        super().__init__(context, self.step_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
+        super().__init__(context, self.step_grouping, exclusive_sources=True)
         self.groups_per_step = settings.groups_per_step
         self.rollouts_per_group = settings.rollouts_per_group
         self.assembly = SampleAssembly(settings)
@@ -176,7 +176,7 @@ class SDPOSamples(ReportSamples):
 
 @dataclass(frozen=True)
 class SDPODemonstrationSettings(Sample2JobSettings):
-    """The config of ``SDPOJobData``: which sibling the teacher reads, whether it reads the feedback, the buffer and the job size."""
+    """The config of ``SDPOJobData``: which sibling the teacher reads, whether it reads the feedback, ``buffer_size`` and the job size."""
 
     success_reward_threshold: float = config_option(0.5, help="An attempt at or above this score is correct.")
     allow_own_success_as_demonstration: bool = config_option(
@@ -202,7 +202,7 @@ class SDPOJobData(Sample2Job):
     A report names its rollout's coordinates in the step's grid
     (``groups_per_step`` questions by ``rollouts_per_group`` attempts), and
     the coordinates are its retry slot in ``SDPOGrouping``: the first report at one wins. A step
-    trains only complete, sampled from one policy release, with one request
+    trains only complete, sampled from one policy artifact, with one request
     per question; anything else is discarded whole and listed in
     ``status()``. A rollout whose teacher reads no privileged information
     (no successful sibling, no feedback) keeps the plain request and a sample

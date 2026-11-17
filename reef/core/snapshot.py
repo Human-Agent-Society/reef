@@ -58,13 +58,10 @@ def encode_snapshot_ref(ref: SnapshotRef) -> dict[str, object]:
 
 
 def decode_snapshot_ref(value: Mapping[str, object]) -> SnapshotRef:
-    """Decode current locators or the former artifact-ref wire format."""
-    if value.get("kind") == "snapshot":
-        revision, parent = value.get("revision"), value.get("parent_revision")
-    elif value.get("kind") == "artifact":
-        revision, parent = value.get("release_id"), value.get("parent_release_id")
-    else:
-        raise ValueError("snapshot ref kind must be 'snapshot' or legacy 'artifact'")
+    """Decode a locator that ``encode_snapshot_ref`` wrote."""
+    if value.get("kind") != "snapshot":
+        raise ValueError("snapshot ref kind must be 'snapshot'")
+    revision, parent = value.get("revision"), value.get("parent_revision")
     if not isinstance(revision, str) or (parent is not None and not isinstance(parent, str)):
         raise ValueError("snapshot ref revision and parent_revision must be strings")
     if "runtime_load_id" in value:
@@ -74,7 +71,7 @@ def decode_snapshot_ref(value: Mapping[str, object]) -> SnapshotRef:
 
 @dataclass(frozen=True)
 class RootSource:
-    """Where the content of a scenario's root release came from.
+    """Where the content of a scenario's root snapshot came from.
 
     Values: ``kind`` is ``"default"`` or ``"item"``.
 
@@ -85,7 +82,7 @@ class RootSource:
       the source names none), as an import records them. ``inputs`` is empty.
 
     Purpose: ``ScenarioFactory`` makes the value when it creates a scenario, and the scenario metadata stores it as
-    ``to_dict``. A trainer gives it to ``TrainingComponent.root_start``, and the release list shows it on the
+    ``to_dict``. A trainer gives it to ``TrainingComponent.root_start``, and the snapshot list shows it on the
     creation row.
     """
 
@@ -136,9 +133,31 @@ class RootSource:
         raise ValueError(f"a root source is {{kind, inputs}} or {{kind, item, uri, version}}, not {value!r}")
 
 
+@dataclass(frozen=True)
+class ItemIdentity:
+    """What an artifact made from an artifact item takes from the item, besides its files.
+
+    Values: ``item_id`` is the item's non-empty ID. ``artifact_id`` is the item's artifact ID, which the new artifact
+    keeps (RFC #1218), or None for a new one. Construction checks these types.
+
+    Purpose: ``reef.service.artifact_imports`` makes it from a stored item; a scenario's root (``ItemStart``) and an
+    import (``ScenarioCommitter.import_artifact``) read it.
+    """
+
+    item_id: str
+    artifact_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or not self.item_id:
+            raise ValueError("an item identity names a non-empty item_id")
+        if self.artifact_id is not None and (not isinstance(self.artifact_id, str) or not self.artifact_id):
+            raise ValueError("an item identity's artifact_id is a non-empty string or None")
+
+
 __all__ = [
     "LOCAL_SNAPSHOT_PREFIX",
     "SELECTION_VIEW_PREFIX",
+    "ItemIdentity",
     "RootSource",
     "SnapshotRef",
     "decode_snapshot_ref",

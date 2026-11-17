@@ -96,7 +96,7 @@ class Campaign:
             write_json(self.output / "inputs.json", inputs)
 
     def artifacts(self) -> list[dict[str, Any]]:
-        """The scenario's artifacts, newest first; one per release in this one-component scenario."""
+        """The scenario's artifacts, newest first; one per snapshot in this one-component scenario."""
         try:
             result = self.client.get(f"/reef/scenarios/{quote(self.args.scenario, safe='')}/artifacts")
         except ReefClientError as error:
@@ -146,7 +146,7 @@ class Campaign:
         )
         artifact_id = record.get("artifact_id")
         if record.get("agent_record_id") != receipt or not artifact_id:
-            raise RuntimeError("Inference receipt has no identifiable weight release")
+            raise RuntimeError("Inference receipt has no identifiable weight artifact")
         choice = response["choices"][0]
         message = choice["message"]
         content = message.get("content") or ""
@@ -173,7 +173,7 @@ class Campaign:
             or [row.get("active", False) for row in rows] != [False] * (len(rows) - 1) + [True]
             or len({row["artifact_id"] for row in rows}) != len(rows)
         ):
-            raise RuntimeError("Campaign requires the newest release to be active and an unchanged training history")
+            raise RuntimeError("Campaign requires the newest snapshot to be active and an unchanged training history")
         return rows
 
     def collect(
@@ -205,16 +205,16 @@ class Campaign:
                     if key in rows or key not in expected or row.get("evaluation") is not expected[key]:
                         raise ValueError(f"Unexpected or duplicate sample in {path}: {key}")
                     if not row.get("receipt") or not row.get("artifact_id"):
-                        raise ValueError(f"Sample in {path} lacks a receipt or release")
+                        raise ValueError(f"Sample in {path} lacks a receipt or artifact ID")
                     rows[key] = row
         versions = {row["artifact_id"] for row in rows.values()}
         if len(versions) > 1 or (artifact_id is not None and versions - {artifact_id}):
-            raise RuntimeError(f"Saved batch does not match expected release {artifact_id}: {versions}")
+            raise RuntimeError(f"Saved batch does not match expected artifact {artifact_id}: {versions}")
         if artifact_id is None and versions:
             artifact_id = next(iter(versions))
         missing = [item for item in work if (item[0].id, item[1]) not in rows]
         if missing and not allow_new:
-            raise RuntimeError(f"Cannot regenerate missing samples from a historical release: {filename}")
+            raise RuntimeError(f"Cannot regenerate missing samples from a historical snapshot: {filename}")
         failure: Exception | None = None
         with ThreadPoolExecutor(max_workers=self.args.concurrency) as pool, path.open("ab") as handle:
             futures = [pool.submit(self.sample, item) for item in missing]
@@ -228,7 +228,7 @@ class Campaign:
                 if artifact_id is None:
                     artifact_id = row["artifact_id"]
                 if row["artifact_id"] != artifact_id:
-                    raise RuntimeError("Batch crossed a weight release boundary")
+                    raise RuntimeError("Batch crossed a weight artifact boundary")
                 handle.write((json.dumps(row, ensure_ascii=False) + "\n").encode())
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -281,7 +281,7 @@ class Campaign:
     def reuse_baseline(self, questions: list[Question]) -> None:
         """Take step 0 from an earlier campaign's evaluation of the same initial weights, seeds and budget.
 
-        The reused rows keep their own release id, so the baseline release stays
+        The reused rows keep their own artifact ID, so the baseline artifact stays
         distinct from every trained checkpoint.
         """
         target = self.output / "eval-0000.jsonl"
@@ -297,7 +297,7 @@ class Campaign:
         if {(row["question_id"], row["seed"]) for row in rows} != expected or len(rows) != len(expected):
             raise ValueError("--baseline-eval does not cover exactly this campaign's evaluation questions and seeds")
         if len({row["artifact_id"] for row in rows}) != 1 or any(not row.get("receipt") for row in rows):
-            raise ValueError("--baseline-eval must hold one release's complete, receipted predictions")
+            raise ValueError("--baseline-eval must hold one snapshot's complete, receipted predictions")
         target.write_text("".join(json.dumps(row) + "\n" for row in rows))
         metric = {
             "step": 0,
@@ -321,7 +321,7 @@ class Campaign:
 
     def verify_update(self, step: int, rows: list[dict[str, Any]], history: list[dict[str, Any]]) -> None:
         result = self.client.get(
-            f"/reef/scenarios/{quote(self.args.scenario, safe='')}/commits?after_step={step - 1}&limit=1"
+            f"/reef/scenarios/{quote(self.args.scenario, safe='')}/commits?after_commit_number={step - 1}&limit=1"
         )
         commits = result["commits"]
         expected = {
@@ -330,7 +330,7 @@ class Campaign:
             for identifier in (row["receipt"], report_id(self.args.scenario, row["receipt"]))
         }
         if len(commits) != 1 or (
-            commits[0]["step"] != step
+            commits[0]["commit_number"] != step
             or commits[0]["operation"] != "training"
             or not commits[0]["activated"]
             or commits[0]["components"]["weights"] != history[step]["artifact_id"]
@@ -361,7 +361,7 @@ class Campaign:
             if saved:
                 raise RuntimeError("Saved samples exist but their Reef scenario is missing")
         if not history:
-            # The inference routes serve only a scenario that exists: create it at its initial release.
+            # The inference routes serve only a scenario that exists: create it at its initial snapshot.
             self.client.post("/reef/scenarios", self.args.scenario, {"name": self.args.scenario})
         evaluation = load_questions(self.args.eval_data)
         training = load_questions(self.args.train_data) if self.args.steps else []
@@ -382,14 +382,14 @@ class Campaign:
                 for sample in range(self.args.samples_per_prompt)
             ]
             if not history and step == 1 and self.args.baseline_eval is not None:
-                # The reused baseline made no request, so this batch opens the scenario at its initial release.
+                # The reused baseline made no request, so this batch opens the scenario at its initial snapshot.
                 rows = self.collect(work, f"train-{step:04d}.jsonl")
                 history = self.history()
                 if len(history) != 1 or history[0]["artifact_id"] != rows[0]["artifact_id"]:
-                    raise RuntimeError("The first batch did not open the scenario at its initial release")
+                    raise RuntimeError("The first batch did not open the scenario at its initial snapshot")
             else:
                 if len(history) < step:
-                    raise RuntimeError("Scenario lost a previously completed training release")
+                    raise RuntimeError("Scenario lost a previously completed training snapshot")
                 rows = self.collect(
                     work,
                     f"train-{step:04d}.jsonl",
@@ -411,13 +411,13 @@ class Campaign:
                 if len(history) != step + 1:
                     raise RuntimeError("Scenario advanced beyond this campaign's batch")
             self.verify_update(step, rows, history)
-            release_path = self.output / f"releases-{step:04d}.json"
-            if release_path.exists():
-                saved = list(reversed(json.loads(release_path.read_text())))
+            artifact_path = self.output / f"releases-{step:04d}.json"
+            if artifact_path.exists():
+                saved = list(reversed(json.loads(artifact_path.read_text())))
                 if [row["artifact_id"] for row in saved] != [row["artifact_id"] for row in history[: len(saved)]]:
                     raise RuntimeError("Saved publication history no longer matches the service")
             else:
-                write_json(release_path, list(reversed(history)))
+                write_json(artifact_path, list(reversed(history)))
             if step % self.args.eval_every == 0 or step == self.args.steps:
                 self.evaluate(
                     evaluation, step, artifact_id=history[step]["artifact_id"], allow_new=len(history) == step + 1

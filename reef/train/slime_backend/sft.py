@@ -1,7 +1,7 @@
 """The ``sft`` loss family: Slime's ``sft_loss`` on the default policy row.
 
-The built-in SFT recipe (``reef.recipe.sft``) registers this family by
-reference. Thus only the training driver and the workers import this module.
+``reef.train.slime_backend.loss_families`` knows this family by reference.
+Thus only the training driver and the workers import this module.
 """
 
 from __future__ import annotations
@@ -11,7 +11,8 @@ from typing import Any
 
 from reef.core.job_data import TrajectorySample
 from reef.core.trajectories import source_record_id, trajectory_reward
-from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
+from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.loss_families import register_loss_family
 
 
 @register_loss_family
@@ -33,9 +34,10 @@ class SftAlgorithm(SlimeAlgorithm):
     def shape_sample_row(self, sample: TrajectorySample) -> list[Any]:
         """The default row, with reward 0 for a trajectory that records none: ``sft_loss`` reads no reward.
 
-        Uploaded demonstrations usually carry no reward. A recorded reward must still be finite.
+        Uploaded demonstrations usually carry no reward, and a trajectory from records holds ``None`` for it. A
+        recorded reward must still be finite.
         """
-        reward = trajectory_reward(sample) if "reward" in sample.metadata else 0.0
+        reward = 0.0 if sample.metadata.get("reward") is None else trajectory_reward(sample)
         return [
             source_record_id(sample),
             list(sample.training.get("tokens", [])),

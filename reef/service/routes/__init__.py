@@ -12,11 +12,12 @@ from reef.service.routes.data import register_data_routes
 from reef.service.routes.evaluations import register_evaluation_reads, register_evaluation_writes
 from reef.service.routes.harness import register_harness_routes
 from reef.service.routes.records import register_record_routes
-from reef.service.routes.samples import register_buffer_routes, register_sample_reads
+from reef.service.routes.samples import register_next_job_route, register_sample_reads
 from reef.service.routes.scenario_files import register_scenario_file_routes
 from reef.service.routes.scenarios import register_scenario_reads, register_scenario_writes
 from reef.service.routes.system import register_system_routes
 from reef.service.routes.tasks import register_task_routes
+from reef.service.tasks import DEFAULT_MAX_TASK_ARCHIVE_BYTES
 
 
 def register_routes(
@@ -26,8 +27,12 @@ def register_routes(
     replica: InferenceReplica,
     evaluations: ArtifactEvaluations,
     imports: ArtifactImports,
+    max_task_archive_bytes: int = DEFAULT_MAX_TASK_ARCHIVE_BYTES,
 ) -> None:
-    """The routes of control's app. It serves the data routes too when its process runs the data service."""
+    """The routes of control's app. It serves the data routes too when its process runs the data service.
+
+    ``max_task_archive_bytes`` is ``data.max_task_archive_bytes`` (``register_data_routes``).
+    """
     add_inference_routes(app, replica)
     register_scenario_reads(app, request_service=request_service)
     register_scenario_writes(app, request_service=request_service, evaluations=evaluations, imports=imports)
@@ -36,21 +41,28 @@ def register_routes(
     register_harness_routes(app, request_service=request_service, imports=DirectImports(request_service))
     register_record_routes(app, request_service=request_service)
     if request_service.dispatcher.services.runs_data:
-        register_data_routes(app, request_service=request_service)
+        register_data_routes(app, request_service=request_service, max_task_archive_bytes=max_task_archive_bytes)
         register_scenario_file_routes(app, request_service=request_service)
     register_task_routes(app, request_service=request_service)
     register_sample_reads(app, request_service=request_service)
-    register_buffer_routes(app, request_service=request_service)
+    register_next_job_route(app, request_service=request_service)
     register_artifact_import_routes(app, request_service=request_service, imports=imports)
     register_evaluation_reads(app, evaluations=evaluations)
     register_evaluation_writes(app, evaluations=evaluations)
 
 
 def register_data_service_routes(
-    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations
+    app: web.Application,
+    *,
+    request_service: RequestService,
+    evaluations: ArtifactEvaluations,
+    max_task_archive_bytes: int = DEFAULT_MAX_TASK_ARCHIVE_BYTES,
 ) -> None:
-    """The routes of the data service's app: the data routes and the reads of what each scenario stores."""
-    register_data_routes(app, request_service=request_service)
+    """The routes of the data service's app: the data routes and the reads of what each scenario stores.
+
+    ``max_task_archive_bytes`` is ``data.max_task_archive_bytes`` (``register_data_routes``).
+    """
+    register_data_routes(app, request_service=request_service, max_task_archive_bytes=max_task_archive_bytes)
     register_scenario_file_routes(app, request_service=request_service)
     register_scenario_reads(app, request_service=request_service)
     register_task_routes(app, request_service=request_service)

@@ -5,13 +5,12 @@ The services of a deployment hand work to each other through these tables:
 - ``served_model`` and ``scheduled_stop`` hold ``served_models`` (``reef.storage.served_models``);
 - ``control_lease`` holds the control lease (``reef.storage.control_lease``);
 - ``work_item`` holds the work queues (``reef.storage.work_queue``);
-- ``coordination_mark`` holds the marks (``reef.storage.marks``);
 - ``coordination_sequence`` holds two counters: ``WORK_SEQUENCE`` numbers the changes of the work queues, and
   ``SERVED_SEQUENCE`` the changes of ``served_models`` and its stops.
 
 A write that numbers its change takes its counter's row first. So the writes of one counter are serialized, and
 the sequence order of their changes is the order in which they commit: a reader that reads the changes after a
-sequence never misses a later commit. A write that numbers nothing (a lease extension, a mark) takes no counter, so
+sequence never misses a later commit. A write that numbers nothing (a lease extension) takes no counter, so
 it never waits behind the writes of a counter.
 """
 
@@ -35,6 +34,7 @@ from sqlalchemy import (
     Column,
     ColumnElement,
     Float,
+    Index,
     Integer,
     MetaData,
     PrimaryKeyConstraint,
@@ -61,29 +61,31 @@ from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
 from reef.core.values import require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
-from reef.storage.marks import Marks, check_mark_name
-from reef.storage.migrations import migrate_work_item_columns
-from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import (
     AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
+    REDEPLOY,
     SERVING_KIND,
     SERVING_QUEUE,
     STOP_SERVING_KIND,
-    ControlLeaseConflict,
+    ControlLeaseConflictError,
     ServedModelsWriter,
+    serving_serial_key,
+    without_redeploy,
 )
-from reef.storage.sqlite import enable_wal
+from reef.storage.sql_setup import enable_wal, postgres_url, prefix_range, validate_postgres_schema
 from reef.storage.work_queue import (
     FINAL_STATES,
     HELD_STATES,
     WORK_STATES,
     JsonValue,
     NewWork,
-    WorkConflict,
+    WorkConflictError,
     WorkItem,
-    WorkLeaseLost,
+    WorkLeaseLostError,
+    WorkLogLine,
     WorkQueue,
+    check_log_page,
     check_page,
     clock,
 )
@@ -93,7 +95,7 @@ from reef.storage.work_queue import (
 class CoordinationTables:
     """The tables of one coordination database.
 
-    Values: seven ``Table`` objects of one ``MetaData``, defined by ``coordination_tables``.
+    Values: eight ``Table`` objects of one ``MetaData``, defined by ``coordination_tables``.
 
     Purpose: a ``CoordinationDatabase`` makes it; the coordination stores query it.
     """
@@ -101,14 +103,20 @@ class CoordinationTables:
     sequence: Table
     served_model: Table
     serving_config: Table
+    traffic_weights: Table
     scheduled_stop: Table
     control_lease: Table
     work_item: Table
-    mark: Table
+    work_log: Table
 
 
-def coordination_tables(metadata: MetaData) -> CoordinationTables:
-    """Define the coordination tables in ``metadata``. Times are seconds since the epoch; JSON is text."""
+#: The indexes of ``work_item`` that a database of an earlier Reef can lack (``CoordinationDatabase.create``).
+ADDED_INDEXES = frozenset({"work_item_by_state", "work_item_by_lease", "work_item_by_scenario", "work_item_by_id"})
+
+
+def coordination_tables(metadata: MetaData, *, sqlite: bool) -> CoordinationTables:
+    """Define the coordination tables in ``metadata``, for SQLite when ``sqlite``, else for PostgreSQL. Times are
+    seconds since the epoch; JSON is text."""
     sequence = Table(
         "coordination_sequence",
         metadata,
@@ -128,6 +136,13 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
     # The override of the served component that each scenario's routes serve with (RFC #1097); no row is no field.
     serving_config = Table(
         "serving_config",
+        metadata,
+        Column("scenario", Text, primary_key=True),
+        Column("value_json", Text, nullable=False),
+    )
+    # The weight of each artifact in each scenario's traffic split; no row is no split.
+    traffic_weights = Table(
+        "traffic_weights",
         metadata,
         Column("scenario", Text, primary_key=True),
         Column("value_json", Text, nullable=False),
@@ -165,6 +180,7 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("started_at", Float, nullable=True),
         Column("ended_at", Float, nullable=True),
         Column("attempt_count", Integer, nullable=False),
+        Column("stopped_attempt_count", Integer, nullable=False, server_default="0"),
         Column("worker_id", Text, nullable=True),
         Column("lease_expires_at", Float, nullable=True),
         Column("progress_json", Text, nullable=False),
@@ -174,14 +190,33 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("created_sequence", BigInteger, nullable=False, index=True),
         Column("changed_sequence", BigInteger, nullable=False, index=True),
         PrimaryKeyConstraint("queue", "item_id"),
+        # Each idle worker looks for a queued item (``take``) and for an expired lease (``requeue_expired``) several
+        # times a second. Without these indexes each look reads every item of the queue, ended ones too.
+        Index("work_item_by_state", "queue", "state", "created_sequence"),
+        Index("work_item_by_lease", "state", "lease_expires_at"),
+        # The items of one scenario of a queue, newest first (``page``), and their counts by state (``counts``).
+        Index("work_item_by_scenario", "queue", "scenario", "created_sequence"),
     )
-    mark = Table(
-        "coordination_mark",
+    if not sqlite:
+        # The items of an ID prefix are a range of IDs in code point order (``WorkQueue.items``). The primary key has
+        # the database's collation, whose order is another one; SQLite's is that order already.
+        Index("work_item_by_id", work_item.c.queue, work_item.c.item_id.collate("C"))
+    work_log = Table(
+        "work_log",
         metadata,
-        Column("name", Text, primary_key=True),
-        Column("value", BigInteger, nullable=False),
+        Column("queue", Text, nullable=False),
+        Column("item_id", Text, nullable=False),
+        Column("attempt", Integer, nullable=False),
+        Column("number", Integer, nullable=False),
+        Column("at", Float, nullable=False),
+        Column("level", String(16), nullable=False),
+        Column("logger", Text, nullable=False),
+        Column("message", Text, nullable=False),
+        PrimaryKeyConstraint("queue", "item_id", "attempt", "number"),
     )
-    return CoordinationTables(sequence, served_model, serving_config, scheduled_stop, control_lease, work_item, mark)
+    return CoordinationTables(
+        sequence, served_model, serving_config, traffic_weights, scheduled_stop, control_lease, work_item, work_log
+    )
 
 
 #: The counter row that numbers the changes of the work queues.
@@ -247,11 +282,20 @@ class CoordinationDatabase(CoordinationResource):
 
     def create(self, connection: Connection, metadata: MetaData) -> None:
         metadata.create_all(connection)
-        migrate_work_item_columns(connection, self.tables.work_item)
+        # ``create_all`` makes the missing tables only: a work_item table that an earlier Reef made gets the later
+        # indexes here.
+        for index in self.tables.work_item.indexes:
+            if index.name in ADDED_INDEXES:
+                index.create(connection, checkfirst=True)
         present = set(connection.execute(select(self.tables.sequence.c.id)).scalars())
         for sequence in (WORK_SEQUENCE, SERVED_SEQUENCE):
             if sequence not in present:
                 connection.execute(insert(self.tables.sequence).values(id=sequence, value=0))
+
+    @abstractmethod
+    def code_point_order(self, column: ColumnElement[str]) -> ColumnElement[str]:
+        """``column`` in code point order, the order of the indexes that find a range of its values
+        (``prefix_range``)."""
 
     @abstractmethod
     def close(self) -> None:
@@ -284,7 +328,7 @@ class SQLiteCoordinationDatabase(CoordinationDatabase):
 
     def __init__(self, directory: Path | None) -> None:
         metadata = MetaData()
-        super().__init__(coordination_tables(metadata))
+        super().__init__(coordination_tables(metadata, sqlite=True))
         if directory is None:
             database = ":memory:"
         else:
@@ -327,6 +371,9 @@ class SQLiteCoordinationDatabase(CoordinationDatabase):
                     self.open.exec_driver_sql("BEGIN IMMEDIATE")
                 yield self.open
 
+    def code_point_order(self, column: ColumnElement[str]) -> ColumnElement[str]:
+        return column
+
     def close(self) -> None:
         with self.lock:
             if self.open is not None:
@@ -341,7 +388,7 @@ class PostgresCoordinationDatabase(CoordinationDatabase):
     def __init__(self, database_url: str, *, schema: str = "reef_coordination") -> None:
         validate_postgres_schema(schema)
         metadata = MetaData(schema=schema)
-        super().__init__(coordination_tables(metadata))
+        super().__init__(coordination_tables(metadata, sqlite=False))
         try:
             self.engine: Engine | None = create_engine(
                 postgres_url(database_url), pool_pre_ping=True, hide_parameters=True
@@ -371,6 +418,9 @@ class PostgresCoordinationDatabase(CoordinationDatabase):
             raise ReefError("the coordination database is closed")
         with self.engine.begin() as connection:
             yield connection
+
+    def code_point_order(self, column: ColumnElement[str]) -> ColumnElement[str]:
+        return column.collate("C")
 
     def close(self) -> None:
         if self.engine is not None:
@@ -435,7 +485,11 @@ class SQLServedModels(ServedModelsWriter):
             current = self.request_in(connection, scenario)
             # Whether the new item retries the failed current item of the same payload.
             retried = False
-            if current is not None and canonical_json(dict(current.payload)) == canonical_json(dict(payload)):
+            if (
+                current is not None
+                and REDEPLOY not in payload
+                and canonical_json(without_redeploy(current.payload)) == canonical_json(dict(payload))
+            ):
                 if not (retry_failed and current.state == "failed"):
                     return current
                 retried = True
@@ -448,7 +502,7 @@ class SQLServedModels(ServedModelsWriter):
                 )
             ).mappings()
             for row in waiting.all():
-                self.work.save(
+                self.work.write_item(
                     connection,
                     counter,
                     item_from_row(row),
@@ -458,22 +512,33 @@ class SQLServedModels(ServedModelsWriter):
                     ended_at=moment,
                 )
             sequence = counter.next()
-            item = self.work.insert(
+            item = self.work.append_item(
                 connection,
-                NewWork(SERVING_QUEUE, f"serve:{sequence}", scenario, SERVING_KIND, payload, serial_key=SERVING_QUEUE),
+                NewWork(
+                    SERVING_QUEUE,
+                    f"serve:{sequence}",
+                    scenario,
+                    SERVING_KIND,
+                    payload,
+                    serial_key=serving_serial_key(scenario),
+                ),
                 sequence,
                 moment,
             )
             if retried and automatic_retries:
                 metadata = canonical_json({AUTOMATIC_RETRIES: automatic_retries})
-                item = self.work.save(connection, counter, item, moment, metadata_json=metadata)
+                item = self.work.write_item(connection, counter, item, moment, metadata_json=metadata)
             if payload:
                 return item
-            self.replace_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)
-            self.replace_serving_config(connection, served_counter, scenario, {})
-            return self.work.save(connection, counter, item, moment, state="finished", result={}, ended_at=moment)
+            self.write_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)
+            self.write_serving_config(connection, served_counter, scenario, {})
+            traffic = self.tables.traffic_weights
+            connection.execute(delete(traffic).where(traffic.c.scenario == scenario))
+            return self.work.write_item(
+                connection, counter, item, moment, state="finished", result={}, ended_at=moment
+            )
 
-    def replace_routes(
+    def write_routes(
         self,
         connection: Connection,
         counter: SequenceCounter,
@@ -495,7 +560,7 @@ class SQLServedModels(ServedModelsWriter):
         self.schedule_unreferenced(connection, counter, set(previous.values()) - set(models.values()), stop_after)
         counter.next()
 
-    def replace_serving_config(
+    def write_serving_config(
         self, connection: Connection, counter: SequenceCounter, scenario: str, serving_config: Mapping[str, JsonValue]
     ) -> None:
         """Make ``serving_config`` the scenario's override in the caller's transaction; an empty one removes it."""
@@ -554,19 +619,19 @@ class SQLServedModels(ServedModelsWriter):
                 self.checked_owner(connection, owner, worker_id, moment)
             held = self.work.held(connection, item.queue, item.id, worker_id, moment)
             if held.attempt_count != item.attempt_count:
-                raise WorkLeaseLost("a later attempt holds this serving request")
+                raise WorkLeaseLostError("a later attempt holds this serving request")
             current = self.request_in(connection, item.scenario)
             result: dict[str, JsonValue] = {}
             with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
                 if current is not None and current.id == item.id:
-                    self.replace_routes(connection, served_counter, item.scenario, models, moment + stop_delay_seconds)
-                    self.replace_serving_config(connection, served_counter, item.scenario, serving_config)
+                    self.write_routes(connection, served_counter, item.scenario, models, moment + stop_delay_seconds)
+                    self.write_serving_config(connection, served_counter, item.scenario, serving_config)
                     result = {name: dict(served.to_json()) for name, served in models.items()}
                 else:
                     self.schedule_unreferenced(
                         connection, served_counter, set(models.values()), moment + stop_delay_seconds
                     )
-            return self.work.save(
+            return self.work.write_item(
                 connection,
                 counter,
                 held,
@@ -595,7 +660,7 @@ class SQLServedModels(ServedModelsWriter):
                 self.checked_owner(connection, owner, worker_id, moment)
             held = self.work.held(connection, item.queue, item.id, worker_id, moment)
             if held.attempt_count != item.attempt_count:
-                raise WorkLeaseLost("a later attempt holds this serving cleanup")
+                raise WorkLeaseLostError("a later attempt holds this serving cleanup")
             with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
                 deleted = connection.execute(
                     delete(self.tables.scheduled_stop).where(
@@ -604,7 +669,7 @@ class SQLServedModels(ServedModelsWriter):
                 ).rowcount
                 if deleted:
                     served_counter.next()
-                return self.work.save(
+                return self.work.write_item(
                     connection,
                     counter,
                     held,
@@ -622,7 +687,7 @@ class SQLServedModels(ServedModelsWriter):
             raise ValueError("the inference owner must hold an inference-owner item")
         held = self.work.held(connection, owner.queue, owner.id, worker_id, now)
         if held.attempt_count != owner.attempt_count:
-            raise WorkLeaseLost("a later attempt holds the inference runtime")
+            raise WorkLeaseLostError("a later attempt holds the inference runtime")
 
     def recover_completed(
         self,
@@ -662,29 +727,31 @@ class SQLServedModels(ServedModelsWriter):
                 served = self.tables.served_model
                 routes = connection.execute(select(served).where(served.c.scenario == current.scenario)).mappings()
                 staying = {row["name"]: route for row in routes if (route := served_from_row(row)) in kept}
-                self.replace_routes(connection, served_counter, current.scenario, staying, moment + stop_delay_seconds)
+                self.write_routes(connection, served_counter, current.scenario, staying, moment + stop_delay_seconds)
                 if current.state != "finished" or not current.payload:
                     continue
                 sequence = counter.next()
-                recovery = self.work.insert(
+                recovery = self.work.append_item(
                     connection,
                     NewWork(
                         SERVING_QUEUE,
                         f"serve:{sequence}",
                         current.scenario,
                         SERVING_KIND,
-                        current.payload,
-                        serial_key=SERVING_QUEUE,
+                        without_redeploy(current.payload),
+                        serial_key=serving_serial_key(current.scenario),
                     ),
                     sequence,
                     moment,
                 )
-                self.work.save(connection, counter, recovery, moment, metadata_json=canonical_json({"recovery": True}))
+                self.work.write_item(
+                    connection, counter, recovery, moment, metadata_json=canonical_json({"recovery": True})
+                )
 
     def checked(self, connection: Connection, control_lease_number: int) -> None:
         current = self.lease.number_in(connection)
         if current != control_lease_number:
-            raise ControlLeaseConflict(
+            raise ControlLeaseConflictError(
                 f"control lease number {control_lease_number} is not the current number {current}"
             )
 
@@ -710,6 +777,21 @@ class SQLServedModels(ServedModelsWriter):
             value_json = connection.execute(select(table.c.value_json).where(table.c.scenario == scenario)).scalar()
         return {} if value_json is None else cast(dict[str, JsonValue], json.loads(value_json))
 
+    def read_traffic_weights(self, scenario: str) -> Mapping[str, int]:
+        table = self.tables.traffic_weights
+        with self.database.read() as connection:
+            value_json = connection.execute(select(table.c.value_json).where(table.c.scenario == scenario)).scalar()
+        return {} if value_json is None else cast(dict[str, int], json.loads(value_json))
+
+    def write_traffic_weights(self, scenario: str, weights: Mapping[str, int], *, control_lease_number: int) -> None:
+        table = self.tables.traffic_weights
+        with self.database.write(SERVED_SEQUENCE) as (connection, counter):
+            self.checked(connection, control_lease_number)
+            connection.execute(delete(table).where(table.c.scenario == scenario))
+            if weights:
+                connection.execute(insert(table).values(scenario=scenario, value_json=canonical_json(dict(weights))))
+            counter.next()
+
     def changed_sequence(self) -> int:
         with self.database.read() as connection:
             return int(
@@ -726,7 +808,7 @@ class SQLServedModels(ServedModelsWriter):
             connection.execute(insert(table).values(scenario=key.scenario, name=key.name, **served.to_json()))
             counter.next()
 
-    def remove(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
+    def delete(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
         table = self.tables.served_model
         condition = and_(table.c.scenario == key.scenario, table.c.name == key.name)
         with self.database.write(SERVED_SEQUENCE) as (connection, counter):
@@ -794,7 +876,7 @@ class SQLControlLease(ControlLease):
             return None
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
-    def store(self, connection: Connection, state: ControlLeaseState, *, existed: bool) -> ControlLeaseState:
+    def write_state(self, connection: Connection, state: ControlLeaseState, *, existed: bool) -> ControlLeaseState:
         values = {"instance_id": state.instance_id, "number": state.number, "expires_at": state.expires_at}
         if existed:
             connection.execute(update(self.table).where(self.table.c.id == 1).values(**values))
@@ -815,7 +897,7 @@ class SQLControlLease(ControlLease):
                 else:
                     return None
                 state = ControlLeaseState(instance_id, number, moment + self.lease_seconds)
-                return self.store(connection, state, existed=held is not None)
+                return self.write_state(connection, state, existed=held is not None)
         except IntegrityError:
             # Another instance took the first lease in the same moment: its row is there now, so this take lost.
             return None
@@ -826,7 +908,7 @@ class SQLControlLease(ControlLease):
             held = self.held(connection)
             if held is None or held.instance_id != instance_id or held.expires_at < moment:
                 return None
-            return self.store(
+            return self.write_state(
                 connection, ControlLeaseState(instance_id, held.number, moment + self.lease_seconds), existed=True
             )
 
@@ -836,7 +918,7 @@ class SQLControlLease(ControlLease):
             held = self.held(connection)
             if held is None or held.instance_id != instance_id or held.expires_at < moment:
                 return False
-            self.store(connection, ControlLeaseState(instance_id, held.number, moment), existed=True)
+            self.write_state(connection, ControlLeaseState(instance_id, held.number, moment), existed=True)
             return True
 
     def number_in(self, connection: Connection) -> int:
@@ -855,35 +937,6 @@ class SQLControlLease(ControlLease):
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
 
-class SQLMarks(Marks):
-    """The marks as rows of ``coordination_mark``. A mark changes no work, so it takes no sequence value."""
-
-    def __init__(self, database: CoordinationDatabase) -> None:
-        self.database = database
-        self.table = database.tables.mark
-
-    def read(self, name: str) -> int:
-        with self.database.read() as connection:
-            value = connection.execute(
-                select(self.table.c.value).where(self.table.c.name == check_mark_name(name))
-            ).scalar_one_or_none()
-        return 0 if value is None else int(value)
-
-    def advance(self, name: str, value: int) -> None:
-        check_mark_name(name)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValueError("a mark is a non-negative int")
-        with self.database.connection(write=True) as connection:
-            query = select(self.table.c.value).where(self.table.c.name == name)
-            if self.database.locks_rows:
-                query = query.with_for_update()
-            current = connection.execute(query).scalar_one_or_none()
-            if current is None:
-                connection.execute(insert(self.table).values(name=name, value=value))
-            elif value > int(current):
-                connection.execute(update(self.table).where(self.table.c.name == name).values(value=value))
-
-
 def item_from_row(row: RowMapping) -> WorkItem:
     return WorkItem(
         queue=row["queue"],
@@ -898,6 +951,7 @@ def item_from_row(row: RowMapping) -> WorkItem:
         started_at=None if row["started_at"] is None else float(row["started_at"]),
         ended_at=None if row["ended_at"] is None else float(row["ended_at"]),
         attempt_count=int(row["attempt_count"]),
+        stopped_attempt_count=int(row["stopped_attempt_count"]),
         worker_id=row["worker_id"],
         lease_expires_at=None if row["lease_expires_at"] is None else float(row["lease_expires_at"]),
         progress=tuple(json.loads(row["progress_json"])),
@@ -938,7 +992,7 @@ class SQLWorkQueue(WorkQueue):
         found = connection.execute(query).mappings().first()
         return None if found is None else item_from_row(found)
 
-    def save(
+    def write_item(
         self, connection: Connection, counter: SequenceCounter, item: WorkItem, moment: float, **changes: object
     ) -> WorkItem:
         """Write ``changes`` to ``item`` as the change ``moment``, with the next change sequence."""
@@ -964,19 +1018,19 @@ class SQLWorkQueue(WorkQueue):
             or item.worker_id != worker_id
             or (item.lease_expires_at is not None and item.lease_expires_at < now)
         ):
-            raise WorkLeaseLost(f"worker {worker_id!r} does not hold {queue}/{item_id}")
+            raise WorkLeaseLostError(f"worker {worker_id!r} does not hold {queue}/{item_id}")
         return item
 
-    def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
+    def append(self, work: NewWork, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
         payload = canonical_json(dict(work.payload))
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             existing = self.row(connection, work.queue, work.id)
             if existing is not None:
                 if canonical_json(dict(existing.payload)) != payload:
-                    raise WorkConflict(f"{work.queue}/{work.id} exists with a different payload")
+                    raise WorkConflictError(f"{work.queue}/{work.id} exists with a different payload")
                 return existing
-            return self.insert(connection, work, counter.next(), moment)
+            return self.append_item(connection, work, counter.next(), moment)
 
     def request(
         self,
@@ -1003,7 +1057,7 @@ class SQLWorkQueue(WorkQueue):
                 wanted = moment if available_at is None else available_at
                 if queued.available_at <= wanted:
                     return queued
-                return self.save(connection, counter, queued, moment, available_at=wanted)
+                return self.write_item(connection, counter, queued, moment, available_at=wanted)
             sequence = counter.next()
             work = NewWork(
                 queue,
@@ -1014,9 +1068,9 @@ class SQLWorkQueue(WorkQueue):
                 serial_key=serial_key,
                 available_at=available_at,
             )
-            return self.insert(connection, work, sequence, moment)
+            return self.append_item(connection, work, sequence, moment)
 
-    def insert(self, connection: Connection, work: NewWork, sequence: int, moment: float) -> WorkItem:
+    def append_item(self, connection: Connection, work: NewWork, sequence: int, moment: float) -> WorkItem:
         """Insert ``work`` as a queued item created at ``moment`` with the change sequence ``sequence``."""
         connection.execute(
             insert(self.table).values(
@@ -1042,7 +1096,7 @@ class SQLWorkQueue(WorkQueue):
             raise ReefError(f"work item {work.queue}/{work.id} was not added")
         return added
 
-    def delete_final(self, *, finished_before: float) -> int:
+    def delete_final(self, *, finished_before: float, keep: Mapping[str, Collection[str]] | None = None) -> int:
         newer = self.table.alias("newer_serving")
         latest_serving = and_(
             self.table.c.queue == SERVING_QUEUE,
@@ -1061,8 +1115,25 @@ class SQLWorkQueue(WorkQueue):
         statement = delete(self.table).where(
             self.table.c.state.in_(sorted(FINAL_STATES)), self.table.c.ended_at < finished_before, not_(latest_serving)
         )
+        for queue, item_ids in (keep or {}).items():
+            if item_ids:
+                statement = statement.where(
+                    not_(and_(self.table.c.queue == queue, self.table.c.item_id.in_(sorted(item_ids))))
+                )
+        log = self.database.tables.work_log
+        orphan_lines = delete(log).where(
+            not_(
+                exists(
+                    select(self.table.c.item_id).where(
+                        self.table.c.queue == log.c.queue, self.table.c.item_id == log.c.item_id
+                    )
+                )
+            )
+        )
         with self.database.write(WORK_SEQUENCE) as (connection, _counter):
-            return int(connection.execute(statement).rowcount or 0)
+            deleted = int(connection.execute(statement).rowcount or 0)
+            connection.execute(orphan_lines)
+            return deleted
 
     def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
         require_text(worker_id, "worker_id")
@@ -1103,7 +1174,7 @@ class SQLWorkQueue(WorkQueue):
             if found is None:
                 return None
             chosen = item_from_row(found)
-            return self.save(
+            return self.write_item(
                 connection,
                 counter,
                 chosen,
@@ -1120,15 +1191,19 @@ class SQLWorkQueue(WorkQueue):
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.save(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
+            return self.write_item(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return item if item.state == "running" else self.save(connection, counter, item, moment, state="running")
+            return (
+                item
+                if item.state == "running"
+                else self.write_item(connection, counter, item, moment, state="running")
+            )
 
-    def add_progress(
+    def append_progress(
         self,
         queue: str,
         item_id: str,
@@ -1145,7 +1220,7 @@ class SQLWorkQueue(WorkQueue):
                 return item
             if number != len(item.progress):
                 raise ValueError(f"progress number {number} skips {len(item.progress)}")
-            return self.save(connection, counter, item, moment, progress=(*item.progress, dict(progress)))
+            return self.write_item(connection, counter, item, moment, progress=(*item.progress, dict(progress)))
 
     def finish(
         self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
@@ -1153,7 +1228,7 @@ class SQLWorkQueue(WorkQueue):
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.save(
+            return self.write_item(
                 connection,
                 counter,
                 item,
@@ -1179,8 +1254,8 @@ class SQLWorkQueue(WorkQueue):
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            again = retryable and item.attempt_count < self.attempts_allowed(queue)
-            return self.save(
+            again = retryable and self.has_attempts_left(item)
+            return self.write_item(
                 connection,
                 counter,
                 item,
@@ -1192,6 +1267,32 @@ class SQLWorkQueue(WorkQueue):
                 ended_at=None if again else moment,
             )
 
+    def give_back(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+        moment = clock(now)
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+            item = self.held(connection, queue, item_id, worker_id, moment)
+            return self.write_item(
+                connection,
+                counter,
+                item,
+                moment,
+                state="queued",
+                error="the worker stopped",
+                worker_id=None,
+                lease_expires_at=None,
+                stopped_attempt_count=item.stopped_attempt_count + 1,
+            )
+
+    def retry(self, queue: str, item_id: str, *, now: float | None = None) -> WorkItem | None:
+        moment = clock(now)
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+            item = self.row(connection, queue, item_id, lock=True)
+            if item is None or not item.final:
+                return item
+            return self.write_item(
+                connection, counter, item, moment, state="queued", result=None, ended_at=None, available_at=moment
+            )
+
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
         require_text(error, "error")
         moment = time.time()
@@ -1199,7 +1300,7 @@ class SQLWorkQueue(WorkQueue):
             item = self.row(connection, queue, item_id, lock=True)
             if item is None or item.final:
                 return item
-            return self.save(
+            return self.write_item(
                 connection,
                 counter,
                 item,
@@ -1211,7 +1312,7 @@ class SQLWorkQueue(WorkQueue):
                 ended_at=moment,
             )
 
-    def set_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
+    def write_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
         require_text(name, "name")
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.row(connection, queue, item_id, lock=True)
@@ -1219,7 +1320,7 @@ class SQLWorkQueue(WorkQueue):
                 name in item.metadata and canonical_json(item.metadata[name]) == canonical_json(value)
             ):
                 return item
-            return self.save(
+            return self.write_item(
                 connection, counter, item, time.time(), metadata_json=canonical_json({**item.metadata, name: value})
             )
 
@@ -1238,9 +1339,9 @@ class SQLWorkQueue(WorkQueue):
             expired = [item_from_row(row) for row in connection.execute(query).mappings().all()]
             changed = []
             for item in expired:
-                again = item.attempt_count < self.attempts_allowed(item.queue)
+                again = self.has_attempts_left(item)
                 changed.append(
-                    self.save(
+                    self.write_item(
                         connection,
                         counter,
                         item,
@@ -1254,7 +1355,7 @@ class SQLWorkQueue(WorkQueue):
                 )
             return tuple(changed)
 
-    def get(self, queue: str, item_id: str) -> WorkItem | None:
+    def read(self, queue: str, item_id: str) -> WorkItem | None:
         with self.database.read() as connection:
             return self.row(connection, queue, item_id)
 
@@ -1268,12 +1369,18 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
 
-    def items(self, queue: str, *, scenario: str | None = None, kind: str | None = None) -> tuple[WorkItem, ...]:
+    def items(
+        self, queue: str, *, scenario: str | None = None, kind: str | None = None, id_prefix: str | None = None
+    ) -> tuple[WorkItem, ...]:
         conditions = [self.table.c.queue == queue]
         if scenario is not None:
             conditions.append(self.table.c.scenario == scenario)
         if kind is not None:
             conditions.append(self.table.c.kind == kind)
+        if id_prefix is not None:
+            if not isinstance(id_prefix, str) or not id_prefix:
+                raise ValueError("id_prefix must be a non-empty string")
+            conditions.append(prefix_range(self.database.code_point_order(self.table.c.item_id), id_prefix))
         query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
@@ -1310,6 +1417,43 @@ class SQLWorkQueue(WorkQueue):
         with self.database.read() as connection:
             counts.update(connection.execute(query).tuples().all())
         return counts
+
+    def append_log(self, queue: str, item_id: str, attempt: int, lines: Sequence[WorkLogLine]) -> None:
+        if not lines:
+            return
+        log = self.database.tables.work_log
+        rows = [
+            {
+                "queue": queue,
+                "item_id": item_id,
+                "attempt": attempt,
+                "number": line.number,
+                "at": line.at,
+                "level": line.level,
+                "logger": line.logger,
+                "message": line.message,
+            }
+            for line in lines
+        ]
+        with self.database.connection(write=True) as connection:
+            connection.execute(insert(log), rows)
+
+    def read_log(
+        self, queue: str, item_id: str, attempt: int, *, after: int = -1, limit: int = 500
+    ) -> tuple[WorkLogLine, ...]:
+        check_log_page(after, limit)
+        log = self.database.tables.work_log
+        query = (
+            select(log)
+            .where(log.c.queue == queue, log.c.item_id == item_id, log.c.attempt == attempt, log.c.number > after)
+            .order_by(log.c.number)
+            .limit(limit)
+        )
+        with self.database.read() as connection:
+            return tuple(
+                WorkLogLine(int(row["number"]), float(row["at"]), row["level"], row["logger"], row["message"])
+                for row in connection.execute(query).mappings().all()
+            )
 
 
 def open_coordination_database(
@@ -1364,7 +1508,6 @@ def coordination_on(
         SQLWorkQueue(database, lease_seconds=lease_seconds, default_attempts=default_attempts),
         SQLServedModels(database, lease),
         lease,
-        SQLMarks(database),
     )
 
 
@@ -1380,7 +1523,6 @@ __all__ = [
     "CoordinationTables",
     "PostgresCoordinationDatabase",
     "SQLControlLease",
-    "SQLMarks",
     "SQLServedModels",
     "SQLWorkQueue",
     "SQLiteCoordinationDatabase",

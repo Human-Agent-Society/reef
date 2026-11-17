@@ -1,6 +1,6 @@
 """The whole manifest of a Tinker checkpoint, which the Tinker training component writes and reads.
 
-The serving side reads only its sampler (``reef.tinker.checkpoint.TinkerRelease``).
+The serving side reads only its sampler (``reef.tinker.checkpoint.TinkerArtifact``).
 A manifest also records the learning-rate schedule its weights were trained
 under and the optimizer steps that schedule has completed, and the objective's
 state: the optimizer state lives in the remote checkpoint, and the schedule's
@@ -17,8 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.storage.durable_files import write_json
-from reef.tinker.checkpoint import MANIFEST, TinkerRelease
-from reef.train.method import LearningRateScheduleState
+from reef.tinker.checkpoint import MANIFEST, TinkerArtifact
+from reef.train.learning_rate import LearningRateScheduleState
 
 
 @dataclass(frozen=True)
@@ -29,10 +29,10 @@ class TinkerCheckpoint:
     all the parameters, which Spindle's full-parameter training saves. ``state_path`` (the weights and optimizer state
     that a later job restores) and ``sampler_path`` (the weights that the service's sampler serves; for a LoRA, the
     adapter that a serving runtime downloads to load into its own engines) are ``tinker://`` paths. ``service`` is the base URL of
-    the Tinker-compatible service that holds every path (``TinkerConfig.base_url``), or ``None`` for Thinking
+    the Tinker-compatible service that holds every path (``TinkerSettings.base_url``), or ``None`` for Thinking
     Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
-    writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole release, and reads them
-    back to start a job. The serving side reads the same manifest as a ``TinkerRelease``.
+    writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole snapshot, and reads them
+    back to start a job. The serving side reads the same manifest as a ``TinkerArtifact``.
     ``check_compatible`` is how the component refuses a checkpoint of another model or service.
     """
 
@@ -69,7 +69,7 @@ class TinkerCheckpoint:
 
         A sampler serves a checkpoint of any rank; a trainer also checks its parameterization (``lora_rank``).
         """
-        TinkerRelease(self.base_model, self.sampler_path, self.service).check_compatible(base_model, service=service)
+        TinkerArtifact(self.base_model, self.sampler_path, self.service).check_compatible(base_model, service=service)
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -110,12 +110,14 @@ class TinkerCheckpoint:
 
 @dataclass(frozen=True)
 class FreshStart:
-    """The start of a new model of all the parameters of ``base_model``, with the base model's own weights.
+    """The start of a new model of ``base_model``, whose outputs are the base model's.
 
-    Values: ``base_model`` is non-empty. The start has no training state: no optimizer state, no learning-rate
-    schedule progress, and an empty objective state, as a ``TinkerCheckpoint`` of the untrained base would have; it
-    names no sampler, so its rollouts sample the base model. Purpose: the full-parameter training component starts a
-    job from it when the job starts from the base; ``TinkerClient.train`` creates the model on the service.
+    Values: ``base_model`` is non-empty. The new model is what the client trains: all the parameters with the base
+    model's own weights, or an untrained LoRA of the client's rank and seed. The start has no training state: no
+    optimizer state, no learning-rate schedule progress, and an empty objective state, as a ``TinkerCheckpoint`` of
+    the untrained base would have; it names no sampler, so its rollouts sample the base model. Purpose: a Tinker
+    component starts a job from it when the job starts from the backend's default start; ``TinkerClient.train``
+    creates the model on the service.
     """
 
     base_model: str

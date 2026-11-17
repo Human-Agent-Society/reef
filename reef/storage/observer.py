@@ -1,4 +1,4 @@
-"""Report storage events, accepted records and committed steps, to an observer.
+"""Report storage events, accepted records and commits, to an observer.
 
 Both events happen at the storage boundary: a record row is inserted for the
 first time, or a commit row lands. Wrapping the storage with
@@ -17,10 +17,11 @@ from typing import Any, Self
 
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.commits import CommitRecord
+from reef.storage.commits import CommitRecord, CommitSnapshots
+from reef.storage.data import DataStore
 from reef.storage.evaluations import EvaluationStore
-from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
-from reef.storage.samples import SampleStore
+from reef.storage.records import AppendResult, RecordLoss, RecordStore, StoredRecord
+from reef.storage.samples import SampleStore, TrainingState
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
 
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 class RecordObserver:
-    """Process-level observer of first-time record inserts and committed steps.
+    """Process-level observer of first-time record inserts and commits.
 
     Observation is a side effect. The wrappers below already isolate
     failures; implementations should still keep their own work off the
@@ -39,7 +40,7 @@ class RecordObserver:
         """One record the store inserted for the first time (retries are not reported)."""
 
     def record_committed(self, commit: CommitRecord) -> None:
-        """One committed step (training, activation or new training start), with the record ids its job data consumed."""
+        """One commit (training, activation or new training start), with the record ids its job data consumed."""
 
     def close(self) -> None:
         pass
@@ -76,8 +77,8 @@ class ObservedRecordStore(RecordStore):
     def existing_receipt(self, item: AgentRecord) -> AgentRecord | None:
         return self._inner.existing_receipt(item)
 
-    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
-        return self._inner.get(scenario, agent_record_id)
+    def read(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+        return self._inner.read(scenario, agent_record_id)
 
     def replay(self, scenario: str, *, offset: int = 0, limit: int | None = None) -> tuple[AgentRecord, ...]:
         return self._inner.replay(scenario, offset=offset, limit=limit)
@@ -93,16 +94,13 @@ class ObservedRecordStore(RecordStore):
     def last_sequence(self, scenario: str) -> int:
         return self._inner.last_sequence(scenario)
 
-    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
-        return self._inner.get_for_audit(scenario, agent_record_id)
+    def read_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+        return self._inner.read_for_audit(scenario, agent_record_id)
 
     def audit_page(
         self, scenario: str, *, after_sequence: int = 0, limit: int = 256, request_type: RequestType | None = None
     ) -> tuple[StoredRecord, ...]:
         return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit, request_type=request_type)
-
-    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        return self._inner.consumption_receipts(scenario)
 
     def loss(self, scenario: str) -> RecordLoss:
         return self._inner.loss(scenario)
@@ -132,12 +130,15 @@ class ObservedScenarioStore(ScenarioStore):
         return self._inner.tasks
 
     @property
-    def samples(self) -> SampleStore:
-        return self._inner.samples
+    def training_state(self) -> TrainingState:
+        return self._inner.training_state
 
     @property
     def evaluations(self) -> EvaluationStore:
         return self._inner.evaluations
+
+    def use_snapshots(self, snapshots: CommitSnapshots) -> None:
+        self._inner.use_snapshots(snapshots)
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()
@@ -145,12 +146,12 @@ class ObservedScenarioStore(ScenarioStore):
     def training_run_position(self) -> tuple[int, int]:
         return self._inner.training_run_position()
 
-    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
-        recorded = self._inner.commit_step(expected_step=expected_step, commit=commit)
+    def append_commit(self, *, expected_commit_number: int, commit: CommitRecord) -> CommitRecord:
+        recorded = self._inner.append_commit(expected_commit_number=expected_commit_number, commit=commit)
         try:
             self._observer.record_committed(recorded)
         except Exception:
-            logger.exception("record observer failed on committed step %s of %s", recorded.step, recorded.scenario)
+            logger.exception("record observer failed on commit %s of %s", recorded.commit_number, recorded.scenario)
         return recorded
 
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
@@ -168,7 +169,9 @@ class ObservedScenarioStorage(ScenarioStorage):
         self._observer = observer
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore, data: DataStore | None = None
+    ) -> Self:
         raise PluginConfigError(f"{cls.__name__} wraps another storage; deployment assembly applies it")
 
     @property
@@ -184,11 +187,11 @@ class ObservedScenarioStorage(ScenarioStorage):
     def open(self, scenario: str) -> ScenarioStore:
         return ObservedScenarioStore(self._inner.open(scenario), self._observer)
 
+    def sample_store(self, scenario: str, session: ScenarioStore) -> SampleStore | None:
+        return self._inner.sample_store(scenario, session)
+
     def archive(self, scenario: str) -> tuple[str, ...]:
         return self._inner.archive(scenario)
-
-    def prune(self, *, max_bytes: int) -> int:
-        return self._inner.prune(max_bytes=max_bytes)
 
     def close(self) -> None:
         try:

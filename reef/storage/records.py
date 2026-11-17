@@ -8,33 +8,15 @@ backends in this package implement this interface; importing it loads no databas
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TypedDict
 
 from reef.core.errors import ReefError
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RecordLoss, RequestType
 
 
-class ConsumptionReceipt(TypedDict):
-    """Record IDs consumed without a training commit, as an older store holds them.
-
-    Reef no longer writes receipts. A store that an earlier Reef version wrote
-    keeps the receipts of its stale job data drops, and the storage migration turns
-    old retired rows into receipts. ``consumed_ids`` is sorted; ``metadata`` may
-    name the receipt's ``component``. Scenario recovery reads them, so that
-    these records never train.
-    """
-
-    receipt_id: str
-    consumed_ids: tuple[str, ...]
-    metadata: dict[str, object]
-    recorded_at: float
-
-
-class RecordConflict(ReefError):
-    """A record id or consumption receipt already identifies different content."""
+class RecordConflictError(ReefError):
+    """A record id already identifies different content."""
 
 
 @dataclass(frozen=True)
@@ -54,22 +36,11 @@ class StoredRecord:
 
 
 @dataclass(frozen=True)
-class RecordLoss:
-    """Durable capacity-eviction totals for one scenario's stored records."""
-
-    record_count: int = 0
-    body_bytes: int = 0
-    first_sequence: int = 0
-    last_sequence: int = 0
-
-
-@dataclass(frozen=True)
 class RecordRetention:
     """Deployment-wide budget for all record bodies, regardless of consumption.
 
     Retry metadata, indexes and database overhead are outside the body budget.
-    Capacity alone triggers automatic eviction; records do not expire by age. Eviction keeps the records that a
-    stored sample holds (``reef.storage.sql_records.sample_record_table``).
+    Capacity alone triggers automatic eviction; records do not expire by age.
     """
 
     max_bytes: int = 20 * 1024**3
@@ -80,15 +51,15 @@ class RecordRetention:
 
 
 class RecordStore(ABC):
-    """Persist records and consumption receipts independently of processors.
+    """Persist records independently of processors.
 
-    Reads and consumption receipts are scoped to the supplied scenario. Record ids are
+    Reads are scoped to the supplied scenario. Record ids are
     unique across the store: retries with identical content are idempotent,
-    while different content raises ``RecordConflict``. Retry comparison ignores
-    ``created_at`` and continues to work after capacity eviction.
+    while different content raises ``RecordConflictError``. Retry comparison ignores
+    ``created_at``.
 
-    Append sequences increase and must never be reused, including after a
-    capacity eviction. Reads include all retained bodies regardless of consumption.
+    Append sequences increase and must never be reused, including after
+    retention deletes a record. Reads include all retained bodies regardless of consumption.
     Implementations serialize conflicting writes so callers
     can append while training and eviction run in other threads.
     """
@@ -99,17 +70,13 @@ class RecordStore(ABC):
 
     @abstractmethod
     def append_result(self, item: AgentRecord) -> AppendResult:
-        """Append with insertion status; retries never restore evicted records.
-
-        Reports referencing evicted records remain outside training reads.
-        Their content is still remembered so conflicting retries are rejected.
-        """
+        """Append with insertion status: ``inserted`` is False for a retry of a stored record."""
 
     def append_many(self, items: Sequence[AgentRecord]) -> tuple[AppendResult, ...]:
         """Atomically append a bounded batch from one scenario, in input order.
 
         Any conflict rolls back the entire batch. Identical retries retain
-        the same semantics as append_result, including evicted records.
+        the same semantics as append_result.
         Adapters without atomic batch support must reject before writing.
         """
         raise NotImplementedError("this record store does not support atomic batch append")
@@ -119,7 +86,7 @@ class RecordStore(ABC):
         """Validate retry content without appending or changing its receipt."""
 
     @abstractmethod
-    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+    def read(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
         """Read one training-visible record in the supplied scenario."""
 
     @abstractmethod
@@ -151,7 +118,7 @@ class RecordStore(ABC):
         """The append sequence of the newest training-visible record of ``scenario``; 0 when it has none."""
 
     @abstractmethod
-    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+    def read_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         """Read a retained record with its append sequence."""
 
     @abstractmethod
@@ -168,14 +135,10 @@ class RecordStore(ABC):
     def trajectory(self, scenario: str, agent_record_id: str) -> tuple[str, ...]:
         """The record IDs of the trajectory that the record ends, oldest first (RFC #1054); ``()`` when the record is
         not stored. A store that keeps no trajectories treats each record as a trajectory of one call."""
-        return () if self.get_for_audit(scenario, agent_record_id) is None else (agent_record_id,)
-
-    @abstractmethod
-    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
-        """Read the scenario's consumption receipts that an older store holds, in recorded order."""
+        return () if self.read_for_audit(scenario, agent_record_id) is None else (agent_record_id,)
 
     def loss(self, scenario: str) -> RecordLoss:
-        """Capacity losses, including after restart; non-evicting stores return zero."""
+        """The records that retention deleted, including after a restart; a store without retention returns zero."""
         return RecordLoss()
 
     @abstractmethod
@@ -186,8 +149,7 @@ class RecordStore(ABC):
 __all__ = [
     "AgentRecord",
     "AppendResult",
-    "ConsumptionReceipt",
-    "RecordConflict",
+    "RecordConflictError",
     "RecordLoss",
     "RecordRetention",
     "RecordStore",

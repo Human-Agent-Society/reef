@@ -21,10 +21,11 @@ from pathlib import Path
 from typing import Any, Self
 
 import pytest
-from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
-from tests.support._trajectories import policy_trajectory
+from tests.support.records import memory_records
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, job_sized_stages
 from tests.support.samples_service import make_samples
+from tests.support.threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.trajectories import policy_trajectory
 
 from recipes.beta.coral.recipe import CoralRecipe
 from recipes.sdpo import SDPOReport
@@ -32,6 +33,8 @@ from recipes.sdpo.recipe import SDPORecipe
 from recipes.tttd import TTTDGroupedRolloutReport
 from recipes.tttd.recipe import TTTDRecipe
 from reef.core import AgentRecord, RequestType
+from reef.core.config import config_option
+from reef.core.plugins import NoSettings, PluginSettings
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.core.training_request import normalize_training_request_payload
 from reef.execution.jobs import SupportsReceipt
@@ -39,7 +42,6 @@ from reef.record2sample import (
     GroupDecision,
     JudgedSamples,
     Record2Sample,
-    Record2SampleSettings,
     RecordJudging,
     ReportContext,
     ReportGrouping,
@@ -47,15 +49,16 @@ from reef.record2sample import (
 )
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2sample.distill import DistillSamples
+from reef.record2sample.staleness import ServedArtifacts, lags_behind
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
 from reef.sample2job.traces import TraceJobData
+from reef.storage.record_items import ItemRecordStore
 from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
-from reef.train.instructions import ScenarioInstructions
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineSpec
+from reef.train.training_requests import ScenarioTrainingRequests
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_job_data_goldens.json"
@@ -66,26 +69,21 @@ RELOAD = "reload"
 
 @dataclass(frozen=True)
 class Serve:
-    """The scenario serves ``artifact_id`` from this step on; the pipeline's staleness check measures against it."""
+    """The scenario serves ``artifact_id`` from this step on; the samples service judges the samples against it."""
 
     artifact_id: str
 
 
 @dataclass(frozen=True)
-class Insert:
-    """A client inserts the stored samples ``sample_ids`` into the trainer's manual buffer at this step."""
+class Train:
+    """A client queues the training request ``request_id``, which names the stored samples ``sample_ids``, at
+    this step (``POST /reef/train``)."""
 
+    request_id: str
     sample_ids: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class Instruct:
-    """A client queues the training instruction ``request_id`` at this step (``POST /reef/train``)."""
-
-    request_id: str
-
-
-Step = AgentRecord | Serve | Insert | Instruct | str
+Step = AgentRecord | Serve | Train | str
 
 
 # ------------------------------------------------------------------- the driver
@@ -145,13 +143,12 @@ class StreamRun:
     report_type: type[ReportBase] | None = None
     training_mode: str = "auto"
     job_samples: int = 1
-    serving_artifact_id: str | None = None
-    records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
+    served: ServedArtifacts = field(default_factory=ServedArtifacts)
+    records: ItemRecordStore = field(default_factory=lambda: memory_records("s"))
     consumed: set[str] = field(default_factory=set)
-    high_water: tuple[int, int] | None = None
     commits: list[dict[str, object]] = field(default_factory=list)
-    instructions: ScenarioInstructions = field(
-        default_factory=lambda: ScenarioInstructions(memory_coordination().work_queue, "s")
+    training_requests: ScenarioTrainingRequests = field(
+        default_factory=lambda: ScenarioTrainingRequests(memory_coordination().work_queue, "s")
     )
 
     def build(self) -> Trainer:
@@ -169,28 +166,22 @@ class StreamRun:
         """Rebuild the trainer from durable state, in the order scenario recovery uses."""
         trainer.close()
         rebuilt = self.build()
-        if self.high_water is not None:
-            sequence, offset = self.high_water
-            rebuilt.replay_retained(up_to_sequence=sequence, consumed_ids=frozenset(self.consumed))
-            rebuilt.restore_record_progress(after_sequence=sequence, offset=offset)
-        elif self.consumed:
-            rebuilt.replay_retained(up_to_sequence=0, consumed_ids=frozenset(self.consumed))
+        rebuilt.restore_consumed_records(frozenset(self.consumed))
         return rebuilt
 
     def drain(self, trainer: Trainer) -> None:
         """Make the samples of the new records, as the samples service does, then commit every batch the trainer can
         reserve now."""
         while True:
-            self.instructions.give([trainer])
-            make_samples(trainer)
-            result = trainer.run_once(serving_artifact_id=self.serving_artifact_id)
+            self.training_requests.give([trainer])
+            make_samples(trainer, self.served)
+            result = trainer.advance_job()
             if result is None:
                 return
             batch = trainer.pending_job_data
             prepared = trainer.prepare_commit(result)
-            trainer.commit(prepared)
+            trainer.settle_commit(prepared)
             self.consumed |= prepared.consumed_ids
-            self.high_water = (prepared.high_water_sequence, prepared.high_water_offset)
             if batch is None:
                 # The end of the batch's job: it consumes no batch, so the goldens list only the submissions.
                 continue
@@ -200,7 +191,6 @@ class StreamRun:
                     "request": None if batch.request is None else batch.request.id,
                     "items": [describe_item(item) for item in batch.samples],
                     "consumed": sorted(prepared.consumed_ids),
-                    "released": sorted(prepared.released_ids),
                 }
             )
 
@@ -211,13 +201,19 @@ class StreamRun:
                 if isinstance(step, AgentRecord):
                     self.records.append(step)
                 elif isinstance(step, Serve):
-                    self.serving_artifact_id = step.artifact_id
-                    trainer.pipeline.observe_serving_artifact_id(step.artifact_id)
-                elif isinstance(step, Insert):
-                    trainer.change_buffer(step.sample_ids, insert=True)
-                elif isinstance(step, Instruct):
-                    payload = {"text": step.request_id, "session": "session-1", "release_id": "release-1"}
-                    self.instructions.file(step.request_id, normalize_training_request_payload(payload))
+                    if self.served.artifact_ids[-1:] != (step.artifact_id,):
+                        self.served = ServedArtifacts(
+                            (*self.served.artifact_ids, step.artifact_id),
+                            commit_number=len(self.served.artifact_ids),
+                        )
+                elif isinstance(step, Train):
+                    payload = {
+                        "text": step.request_id,
+                        "session": "session-1",
+                        "artifact_id": "artifact-1",
+                        "samples": list(step.sample_ids),
+                    }
+                    self.training_requests.file(step.request_id, normalize_training_request_payload(payload))
                 elif step == CYCLE:
                     self.drain(trainer)
                 elif step == RELOAD:
@@ -261,8 +257,8 @@ def report(record_id: str, *references: str, score: float = 1.0, **metadata: obj
     )
 
 
-def instruction(record_id: str) -> Instruct:
-    return Instruct(record_id)
+def train_step(record_id: str, *sample_ids: str) -> Train:
+    return Train(record_id, sample_ids)
 
 
 def scored(prefix: str, index: int, score: float = 1.0, **metadata: object) -> list[AgentRecord]:
@@ -299,8 +295,8 @@ class AnyGroupReady(SlotGrouping):
 class AssembledSamples(ReportSamples):
     """One report as one assembled policy sample, in the groups of ``grouping``; a terminal report owns its sources."""
 
-    def __init__(self, context: PipelineContext, grouping: ReportGrouping, *, max_staleness: int = 0) -> None:
-        super().__init__(context, grouping, exclusive_sources=True, max_staleness=max_staleness)
+    def __init__(self, context: PipelineContext, grouping: ReportGrouping) -> None:
+        super().__init__(context, grouping, exclusive_sources=True)
         self.assembly = SampleAssembly(SampleAssemblySettings())
 
     def make_sample(self, context: ReportContext) -> TrajectorySample:
@@ -312,8 +308,8 @@ class SlotGroupSamples(AssembledSamples):
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        settings = Record2SampleSettings.parse(config, plugin_class=cls)
-        return cls(context, SlotGrouping(), max_staleness=settings.max_staleness)
+        NoSettings.parse(config, plugin_class=cls)
+        return cls(context, SlotGrouping())
 
 
 class OrderedMixSamples(AssembledSamples):
@@ -321,8 +317,8 @@ class OrderedMixSamples(AssembledSamples):
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        settings = Record2SampleSettings.parse(config, plugin_class=cls)
-        return cls(context, AnyGroupReady(), max_staleness=settings.max_staleness)
+        NoSettings.parse(config, plugin_class=cls)
+        return cls(context, AnyGroupReady())
 
 
 class SlotJobData(Sample2Job):
@@ -396,14 +392,28 @@ class ToyJudging(RecordJudging):
         raise AssertionError("the immediate worker judges without the coroutine")
 
 
+@dataclass(frozen=True)
+class ToySettings(PluginSettings):
+    """The config of ``ToySamples``: ``max_artifact_lag``, a non-negative int, the artifacts that a sample may lag
+    behind the served one."""
+
+    max_artifact_lag: int = config_option(0, help="The artifacts that a sample may lag behind the served one.")
+
+
 class ToySamples(JudgedSamples):
     """Judges the records of ``ToyJudging`` at the next poll, as one-token stub samples; a judgment that is not good
-    cannot train."""
+    cannot train. A sample goes stale when it lags more than ``max_artifact_lag`` artifacts behind."""
+
+    def __init__(self, max_artifact_lag: int = 0) -> None:
+        super().__init__(ToyJudging(), ImmediateWorker())
+        self.max_artifact_lag = max_artifact_lag
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        settings = Record2SampleSettings.parse(config, plugin_class=cls)
-        return cls(ToyJudging(), ImmediateWorker(), max_staleness=settings.max_staleness)
+        return cls(ToySettings.parse(config, plugin_class=cls).max_artifact_lag)
+
+    def is_stale(self, samples: Sequence[Sample], served: ServedArtifacts) -> bool:
+        return lags_behind(samples, served, self.max_artifact_lag)
 
     def make_sample(self, record: AgentRecord, judgment: SupportsReceipt) -> TrajectorySample | None:
         if not isinstance(judgment, ToyJudgment) or not judgment.good:
@@ -500,10 +510,10 @@ def ordered_steps() -> list[Step]:
     ]
 
 
-def tttd_inference(step: int, group: int, rollout: int, release: str) -> AgentRecord:
+def tttd_inference(step: int, group: int, rollout: int, artifact_id: str) -> AgentRecord:
     return replace(
         inference(f"i-{step}-{group}-{rollout}"),
-        artifact_id=release,
+        artifact_id=artifact_id,
     )
 
 
@@ -527,9 +537,9 @@ def tttd_steps() -> list[Step]:
     for step, mixed in ((0, True), (1, False)):
         for group in range(2):
             for rollout in range(2):
-                release = "v2" if mixed and (group, rollout) == (1, 1) else "v1"
+                artifact_id = "v2" if mixed and (group, rollout) == (1, 1) else "v1"
                 steps += [
-                    tttd_inference(step, group, rollout, release),
+                    tttd_inference(step, group, rollout, artifact_id),
                     tttd_report(step, group, rollout, float(rollout)),
                 ]
         if step == 1:
@@ -661,16 +671,13 @@ def trace_steps(mode_requests: bool) -> list[Step]:
     for index in range(6):
         steps += scored("c", index, float(index))
     if mode_requests:
-        # The samples join the manual buffer only by a client's insert; each instruction trains the one inserted
-        # sample, and the other stored samples wait.
+        # Each request trains the one sample that it names, and the other stored samples wait.
         steps += [
             CYCLE,
-            Insert(("r-c-0:0",)),
-            instruction("train-1"),
+            train_step("train-1", "s.r-c-0:0"),
             CYCLE,
             *scored("c", 6),
-            Insert(("r-c-1:0",)),
-            instruction("train-2"),
+            train_step("train-2", "s.r-c-1:0"),
         ]
     return steps
 
@@ -709,7 +716,7 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
         "sdpo": (StreamRun(SDPORecipe.pipeline_spec(), sdpo, SDPOReport), sdpo_steps()),
         "computed_exact_version": (StreamRun(TOY_COMPUTED_STAGES, job_samples=2), computed_steps()),
         "computed_window": (
-            StreamRun(TOY_COMPUTED_STAGES, stage_configs(record2sample={"max_staleness": 1}), job_samples=2),
+            StreamRun(TOY_COMPUTED_STAGES, stage_configs(record2sample={"max_artifact_lag": 1}), job_samples=2),
             computed_steps(),
         ),
         "trace_manual_cap": (

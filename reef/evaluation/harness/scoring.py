@@ -29,7 +29,7 @@ class TaskScorer(ConfiguredPlugin, ABC):
         ``score`` — given a task name and its run result, return a
         float score. Higher is better; non-finite values raise.
     A model-based judge also overrides ``score_with_models``, which receives
-    the step's model bindings. ``score`` stays abstract, so a judge
+    the job's model bindings. ``score`` stays abstract, so a judge
     implements it too, for example to raise because it needs the bindings.
     """
 
@@ -47,7 +47,7 @@ class TaskScorer(ConfiguredPlugin, ABC):
 
     def score_with_models(self, task: str, result: TaskResult, models: ModelBindings) -> float:
         """The score that the evaluation records for one run: ``score(task, result)`` unless a judge overrides
-        it to call ``models``, the step's bindings."""
+        it to call ``models``, the job's bindings."""
         return self.score(task, result)
 
 
@@ -55,7 +55,7 @@ def verifier_reward(task: str, result: TaskResult) -> float:
     """The Harbor verifier's reward for a task directory run; :class:`VerifierRewardScorer` scores with it.
 
     A task directory run's trajectory holds one ``verifier`` row with the task it ran and the rewards
-    its verifier wrote (``reef.harness.tasks.harbor_task`` writes it, and so may an adapter's own runner);
+    its verifier wrote (``reef.harness.harbor.agent`` writes it, and so may an adapter's own runner);
     Harbor's primary reward is the ``reward`` entry, else the sole entry. A failed
     run or a verifier that wrote nothing scores 0 (the evaluation has already marked a run whose
     trial never ran as failed); a run that exited without a row scores 0; a row for another task, several

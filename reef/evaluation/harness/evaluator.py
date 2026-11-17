@@ -46,7 +46,7 @@ from reef.execution.executor.config import ExecutorSelection
 from reef.execution.executor.requirements import ExecutionRequirements
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.harbor_task import can_run_in_task_container
+from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import TrajectoryKeepError
 from reef.harness.tasks.trajectory import sum_agents
@@ -114,10 +114,10 @@ class HarnessCandidate(UpdateCandidate):
     """One candidate tree, evaluated against the head tree.
 
     Values: ``candidate_tree`` is the tree under evaluation, and
-    ``current_tree`` is the head tree the step started from.
+    ``current_tree`` is the head tree the job started from.
     ``evaluation_tasks`` are the tasks both sides run, the seed tasks first.
-    ``step`` ≥ 1 is the step that made it.
-    Purpose: ``HarnessBackend.prepare_step`` makes it; the evaluator scores
+    ``step`` ≥ 1 is the number of the job that made it.
+    Purpose: ``HarnessBackend.prepare_job`` makes it; the evaluator scores
     both trees and the publication policy decides on it.
     """
 
@@ -207,7 +207,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         self.task_containers = task_directories and not descriptor.takes_task_directory
         if self.task_containers and not can_run_in_task_container(descriptor):
             raise ValueError(
-                f"adapter {descriptor.name!r} cannot play a Harbor task directory: it needs an npm install"
+                f"adapter {descriptor.name!r} cannot play a Harbor task directory: it needs an npm, uv or git install"
             )
         if not agent_host:
             raise ValueError("agent_host must name the address at which a task container reaches Reef")
@@ -262,7 +262,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         )
 
     @property
-    def served_model(self) -> PolicyModel:
+    def policy_model(self) -> PolicyModel:
         """The model that every request must name: the served model, which the runs call."""
         return PolicyModel(self.models.served.model)
 
@@ -286,7 +286,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         remote worker returns the kept record as an archive; it is extracted
         here into the request's ``record_dir``.
         """
-        served = self.served_model
+        served = self.policy_model
         for request in requests:
             if request.harness.base != self.descriptor.name:
                 raise ValueError(
@@ -344,7 +344,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
                 harnesses[checksums[index]] = self.policy_harness(tree)
             task_run, record_dir = self.history.new_run()
             task_runs.append(task_run)
-            to_run.append(RolloutRequest(harnesses[checksums[index]], self.served_model, task, record_dir))
+            to_run.append(RolloutRequest(harnesses[checksums[index]], self.policy_model, task, record_dir))
         scored = self.run_rollouts(to_run)
         for index, task_run, request, result in zip(missing, task_runs, to_run, scored, strict=True):
             record = RunRecord.from_scored(
@@ -435,7 +435,7 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
             # Per run, in pairing order: the root's stage path and how its turn ended.
             metrics[f"{side}_paths"] = tuple(record.path for record in runs[side])
         if "candidate" in sides:
-            # What the first candidate runs were graded on, so a rejected step names the task, the reply and why.
+            # What the first candidate runs were graded on, so a rejected job names the task, the reply and why.
             metrics["candidate_runs"] = [
                 {
                     "task": clip_record_text(record.task, RUN_SUMMARY_CHARS),

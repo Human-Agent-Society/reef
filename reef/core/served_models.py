@@ -4,10 +4,15 @@ Control decides what each scenario serves and writes it to the ``served_models``
 (``reef.storage.served_models``). An inference service reads that table on each request and sends the request to
 the engine that the value names. The ``artifact_id`` of the value is the only identity that crosses services.
 
-A runtime that serves each artifact under its own model name (an adapter runtime) gives every artifact its own
-value, so a request answered under a value's name was answered by its artifact. A runtime that loads full weights
-in place serves the next artifact under the same URL and name after an activation, so a request in flight across
-the activation can be answered by the next artifact while its record names the old one.
+Reef's engines serve each load under its own model name: an adapter by its scenario and load, and full weights by
+their load. Every artifact therefore has its own value, and the inference component refuses a name that it no longer
+serves before any output. It also changes no weights while a request that it admitted still generates, so a request
+answered under a value's name was answered by its artifact. A runtime that serves an immutable provider or sampler
+revision gives the same guarantee without the component.
+
+A scenario whose snapshot loads no weights, such as a record-only or harness scenario, is answered by the deployment's
+configured model. The value of each artifact that it serves names that artifact at that model
+(``InferenceRuntime.endpoint_model_name``) and identifies no weights.
 """
 
 from __future__ import annotations
@@ -27,14 +32,20 @@ CACHE_SECONDS = 5.0
 
 @dataclass(frozen=True)
 class ServedArtifact:
-    """One artifact that an engine serves, and the address and name that reach it.
+    """The route of one artifact of a scenario: the address and name that answer requests for it.
 
-    Values: ``artifact_id`` names an artifact of a scenario. ``url`` is an HTTP(S) base URL without credentials,
-    query or fragment: the engine outside the Reef process. ``model_name`` is the name that the engine serves the
-    artifact under, a non-empty string.
+    Values: ``artifact_id`` is a non-empty ID of an artifact of a scenario. ``url`` is an HTTP(S) base URL without
+    credentials, query or fragment: the engine outside the Reef process. ``model_name`` is a non-empty name that the
+    engine answers under. For an artifact with weights, the engine served that artifact's weights under ``model_name``
+    when the runtime made the value. The value does not keep that binding for a request; an immutable revision or a
+    receiver that pins requests does (``InferenceRuntime.served_artifact``). For an artifact of a scenario without a
+    weight component, such as a record-only or harness scenario, ``model_name`` is the deployment's configured model:
+    the value associates that model with the artifact and identifies no weights.
 
-    Purpose: a runtime makes it for the artifact that it serves (``InferenceRuntime.served_artifact``); inference
-    writes it to ``served_models``, and inference replicas send requests with it.
+    Purpose: a runtime makes it for the weights that it serves (``InferenceRuntime.served_artifact`` and
+    ``serve_artifact``), and the inference worker makes it for each artifact that a scenario without a weight
+    component serves (``InferenceRuntime.endpoint_model_name``); inference writes it to ``served_models``, and
+    inference replicas send requests with it.
     """
 
     artifact_id: str

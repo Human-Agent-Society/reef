@@ -2,7 +2,7 @@
 
 One search step is one Reef training job. Reef commits a job at its
 submission, at each saved checkpoint and at its end, so the controller counts
-finished jobs (``finished_jobs`` in ``GET /reef/status``), not scenario steps.
+finished jobs (``finished_jobs`` in ``GET /reef/status``), not commits.
 """
 
 from __future__ import annotations
@@ -169,7 +169,7 @@ class ReefTrainingStatusClient(TrainingStatusReader):
                 )
             )
         # The last commit's job outcome: a failed job ends with event "failed" and its error.
-        last_commit = value.get("last_committed_step")
+        last_commit = value.get("last_training_commit")
         metrics = last_commit.get("metrics") if isinstance(last_commit, Mapping) else None
         last_job = metrics.get("training_job") if isinstance(metrics, Mapping) else None
         failed_job_error = (

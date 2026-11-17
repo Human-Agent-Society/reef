@@ -1,7 +1,7 @@
 """The harness source tree: what a harness is, how it changes, and how it renders.
 
 ``tree``
-    ``HarnessTree``, the immutable path-to-text value a release stores, and
+    ``HarnessTree``, the immutable path-to-text value a snapshot stores, and
     ``TreePatch``, a change to a tree.
 ``checks``
     Content checks for single files, shared with the native loop's loader.

@@ -16,13 +16,14 @@ On reef's native harness (``./run.sh native``) the same pass runs through a
 resident ``reef-native serve`` process, so the publish lands in a process
 that is already running:
 
-    pull   - ``python3 run.py pull`` names the scenario and writes the model
-             binding at this Reef under work/tree; run.sh then starts
+    pull   - ``python3 run.py pull`` names the scenario, waits until
+             inference serves its model, and writes the model binding at
+             this Reef under work/tree; run.sh then starts
              ``reef-native serve`` there, which pulls the served source tree
              and follows the head
     turns  - ``python3 run.py native`` sends each task to the process as one
              turn, grades the reply, and reports the score against the
-             receipts the turn returned
+             last receipt the turn returned
     mount  - every reported score batches, so each report triggers one
              evolve step; a winning tree publishes and the process mounts it
              while it runs, which its log shows as ``harness/mount``
@@ -54,6 +55,8 @@ PULL_TIMEOUT_S = 900.0
 # run.sh polls the head every 5 s, but a poll that started during the evolve step waits behind the step's
 # lock until the client's 30 s timeout; the mount lands on the poll after that one.
 MOUNT_TIMEOUT_S = 120.0
+#: The seconds a run waits for inference to start the scenario's model before it stops.
+INFERENCE_TIMEOUT_S = 300.0
 
 WORK = Path(__file__).resolve().parent / "work"
 # run.sh copies serve.yaml's evolution.evaluation.tasks here; the recorded traffic and
@@ -62,7 +65,7 @@ TASKS_FILE = WORK / "tasks.json"
 # The native variant: the pulled tree the serve process runs, and the workspace its tools work in.
 TREE_DIR = WORK / "tree"
 SCRATCH_DIR = WORK / "scratch"
-RELEASE_FILE = ".reef-harness-release"
+SNAPSHOT_FILE = ".reef-harness-release"
 #: The key the binding carries when the service wants no token: the native loop refuses an empty one.
 NO_TOKEN_API_KEY = "reef-no-token"
 
@@ -72,6 +75,7 @@ def main():
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # The inference routes serve only a scenario that exists: create it first.
     client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+    wait_for_inference(client)
 
     before = steps_before(client)
     # record + report: the traffic the evolve steps learn from.
@@ -86,9 +90,10 @@ def main():
         )
         prefix = task.split(maxsplit=1)[0]  # keys evolution.py's ANSWERS table
         score = evolution.grade_text(task, body["choices"][0]["message"]["content"])
+        # The receipt in the ID keeps a rerun on the same work/ from reusing the ID of an earlier report.
         client.report(
             SCENARIO,
-            {"agent_record_id": f"harness-evolve-{index}", "score": score, "feedback": prefix},
+            {"agent_record_id": f"harness-evolve-{receipt}", "score": score, "feedback": prefix},
             references=[receipt],
         )
         # The recipe's default stages batch valid scored reports, passing ones included, and
@@ -117,7 +122,7 @@ def main():
     # The step's patch maps each tree path it changed to the new text, or to null for a removed file.
     evaluation = dict(manifest["evaluation"])
     patch = evaluation.pop("patch", {})
-    print("evaluation metrics (the evolve step that published this release):")
+    print("evaluation metrics (the evolve step that published this snapshot):")
     print(json.dumps(evaluation, indent=2, sort_keys=True))
     print("changed files:")
     for path, text in sorted(patch.items()):
@@ -127,9 +132,23 @@ def main():
     # wait for: the head this run pulled is the one a win left behind.
 
 
+def wait_for_inference(client):
+    """Wait until inference serves the scenario's model; ``SystemExit`` when its startup fails or takes longer than
+    ``INFERENCE_TIMEOUT_S``."""
+    deadline = time.monotonic() + INFERENCE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        startup = client.get(f"/reef/scenarios/{SCENARIO}/inference/status")
+        if startup["state"] == "ready":
+            return
+        if startup["state"] == "failed":
+            raise SystemExit("inference did not start: check work/reef.log")
+        time.sleep(0.5)
+    raise SystemExit(f"inference did not start within {INFERENCE_TIMEOUT_S:.0f}s; check work/reef.log")
+
+
 def training_rows(client):
     """The catalog's training rows, oldest first; a step in flight holds the catalog, so the caller may wait."""
-    rows = client.get("/reef/harness/releases", extra_headers={"x-reef-scenario": SCENARIO})["releases"]
+    rows = client.get("/reef/harness/artifacts", extra_headers={"x-reef-scenario": SCENARIO})["artifacts"]
     return [row for row in rows if row.get("operation") == "training"]
 
 
@@ -185,13 +204,15 @@ def head_manifest(client):
 
 
 def pull():
-    """Name the scenario and write the model binding the serve process runs with under work/tree.
+    """Name the scenario, wait until inference serves its model, and write the model binding the serve process runs
+    with under work/tree.
 
-    The serve process pulls the served source tree itself and writes the release file beside it.
+    The serve process pulls the served source tree itself and writes the snapshot file beside it.
     """
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
-    # Create the scenario if it does not exist yet: its base release is the seed tree.
+    # Create the scenario if it does not exist yet: its base snapshot is the seed tree.
     client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+    wait_for_inference(client)
     manifest = head_manifest(client)
     shutil.rmtree(TREE_DIR, ignore_errors=True)
     binding = {"api": "openai", "base_url": SERVICE_URL, "api_key": TOKEN or NO_TOKEN_API_KEY, "model": MODEL}
@@ -216,11 +237,11 @@ def turn(prompt, session=None):
 
 
 def report(client, result, score, feedback):
-    """Post the score against the receipts of the model calls one turn made."""
+    """Post the score against the last model call of one turn; Reef adds the earlier calls of its trajectory."""
     client.report(
         SCENARIO,
         {"agent_record_id": f"native-{result['session']}-{result['turn']}", "score": score, "feedback": feedback},
-        references=result["receipts"],
+        references=result["receipts"][-1:],
     )
 
 
@@ -241,10 +262,10 @@ def native_main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # The pulled tree is the seed: the head moves off it only when a step publishes.
-    seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["artifact_id"]
+    seed = json.loads((TREE_DIR / SNAPSHOT_FILE).read_text())["artifact_id"]
 
     before = steps_before(client)
-    # turns + report: each task is one turn on the resident process; the score goes against the turn's receipts.
+    # turns + report: each task is one turn on the resident process; the score goes against the turn's last receipt.
     batched = 0
     failures = 0
     for index, task in enumerate(tasks, start=1):
@@ -265,7 +286,7 @@ def native_main():
         "each triggers one evolve step (runs take minutes)"
     )
 
-    # Only a win moves the head off the seed release, and a step that is rejected or skipped never does: wait for
+    # Only a win moves the head off the seed snapshot, and a step that is rejected or skipped never does: wait for
     # every result this run triggered, so an all-passing run that publishes nothing ends here instead of sitting
     # out the whole publication deadline, then read the head a win left behind.
     deadline = time.monotonic() + PULL_TIMEOUT_S
@@ -278,25 +299,25 @@ def native_main():
         )
         return
     manifest = head_manifest(client)
-    release = manifest["artifact_id"]
-    if release == seed:
+    artifact_id = manifest["artifact_id"]
+    if artifact_id == seed:
         # A result said published, but the head still serves the seed: nothing this run can mount.
         print(
             f"no change passed the evaluation within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh native for another attempt"
         )
         return
-    print(f"published: artifact {release} (parent {manifest['parent_artifact_id']})")
-    print("evaluation metrics (the evolve step that published this release):")
+    print(f"published: artifact {artifact_id} (parent {manifest['parent_artifact_id']})")
+    print("evaluation metrics (the evolve step that published this snapshot):")
     print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
 
     # The process follows the head: no reinstall, no restart, one harness/mount line in its log. Every step this
     # run triggered already has its result, so nothing holds the catalog or the manifest now.
     deadline = time.monotonic() + MOUNT_TIMEOUT_S
-    while not mount_events(release) and time.monotonic() < deadline:
+    while not mount_events(artifact_id) and time.monotonic() < deadline:
         time.sleep(1.0)
-    mounts = mount_events(release)
+    mounts = mount_events(artifact_id)
     if not mounts:
-        print(f"the serve process did not mount {release} within {MOUNT_TIMEOUT_S:.0f}s; check work/serve.log")
+        print(f"the serve process did not mount {artifact_id} within {MOUNT_TIMEOUT_S:.0f}s; check work/serve.log")
         return
     for path, data in mounts:
         print(f"{path}: harness/mount {json.dumps(data, sort_keys=True)}")
@@ -320,7 +341,7 @@ def replay():
     except (OSError, ValueError, KeyError) as exc:
         print(f"replay page not written: {exc}")
         return
-    print(f"replay: open work/replay.html ({len(data['releases'])} release(s), {len(data['sessions'])} session(s))")
+    print(f"replay: open work/replay.html ({len(data['snapshots'])} snapshot(s), {len(data['sessions'])} session(s))")
 
 
 if __name__ == "__main__":

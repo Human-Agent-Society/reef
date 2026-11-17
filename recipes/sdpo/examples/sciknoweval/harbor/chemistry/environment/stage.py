@@ -12,7 +12,7 @@ from the seed:
     learn   — the recipe holds the step until the grid is complete, builds it
               as one batch (each rollout's teacher rereads the question with a
               successful sibling's response) and publishes the weights; the
-              loop blocks on that release, so the next grid is on-policy
+              loop blocks on that snapshot, so the next grid is on-policy
 
 Every ``EVAL_EVERY`` steps, and before the first, the stage evaluates avg@16 on
 the 210 test questions and appends it to ``RESULT_PATH``: that series is the

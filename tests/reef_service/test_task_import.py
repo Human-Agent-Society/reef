@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from tests.support.samples import sample_store
 from tests.support.task_service_stubs import task_for
 
 from reef.core.job_data import TaskSample
@@ -15,9 +16,9 @@ from reef.core.tasks import write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitError, write_split_manifest
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.deployment_config import translate_layout
-from reef.service.deploy.service_config import ServiceConfig, normalize_service_config, service_config_from_mapping
+from reef.service.deploy.service_config import ServiceSettings, normalize_service_config, service_config_from_mapping
 from reef.service.task_import import DataScenarioStorage, TaskImport, TaskImportError
-from reef.storage.data import ItemConflict
+from reef.storage.data import ItemConflictError
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
@@ -40,11 +41,12 @@ def manifest(path: Path, train: tuple[str, ...], eval_: tuple[str, ...]) -> Path
 
 @contextmanager
 def data_storage(tmp_path: Path, task_import: TaskImport | None) -> Iterator[DataScenarioStorage]:
-    """Scenario storage with the data sync over SQLite stores; the scenario storage owns the task files."""
+    """Scenario storage whose sessions read their samples from a SQLite data store; the scenario storage owns the task
+    files."""
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = DataScenarioStorage(
-        SQLiteScenarioStorage(tmp_path / "records", task_files=task_files), data, task_import
+        SQLiteScenarioStorage(tmp_path / "records", task_files=task_files, data=data), data, task_import
     )
     try:
         yield storage
@@ -55,10 +57,10 @@ def data_storage(tmp_path: Path, task_import: TaskImport | None) -> Iterator[Dat
 
 def imported(storage: DataScenarioStorage) -> list[tuple[str, str]]:
     with closing(storage.open("math")) as session:
-        return [(task.sample_id, task.split) for task in session.samples.imported_tasks()]
+        return [(task.sample_id, task.split) for task in sample_store(storage, "math", session).imported_tasks()]
 
 
-def test_each_open_imports_the_manifest_into_the_sample_store(tmp_path: Path) -> None:
+def test_each_open_imports_the_manifest_as_items_that_the_scenario_uses(tmp_path: Path) -> None:
     root = tmp_path / "tasks"
     for port, name in enumerate(("b-task", "a-task", "c-task")):
         harbor_task(root, name, 9000 + port)
@@ -73,7 +75,7 @@ def test_each_open_imports_the_manifest_into_the_sample_store(tmp_path: Path) ->
             ("c-task", {"math": "eval"}),
         ]
         with closing(storage.open("math")) as session:
-            (evaluated,) = session.samples.imported_tasks(split="eval")
+            (evaluated,) = sample_store(storage, "math", session).imported_tasks(split="eval")
             assert isinstance(evaluated.sample, TaskSample)
             assert (evaluated.sample.task_path / "environment" / "image.png").read_bytes() == IMAGE
 
@@ -96,7 +98,7 @@ def test_a_task_that_changed_or_cannot_load_stops_the_open(tmp_path: Path) -> No
         instruction = root / "a-task" / "instruction.md"
         original = instruction.read_text()
         instruction.write_text("Solve another problem.\n")
-        with pytest.raises(ItemConflict, match="other content"):
+        with pytest.raises(ItemConflictError, match="other content"):
             storage.open("math")
         instruction.write_text(original)
         # The split is the item's metadata, so a task that the manifest moves moves in the scenario.
@@ -138,10 +140,10 @@ def test_the_deployment_imports_its_tasks_into_each_scenario(tmp_path: Path) -> 
     )
     dispatcher = build_dispatcher(settings)
     try:
-        samples = dispatcher.get_or_create_scenario("math").store.samples
+        samples = dispatcher.storage.sample_store("math", dispatcher.get_or_create_scenario("math").store)
         assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [("a-task", "eval")]
     finally:
         dispatcher.close()
 
     with pytest.raises(ValueError, match="task-import needs both manifest and tasks-root"):
-        ServiceConfig(recipe="recipe", task_import_manifest=str(path))
+        ServiceSettings(recipe="recipe", task_import_manifest=str(path))

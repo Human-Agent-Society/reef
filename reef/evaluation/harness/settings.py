@@ -28,25 +28,25 @@ class EvaluationSettings(Settings):
 
     Values: at most one task source is set: ``tasks`` (instructions or task
     directories), ``task_manifest`` with ``tasks_root``, or ``imported_tasks``
-    (the eval split of the scenario's imported tasks, as each step reads it);
+    (the eval split of the scenario's imported tasks, as each job reads it);
     one is required unless ``policy`` is ``none``. ``scorer`` and ``collector``
     are plugin settings (a ``package.module:Class`` reference, or a mapping
-    with ``module`` and ``config``); the recipe requires a scorer unless
+    with ``module`` and ``config``); the harness training component requires a scorer unless
     ``policy`` is ``none``. ``policy`` is one of ``POLICIES`` and ``statistic`` one of
     ``STATISTICS``. ``min_margin`` ≥ 0, ``floor_score`` > 0 and
     ``task_timeout_s`` > 0 are finite numbers, ``repeats`` ≥ 1, and every
     count ≥ 0. ``collector`` needs ``collect_failures``. ``agent_host`` is a
     non-empty host name or address: an agent that plays a Harbor task in the
     task's container reaches Reef's model route there.
-    Purpose: the harness recipe parses it and builds the evaluator, the task
-    source and the publication policy from it.
+    Purpose: the harness recipe parses it, and the harness training component
+    builds the evaluator, the task source and the publication policy from it.
     """
 
     tasks: tuple[str, ...] = config_option((), help="The evaluation tasks: instructions, or task directories.")
     task_manifest: str | None = config_option(None, help="A split manifest whose eval side names the tasks.")
     tasks_root: str | None = config_option(None, help="The directory of the task manifest's task directories.")
     imported_tasks: bool = config_option(
-        False, help="Evaluate each step on the eval split of the scenario's imported tasks."
+        False, help="Evaluate each job on the eval split of the scenario's imported tasks."
     )
     scorer: str | Mapping[str, Any] | None = config_option(None, help="The TaskScorer that scores each run.")
     policy: str = config_option("compare", help="The publication policy: compare, floor or none.")

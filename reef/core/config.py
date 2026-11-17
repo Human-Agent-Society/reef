@@ -71,7 +71,7 @@ class ConfigArgumentParser(argparse.ArgumentParser):
 
 @dataclass(frozen=True)
 class ConfigArgument:
-    """One setting's YAML path, CLI aliases, default and value parser."""
+    """One setting's YAML path, CLI flags, default and value parser."""
 
     name: str
     path: tuple[str, ...]
@@ -86,22 +86,13 @@ class ConfigArgument:
 
     @property
     def destination(self) -> str:
-        """Keep the config's recipe separate from the launcher's profile."""
-        if len(self.path) > 2:
-            return ".".join(self.path)
-        return "config_recipe" if self.name == "recipe" else self.name
+        return ".".join(self.path) if len(self.path) > 2 else self.name
 
     @property
     def flags(self) -> tuple[str, ...]:
-        dotted = ".".join(self.path)
-        names = [dotted.replace("_", "-"), dotted]
-        # The launcher reserves --recipe; the setting remains --reef.recipe.
-        if len(self.path) == 2 and self.path[0] == "reef" and self.name != "recipe":
-            names = [self.name.replace("_", "-"), self.name, *names]
-        if self.public_path:
-            public = ".".join(self.public_path)
-            names = [public.replace("_", "-"), public, *names]
-        return tuple(dict.fromkeys(f"--{name}" for name in names))
+        """The setting's public path, with hyphens and as written in YAML."""
+        dotted = ".".join(self.public_path or self.path)
+        return tuple(dict.fromkeys((f"--{dotted.replace('_', '-')}", f"--{dotted}")))
 
     @property
     def negative_flags(self) -> tuple[str, ...]:
@@ -382,7 +373,7 @@ class ConfiguredFactory(ABC):
     kind: str
 
     def config_type(self) -> type | None:
-        """Return this adapter's settings dataclass, or None for legacy factories.
+        """Return this adapter's settings dataclass, or None when the factory reads the section as it is.
 
         Declarations use ``reef.core.config.config_option``. Discovery reads
         metadata only; it must not connect services or allocate resources.

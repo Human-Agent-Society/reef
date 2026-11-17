@@ -9,8 +9,7 @@ import pytest
 
 from reef.execution.executor.delegating import DelegatingExecutor
 from reef.execution.executor.uniproc import UniProcExecutor
-from reef.inference.sglang.config import SGLangConfig
-from reef.inference.sglang.launch import SGLangModel
+from reef.inference.sglang.config import SGLangSettings
 
 torch = pytest.importorskip("torch")
 
@@ -93,7 +92,7 @@ class _RecordingRolloutExecutor(DelegatingExecutor):
 def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor(monkeypatch):
     from reef.inference.sglang.control import SGLangControl
 
-    args = SGLangConfig("model", 1, 1, 1, executor=_RecordingRolloutExecutor)
+    args = SGLangSettings("model", 1, 1, 1, executor=_RecordingRolloutExecutor)
     manager = SGLangControl(args, "placement")
     executor = manager._serving
     assert executor.config.options == {"config": args, "pg": "placement"}
@@ -121,11 +120,10 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
 def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
     module = _load_manager_module(monkeypatch, serving=True)
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
-    server = types.SimpleNamespace(server_groups=[types.SimpleNamespace(all_engines=[engine])])
 
     class Cluster:
         def __init__(self, config, pg):
-            self.servers = {"actor": server}
+            self.group = types.SimpleNamespace(all_engines=[engine])
             self.routers = []
 
         def start(self):
@@ -137,61 +135,32 @@ def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
     )
     killed = []
     monkeypatch.setattr(module.ray, "kill", lambda worker, **kwargs: killed.append(worker))
-    args = SGLangConfig("model", 1, 1, 1)
+    args = SGLangSettings("model", 1, 1, 1)
     with pytest.raises(RuntimeError, match="failed init"):
         module.SGLangWorker(args, "borrowed-placement")
     assert killed == [engine]
 
 
-def test_rollout_shutdown_of_external_engines_is_idempotent(monkeypatch):
-    module = _load_manager_module(monkeypatch, serving=True)
-    worker = object.__new__(module.SGLangWorker)
-    worker.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
-    worker._closed = False
-    worker._health_monitors = []
-    worker._routers = []
-    worker.servers = {"borrowed": types.SimpleNamespace(server_groups=[])}
-    killed = []
-    monkeypatch.setattr(module.ray, "kill", lambda target, **kwargs: killed.append(target))
-    worker.shutdown()
-    worker.shutdown()
-    assert killed == []
-    assert worker.servers == {}
-
-
-def _attach_control(module, worker) -> None:
-    """Give a bare serving worker the inference control its constructor builds."""
+def _worker(module, group, config=None):
+    """A bare serving worker over ``group``, with the inference control its constructor builds."""
     from reef.inference.recovery import InferenceControl
 
-    worker._control = InferenceControl(module._SGLangEngineGroup(worker), module._SGLangInferenceMonitor(worker))
+    worker = object.__new__(module.SGLangWorker)
+    worker.config = SGLangSettings("model", 1, 1, 1) if config is None else config
+    worker.cluster = types.SimpleNamespace(group=group, routers=[])
+    worker._closed = False
+    worker._control = InferenceControl(module._SGLangEngineGroup(worker))
+    return worker
 
 
 class _ServerGroup:
-    def __init__(self, engines: list[object | None], *, num_new_engines: int) -> None:
+    def __init__(self, engines: list[object | None]) -> None:
         self.all_engines = engines
-        self.num_new_engines = num_new_engines
-        self.worker_type = "regular"
-        self.external = False
-        self.needs_offload = False
-        self.num_gpus_per_engine = 1
-        self.gpu_offset = 0
-        self.start_calls = 0
+        self.recover_calls = 0
 
-    @property
-    def engines(self):
-        return self.all_engines
-
-    def parallel_config(self):
-        return {"tp_size": 1, "pp_size": 1, "ep_size": 1, "moe_dp_size": 1}
-
-    def start_engines(self, port_cursors):
-        self.start_calls += 1
-        dead_indices = [i for i, engine in enumerate(self.all_engines) if engine is None]
-        for index in dead_indices:
-            self.all_engines[index] = object()
-        self.num_new_engines = len(dead_indices)
-        # Engines that are ready at once: nothing for the startup to wait on.
-        return {}
+    def recover(self):
+        self.recover_calls += 1
+        self.all_engines[:] = [engine or object() for engine in self.all_engines]
 
 
 class _RemoteMethod:
@@ -203,34 +172,15 @@ class _RemoteMethod:
 
 
 @pytest.mark.unit
-def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_stubs(monkeypatch)
-    from reef.inference.sglang.worker import recover_server
+def test_recovery_starts_only_dead_engines(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_manager_module(monkeypatch, serving=True)
+    healthy = _ServerGroup([object(), object()])
+    assert _worker(module, healthy).recover_updatable_engines() == 0
+    assert healthy.recover_calls == 0
 
-    group = _ServerGroup([object(), object()], num_new_engines=2)
-    server = SGLangModel(server_groups=[group])
-
-    recover_server(server)
-
-    assert group.start_calls == 0
-    assert group.num_new_engines == 2
-
-
-@pytest.mark.unit
-def test_recovery_still_starts_dead_engines(monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_stubs(monkeypatch)
-    from reef.inference.sglang.worker import recover_server
-
-    # The relaunched engines are ready at once; nothing reaches Ray.
-    monkeypatch.setattr("reef.inference.sglang.launch.ray", types.SimpleNamespace(get=lambda refs: refs))
-
-    group = _ServerGroup([object(), None], num_new_engines=0)
-    server = SGLangModel(server_groups=[group])
-
-    recover_server(server)
-
-    assert group.start_calls == 1
-    assert group.num_new_engines == 1
+    group = _ServerGroup([object(), None])
+    assert _worker(module, group).recover_updatable_engines() == 1
+    assert group.recover_calls == 1
     assert all(engine is not None for engine in group.all_engines)
 
 
@@ -246,13 +196,13 @@ def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch:
         "prm_teacher_topk_log_probs_cand": [[[[-0.1, -0.2], [-0.3, -0.4]]]],
     }
 
-    from reef.train.slime_backend.loss_families import LOSS_FAMILIES
+    from reef.train.slime_backend.loss_families import resolve_loss_family
 
     # Each family declares its own columns; the manager applies whatever the
     # active family declared. Both sets here, so one call covers the table.
     declared = {
-        **LOSS_FAMILIES.resolve("sao").rollout_tensor_dtypes,
-        **LOSS_FAMILIES.resolve("openclawrl").rollout_tensor_dtypes,
+        **resolve_loss_family("sao").rollout_tensor_dtypes,
+        **resolve_loss_family("openclawrl").rollout_tensor_dtypes,
     }
     tensorize_external_fields(data, declared)
 
@@ -263,24 +213,14 @@ def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch:
 
 
 @pytest.mark.unit
-def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from reef.inference.sglang.launch import SGLangModel
-
+def test_uncertain_weight_update_synchronously_retires_engine_handles(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_manager_module(monkeypatch, serving=True)
     engines = [
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-0")),
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-1")),
     ]
-    group = _ServerGroup(list(engines), num_new_engines=0)
-    server = SGLangModel(server_groups=[group])
-    pauses: list[str] = []
-    manager = object.__new__(module.SGLangWorker)
-    _attach_control(module, manager)
-    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
-    manager.servers = {"actor": server}
-    manager._health_monitors = [types.SimpleNamespace(pause=lambda: pauses.append("pause"))]
+    group = _ServerGroup(list(engines))
+    manager = _worker(module, group, SGLangSettings("model", 1, 1, 1, pause_mode="retract"))
     killed = []
     monkeypatch.setattr(module.ray, "kill", lambda engine, **kwargs: killed.append((engine, kwargs)))
 
@@ -288,29 +228,6 @@ def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     assert group.all_engines == [None, None]
     assert [engine for engine, _ in killed] == engines
     assert all(kwargs == {"no_restart": True} for _, kwargs in killed)
-    assert pauses == ["pause"]
-
-
-@pytest.mark.unit
-def test_uncertain_weight_update_keeps_deployment_owned_external_engines(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = _load_manager_module(monkeypatch, serving=True)
-    engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
-    server = types.SimpleNamespace(
-        update_weights=True, server_groups=[types.SimpleNamespace(all_engines=[engine])], engines=[engine]
-    )
-    manager = object.__new__(module.SGLangWorker)
-    _attach_control(module, manager)
-    manager.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
-    manager.servers = {"actor": server}
-    manager._health_monitors = []
-    killed = []
-    monkeypatch.setattr(module.ray, "kill", lambda actor, **kwargs: killed.append((actor, kwargs)))
-
-    assert manager.terminate_updatable_engines() == 0
-    assert server.engines == [engine]
-    assert killed == []
 
 
 @pytest.mark.unit
@@ -329,22 +246,12 @@ def test_recovered_engine_is_paused_before_an_in_place_update_continues(
             return self.event
 
     engine = types.SimpleNamespace(pause_generation=RecordingRemote("pause"))
-    group = _ServerGroup([engine], num_new_engines=1)
-    server = SGLangModel(server_groups=[group])
-    monitor = types.SimpleNamespace(
-        pause=lambda: lifecycle.append("monitor_pause"),
-        resume=lambda: lifecycle.append("monitor_resume"),
-    )
-    manager = object.__new__(module.SGLangWorker)
-    _attach_control(module, manager)
-    manager.config = SGLangConfig("model", 1, 1, 1)
-    manager.servers = {"actor": server}
-    manager._health_monitors = [monitor]
+    manager = _worker(module, _ServerGroup([engine]))
     manager._control.paused = True
 
     manager.recover_updatable_engines()
 
-    assert lifecycle == ["monitor_pause", "pause:in_place"]
+    assert lifecycle == ["pause:in_place"]
 
 
 @pytest.mark.unit
@@ -368,12 +275,9 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
         types.SimpleNamespace(pause_generation=RecordingRemote("pause"), flush_cache=RecordingRemote("flush"))
         for _ in range(2)
     ]
-    group = _ServerGroup([*engines, None], num_new_engines=0)
-    manager = object.__new__(module.SGLangWorker)
-    _attach_control(module, manager)
-    manager.config = SGLangConfig("model", 1, 1, 1, pause_mode=pause_mode)
-    manager.servers = {"actor": SGLangModel(server_groups=[group])}
-    manager._health_monitors = []
+    # The dead slot recovers later; the pause fences the engines that survive.
+    group = _ServerGroup([*engines, None])
+    manager = _worker(module, group, SGLangSettings("model", 1, 1, 1, pause_mode=pause_mode))
 
     manager.pause_generation_for_update()
 
@@ -489,100 +393,22 @@ def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
         assert not hasattr(processor, name)
 
 
-def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatch):
+def test_shutdown_retires_the_engines_and_the_router_once(monkeypatch):
     module = _load_manager_module(monkeypatch, serving=True)
-    worker = object.__new__(module.SGLangWorker)
-    _attach_control(module, worker)
-    worker._control.paused = True
-    resumed = []
-    worker._health_monitors = [types.SimpleNamespace(resume=lambda: resumed.append(True))]
-
-    worker.health_monitoring_resume()
-
-    assert resumed == []
-
-
-def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
-    module = _load_manager_module(monkeypatch, serving=True)
-    worker = object.__new__(module.SGLangWorker)
-    worker.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
-    worker._closed = False
-    worker._routers = []
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
-    worker.servers = {"actor": types.SimpleNamespace(server_groups=[types.SimpleNamespace(all_engines=[engine])])}
-    calls = []
-
-    class Monitor:
-        def __init__(self, name, stuck):
-            self.name, self.stuck = name, stuck
-
-        def stop(self):
-            calls.append(self.name)
-            if self.stuck:
-                raise TimeoutError("in-flight probe")
-
-    stuck, drained = Monitor("stuck", True), Monitor("drained", False)
-    worker._health_monitors = [stuck, drained]
+    group = _ServerGroup([engine])
+    worker = _worker(module, group, SGLangSettings("model", 1, 1, 1, pause_mode="retract"))
+    stopped = []
+    router = types.SimpleNamespace(
+        is_alive=lambda: False,
+        terminate=lambda: stopped.append("terminate"),
+        join=lambda timeout: stopped.append("join"),
+    )
+    worker.cluster.routers.append(router)
     killed = []
     monkeypatch.setattr(module.ray, "kill", lambda target, **kwargs: killed.append(target))
-    with pytest.raises(TimeoutError, match="in-flight"):
-        worker.shutdown()
-    assert not worker._closed
-    assert worker._health_monitors == [stuck]
-    assert calls == ["stuck", "drained"]
-    assert killed == []
-    assert worker.servers
-    stuck.stuck = False
     worker.shutdown()
     worker.shutdown()
-    assert worker._closed
-    assert worker._health_monitors == []
-    assert calls == ["stuck", "drained", "stuck"]
     assert killed == [engine]
-
-
-def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
-    from reef.inference.recovery import EngineHealthMonitor, HealthMonitorConfig
-
-    module = _load_manager_module(monkeypatch, serving=True)
-    group = types.SimpleNamespace(all_engines=[], nodes_per_engine=1)
-    server = types.SimpleNamespace(server_groups=[group])
-    monkeypatch.setattr(
-        module,
-        "SGLangCluster",
-        lambda config, pg: types.SimpleNamespace(servers={"actor": server}, routers=[], start=lambda: None),
-    )
-    configs = []
-
-    class RecordingMonitor(EngineHealthMonitor):
-        def __init__(self, checks, config):
-            configs.append(config)
-            super().__init__(checks, config)
-
-    monkeypatch.setattr(module, "EngineHealthMonitor", RecordingMonitor)
-    args = SGLangConfig(
-        "model", 1, 1, 1, health_enabled=True, health_interval=10, health_timeout=2, health_first_wait=60
-    )
-    worker = module.SGLangWorker(args, None)
-    try:
-        assert configs == [HealthMonitorConfig(interval=10, timeout=2, first_wait=60)]
-        assert len(worker._health_monitors) == 1
-        assert worker._health_monitors[0].is_checking_enabled()
-        worker.health_monitoring_pause()
-        assert not worker._health_monitors[0].is_checking_enabled()
-    finally:
-        worker.shutdown()
-
-
-def test_publication_pause_fences_surviving_engines_before_dead_slots_recover(monkeypatch):
-    module = _load_manager_module(monkeypatch, serving=True)
-    paused = []
-    engine = types.SimpleNamespace(
-        pause_generation=types.SimpleNamespace(remote=lambda mode: paused.append(mode)),
-        flush_cache=types.SimpleNamespace(remote=lambda: paused.append("flush")),
-    )
-    worker = types.SimpleNamespace(
-        config=SGLangConfig("model", 1, 1, 1, pause_mode="retract"), updatable_rollout_engines=[None, engine]
-    )
-    module._SGLangEngineGroup(worker).pause()
-    assert paused == ["retract", "flush"]
+    assert group.all_engines == [None]
+    assert stopped == ["join"] and worker.cluster.routers == []

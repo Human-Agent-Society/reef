@@ -1,20 +1,21 @@
-"""LocalJobComponent: durable submission, one job at a time, cancellation, close and resume after a restart."""
+"""LocalJobComponent: durable submission, one job at a time or concurrent jobs, cancellation, close and resume after a
+restart."""
 
 from __future__ import annotations
 
 import os
 import threading
-import time
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.job_data import job_data_ref
+from tests.support.polling import wait_until
+from tests.support.trajectories import policy_trajectory
 
-from reef.artifact import DefaultStart
 from reef.core.job_data import JobData
-from reef.core.weight_layout import ReleaseFormat
+from reef.core.weight_layout import ArtifactFormat
 from reef.storage.durable_files import write_json
 from reef.train import local_jobs
 from reef.train.component import SavedCheckpoint, ScenarioRoot, TrainingJob
@@ -31,8 +32,11 @@ class GatedComponent(LocalJobComponent):
     the run job IDs in order, and ``resumed_from`` the checkpoints each run found.
     """
 
-    def __init__(self, jobs_root: Path, *, checkpoint_count: int = 1, gated: bool = False) -> None:
+    def __init__(
+        self, jobs_root: Path, *, checkpoint_count: int = 1, gated: bool = False, concurrent: bool = False
+    ) -> None:
         super().__init__(jobs_root)
+        self.concurrent = concurrent
         self.checkpoint_count = checkpoint_count
         self.gate = threading.Event()
         if not gated:
@@ -46,17 +50,18 @@ class GatedComponent(LocalJobComponent):
         return "gated"
 
     @property
-    def release_format(self) -> ReleaseFormat:
-        return ReleaseFormat("full")
+    def artifact_format(self) -> ArtifactFormat:
+        return ArtifactFormat("full")
 
-    def default_start(self) -> DefaultStart:
-        return DefaultStart()
+    @property
+    def concurrent_jobs(self) -> bool:
+        return self.concurrent
 
     def root_start(self, root: ScenarioRoot) -> str:
         return "gated:base"
 
-    def import_start(self, release: Path) -> str:
-        return str(release)
+    def import_start(self, artifact_dir: Path) -> str:
+        return str(artifact_dir)
 
     def check_job(self, job: TrainingJob) -> None:
         if job.parameters.get("invalid"):
@@ -81,19 +86,11 @@ class GatedComponent(LocalJobComponent):
 
 def training_job(job_id: str, **parameters: bool) -> TrainingJob:
     data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
-    return TrainingJob(job_id, "gated", "gated:base", data, parameters, scenario="s")
-
-
-def wait_until(condition: Callable[[], bool]) -> None:
-    deadline = time.monotonic() + WAIT_SECONDS
-    while not condition():
-        if time.monotonic() > deadline:
-            raise TimeoutError("the condition did not hold in time")
-        time.sleep(0.01)
+    return TrainingJob(job_id, "gated", "gated:base", job_data_ref(data), parameters, scenario="s")
 
 
 def wait_ended(component: LocalJobComponent, job_id: str) -> None:
-    wait_until(lambda: component.status(job_id).state != "running")
+    wait_until(lambda: component.status(job_id).state != "running", timeout_seconds=WAIT_SECONDS)
 
 
 @pytest.fixture
@@ -217,20 +214,33 @@ def test_cancelled_queued_job_never_runs(tmp_path, make_component):
 
 
 @pytest.mark.unit
-def test_a_job_cancelled_at_the_head_of_the_queue_never_runs(tmp_path, make_component):
+def test_a_job_cancelled_while_it_waits_never_runs(tmp_path, make_component):
     component = make_component(tmp_path)
     component.submit(training_job("a"))
     component.submit(training_job("b"))
     component.cancel("a")
-    assert list(component.queue) == ["a", "b"]
-    # Run the job thread on the queue as it is, with the cancelled job at its head.
-    component.job_thread = threading.Thread(target=component.run_jobs, daemon=True)
-    component.job_thread.start()
+    assert list(component.queue) == ["b"]
+    component.start_jobs()
     wait_ended(component, "b")
 
     assert component.runs == ["b"]
     status = component.status("a")
     assert (status.state, status.error, status.checkpoints) == ("failed", "cancelled", ())
+
+
+@pytest.mark.unit
+def test_a_component_with_concurrent_jobs_runs_its_jobs_at_the_same_time(tmp_path, make_component):
+    component = make_component(tmp_path, gated=True, concurrent=True)
+    component.start_jobs()
+    component.submit(training_job("a"))
+    component.submit(training_job("b"))
+    # Both runs begin while the gate holds each before its first checkpoint.
+    wait_until(lambda: sorted(component.runs) == ["a", "b"], timeout_seconds=WAIT_SECONDS)
+    assert (component.status("a").state, component.status("b").state) == ("running", "running")
+    component.gate.set()
+    wait_ended(component, "a")
+    wait_ended(component, "b")
+    assert (component.status("a").state, component.status("b").state) == ("finished", "finished")
 
 
 @pytest.mark.unit
@@ -322,7 +332,7 @@ def test_close_mid_job_leaves_it_to_resume_and_refuses_new_jobs(tmp_path, make_c
 
     closer = threading.Thread(target=component.close)
     closer.start()
-    wait_until(lambda: component.stopping(directory))
+    wait_until(lambda: component.stopping(directory), timeout_seconds=WAIT_SECONDS)
     component.gate.set()
     closer.join(WAIT_SECONDS)
 

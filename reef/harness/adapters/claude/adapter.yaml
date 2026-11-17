@@ -23,7 +23,7 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 renderer: reef.harness.adapters.claude.render:ClaudeAdapterRenderer
-# A release is a Claude Code plugin in plugin/, named reef: its skills and commands load as
+# A snapshot is a Claude Code plugin in plugin/, named reef: its skills and commands load as
 # reef:<name>, its rules as the plugin's output style, and its extensions as hooks. A run
 # loads it with --plugin-dir; a person's machine installs it from the local marketplace reef at
 # the install root, and Claude Code loads it in place in every session. A plugin carries no
@@ -68,7 +68,17 @@ run:
       DISABLE_UPDATES: "1"
       DISABLE_TELEMETRY: "1"
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-  # How a person's machine runs Claude Code on a release: the person's own ~/.claude stays.
+    # Where the skills of a Harbor task go (environment.skills_dir): the agent's own skills directory.
+    skills: claude/skills
+    # How the agent reads the MCP servers of a Harbor task (environment.mcp_servers): the config key, and the
+    # entry of a server of each transport.
+    mcp:
+      target: mcp
+      key: mcpServers
+      stdio: {type: stdio, command: "{command}", args: "{args}"}
+      sse: {type: sse, url: "{url}"}
+      streamable-http: {type: http, url: "{url}"}
+  # How a person's machine runs Claude Code on a snapshot: the person's own ~/.claude stays.
   # register installs the plugin reef from the local marketplace reef at the install root, and
   # Claude Code loads it in place in every session; a session that Reef starts also takes the
   # settings that bind the model, which win over the person's.
@@ -103,6 +113,14 @@ config:
       - key: env
         match: Each(Key(IsIn(["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL"])))
         reason: Reef's model binding chooses the endpoint, the credential and the model
+  # Claude Code's own state file, where it reads the MCP servers of the user. Only Reef writes it, with the MCP
+  # servers of a Harbor task; a run without them renders no such file.
+  mcp:
+    path: "claude/.claude.json"
+    checks:
+      - key: "."
+        match: Eq({})
+        reason: Reef writes the MCP servers of a task, and a plugin carries no state of Claude Code
   # The plugin's hooks: when each extension script runs.
   hooks:
     path: "plugin/hooks/hooks.json"

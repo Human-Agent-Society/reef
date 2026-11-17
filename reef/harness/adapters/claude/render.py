@@ -1,6 +1,6 @@
 """Claude Code adapter render steps: the plugin's own files, the model a frontmatter names, and the layer's files.
 
-A release is the plugin ``reef`` in ``plugin/``. ``finalize_render`` writes
+A snapshot is the plugin ``reef`` in ``plugin/``. ``finalize_render`` writes
 its manifest, and its output style from ``plugin/rules.md``, which Claude Code
 adds to its system prompt while the plugin is on (``force-for-plugin``). It
 drops ``plugin/hooks/hooks.json`` when the tree has no hooks. ``layer_files``
@@ -27,6 +27,8 @@ from reef.harness.tree.render import RenderError
 
 RULES = "plugin/rules.md"
 HOOKS = "plugin/hooks/hooks.json"
+#: Claude Code's own state file, which holds the MCP servers of a task.
+STATE = "claude/.claude.json"
 #: The output style that holds the rules: Claude Code adds it to its own system prompt, which it keeps.
 OUTPUT_STYLE = "plugin/output-styles/reef.md"
 OUTPUT_STYLE_FRONTMATTER = (
@@ -97,6 +99,8 @@ class ClaudeAdapterRenderer(AdapterRenderer):
         plugin = {**files, "plugin/.claude-plugin/plugin.json": '{"name": "reef"}\n'}
         if not json.loads(plugin[HOOKS]):
             plugin.pop(HOOKS)
+        if not json.loads(plugin[STATE]):
+            plugin.pop(STATE)
         if RULES in plugin:
             plugin[OUTPUT_STYLE] = OUTPUT_STYLE_FRONTMATTER + plugin[RULES]
         return plugin

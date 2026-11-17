@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
@@ -27,6 +27,7 @@ from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed
 from reef.execution.sandbox.process import LocalExecutor, ProgramLaunchError
 from reef.pipeline_context import PipelineContext
 from reef.record2sample import JudgedSamples, RecordJudging
+from reef.record2sample.staleness import ServedArtifacts
 from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TrajectorySample
@@ -108,10 +109,10 @@ class ToyJobData(Sample2Job):
 class _ToyProcessor(TrainingPipeline):
     """Trains the judged records of ``_ToyJudging``. Samples are one-token stubs."""
 
-    def __init__(self, context: PipelineContext, *, worker: Any, max_staleness: int = 0) -> None:
+    def __init__(self, context: PipelineContext, *, worker: Any) -> None:
         super().__init__(
             context,
-            record2sample=_ToySamples(_ToyJudging(), worker, max_staleness=max_staleness),
+            record2sample=_ToySamples(_ToyJudging(), worker),
             sample2job=ToyJobData(context, None, None),
         )
 
@@ -142,7 +143,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     batch = processor.build_job_data(1)
     assert source_record_id(batch.samples[0]) == "r1"
     processor.acknowledge(batch.data_id)
-    decision = processor.releasable_record_ids()
+    decision = processor.record2sample.releasable_record_ids()
     assert "r1" in decision
     assert "r2" not in decision  # still tracked
 
@@ -150,7 +151,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
 def test_untracked_records_are_terminal_on_sight() -> None:
     processor, worker = _engine()
     processor.push(_record("noise"))
-    assert "noise" in processor.releasable_record_ids()
+    assert "noise" in processor.record2sample.releasable_record_ids()
     assert not worker.jobs
 
 
@@ -164,7 +165,7 @@ def test_failed_and_declined_judgments_retire_the_record() -> None:
     worker.push(_Judgment("b", good=False))
     processor.produce()
     assert not processor.ready(1)
-    releasable = processor.releasable_record_ids()
+    releasable = processor.record2sample.releasable_record_ids()
     assert {"a", "b"} <= set(releasable)
 
 
@@ -176,44 +177,30 @@ def test_refused_submission_retires_immediately() -> None:
     processor, _ = _engine(worker=_Refusing())
     processor.push(_record("r1", track=True))
     processor.push(_record("r2", completes="r1"))
-    assert "r1" in processor.releasable_record_ids()
+    assert "r1" in processor.record2sample.releasable_record_ids()
 
 
 def test_judged_samples_behind_the_serving_version_leave_the_buffer_before_a_batch() -> None:
     processor, worker = _engine()
-    processor.observe_serving_artifact_id("v1")
     processor.push(_record("old", track=True, version="v1"))
     processor.push(_record("done1", completes="old"))
-    processor.observe_serving_artifact_id("v2")
     processor.push(_record("new", track=True, version="v2"))
     processor.push(_record("done2", completes="new"))
     worker.push(_Judgment("new"))
     worker.push(_Judgment("old"))
     processor.produce()
+    # A judging stage is on-policy: the samples service marks the sample of v1 stale once v2 serves.
+    processor.mark_stale(ServedArtifacts(("v1", "v2")))
     assert not processor.ready(2)  # the stale sample is not in the buffer
-    assert {"old", "new"} <= processor.releasable_record_ids()
+    assert {"old", "new"} <= processor.record2sample.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
-
-
-def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
-    worker = _FakeWorker()
-    processor = _ToyProcessor(PipelineContext("s"), worker=worker, max_staleness=1)
-    for name, version in (("v3", "e:3"), ("v4", "e:4"), ("v5", "e:5")):
-        processor.observe_serving_artifact_id(version)
-        processor.push(_record(name, track=True, version=version))
-        processor.push(_record(f"done-{name}", completes=name))
-        worker.push(_Judgment(name))
-    processor.produce()
-    assert not processor.ready(3)  # e:3 is two artifacts behind e:5
-    assert {"v3", "v4", "v5"} <= processor.releasable_record_ids()
-    assert [source_record_id(sample) for sample in processor.build_job_data(2).samples] == ["v4", "v5"]
 
 
 def test_correlate_only_mode_without_a_worker() -> None:
     processor = _ToyProcessor(PipelineContext("s"), worker=None)
     processor.push(_record("r1", track=True))
     processor.push(_record("r2", completes="r1"))
-    assert "r1" in processor.releasable_record_ids()
+    assert "r1" in processor.record2sample.releasable_record_ids()
     processor.close()
 
 

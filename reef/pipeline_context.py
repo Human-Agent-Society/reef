@@ -43,7 +43,7 @@ class PipelineContext:
     #: keeps its samples in memory.
     samples: TrainerSamples | None = None
     #: The parameters of each training job, by the kind of the job's samples (``trajectory`` or ``task``), each a
-    #: mapping that encodes as JSON; the recipe gives them, with its ``method``. Empty for a trainer without a job
+    #: mapping that encodes as JSON, which Reef does not read; the recipe gives them. Empty for a trainer without a job
     #: loop. ``Sample2Job.job_parameters`` reads them.
     job_parameters: Mapping[SampleKind, Mapping[str, Any]] = field(default_factory=dict)
 

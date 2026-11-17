@@ -8,21 +8,17 @@ import urllib.error
 import urllib.request
 
 import pytest
+from tests.support.job_data import job_data_ref
 from tests.tinker_backend.test_spindle_full import BASE, MODEL, RELEASES, SPINDLE, Exporter, SpindleClient
 
 from reef.core.errors import DeployConfigError
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.algos import TrainingSignal
-from reef.train.algos.objective import TrainingObjective
-from reef.train.algos.registry import register_objective, unregister_objective
-from reef.train.algos.schedule import StepScheduling
 from reef.train.component import TrainingJob
-from reef.train.method import TrainingMethod
-from reef.train.task_rollouts import ChatEndpoint, TaskJobRollouts
+from reef.train.task_rollouts import ChatEndpoint, RolloutTokens, TaskJobRollouts
 from reef.train.tinker_backend import component as component_module
-from reef.train.tinker_backend.config import ScoreCentering, SpindleFullConfig
+from reef.train.tinker_backend.config import ScoreCentering, SpindleFullSettings
 from reef.train.tinker_backend.full import SpindleFullTrainingComponent
 from reef.train.tinker_backend.launch import spindle_full_settings
 from reef.train.tinker_backend.losses import (
@@ -32,8 +28,11 @@ from reef.train.tinker_backend.losses import (
     ScoreCenteredLoss,
     TokenRow,
 )
+from reef.train.tinker_backend.objectives import TinkerObjective, register_objective, unregister_objective
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
+from reef.train.tinker_backend.schedule import StepScheduling
+from reef.train.tinker_backend.signals import TrainingSignal
 
 CENTERING = ScoreCentering(top_k=2, min_tail_mass=1e-6, weight_low=1.0, weight_high=1.0)
 HEADS = {"topk_indices": [[7, 3, 4], [8, 1, 2]], "topk_log_probs": [[-0.1, -2.5, -3.0], [-0.2, -2.0, -4.0]]}
@@ -52,7 +51,7 @@ def trajectory(group: str = "g", reward: float = 1.0, **training: object) -> Tra
     )
 
 
-class Objective(TrainingObjective):
+class Objective(TinkerObjective):
     loss_family = "importance_sampling"
     name = "score-centering-test-objective"
 
@@ -60,7 +59,7 @@ class Objective(TrainingObjective):
         return TrainingSignal("train", {}, advantages=tuple(1.0 for _ in batch.samples))
 
 
-class SftObjective(TrainingObjective):
+class SftObjective(TinkerObjective):
     loss_family = "sft"
     name = "score-centering-test-sft"
 
@@ -68,7 +67,7 @@ class SftObjective(TrainingObjective):
         return TrainingSignal("train", {})
 
 
-class TttdObjective(TrainingObjective):
+class TttdObjective(TinkerObjective):
     loss_family = "tttd"
     name = "score-centering-test-tttd"
 
@@ -82,16 +81,16 @@ def objectives():
 
     values = (Objective(), SftObjective(), TttdObjective())
     for value in values:
-        register_objective(value)
+        register_objective(value.name, value)
     yield values
     for value in values:
         unregister_objective(value.name)
 
 
-def prepare(objective: TrainingObjective, *items: TrajectorySample):
+def prepare(objective: TinkerObjective, *items: TrajectorySample):
     return prepare_tinker_job(
         JobData("d", items),
-        TrainingMethod(objective.name),
+        objective.name,
         {},
         StepScheduling(),
         batch_size=len(items),
@@ -100,9 +99,9 @@ def prepare(objective: TrainingObjective, *items: TrajectorySample):
     )
 
 
-def spindle(tmp_path, **options: object) -> SpindleFullConfig:
+def spindle(tmp_path, **options: object) -> SpindleFullSettings:
     values = {"state_dir": str(tmp_path / "state"), "base_url": SPINDLE, "base": BASE, "release_repo": RELEASES}
-    return SpindleFullConfig(**{**values, **options})
+    return SpindleFullSettings(**{**values, **options})
 
 
 @pytest.mark.unit
@@ -198,7 +197,7 @@ class TopkSampler(TinkerSampler):
     def render(self, messages, *, template_kwargs):
         return [1, 2, 3]
 
-    def decode(self, tokens):
+    def decode(self, tokens, *, skip_special_tokens=True):
         return "done"
 
     def sample(self, sampler_path, prompt, params, *, topk_logprobs):
@@ -250,16 +249,15 @@ class Client(SpindleClient):
 
 
 @pytest.mark.unit
-def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, monkeypatch):
-    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
-
+def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, monkeypatch, objectives):
     widths = []
 
     def fake_roll_out(tasks, settings, rollout_chat, **options):
         widths.append(rollout_chat.topk_logprobs)
         samples = (trajectory("add", 1.0, **HEADS), trajectory("add", 0.0, **HEADS))
+        tokens = tuple(RolloutTokens("add", 2, 2, assembled=True) for _ in samples)
         return TaskJobRollouts(
-            samples, RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
+            samples, RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),)), tokens
         )
 
     monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
@@ -273,7 +271,7 @@ def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, m
         task.mkdir()
         (task / "task.toml").write_text('version = "1.0"\n')
         parameters = {
-            "method": TrainingMethod("task_group").to_dict(),
+            "objective": Objective.name,
             "rollout": {"rollouts_per_task": 2},
             "batch_size": 2,
         }
@@ -282,7 +280,7 @@ def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, m
                 "job-0",
                 component.name,
                 component.base_start,
-                JobData("d", (TaskSample(task, metadata={"task": {"name": "add"}}),)),
+                job_data_ref(JobData("d", (TaskSample(task, metadata={"task": {"name": "add"}}),))),
                 parameters,
                 scenario="s",
             )

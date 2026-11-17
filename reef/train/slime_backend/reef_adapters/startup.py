@@ -16,8 +16,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from reef.train.algos.registry import loss_family_refs
-from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
+from reef.train.slime_backend.loss_families import UnknownLossFamilyError, loss_family_reference, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.executors.config import slime_executor_class
 from reef.train.slime_backend.reef_adapters.preflight import (
@@ -27,7 +26,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
 )
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     MEGATRON_TRACKER,
-    RetentionConfig,
+    RetentionSettings,
     retention_options,
 )
 
@@ -36,11 +35,11 @@ logger = logging.getLogger(__name__)
 
 def prepare_slime_arguments(
     arguments: Sequence[str], *, loss_family: str, recipe: str, execution: Mapping[str, Any]
-) -> tuple[SlimeArguments, object | None, RetentionConfig]:
+) -> tuple[SlimeArguments, object | None, RetentionSettings]:
     """Return the workers' Slime arguments, the startup loss family's driver config and the checkpoint retention.
 
     ``arguments`` are the native Slime arguments with Reef's retention
-    options. ``loss_family`` is the recipe's startup loss family, by name or
+    options. ``loss_family`` is the startup loss family, by name or
     dotted reference; ``recipe`` names the recipe in error messages.
     ``execution`` holds the deployment's ``execution`` and ``executors``
     sections. Raise ``RuntimeError`` for an unknown loss family, before Slime
@@ -171,10 +170,16 @@ def apply_unsaved_optimizer_resume(args: SlimeArguments) -> None:
 
 
 def stamp_loss_family_reference(args: SlimeArguments, reference: str) -> None:
-    """Carry a dotted family reference to the workers, whose registry starts empty."""
-    dotted = reference if ":" in reference else loss_family_refs().get(reference)
+    """Carry a dotted family reference to the workers, which start without the driver's registrations."""
+    dotted = reference if ":" in reference else loss_family_reference(reference)
     if dotted is not None:
         args.loss_family_ref = dotted
+
+
+#: The credentials of Harbor's cloud task environments, which Ray's actors do not inherit from this process.
+TASK_ENVIRONMENT_CREDENTIALS = ("E2B_API_KEY", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET")
+#: The endpoints of a self-hosted service for the ``e2b`` task environment, which Ray's actors do not inherit either.
+TASK_ENVIRONMENT_ENDPOINTS = ("E2B_API_URL", "E2B_SANDBOX_URL", "E2B_DOMAIN")
 
 
 def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -184,7 +189,12 @@ def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     service. The workers get ``CUDA_DEVICE_MAX_CONNECTIONS=1`` and
     ``NCCL_NVLS_ENABLE=0`` unless this process sets them, and the service's
     ``PYTHONPATH``: cookbook loss families resolve inside the workers, so
-    without it the first actor fails to import ``recipes``.
+    without it the first actor fails to import ``recipes``. A task job's
+    Harbor rollouts run in Slime's rollout manager, an actor too, so it gets the
+    non-empty credentials of a cloud task environment that this process sets.
+    It also gets each ``TASK_ENVIRONMENT_ENDPOINTS`` variable that this process
+    sets, with its value unchanged, even when it is empty, so the rollouts
+    reach the same E2B service as this process.
     """
     source = os.environ if environ is None else environ
     env_vars = {
@@ -194,6 +204,8 @@ def job_runtime_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
     pythonpath = source.get("PYTHONPATH", "").strip()
     if pythonpath:
         env_vars["PYTHONPATH"] = pythonpath
+    env_vars.update({name: source[name] for name in TASK_ENVIRONMENT_CREDENTIALS if source.get(name)})
+    env_vars.update({name: source[name] for name in TASK_ENVIRONMENT_ENDPOINTS if name in source})
     return {"env_vars": env_vars}
 
 

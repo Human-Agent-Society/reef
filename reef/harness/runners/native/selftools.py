@@ -19,9 +19,9 @@ from typing import Any
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import Format
 from reef.harness.runners.native import ToolModule, ToolRunner
-from reef.harness.runners.native.enforce import ToolFailed
+from reef.harness.runners.native.artifact_client import ArtifactClient
+from reef.harness.runners.native.enforce import ToolFailedError
 from reef.harness.runners.native.graph import SEED_GRAPH
-from reef.harness.runners.native.release_client import ArtifactClient
 from reef.harness.tree import HarnessTree, TreePatch
 
 #: How many catalog rows ``harness_inspect("results")`` returns, newest first.
@@ -43,9 +43,9 @@ PATCH_SCHEMA: dict[str, Any] = {
 
 INSPECT_DESCRIPTION = (
     "Read the harness you are running in. what=tree returns every file of the live tree by path and the mounted "
-    "release id; what=graph shows the main loop graph and every named graph as JSON; what=results lists the "
-    "newest releases with the evaluation metrics that admitted each one and, when Reef exposes it, the candidates "
-    "the evaluation rejected; what=status shows the mounted release, the follow mode and any pending mount. Read "
+    "artifact ID; what=graph shows the main loop graph and every named graph as JSON; what=results lists the "
+    "newest snapshots with the evaluation metrics that admitted each one and, when Reef exposes it, the candidates "
+    "the evaluation rejected; what=status shows the mounted artifact, the follow mode and any pending mount. Read "
     "only. Call it before you change anything."
 )
 TRY_DESCRIPTION = (
@@ -85,13 +85,13 @@ class HostTool(ToolModule):
 
 
 def patch_argument(value: Any) -> TreePatch:
-    """The ``patch`` argument as a non-empty ``TreePatch``; ToolFailed naming the problem otherwise."""
+    """The ``patch`` argument as a non-empty ``TreePatch``; ToolFailedError naming the problem otherwise."""
     try:
         patch = TreePatch.from_json(value)
     except (TypeError, ValueError) as exc:
-        raise ToolFailed(f"patch: {exc}") from exc
+        raise ToolFailedError(f"patch: {exc}") from exc
     if not patch.changes:
-        raise ToolFailed("patch must change at least one path")
+        raise ToolFailedError("patch must change at least one path")
     return patch
 
 
@@ -107,7 +107,7 @@ class SelfTools(ToolRunner):
             return self.inspect(args, workdir)
         if self._action == "try":
             return self.try_(args, workdir)
-        raise ToolFailed(f"unknown self tool action {self._action!r}")
+        raise ToolFailedError(f"unknown self tool action {self._action!r}")
 
     def inspect(self, args: dict[str, Any], workdir: str) -> Any:
         what = str(args.get("what", ""))
@@ -125,11 +125,11 @@ class SelfTools(ToolRunner):
             return self.results()
         if what == "status":
             return self._state.status()
-        raise ToolFailed(f"what must be one of tree, graph, results, status; got {what!r}")
+        raise ToolFailedError(f"what must be one of tree, graph, results, status; got {what!r}")
 
     def results(self) -> dict[str, Any]:
         rows = list(reversed(self._state.client.artifacts()))[:RESULT_ROWS]
-        releases = [
+        artifacts = [
             {
                 "artifact_id": row.get("artifact_id"),
                 "parent_artifact_id": row.get("parent_artifact_id"),
@@ -148,14 +148,14 @@ class SelfTools(ToolRunner):
             manifest = self._state.client.fetch(head)
             evaluation_metrics = manifest.get("evaluation")
             rejected = evaluation_metrics.get("rejected") if isinstance(evaluation_metrics, Mapping) else None
-        return {"head": head, "artifacts": releases, "rejected": rejected}
+        return {"head": head, "artifacts": artifacts, "rejected": rejected}
 
     def try_(self, args: dict[str, Any], workdir: str) -> Any:
         patch = patch_argument(args.get("patch"))
         for path in patch.changes:
             location = get_adapter("native").layout.locate(path)
             if location is not None and location.part.review:
-                raise ToolFailed(f"{path} is reviewed code: a person activates it")
+                raise ToolFailedError(f"{path} is reviewed code: a person activates it")
         return self._state.try_patch(patch, secrets.token_hex(4))
 
 

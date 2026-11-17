@@ -9,10 +9,10 @@ content hash that ignores ``task.toml`` and the hint, and ``oracle_check`` runs 
 ``harbor`` command line, once with Harbor's oracle agent (the reference solution) and once with its nop
 agent (nothing), and accepts the task only when the first scores 1 and the second scores below 1:
 solvable, and not for free. A check that could not run, because ``harbor`` is not installed or a run
-ended without a trial to read (an exit code, a timeout, an environment that cannot start), raises ``OracleUnavailable``
-rather than refusing the task. One gate is reef's own: the team requires a pytest file under ``tests/``,
-reef requires a file under ``tests/`` that names the reward file, since its verifiers are shell scripts
-that write it.
+ended without a trial to read (an exit code, a timeout, an environment that cannot start), raises
+``OracleUnavailableError`` rather than refusing the task. One gate is reef's own: the team requires a
+pytest file under ``tests/``, reef requires a file under ``tests/`` that names the reward file, since its
+verifiers are shell scripts that write it.
 """
 
 from __future__ import annotations
@@ -27,8 +27,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from reef.core.errors import InternalError
 from reef.core.tasks import HarborTask, primary_reward
-from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosed
+from reef.execution.processes import CURRENT_PROCESS_SCOPE, ProcessRequest, ProcessScope, ProcessScopeClosedError
+from reef.execution.sandbox.task_environment import environment_config
 from reef.record2sample.generator.designer import SKILL_PATTERN, HarborReply
 
 DEFAULT_VERIFIER_TIMEOUT_S = 300
@@ -130,7 +132,7 @@ class OracleResult:
     nop_reward: float | None = None
 
 
-class OracleUnavailable(RuntimeError):
+class OracleUnavailableError(InternalError, RuntimeError):
     """The check could not run: harbor is not installed, or a harbor run ended without a trial to read."""
 
 
@@ -347,31 +349,6 @@ def trial_outcome(jobs_path: Path) -> TrialOutcome:
     return TrialOutcome(reward=float(value), exception=exception_text, agent_note=agent_note)
 
 
-class HarborRuns:
-    """Compatibility adapter for callers that explicitly own several Harbor checks.
-
-    scope is one initially open ProcessScope. pids reports its active children;
-    terminate_all closes it, signals with the supplied grace and waits for reaping.
-    New generator jobs instead receive their worker's per-job process scope.
-    """
-
-    def __init__(self) -> None:
-        self.scope = ProcessScope()
-
-    @property
-    def is_closed(self) -> bool:
-        return self.scope.closed
-
-    def pids(self) -> tuple[int, ...]:
-        return self.scope.pids()
-
-    def terminate_all(self, *, grace_s: float = STOP_GRACE_S) -> tuple[int, ...]:
-        pids = self.scope.pids()
-        self.scope.request_stop(grace_seconds=grace_s)
-        self.scope.wait_closed()
-        return pids
-
-
 def run_harbor_agent(
     task_path: Path,
     agent: str,
@@ -380,15 +357,40 @@ def run_harbor_agent(
     harbor: str,
     timeout_s: float,
     environment: str = "docker",
-    runs: HarborRuns | None = None,
 ) -> TrialOutcome:
     """Run ``agent`` on the task through the harbor command line in Harbor's ``environment``, and read the trial.
 
     The child runs in its own process group and inherits this process's environment, so the credentials of the
-    environment (``reef.execution.sandbox.task_environment``) reach Harbor.
+    environment (``reef.execution.sandbox.task_environment``) reach Harbor. On ``e2b``, the child gets the
+    environment class and the sandbox lifetime of an in-process trial (``environment_config``). ``-e e2b`` would
+    select Harbor's own class, so ``-e`` names the import path of the class that deletes the sandbox at its timeout,
+    and ``--ek`` gives it the lifetime. Harbor's command line makes an environment config with that import path and
+    no type. ``agent`` is an agent name with no time limit of its own, so the lifetime comes from the task's time
+    limits.
     """
-    command = [harbor, "run", "-p", str(task_path), "-a", agent, "-e", environment, "-o", str(jobs_path), "-n", "1"]
-    scope = runs.scope if runs is not None else CURRENT_PROCESS_SCOPE.get()
+    environment_spec = environment
+    environment_kwargs: list[str] = []
+    if environment == "e2b":
+        config = environment_config(environment, task_path)
+        environment_spec = config["import_path"]
+        for name, value in config.get("kwargs", {}).items():
+            environment_kwargs += ["--ek", f"{name}={value}"]
+    command = [
+        harbor,
+        "run",
+        "-p",
+        str(task_path),
+        "-a",
+        agent,
+        "-e",
+        environment_spec,
+        "-o",
+        str(jobs_path),
+        "-n",
+        "1",
+        *environment_kwargs,
+    ]
+    scope = CURRENT_PROCESS_SCOPE.get()
     if scope is None:
         scope = ProcessScope()
     try:
@@ -402,7 +404,7 @@ def run_harbor_agent(
                 capture_stdout=False,
             )
         )
-    except ProcessScopeClosed as exc:
+    except ProcessScopeClosedError as exc:
         raise RuntimeError("the generator is stopping; no new harbor run") from exc
     if result.reason == "timed_out":
         raise RuntimeError(f"harbor run -a {agent} did not finish within {timeout_s:g} s")
@@ -421,7 +423,6 @@ def oracle_check(
     harbor: str | None = None,
     environment: str = "docker",
     timeout_s: float = ORACLE_TIMEOUT_S,
-    runs: HarborRuns | None = None,
 ) -> OracleResult:
     """Solvable, and not for free: the reference solution scores 1 and doing nothing scores below 1 under Harbor.
 
@@ -429,7 +430,7 @@ def oracle_check(
     """
     executable = harbor if harbor is not None else shutil.which("harbor")
     if executable is None:
-        raise OracleUnavailable("the harbor command line is not installed")
+        raise OracleUnavailableError("the harbor command line is not installed")
     jobs_path = task_path.parent / JOBS_DIRECTORY / task_path.name
     if jobs_path.exists():
         shutil.rmtree(jobs_path)
@@ -442,10 +443,9 @@ def oracle_check(
             harbor=executable,
             timeout_s=timeout_s,
             environment=environment,
-            runs=runs,
         )
     except (RuntimeError, ValueError, OSError) as exc:
-        raise OracleUnavailable(str(exc)[:500]) from exc
+        raise OracleUnavailableError(str(exc)[:500]) from exc
     if oracle.reward is None or oracle.reward < 1.0:
         # A task the reference solution does not solve is refused here; the nop run would only cost a build.
         reason = f"the reference solution scored {oracle.reward}, not 1"
@@ -462,10 +462,9 @@ def oracle_check(
             harbor=executable,
             timeout_s=timeout_s,
             environment=environment,
-            runs=runs,
         )
     except (RuntimeError, ValueError, OSError) as exc:
-        raise OracleUnavailable(str(exc)[:500]) from exc
+        raise OracleUnavailableError(str(exc)[:500]) from exc
     if nop.reward is None or nop.reward >= 1.0:
         reason = f"doing nothing scored {nop.reward}, not below 1"
         if nop.exception is not None:

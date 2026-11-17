@@ -1,7 +1,7 @@
-"""Saved weight files: what a training component's releases hold and what serving engines load.
+"""Saved weight files: what a training component's snapshots hold and what serving engines load.
 
-``ReleaseFormat`` is what a training component declares about its releases.
-``ReleaseWeights`` gives a serving runtime the ``WeightFiles`` of one release.
+``ArtifactFormat`` is what a training component declares about its snapshots.
+``ArtifactWeights`` gives a serving runtime the ``WeightFiles`` of one snapshot.
 Training and inference both read these values, and neither imports the other.
 """
 
@@ -18,7 +18,7 @@ from reef.core.plugins import ConfiguredPlugin
 #: ``"full"`` is a Hugging Face checkpoint of every model weight; ``"adapter"`` is a PEFT adapter directory.
 WeightLayout = Literal["full", "adapter"]
 WEIGHT_LAYOUTS: tuple[WeightLayout, ...] = ("full", "adapter")
-#: The directory of a release in the ``"adapter"`` layout that holds its PEFT adapter.
+#: The directory of a snapshot in the ``"adapter"`` layout that holds its PEFT adapter.
 ADAPTER_DIR = "adapter"
 
 
@@ -29,7 +29,7 @@ class WeightFiles:
     ``path`` is a directory on the control plane's node. ``layout`` names what
     it holds: ``"full"`` is a Hugging Face checkpoint of every model weight,
     and ``"adapter"`` is a PEFT adapter directory. The serving runtimes in
-    ``reef.inference.serving`` make the values from a published release and pass
+    ``reef.inference.serving`` make the values from a published snapshot and pass
     them to ``InferenceBackend.load_weight_files``.
     """
 
@@ -44,18 +44,18 @@ class WeightFiles:
 
 
 @dataclass(frozen=True)
-class ReleaseFormat:
-    """The weight files that each release of a training component holds, which a serving runtime loads.
+class ArtifactFormat:
+    """The weight files that each snapshot of a training component holds, which a serving runtime loads.
 
-    ``layout`` is ``"full"``, a Hugging Face checkpoint at the release's root,
-    or ``"adapter"``, a PEFT adapter in the release's ``adapter/`` directory
+    ``layout`` is ``"full"``, a Hugging Face checkpoint at the snapshot's root,
+    or ``"adapter"``, a PEFT adapter in the snapshot's ``adapter/`` directory
     (the layouts of ``WeightFiles``). ``adapter_rank`` is the adapter's
     positive LoRA rank, and ``adapter_target_modules`` the non-empty names of
     the modules it adapts in the serving engine's naming (``("all",)`` for
     every linear module); both are set exactly for ``"adapter"``. A training
-    component declares the value (``TrainingComponent.release_format``), and
+    component declares the value (``TrainingComponent.artifact_format``), and
     the serving assembly reads it to configure the engines and to refuse a
-    serving runtime that cannot load the releases.
+    serving runtime that cannot load the snapshots.
     """
 
     layout: WeightLayout
@@ -64,21 +64,21 @@ class ReleaseFormat:
 
     def __post_init__(self) -> None:
         if self.layout not in WEIGHT_LAYOUTS:
-            raise ValueError(f"ReleaseFormat.layout must be 'full' or 'adapter', got {self.layout!r}")
+            raise ValueError(f"ArtifactFormat.layout must be 'full' or 'adapter', got {self.layout!r}")
         if self.layout == "full":
             if self.adapter_rank is not None or self.adapter_target_modules:
-                raise ValueError("a full-weight ReleaseFormat has no adapter rank or target modules")
+                raise ValueError("a full-weight ArtifactFormat has no adapter rank or target modules")
             return
         rank = self.adapter_rank
         if isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0:
-            raise ValueError(f"an adapter ReleaseFormat needs a positive int adapter_rank, got {rank!r}")
+            raise ValueError(f"an adapter ArtifactFormat needs a positive int adapter_rank, got {rank!r}")
         modules = self.adapter_target_modules
         if (
             not isinstance(modules, tuple)
             or not modules
             or any(not isinstance(name, str) or not name for name in modules)
         ):
-            raise ValueError("an adapter ReleaseFormat needs a non-empty tuple of module names")
+            raise ValueError("an adapter ArtifactFormat needs a non-empty tuple of module names")
 
     def to_dict(self) -> dict[str, Any]:
         """The value as a JSON object, which ``from_dict`` reads back to an equal value."""
@@ -89,34 +89,35 @@ class ReleaseFormat:
         }
 
     @classmethod
-    def from_dict(cls, value: Mapping[str, Any]) -> ReleaseFormat:
+    def from_dict(cls, value: Mapping[str, Any]) -> ArtifactFormat:
         """Read a ``to_dict`` value; raise ``ValueError`` for another shape."""
         if (
             not isinstance(value, Mapping)
             or "layout" not in value
             or set(value) - {"layout", "adapter_rank", "adapter_target_modules"}
         ):
-            raise ValueError("a release format is an object of layout, adapter_rank and adapter_target_modules")
+            raise ValueError("a artifact format is an object of layout, adapter_rank and adapter_target_modules")
         modules = value.get("adapter_target_modules", ())
         if not isinstance(modules, (list, tuple)):
-            raise ValueError("a release format's adapter_target_modules is a list of module names")
+            raise ValueError("a artifact format's adapter_target_modules is a list of module names")
         return cls(value["layout"], value.get("adapter_rank"), tuple(modules))
 
 
-class ReleaseWeights(ConfiguredPlugin, ABC):
-    """Where a serving runtime gets the weight files of a published release.
+class ArtifactWeights(ConfiguredPlugin, ABC):
+    """Where a serving runtime gets the weight files of a published snapshot.
 
-    ``weight_files(release, layout)`` takes the local directory ``release`` of
-    a materialized release and the ``layout`` that the engines load, and
-    returns ``WeightFiles`` of that layout with the release's weights. Equal
-    releases give files of equal content. It raises ``ReefError`` when the
-    release gives no files of ``layout``.
+    ``weight_files(artifact_dir, layout)`` takes the local directory ``artifact_dir`` of
+    a materialized snapshot and the ``layout`` that the engines load, and
+    returns ``WeightFiles`` of that layout with the snapshot's weights. Equal
+    snapshots give files of equal content. It raises ``ReefError`` when the
+    snapshot gives no files of ``layout``. The runtimes do not call it for a base root
+    (``reef.artifact.base_root``), which holds no weight files.
 
-    Purpose: the serving runtimes of ``reef.inference.serving`` call it at each load. ``ReleaseFiles``,
-    the default, reads the release's own files. A training backend whose
-    releases name weights on a service instead names the plugin that fetches
+    Purpose: the serving runtimes of ``reef.inference.serving`` call it at each load. ``ArtifactWeightFiles``,
+    the default, reads the snapshot's own files. A training backend whose
+    snapshots name weights on a service instead names the plugin that fetches
     them (``TrainingDeployment.engine_weights``).
     """
 
     @abstractmethod
-    def weight_files(self, release: Path, layout: WeightLayout) -> WeightFiles: ...
+    def weight_files(self, artifact_dir: Path, layout: WeightLayout) -> WeightFiles: ...

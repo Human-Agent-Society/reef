@@ -33,7 +33,7 @@ inference:
     router-port: "23002"
     context-length: "8192"
     mem-fraction-static: "0.6"
-  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-factory: reef.inference.sglang.chat:SGLangInferenceHandler
   handler-config:
     # The reference samples through vLLM at temperature 1 with no nucleus,
     # top-k or repetition penalty; the requests set temperature and the
@@ -47,10 +47,9 @@ recipe:
   implementation: recipes.sdft.recipe:SDFTRecipe
 # The sdft recipe's stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
-  # The staleness limit, and the teacher's window.
+  # The teacher's window. The stage is on-policy: a sample of an artifact that no longer serves does not train.
   record2sample:
     config:
-      max_staleness: 0                 # on-policy: the stage waits for each step's release before sampling again
       max_teacher_tokens: 8192         # the trainer's seq-length; a longer teacher sequence does not train
   sample2job:
     config:

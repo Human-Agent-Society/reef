@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import httpx2
+import httpx
 from huggingface_hub import HfApi
 from huggingface_hub.errors import RevisionNotFoundError
 
@@ -27,7 +27,8 @@ class MemoryHub(HfApi):
     def model_info(self, repo_id: str, *, revision: str | None = None, **kwargs: Any) -> Any:
         # The default branch, ``main``, is at ``COMMIT``.
         if repo_id != self.repo or revision not in (None, "main", COMMIT):
-            missing = httpx2.Response(404, request=httpx2.Request("GET", "https://huggingface.co"))
+            # huggingface_hub builds its HTTP errors from httpx responses, the client it depends on.
+            missing = httpx.Response(404, request=httpx.Request("GET", "https://huggingface.co"))
             raise RevisionNotFoundError(f"{repo_id}@{revision} is not on the hub", response=missing)
         return SimpleNamespace(
             sha=COMMIT,

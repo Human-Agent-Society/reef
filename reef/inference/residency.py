@@ -17,7 +17,7 @@ from typing import Any, Literal
 
 from reef.core.errors import ReefError
 from reef.core.weight_layout import WeightFiles
-from reef.inference.interfaces import AdapterEngine
+from reef.inference.interfaces import AdapterEngine, InferenceOwnerLostError
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ class AdapterResidencyError(ReefError):
     """The shared engine cannot make a scenario's adapter revision servable."""
 
 
-class AdapterCapacityExhausted(AdapterResidencyError):
+class AdapterCapacityExhaustedError(AdapterResidencyError):
     """Every loaded adapter is protected, so nothing can be evicted for a new one.
 
     Raised before anything is unloaded, so the engine still holds exactly what
@@ -79,11 +79,11 @@ class AdapterCapacityExhausted(AdapterResidencyError):
     """
 
 
-class AdapterEvictionFailed(AdapterCapacityExhausted):
+class AdapterEvictionFailedError(AdapterCapacityExhaustedError):
     """The engine refused to release the slot chosen for eviction.
 
     Still a capacity failure for the caller, but a different one: a plain
-    :class:`AdapterCapacityExhausted` proves the engine is fine, while this
+    :class:`AdapterCapacityExhaustedError` proves the engine is fine, while this
     says it would not let go and may be wedged.
     """
 
@@ -190,6 +190,9 @@ class AdapterResidencyManager:
             self.next_order += 1
             try:
                 engine.load_adapter(name, files)
+            except InferenceOwnerLostError:
+                self.adapters.pop(name, None)
+                raise
             except Exception as exc:
                 # Never leave a phantom slot: it would evict a live peer later for an adapter the engine never held.
                 self.adapters.pop(name, None)
@@ -200,21 +203,6 @@ class AdapterResidencyManager:
                     f"engine could not load adapter {name!r} for scenario {scenario!r}: {exc}"
                 ) from exc
             self.counters["loads"] += 1
-            self.current[scenario] = name
-            return name
-
-    def adopt(self, scenario: str, runtime_load_id: str, *, files: WeightFiles) -> str:
-        """Record that the engine already holds ``runtime_load_id`` for ``scenario``, as it did before this manager
-        existed (a control restart), and make it the scenario's current revision without loading it; return its
-        engine name. ``files`` is where the engine would load it from again after an engine restart."""
-        require_name(scenario, "scenario")
-        require_name(runtime_load_id, "runtime_load_id")
-        name = adapter_name(scenario, runtime_load_id)
-        with self.lock:
-            if name not in self.adapters:
-                self.adapters[name] = ResidentAdapter(name, scenario, runtime_load_id, files, self.next_order)
-                self.next_order += 1
-                self.note("adopted", name, scenario)
             self.current[scenario] = name
             return name
 
@@ -238,6 +226,18 @@ class AdapterResidencyManager:
             return tuple(
                 sorted((self.adapters[name] for name in self.current.values()), key=lambda adapter: adapter.order)
             )
+
+    def serve_base(self, scenario: str) -> None:
+        """Record that ``scenario`` serves no adapter from now on, and unload nothing.
+
+        The revision that it served stays resident and is no longer protected: ``retire`` unloads it, and a
+        load that needs its slot evicts it. Nothing happens when the scenario serves none.
+        """
+        require_name(scenario, "scenario")
+        with self.lock:
+            name = self.current.pop(scenario, None)
+            if name is not None:
+                self.note("serves_base", name, scenario)
 
     def release(self, scenario: str, engine: AdapterEngine) -> None:
         """Unload the revision ``scenario`` serves, after which the scenario serves no adapter.
@@ -266,6 +266,8 @@ class AdapterResidencyManager:
         """
         try:
             engine.unload_adapter(name)
+        except InferenceOwnerLostError:
+            raise
         except Exception as exc:
             self.counters["cleanup_failures"] += 1
             self.note("cleanup_failed", name, scenario, str(exc))
@@ -275,7 +277,8 @@ class AdapterResidencyManager:
         self.note("load_cleanup", name, scenario)
 
     def make_room(self, scenario: str, engine: AdapterEngine, *, supersede: bool) -> None:
-        """Evict until one more adapter fits; raise ``AdapterCapacityExhausted`` when every adapter is protected."""
+        """Evict until one more adapter fits. Raise ``AdapterCapacityExhaustedError`` when every adapter is
+        protected."""
         if self.capacity is None:
             return
         superseding = self.current.get(scenario) if supersede else None
@@ -287,7 +290,7 @@ class AdapterResidencyManager:
             if (unload_error := self.unload(victim, engine)) is not None:
                 # The engine refused to let go: the caller sees exhaustion rather than a silent overcommit.
                 self.counters["capacity_rejections"] += 1
-                raise AdapterEvictionFailed(
+                raise AdapterEvictionFailedError(
                     f"engine adapter capacity {self.capacity} is exhausted and evicting {victim.name!r} "
                     f"failed ({unload_error}); scenario {scenario!r} cannot activate until the leaked slot "
                     f"is reclaimed"
@@ -295,10 +298,10 @@ class AdapterResidencyManager:
             self.counters["evictions"] += 1
             self.note("evicted", victim.name, victim.scenario, f"for scenario {scenario!r}")
 
-    def capacity_exhausted(self, scenario: str) -> AdapterCapacityExhausted:
+    def capacity_exhausted(self, scenario: str) -> AdapterCapacityExhaustedError:
         """The error for a load that no eviction can make room for; it names the slots needed."""
         sharing = {adapter.scenario for adapter in self.adapters.values()} | {scenario}
-        return AdapterCapacityExhausted(
+        return AdapterCapacityExhaustedError(
             f"engine adapter capacity {self.capacity} is exhausted and every resident adapter is "
             f"its scenario's current revision: {sorted(self.adapters)}; scenario {scenario!r} cannot "
             f"activate. {len(sharing)} scenarios share this engine and each keeps its current "
@@ -321,6 +324,8 @@ class AdapterResidencyManager:
         """Drop ``adapter`` from the engine and the table; a returned failure leaves it ``leaked``."""
         try:
             engine.unload_adapter(adapter.name)
+        except InferenceOwnerLostError:
+            raise
         except Exception as exc:
             self.counters["unload_failures"] += 1
             adapter.state = "leaked"

@@ -17,13 +17,29 @@ from reef.storage.work_queue import JsonValue, WorkItem
 SERVING_QUEUE = "serving"
 SERVING_KIND = "serve"
 STOP_SERVING_KIND = "stop_serving"
+#: The kind of an item that asks inference to serve one artifact, with no route: an evaluation rollout's model.
+SERVE_ARTIFACT_KIND = "serve_artifact"
 INFERENCE_OWNER_QUEUE = "inference-owner"
 #: The metadata key of a serving request that control made to retry a failed request by itself: the number of such
 #: retries of the same payload in a row, a positive int. A request without the key has the count 0.
 AUTOMATIC_RETRIES = "automatic_retries"
+#: The payload key of a serving request that a person made to deploy the scenario's engines again (RFC #1299): a
+#: number that makes the request new. A comparison of payloads leaves it out, and recovery does not copy it.
+REDEPLOY = "redeploy"
 
 
-class ControlLeaseConflict(ReefError):
+def serving_serial_key(scenario: str) -> str:
+    """The serial key of ``scenario``'s serving requests: its work runs in order, and the work of other scenarios
+    can run at the same time (RFC #1299)."""
+    return f"{SERVING_QUEUE}:{scenario}"
+
+
+def without_redeploy(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """``payload`` without ``REDEPLOY``: the selection that it asks for."""
+    return {key: value for key, value in payload.items() if key != REDEPLOY}
+
+
+class ControlLeaseConflictError(ReefError):
     """A control write carried a ``control_lease_number`` that is not the current one."""
 
 
@@ -54,6 +70,10 @@ class ServedModels(ABC):
         published request carried, and ``{}`` before one or after a withdrawal."""
 
     @abstractmethod
+    def read_traffic_weights(self, scenario: str) -> Mapping[str, int]:
+        """The weight of each artifact in ``scenario``'s traffic split, and ``{}`` without a split."""
+
+    @abstractmethod
     def changed_sequence(self) -> int:
         """The number of changes so far; it increases at each write, removal and stop change."""
 
@@ -70,8 +90,8 @@ class ServedModelsWriter(ServedModels):
     """Writes of serving work and routes, with the lease of the operation's owner.
 
     Control selects work with ``request``. Inference completes startup and cleanup with ``complete_request`` and ``complete_stop``.
-    Direct operations ``write``, ``remove``, ``schedule_stop`` and ``delete_stop`` check ``control_lease_number``.
-    A stale control number raises ``ControlLeaseConflict`` without a change. Reads require no lease.
+    Direct operations ``write``, ``delete``, ``schedule_stop`` and ``delete_stop`` check ``control_lease_number``.
+    A stale control number raises ``ControlLeaseConflictError`` without a change. Reads require no lease.
     """
 
     @abstractmethod
@@ -79,7 +99,15 @@ class ServedModelsWriter(ServedModels):
         """Make ``served`` the row of ``key``."""
 
     @abstractmethod
-    def remove(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
+    def write_traffic_weights(self, scenario: str, weights: Mapping[str, int], *, control_lease_number: int) -> None:
+        """Make ``weights`` the traffic split of ``scenario``. Empty ``weights`` remove the split.
+
+        An artifact can have a weight before it has a route: inference then gives its requests to the active
+        artifact (``InferenceReplica.route``). A withdrawal of the scenario also removes the split.
+        """
+
+    @abstractmethod
+    def delete(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
         """Remove the row of ``key``; return the removed value, or None when there was none."""
 
     @abstractmethod
@@ -116,12 +144,14 @@ class ServedModelsWriter(ServedModels):
     ) -> WorkItem:
         """Select ``payload`` for ``scenario`` under the control lease and return its serving work.
 
-        An unchanged payload returns the current item, except a failed item when ``retry_failed`` is true.
+        An unchanged payload returns the current item, except a failed item when ``retry_failed`` is true. The
+        comparison leaves out ``REDEPLOY``, and a payload with ``REDEPLOY`` always makes a new item.
         A new item that retries a failed item of the same payload records the non-negative int
         ``automatic_retries`` as ``metadata[AUTOMATIC_RETRIES]`` when it is positive. Every other new item has no
         such key, so its count is 0.
         A new request cancels earlier queued work and gets a new ID. Held work finishes without publishing.
-        All serving work shares one serial key, because runtimes can share an engine across scenarios.
+        Each scenario's serving work has its own serial key (``serving_serial_key``). A runtime that serves more than
+        one work at once locks the engines that scenarios share.
         An empty payload withdraws the routes and the serving config immediately and records a completed request.
         Unreferenced withdrawn routes stop after the finite, non-negative ``stop_delay_seconds``.
         """
@@ -141,7 +171,7 @@ class ServedModelsWriter(ServedModels):
         """Publish ``models`` and ``serving_config`` for ``item.scenario`` and finish its serving work in one
         transaction.
 
-        The item must be held by ``worker_id`` in the same attempt; otherwise raise ``WorkLeaseLost``.
+        The item must be held by ``worker_id`` in the same attempt; otherwise raise ``WorkLeaseLostError``.
         When supplied, ``owner`` must also be held in the same attempt.
         Superseded work finishes with an empty result and changes no route. Schedule its unreferenced endpoints for cleanup.
         Each model name is non-empty. Schedule unreferenced replaced routes after ``stop_delay_seconds``.
@@ -162,7 +192,7 @@ class ServedModelsWriter(ServedModels):
         """Remove ``stop`` and finish its held cleanup work in one transaction.
 
         A later stop of the same endpoint stays when its ``stop_after`` differs.
-        An expired lease or another attempt raises ``WorkLeaseLost`` without changing anything.
+        An expired lease or another attempt raises ``WorkLeaseLostError`` without changing anything.
         When supplied, ``owner`` must also be held in the same attempt.
         """
 
@@ -189,10 +219,14 @@ class ServedModelsWriter(ServedModels):
 __all__ = [
     "AUTOMATIC_RETRIES",
     "INFERENCE_OWNER_QUEUE",
+    "REDEPLOY",
+    "SERVE_ARTIFACT_KIND",
     "SERVING_KIND",
     "SERVING_QUEUE",
     "STOP_SERVING_KIND",
-    "ControlLeaseConflict",
+    "ControlLeaseConflictError",
     "ServedModels",
     "ServedModelsWriter",
+    "serving_serial_key",
+    "without_redeploy",
 ]

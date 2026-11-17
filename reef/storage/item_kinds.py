@@ -8,7 +8,7 @@ kind (``ITEM_KIND_RULES``), and every data store checks them when it creates an 
   (``reef.storage.record_items``).
 * ``artifact``: a reference to an artifact's files (``check_artifact_content``, ``reef.storage.artifact_items``).
 * ``task``: a Harbor task directory named after the item, which the store copies into the owner's task file
-  partition (``task_partition``).
+  partition (``task_partition``), or a ``TaskFilesReference`` to such a directory that the partition already holds.
 
 This module imports no store, so that each store and each kind's own module can import it.
 """
@@ -19,13 +19,14 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from reef.core.evaluation import ARTIFACT_KINDS
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
-from reef.storage.tasks import TaskFileStore
+from reef.storage.tasks import FILES_DIGEST_PATTERN, TaskFilesNotFoundError, TaskFileStore
 
 #: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
 #: starts with it, and archiving a scenario never moves an owner's task files.
@@ -44,21 +45,60 @@ def json_digest(content: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def evaluation_rollout_id_prefix(evaluation_id: str, task_index: int, repeat: int) -> str:
+    """``<evaluation_id>:<task_index>:<repeat>:``, the start of the ID of each call and trajectory of one rollout of an
+    evaluation, and of no other rollout's (``evaluation_call_id``, ``evaluation_trajectory_id``)."""
+    return f"{evaluation_id}:{task_index}:{repeat}:"
+
+
+def evaluation_call_id(
+    evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int, caller: str = "agent"
+) -> str:
+    """The record ID of a call of an evaluation rollout: ``<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>``
+    for an agent call, and ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:<index>`` for a verifier call."""
+    attempt_id = f"{evaluation_rollout_id_prefix(evaluation_id, task_index, repeat)}{attempt}"
+    return f"{attempt_id}:{index}" if caller == "agent" else f"{attempt_id}:{caller}:{index}"
+
+
+def evaluation_trajectory_id(evaluation_id: str, task_index: int, repeat: int, attempt: int, index: int) -> str:
+    """The ID, after ``<scenario>/``, of a trajectory that the verifier of an evaluation rollout wrote:
+    ``<evaluation_id>:<task_index>:<repeat>:<attempt>:verifier:trajectory:<index>``."""
+    return f"{evaluation_rollout_id_prefix(evaluation_id, task_index, repeat)}{attempt}:verifier:trajectory:{index}"
+
+
 def task_partition(owner: str) -> str:
     """The task file store partition that keeps the task directories of ``owner``."""
     return TASK_PARTITION_PREFIX + owner
 
 
+@dataclass(frozen=True)
+class TaskFilesReference:
+    """The files of a task item that the owner's task file partition already holds.
+
+    Values: ``digest`` is a string that matches ``FILES_DIGEST_PATTERN``: the ``files_digest`` of a task directory
+    that a client wrote into the owner's partition (``task_partition``) of the task file store itself. The
+    directory has the name of the item, so a reference names no directory name of its own.
+
+    Purpose: the data service makes it from a create or a replace by reference. ``TaskRules`` reads it as the
+    content of a task item, in place of a local task directory, and copies no file.
+    """
+
+    digest: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.digest, str) or not FILES_DIGEST_PATTERN.fullmatch(self.digest):
+            raise ValueError("a task's files digest is 64 lowercase hexadecimal digits")
+
+
 def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenario: str) -> AgentRecord:
     """The copy in ``scenario`` of the record item ``item_id`` with ``content``, made in the scenario ``origin``.
 
-    The copy has the record ID ``item_id``, and the request type, payload, time and release of ``content``. Each
+    The copy has the record ID ``item_id``, and the request type, payload, time and artifact ID of ``content``. Each
     reference ``x`` becomes ``<origin>/x``, and so does each entry of a ``references`` list in the payload. Raise
     ``ValueError`` unless ``content`` has the keys ``RECORD_CONTENT_KEYS`` with the types that ``record_item``
     gives them, for an inference or a report, and ``item_id`` is ``<origin>/<agent_record_id>``.
     """
-    legacy_keys = RECORD_CONTENT_KEYS - {"artifact_id"} | {"artifact_ref"}
-    if not isinstance(content, Mapping) or set(content) not in (RECORD_CONTENT_KEYS, legacy_keys):
+    if not isinstance(content, Mapping) or set(content) != RECORD_CONTENT_KEYS:
         raise ValueError(f"a record item's content has exactly the keys {', '.join(sorted(RECORD_CONTENT_KEYS))}")
     record_id, request_type, payload = content["agent_record_id"], content["request_type"], content["payload"]
     created_at, references = content["created_at"], content["references"]
@@ -115,12 +155,9 @@ class ItemKindRules(ABC):
     Values: ``kind`` is the kind, one of ``ITEM_KINDS``. ``stored_digest(owner, item_id, content, metadata,
     task_files)`` checks ``content``, the content of the new item ``item_id`` of ``owner`` with the created
     ``metadata``, against the kind's rules, and returns the digest of the content that the store keeps. It raises
-    ``ValueError`` for content that breaks the rules. ``current_content(content)`` is ``content`` in the current
-    format; an older stored format maps to the same value as its current equivalent. ``matches_stored(content,
-    digest)`` is whether stored ``content`` in an older format has the current content with ``digest``.
+    ``ValueError`` for content that breaks the rules.
 
-    Purpose: ``ITEM_KIND_RULES`` holds one per kind; ``prepared_items`` calls it for each item of a create, and a
-    create compares a retry with ``matches_stored``.
+    Purpose: ``ITEM_KIND_RULES`` holds one per kind; ``prepared_items`` calls it for each item of a create.
     """
 
     @property
@@ -131,14 +168,6 @@ class ItemKindRules(ABC):
     def stored_digest(
         self, owner: str, item_id: str, content: object, metadata: Mapping[str, Any], task_files: TaskFileStore
     ) -> str: ...
-
-    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
-        """``content`` unchanged: this kind has one format."""
-        return content
-
-    def matches_stored(self, content: object, digest: str) -> bool:
-        """False: without older formats, only an equal digest matches."""
-        return False
 
 
 class JsonItemRules(ItemKindRules):
@@ -151,12 +180,6 @@ class JsonItemRules(ItemKindRules):
             raise ValueError(f"{self.kind} item {item_id!r} needs a JSON object as its content")
         self.check_json(item_id, content, metadata)
         return json_digest(content)
-
-    def matches_stored(self, content: object, digest: str) -> bool:
-        if not isinstance(content, Mapping):
-            return False
-        current = self.current_content(content)
-        return current is not content and isinstance(current, Mapping) and json_digest(current) == digest
 
     @abstractmethod
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
@@ -173,24 +196,44 @@ class TrajectoryRules(JsonItemRules):
 
 
 class RecordRules(JsonItemRules):
-    """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``."""
+    """A record's content and ID are what ``copied_record`` reads, for the scenario of its ``origin``. The record ID of
+    an evaluation call is the ``evaluation_call_id`` of its ``origin.evaluation``.
+
+    Its digest is ``json_digest`` of the content without ``created_at``, as the record store's retry fingerprint,
+    so a client's retry with a new time matches.
+    """
 
     kind = "record"
 
-    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
-        """An older record names its artifact by ``artifact_ref``; the current one by ``artifact_id``."""
-        if not isinstance(content, Mapping) or "artifact_ref" not in content:
-            return content
-        payload = content.get("payload")
-        if not isinstance(payload, Mapping):
-            return content  # Malformed content: ``check_json`` rejects it.
-        current = {key: value for key, value in content.items() if key != "artifact_ref"}
-        current["artifact_id"] = stored_record_artifact_id(content, payload)
-        return current
+    def stored_digest(
+        self, owner: str, item_id: str, content: object, metadata: Mapping[str, Any], task_files: TaskFileStore
+    ) -> str:
+        if not isinstance(content, Mapping):
+            raise ValueError(f"record item {item_id!r} needs a JSON object as its content")
+        self.check_json(item_id, content, metadata)
+        return record_digest(content)
 
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         origin = metadata["origin"]["scenario"]
-        copied_record(item_id, content, origin, origin)
+        record = copied_record(item_id, content, origin, origin)
+        location = metadata["origin"].get("evaluation")
+        if location is not None and record.agent_record_id != f"{origin}/" + evaluation_call_id(
+            location["evaluation_id"],
+            location["task_index"],
+            location["repeat"],
+            location["attempt"],
+            location["index"],
+            location.get("caller", "agent"),
+        ):
+            raise ValueError(
+                f"an evaluation call has the ID {origin}/<evaluation_id>:<task_index>:<repeat>:<attempt>:<index>,"
+                " with verifier: before the index of a verifier call"
+            )
+
+
+def record_digest(content: Mapping[str, Any]) -> str:
+    """The digest of a record item's ``content``: ``json_digest`` without ``created_at``."""
+    return json_digest({key: value for key, value in content.items() if key != "created_at"})
 
 
 class ArtifactRules(JsonItemRules):
@@ -199,30 +242,36 @@ class ArtifactRules(JsonItemRules):
 
     kind = "artifact"
 
-    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
-        """An older artifact item also held an unused ``content_id``."""
-        if not isinstance(content, Mapping) or "content_id" not in content:
-            return content
-        return {key: value for key, value in content.items() if key != "content_id"}
-
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         check_artifact_content(content, made_by_scenario="origin" in metadata)
 
 
 class TaskRules(ItemKindRules):
-    """A task's content is a Harbor task directory named after the item. The store copies it into the owner's task
-    file partition, so the digest names stored files."""
+    """A task's content is a Harbor task directory named after the item, or a ``TaskFilesReference``.
+
+    The store copies a directory into the owner's task file partition. For a reference, the partition must already
+    hold a complete directory of the reference's digest, named after the item, and the store copies nothing. Either
+    way, the digest names stored files. ``stored_digest`` raises ``TaskFilesNotFoundError`` for a reference to a
+    directory that the partition does not hold.
+    """
 
     kind = "task"
 
     def stored_digest(
         self, owner: str, item_id: str, content: object, metadata: Mapping[str, Any], task_files: TaskFileStore
     ) -> str:
+        if isinstance(content, TaskFilesReference):
+            if not task_files.contains(task_partition(owner), content.digest, item_id):
+                raise TaskFilesNotFoundError(
+                    f"the task file store holds no task directory {item_id!r} with digest {content.digest} for"
+                    f" {owner!r}"
+                )
+            return content.digest
         if not isinstance(content, Path) or not content.is_dir():
-            raise ValueError(f"task item {item_id!r} needs a task directory as its content")
+            raise ValueError(f"task item {item_id!r} needs a task directory or a reference as its content")
         if content.name != item_id:
             raise ValueError(f"task item {item_id!r} needs a task directory of the same name")
-        return task_files.put(task_partition(owner), content)
+        return task_files.write(task_partition(owner), content)
 
 
 #: The rules of each item kind.
@@ -239,10 +288,13 @@ __all__ = [
     "ItemKindRules",
     "JsonItemRules",
     "RecordRules",
+    "TaskFilesReference",
     "TaskRules",
     "TrajectoryRules",
     "check_artifact_content",
     "copied_record",
+    "evaluation_call_id",
+    "evaluation_trajectory_id",
     "json_digest",
     "task_partition",
 ]

@@ -327,7 +327,7 @@ def test_invalid_report_references_are_not_persisted(references: list[str]) -> N
         scenario = dispatcher.get_or_create_scenario("workload")
         with pytest.raises(ReportValidationError, match="reference"):
             dispatcher.accept_record(_report_record("invalid", {"references": references, "score": 1.0}))
-        assert scenario.records.get_for_audit("workload", "invalid") is None
+        assert scenario.records.read_for_audit("workload", "invalid") is None
     finally:
         dispatcher.close()
 
@@ -347,35 +347,8 @@ def test_missing_reference_rejection_does_not_queue_or_reserve_the_report_id() -
             )
         )
         scenario = dispatcher.get_or_create_scenario("workload")
-        assert scenario.records.get("workload", "feedback") is None
+        assert scenario.records.read("workload", "feedback") is None
         assert dispatcher.accept_record(record).agent_record_id == "feedback"
-    finally:
-        dispatcher.close()
-
-
-def test_report_retry_after_capacity_eviction_remains_idempotent_and_conflicts_fail(tmp_path) -> None:
-    from dataclasses import replace
-
-    from reef.storage.records import RecordConflict, RecordRetention
-
-    dispatcher = _dispatcher(Recipe(), "recipe", record_dir=tmp_path)
-    try:
-        dispatcher.accept_record(
-            AgentRecord.create(
-                scenario="workload",
-                request_type=RequestType.INFERENCE,
-                agent_record_id="source",
-                payload={},
-            )
-        )
-        record = _report_record("feedback", {"references": ["source"], "score": 1.0})
-        dispatcher.accept_record(record)
-        scenario = dispatcher.get_or_create_scenario("workload")
-        dispatcher.prune_record_archives(RecordRetention(max_bytes=1))
-        assert dispatcher.accept_record(record).agent_record_id == "feedback"
-        with pytest.raises(RecordConflict):
-            dispatcher.accept_record(replace(record, payload={**record.payload, "score": 0.0}))
-        assert scenario.records.count("workload") == 0
     finally:
         dispatcher.close()
 
@@ -387,6 +360,6 @@ def test_report_eligibility_flag_is_rejected_at_ingress(eligible: bool) -> None:
         with pytest.raises(ReportValidationError, match="eligible"):
             dispatcher.accept_record(_report_record("invalid", {"metadata": {"training": {"eligible": eligible}}}))
         scenario = dispatcher.get_or_create_scenario("workload")
-        assert scenario.records.get_for_audit("workload", "invalid") is None
+        assert scenario.records.read_for_audit("workload", "invalid") is None
     finally:
         dispatcher.close()

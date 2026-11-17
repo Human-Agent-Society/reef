@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from recipes.sao.processor import SAOJobData, SAOSamples
 from reef.core.reports import ReportBase, ScoredRolloutReport
-from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-from reef.recipe.errors import RecipeConfigError
+from reef.recipe.base import WeightTrainingRecipe
+from reef.storage.samples import SAMPLE_KINDS, SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -39,24 +39,20 @@ class SAORecipe(WeightTrainingRecipe):
     """
 
     name: str = "sao"
+    refused_sections: ClassVar[Mapping[str, str]] = {
+        "optimization": (
+            "SAO objective options are backend-owned; configure the Slime implementation with training.options"
+        )
+    }
 
     @property
     def report_type(self) -> type[ReportBase]:
         return ScoredRolloutReport
 
     @classmethod
-    def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(
-            objective="sao",
-        )
+    def default_parameters(cls) -> Mapping[SampleKind, Mapping[str, Any]]:
+        return {kind: {"objective": "sao"} for kind in SAMPLE_KINDS}
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2sample=SAOSamples, sample2job=SAOJobData)
-
-    @classmethod
-    def _validate_config(cls, settings: Mapping[str, Any]) -> None:
-        if settings.get("optimization"):
-            raise RecipeConfigError(
-                "SAO objective options are backend-owned; configure the Slime implementation with training.options"
-            )

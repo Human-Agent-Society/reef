@@ -11,11 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
+from tests.support.trajectories import policy_trajectory
 
 from reef.train.component import JobStatus, TrainingJob
-from reef.train.method import TrainingMethod
 from reef.train.slime_backend.component import SlimeJobRunner
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -56,7 +56,7 @@ def _payload(rows: list[list[object]], rollout_ids: list[int] | None = None) -> 
         "samples": rows,
         "rollout_ids": list(range(len(rows))) if rollout_ids is None else rollout_ids,
         "loss": "sao",
-        "method": TrainingMethod("sao").to_dict(),
+        "objective": "sao",
         # The rows train as one optimizer step.
         "external_step_sizes": [len(rows)],
     }
@@ -252,9 +252,9 @@ class SaoStack:
                 for index, (reward, producing) in enumerate(((0.5, "artifact-4"), (1.0, "artifact-3")))
             ),
         )
-        method = {"method": TrainingMethod("sao").to_dict()}
+        method = {"objective": "sao"}
         job_id = f"job-{step}"
-        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method, scenario="s"))
+        self.component.submit(TrainingJob(job_id, "slime", self.start, job_data_ref(batch), method, scenario="s"))
         status = finished(self.component, job_id)
         if status.checkpoints:
             self.start = status.checkpoints[-1].path
@@ -664,7 +664,7 @@ def _write_bytes(path: Path, size: int) -> None:
 def _critic_storage(tmp_path: Path, *, critic: bool = True, cap: int = 1000, free: int = 1000):
     from collections import namedtuple
 
-    from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
+    from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionSettings
 
     usage = namedtuple("Usage", "total used free")
     root = tmp_path / "checkpoints"
@@ -673,7 +673,7 @@ def _critic_storage(tmp_path: Path, *, critic: bool = True, cap: int = 1000, fre
     _write_bytes(source_megatron / "iter_0000000", 90)
     (source_megatron / "latest_checkpointed_iteration.txt").write_text("0", encoding="utf-8")
     return CheckpointStorage(
-        RetentionConfig(max_storage_bytes=cap),
+        RetentionSettings(max_storage_bytes=cap),
         hf_template=str(root / "hf" / "{rollout_id}"),
         megatron_root=root / "megatron",
         critic_root=(root / "megatron-critic") if critic else None,

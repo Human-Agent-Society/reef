@@ -10,7 +10,6 @@ read, so that run has no score. The scorer prefers rules with the marker.
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import random
 import sys
@@ -18,13 +17,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_jobs import TreeArtifacts, build_harness_backend, harness_recipe, rebuilt_recipe
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import TreeReleases, build_harness_backend, harness_recipe
+from tests.support.trajectories import recorded_trajectory
 
 from recipes.gepa import GEPA, GEPASettings, ScoreFeedback, components, reflection
 from recipes.gepa.archive import Archive, Candidate
-from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
+from recipes.gepa.method import ARCHIVE_FILE, archive_for_job
 from reef.core.evaluation import RolloutScore
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
@@ -35,7 +34,7 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
-from reef.train.types import JobData, TrainStepResult
+from reef.train.types import JobData, TrainingCommit
 
 MARKER = "SHOW-YOUR-WORK"
 SEED_TEXT = "Answer briefly."
@@ -88,21 +87,23 @@ class FakeChat(ModelBinding):
 
 def gepa_backend(
     tmp_path: Path, settings: GEPASettings, *, reflector: ModelBinding | None = None
-) -> tuple[HarnessBackend, TreeReleases]:
+) -> tuple[HarnessBackend, TreeArtifacts]:
     """The backend of a pi scenario that GEPA evolves from ``TREE``, its reflection model ``reflector``."""
     binary = tmp_path / "gepa-pi"
     binary.write_text(PI_FAKE)
     binary.chmod(0o755)
-    recipe = harness_recipe(tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary))
-    recipe = dataclasses.replace(recipe, models={"reflection": FakeChat() if reflector is None else reflector})
-    releases = TreeReleases(recipe.seed)
-    return build_harness_backend(recipe, "demo", releases), releases
+    recipe, live = harness_recipe(
+        tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary)
+    )
+    recipe, live = rebuilt_recipe(recipe, live, models={"reflection": FakeChat() if reflector is None else reflector})
+    artifacts = TreeArtifacts(recipe.seed)
+    return build_harness_backend(recipe, live, "demo", artifacts), artifacts
 
 
-def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainStepResult:
+def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainingCommit:
     """Step ``number`` on ``samples``, decided by the compare policy on the mean."""
     policy = ComparePolicy(backend, statistic="mean")
-    return backend_step(backend, JobData(f"demo:{number}", samples), state, policy, scenario_step=number - 1)
+    return backend_step(backend, JobData(f"demo:{number}", samples), state, policy, commit_number=number - 1)
 
 
 def sample(name: str, score: float, prompt: str = TASK) -> TrajectorySample:
@@ -119,7 +120,7 @@ def committed(archive: Archive) -> dict[str, Any]:
     return HarnessState(method_files={ARCHIVE_FILE: json.dumps(archive.to_state())}).to_json()
 
 
-def archive_of(result: TrainStepResult) -> Archive:
+def archive_of(result: TrainingCommit) -> Archive:
     """The archive a step committed."""
     return Archive.from_state(json.loads(HarnessState.from_json(result.state).method_files[ARCHIVE_FILE]))
 
@@ -325,9 +326,9 @@ def test_with_repeats_a_tasks_validation_is_the_mean_of_its_runs_and_each_run_is
             history.add_run(record)
     history.add_decision(DecisionRecord(1, child.checksum(), seed.checksum(), True, "compare", "a higher mean"))
 
-    seeded = archive_for_step(None, history, TASKS, seed.files, repeats=2)
+    seeded = archive_for_job(None, history, TASKS, seed.files, repeats=2)
     seeded.add(child.files, 0, [1.0], step=1)
-    settled = archive_for_step(json.dumps(seeded.to_state()), history, TASKS, child.files, repeats=2)
+    settled = archive_for_job(json.dumps(seeded.to_state()), history, TASKS, child.files, repeats=2)
     assert (settled.candidates[1].val_scores, settled.candidates[0].val_scores) == ([0.5, 0.5], [0.0, 1.0])
     # Each validation pass ran 2 tasks with 2 runs each: the seed's, then the candidate's.
     assert (seeded.metric_calls, settled.metric_calls, settled.served) == (4, 8, 1)
@@ -388,7 +389,7 @@ def test_a_step_reflects_on_the_served_trees_traces_and_the_next_step_settles_it
     tmp_path: Path,
 ) -> None:
     reflector = FakeChat()
-    backend, releases = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
+    backend, artifacts = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
     first = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
 
     # The served tree's traces are the parent's minibatch, graded by the feedback hook: only the child ran.
@@ -418,7 +419,7 @@ def test_a_step_reflects_on_the_served_trees_traces_and_the_next_step_settles_it
     (call,) = json.loads((Path(first.metrics["step_record"]) / "calls.json").read_text())
     assert (call["messages"][0]["content"], call["reply"]) == (prompt, FENCED_REPLY)
 
-    releases.publish("r1", HarnessTree.read(first.artifact.local_path))
+    artifacts.publish("r1", HarnessTree.read(first.artifact.local_path))
     second = step(backend, 2, first.state, sample("a2", 1.0))
     # The next step folds the validation in from the history; the task that could not run is a zero, not a gap.
     settled = archive_of(second)

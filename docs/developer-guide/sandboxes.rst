@@ -2,8 +2,8 @@ Sandbox environments
 ====================
 
 Use ``reef.execution.sandbox.environment.ExecutorEnvironment`` to run commands and move
-files through Harbor's ``BaseEnvironment`` interface. It supports Reef's local
-and bubblewrap executors, and the cloud sandboxes of E2B and Modal. Harness rendering and candidate
+files through Harbor's ``BaseEnvironment`` interface. It supports Reef's local,
+bubblewrap and Seatbelt executors, and the cloud sandboxes of E2B and Modal. Harness rendering and candidate
 evaluation remain outside this package.
 
 Callers do not need to know which sandbox runs their commands. These
@@ -22,10 +22,14 @@ them:
   its credentials come from.
 - ``reef.execution.sandbox.task_environment`` names every Harbor task environment type
   (``HARBOR_TASK_ENVIRONMENTS``) and checks what a host needs to run tasks in
-  the ones it has probes for (``PROBED_TASK_ENVIRONMENTS``: ``docker`` and
-  ``e2b``). ``task_environment_probes(environment)`` returns a readiness probe
-  for each need, such as the Docker daemon, or the E2B key, the e2b package and
-  dockerfile-parse; ``checked_task_environment`` refuses any other name.
+  each of them (``PROBED_TASK_ENVIRONMENTS``: ``docker``, ``e2b`` and
+  ``modal``). ``task_environment_probes(environment)`` returns a readiness probe
+  for each need: the Docker daemon; the E2B key, the e2b package and
+  dockerfile-parse; or the two Modal token variables and the modal package.
+  ``checked_task_environment`` refuses any other name.
+  ``environment_config(environment, task_path, agent)`` returns the
+  ``environment`` section of a Harbor trial config for the selected type. The
+  next section describes what it adds for ``e2b`` and ``modal``.
 
 Every other caller uses these interfaces.
 
@@ -33,7 +37,7 @@ Executors and Harbor task environments
 --------------------------------------
 
 The two run different things. A ``ProgramExecutor`` launches one program,
-such as a harness's pinned binary, locally, in bubblewrap, or in an E2B or
+such as a harness's pinned binary, locally, in bubblewrap or Seatbelt, or in an E2B or
 Modal sandbox, and ``ExecutorEnvironment`` adapts one to Harbor's
 ``BaseEnvironment`` without building a task image. A Harbor task environment
 is where Harbor builds a task's ``environment/Dockerfile``, starts it, runs
@@ -44,8 +48,50 @@ The generator service's checks (``harbor run -e`` children) and runs
 an environment by name and read its needs from ``reef.execution.sandbox.task_environment``.
 Checks share local process management with the executors through
 ``reef.execution.processes.ProcessScope``; their command arguments and scoring
-remain in the generator. The Terminus harness layers the two: an executor
-launches its runner, which then drives a Harbor task environment.
+remain in the generator.
+
+Select a Harbor environment by name: ``docker``, ``e2b`` or ``modal``. Use
+``e2b`` for a self-hosted service that implements E2B's API, such as AgentENV.
+Configure its endpoints in the rollout process, as described under
+``rollout.environment`` in the `configuration reference
+<../reference/configuration.rst>`__.
+
+``environment_config(environment, task_path, agent)`` turns the selected type
+into the ``environment`` section of a Harbor trial config. For ``docker`` the
+section holds the type alone. For ``e2b`` and ``modal`` it also holds the
+sandbox's lifetime, ``sandbox_timeout_secs``: the sum of the task's build,
+agent and verifier time limits, plus one hour, at most one day. ``agent`` is
+the trial's Harbor agent config, or ``None``. A nonzero ``override_timeout_sec``
+in it replaces the task's agent time limit, and an
+``override_setup_timeout_sec`` adds to the sum. When the agent has no time
+limit, the sum does not apply. For ``modal`` the section then holds a lifetime
+of two hours. For ``e2b`` it holds no lifetime, and Harbor's default of one day
+applies. For ``modal`` the section also selects Modal's VM runtime when the
+task has ``environment/docker-compose.yaml`` and asks for no GPU.
+
+For ``e2b`` the section also names a class through Harbor's ``import_path``
+field: ``reef.execution.sandbox.e2b.KillOnTimeoutE2BEnvironment``. This
+is Harbor's ``E2BEnvironment`` with one more argument when it creates the
+sandbox, ``lifecycle={"on_timeout": "kill"}``. The argument asks the service to
+delete the sandbox at the end of its lifetime. Harbor's own class sends no
+such argument, so a self-hosted service can pause the sandbox instead.
+
+Two callers apply the config. ``reef.harness.harbor.rollouts.TaskRolloutRunner``
+gives it to each in-process trial and to each environment build. That covers
+the generator's runs, the evaluation rollouts and the training rollouts. A
+generator check on ``e2b`` gives it to its child as
+``harbor run -e <import path>``, with ``--ek sandbox_timeout_secs=<seconds>``
+when the section holds a lifetime. A check passes no agent config, so only the
+task's time limits count. A check on ``docker`` or ``modal`` runs
+``harbor run -e <type>`` without the config.
+
+Other Harbor runs get Harbor's own ``E2BEnvironment`` for ``e2b``. One is a
+``harbor run -e e2b`` that Reef does not start. Another is the ``terminus``
+adapter of the Meta-Harness Terminal-Bench campaign. That adapter layers an
+executor and a task environment: an executor launches its runner, which then
+drives a Harbor task environment with the type alone. The caller decides this,
+not the agent: ``TaskRolloutRunner`` runs Harbor's ``terminus-2`` agent by
+default, and its trials get the config.
 
 Shared execution control
 ------------------------
@@ -160,7 +206,7 @@ environment. This local example returns ``hello`` and exit code zero::
 environment variables and a timeout in seconds. It returns Harbor's
 ``ExecResult`` with ``stdout``, ``stderr`` and ``return_code``. A nonzero command
 exit is a result. Launch failures raise ``ProgramLaunchError``; timeouts raise
-``ProgramTimeout``. Commands run as the executor's configured user; selecting
+``ProgramTimeoutError``. Commands run as the executor's configured user; selecting
 another ``user`` is unsupported.
 
 
@@ -175,7 +221,7 @@ with a ``reef.execution.sandbox.process.SandboxProgram`` subclass, then bind it:
 ``for_program`` returns the bound executor and the binary its processes
 launch. Pass ``binary=`` to override the resolved binary. An executor on the
 Reef host resolves ``program.host_binary()``, which can install the binary.
-Bubblewrap also binds ``program.host_install_dir()`` read-only. A cloud sandbox
+Bubblewrap binds ``program.host_install_dir()`` read-only, and Seatbelt allows reads of it. A cloud sandbox
 resolves ``program.binary`` in its image (an E2B template, a Modal image) and
 never installs on the Reef host; it refuses a ``self_isolating`` program. The harness layer provides
 ``reef.harness.tasks.vendor_install.AdapterProgram`` for an adapter.
@@ -189,9 +235,9 @@ session::
     finally:
         session.close()
 
-Local and default-network bubblewrap executors already reach the host, so the
-session is the executor itself. An isolated bubblewrap network forwards the
-ports. A cloud sandbox opens one sandbox with a tunnel for each port. ``push``, ``pull`` and
+Local executors and the local sandboxes on their default network already
+reach the host, so the session is the executor itself. An isolated bubblewrap
+network forwards the ports; an isolated Seatbelt profile allows them. A cloud sandbox opens one sandbox with a tunnel for each port. ``push``, ``pull`` and
 ``close`` do nothing for an executor whose processes use the host's files.
 ``runs_on_host`` tells a caller whether processes see the host's paths,
 environment and container runtime.
@@ -220,8 +266,20 @@ timeouts preserve the executor's file-copy behavior. Transfer and cleanup
 failures propagate. Retaining a stopped owned session and forcing template
 rebuilds are unsupported.
 
-Local execution provides no sandbox isolation. Bubblewrap and the cloud sandboxes retain their
-existing read-only inputs, writable state and network behavior. Configuration
+Local execution provides no sandbox isolation. Bubblewrap, Seatbelt and the cloud sandboxes retain their
+existing read-only inputs, writable state and network behavior.
+
+On macOS, ``executor: sandbox`` selects ``SeatbeltExecutor``. It launches the
+program with ``sandbox-exec`` under a profile with the same read, write and
+credential rules as bubblewrap. It differs in three ways:
+
+- Seatbelt profiles do not nest. A native loop in this sandbox runs its tool
+  calls under the run's profile, and its trajectory reports enforcement
+  ``none`` instead of a narrower profile per call.
+- An isolated network denies every loopback port except the forwarded ones,
+  but the host's LAN addresses stay reachable.
+- macOS cannot limit address space, so preflight refuses
+  ``limits.memory_bytes``. The other limits apply. Configuration
 remains independent for the evaluation runs and for an agent that a method
 runs; see
 `Running runs <../user-guide/evolve-your-harness.rst#running-runs>`__.

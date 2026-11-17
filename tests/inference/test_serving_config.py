@@ -7,8 +7,8 @@ from collections.abc import Mapping
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.policy_recipe import TestPolicyRecipe
+from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, live_objects
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.values import JsonValue
@@ -68,7 +68,8 @@ class TemperatureHandler(InferenceHandler):
 def serving(tmp_path):
     runtime = ScalingRuntime()
     handler = TemperatureHandler()
-    recipe = TestPolicyRecipe(**runtime_bindings(StubTrainingComponent(tmp_path / "checkpoints"), runtime))
+    recipe = TestPolicyRecipe()
+    live = live_objects(StubTrainingComponent(tmp_path / "checkpoints"), runtime)
     backends = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     coordination = memory_coordination()
     storage = SQLiteScenarioStorage(tmp_path / "records")
@@ -77,6 +78,7 @@ def serving(tmp_path):
         return Dispatcher(
             recipe,
             backends,
+            live=live,
             scenario_storage=storage,
             coordination=coordination,
             components=frozenset({"control"}),
@@ -84,7 +86,7 @@ def serving(tmp_path):
         )
 
     worker = ServingWorker(
-        recipe, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
+        recipe, live, backends, coordination, worker_id="inference", local_artifact_dir=tmp_path / "inference"
     )
     inference = build_inference_app(coordination.served_models, storage, FixedEngineClients(handler), tokens=None)
     # Each test stops the worker before it closes control, which closes the coordination store.
@@ -192,6 +194,22 @@ def test_another_service_reads_the_stored_serving_config_that_control_changed(se
         settings = data.scenario_settings("math")
         assert settings["serving_config"] == {"weights": {"min_replicas": 2}}
         assert settings["effective_serving_config"] == {"weights": {"min_replicas": 2, "temperature": 1.0}}
+    finally:
+        worker.stop()
+        data.close()
+        control.close()
+
+
+@pytest.mark.unit
+def test_another_service_reads_the_training_mode_that_control_changed(serving, tmp_path):
+    control_of, worker = serving[0], serving[1]
+    control = control_of()
+    data = control_of(memory_coordination(), SQLiteScenarioStorage(tmp_path / "records"))
+    try:
+        control.create_scenario("math")
+        assert data.scenario_settings("math")["training_mode"] == "auto"
+        control.set_training_mode("math", "manual")
+        assert data.scenario_settings("math")["training_mode"] == "manual"
     finally:
         worker.stop()
         data.close()

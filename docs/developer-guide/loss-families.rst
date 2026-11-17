@@ -1,28 +1,37 @@
 Loss families
 =============
 
-A method's ``TrainingObjective`` owns signal preparation and declares its
+A method's objective owns signal preparation and declares its
 ``loss_family``. A loss family implements the model-dependent computation for
 one backend. Preparation runs on the job's full data; tensor loss hooks run after
 the backend's forward passes.
 
-- ``recipes/<name>/objective.py`` holds the backend-neutral objective.
-  ``reef/train/algos/`` defines its shared contract and registry.
-- ``reef/train/slime_backend/`` holds Slime integration machinery; each
-  method's Slime implementation lives in ``recipes/<name>/slime/``. Its spec
-  is torch-free code that runs in the Slime component's process, and its
-  ``objective.py`` contains worker hooks.
-- Methods can also supply a Tinker loss implementation. TTTD shares one
-  preparation method between its Slime and Tinker implementations.
+- ``reef/train/slime_backend/`` holds Slime integration machinery, with the
+  ``SlimeObjective`` base class and its table in ``objectives.py`` and the
+  loss families in ``loss_families.py``. Each
+  method's Slime implementation lives in ``recipes/<name>/slime/``. Its
+  ``__init__.py`` holds the objective and the spec, torch-free code that runs in
+  the Slime component's process, and its ``objective.py`` contains worker hooks.
+- ``reef/train/tinker_backend/`` has modules of the same names for Tinker: a
+  method can also supply a ``TinkerObjective`` and a ``TinkerLoss``.
+  TTTD computes its advantages in one function that names no backend
+  (``recipes/tttd/objective.py``); its Slime and Tinker objectives both call it.
 
-A recipe binds ``WeightTrainingSpec(objective=...)``.
-``WeightTrainingSpec.loss_family`` derives the family from that objective, and
-``TrainingSignal`` carries advantages, metrics and proposed state. The training
+The two backends share no code: each has its own objectives, loss families,
+``TrainingSignal`` and step schedule. A Slime module of a method imports from
+``reef.train.slime_backend`` only, and a Tinker module from
+``reef.train.tinker_backend`` only.
+
+A recipe names its objective in ``default_parameters()``, a parameter that Reef
+reads as opaque data. ``TrainingSignal`` carries advantages, metrics and proposed
+state. The training
 component cuts each job's data into optimizer steps of its batch size. The
 objective's ``rollout_unit`` keeps each sample, or each comparison set, in one
 step; the job's optional ``scheduling`` parameter sets the passes, the order
 and the last step (`Python API <../reference/python-api.rst>`__).
-The workers start with that objective's family. A job that selects another
+The Slime backend reads the objective of the recipe's parameters when it connects
+(trajectory kind first, then task kind), and the workers start with that
+objective's family. A job that selects another
 objective trains that objective's family on the same workers (see
 `Per-job families`_).
 
@@ -34,17 +43,94 @@ Layout
    recipes/<name>/slime/
      __init__.py     the spec: a SlimeAlgorithm subclass, no torch; a custom
                      wire row's shaper and payload builder live here too
-     objective.py    the @objective hooks, torch
+     objective.py    the @worker_hook hooks, torch
 
-A package ``__init__`` registers its family by reference
-(``register_loss_family_ref("<name>", "my_pkg.slime:MyAlgorithm")``);
-``loss_families.py`` imports the reference on first resolve so
-``@register_loss_family`` runs at boot. An external family decorates its class
-the same way. The recipe names it in ``training_spec().loss_family``; Reef
-reads that binding after it imports the configured recipe class. Resolving the
-reference imports the module, which registers the family. The Slime component
-also keeps the reference on ``args.loss_family_ref``, so each Megatron worker,
-whose registry starts empty, can import it too.
+Register a method
+-----------------
+
+A method makes one registration call for each backend that it supports, in its
+package ``__init__``. The call names the objective by reference, so the public
+half of the package imports none of the method's backend code:
+
+.. code:: python
+
+   # my_pkg/__init__.py
+   from reef.train.slime_backend.objectives import register_objective
+
+   register_objective("my", "my_pkg.slime:MyObjective")
+
+``register_objective`` records the reference and imports nothing. The first
+``resolve_objective("my")`` imports ``my_pkg.slime``. That module defines the
+objective and, under ``@register_loss_family``, the loss family that the
+objective names in ``loss_family``:
+
+.. code:: python
+
+   # my_pkg/slime/__init__.py
+   from reef.train.slime_backend.algorithm import SlimeAlgorithm
+   from reef.train.slime_backend.loss_families import register_loss_family
+   from reef.train.slime_backend.objectives import SlimeObjective
+
+
+   @register_loss_family
+   class MyAlgorithm(SlimeAlgorithm):
+       loss_family = "my"
+       ...
+
+
+   class MyObjective(SlimeObjective):
+       name = "my"
+       loss_family = "my"
+       ...
+
+So a process knows a method's loss family after it resolved the method's
+objective, or after it resolved the family's dotted reference. The decorator
+also records the reference of the class (``my_pkg.slime:MyAlgorithm``). The
+Slime component sends that reference to the job's driver and stamps it on
+``args.loss_family_ref``, so each Megatron worker, which starts without the
+component's registrations, imports the family too.
+
+Slime keeps three tables. ``objectives.OBJECTIVES`` maps a name to an
+objective, or to the reference of an objective that the process did not import
+yet. ``loss_families.LOSS_FAMILIES`` maps a name to an imported family.
+``loss_families.LOSS_FAMILY_REFERENCES`` maps a name to the reference that
+another process imports; it holds the built-in families from the start.
+
+Tinker registers the same way, with the functions of its own package:
+
+.. code:: python
+
+   # my_pkg/__init__.py
+   from reef.train.tinker_backend.objectives import register_objective
+
+   register_objective("my", "my_pkg.tinker:MyTinkerObjective")
+
+   # my_pkg/tinker.py
+   from reef.train.tinker_backend.loss_families import register_loss_family
+   from reef.train.tinker_backend.losses import TinkerLoss
+   from reef.train.tinker_backend.objectives import TinkerObjective
+
+
+   @register_loss_family
+   class MyTinkerLoss(TinkerLoss):
+       loss_family = "my"
+       ...
+
+
+   class MyTinkerObjective(TinkerObjective):
+       name = "my"
+       loss_family = "my"
+       ...
+
+Tinker trains in the component's process, so it keeps two tables only:
+``objectives.OBJECTIVES`` and ``loss_families.LOSS_FAMILIES``. A package that
+supports both backends imports each ``register_objective`` under its own name
+(see ``recipes/tttd/__init__.py``).
+
+A test or a deployment module can also register an instance:
+``register_objective(objective.name, objective)`` and
+``register_loss_family(family)``. A Slime family that registers as an instance
+has no reference, so only that process knows it.
 
 Family to Slime flags
 ---------------------
@@ -75,17 +161,19 @@ Every family except ``slime`` refuses ``--use-rollout-logprobs``. Serving return
 log-probabilities, so the actor computes the old-policy log-probabilities of
 each row with the weights of the job's start. Objectives that need old-policy
 log-probabilities, such as TTTD and the distillation importance-sampling
-correction, read these values. They are exact when ``max_staleness`` is 0 and
-an approximation above it.``importance_sampling`` reads the rollout engines' own log-probabilities of
-its task rollouts (``rollout_log_probs``) as ``q`` instead, without the flag,
-and refuses a row without them.
+correction, read these values. They are exact for an on-policy stage and
+an approximation for a stage that accepts a lag. ``importance_sampling`` reads recorded rollout log-probabilities
+(``rollout_log_probs``) as ``q`` instead, without the flag, and refuses a row
+without them. No built-in job data records them on Slime, so a method that selects
+this family must provide such samples.
 
 The spec
 --------
 
 .. code:: python
 
-   from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_family
+   from reef.train.slime_backend.algorithm import SlimeAlgorithm
+   from reef.train.slime_backend.loss_families import register_loss_family
 
 
    @register_loss_family
@@ -135,7 +223,8 @@ Objective hooks
 ---------------
 
 ``objective.py`` registers each channel the spec listed in
-``required_objective_hooks``. The worker imports the module at init, checks that
+``required_objective_hooks``, with ``@worker_hook("<channel>")``
+(``reef.train.slime_backend.algorithm``). The worker imports the module at init, checks that
 every declared channel is present, and projects the dotted paths onto ``args``.
 A missing module or hook stops the worker; nothing falls back to Slime's default
 loss.
@@ -175,8 +264,8 @@ A family that ships more than the five policy columns declares them on the spec.
 Bundled families worth reading: ``reef/train/slime_backend/sft.py`` (the
 built-in SFT family: Slime's ``sft_loss`` and no hooks),
 ``reef/train/slime_backend/native.py`` (the built-in ``slime`` family of dataset
-jobs, whose advantages and loss are Slime's; see `Dataset jobs on Slime
-<../reference/configuration.rst#dataset-jobs-on-slime>`__),
+jobs and task jobs, whose advantages and loss are Slime's; see `Dataset jobs on
+Slime <../reference/configuration.rst#dataset-jobs-on-slime>`__),
 ``recipes/tttd/slime/`` (two hooks, the default row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
@@ -234,7 +323,7 @@ and each such recipe's family is a thin subclass of it:
   ``importance-sampling-level``, ``skip-response-tokens``, ``jsd-beta``) and
   the settings they stamp on ``args`` under ``distill_*`` names, which the
   worker hooks read whatever the prefix was. A family names itself, sets
-  its defaults in a ``DistillSettings`` subclass, and its ``objective.py``
+  its defaults in a ``DistillAlgorithmSettings`` subclass, and its ``objective.py``
   forwards ``<name>_loss`` and ``<name>_actor_pre_train`` to
   ``distill.objective``.
 - The teacher is ``self`` (the student's own weights reading the privileged
@@ -364,8 +453,8 @@ the teacher signal and that loss's masks; other custom losses use a wrapper.
 
 The term reads the sampler's top-K, so every trained sample must carry the
 top-K that its sampler recorded. Serving records no tensors: a sample that
-serving recorded cannot train with score centering. Only the task rollouts of
-a training component record the sampler's top-K (see the requirements below).
+serving recorded cannot train with score centering. A training component's own
+task rollouts record the sampler's top-K (see the requirements below).
 
 To enable it, set the flags in ``training.options``:
 
@@ -426,17 +515,15 @@ Inputs and requirements:
 
 - Samples need the sampler's top-K, at least ``score-centering-top-k`` per
   trained position, in ``extra.reef.training`` (``topk_indices`` and
-  ``topk_log_probs``). Only the task rollouts of a training component record
-  them; a sample that serving recorded has none, and the component fails the
-  job. The Spindle full-parameter component's task rollouts record them
-  when its ``score_centering`` option is on, and the Slime component's
-  when ``--score-centering`` is on: its engines then return the top
-  ``score-centering-top-k`` log-probs of each response token. Such a
-  rollout's requests must sample at temperature 1 without top-p or top-k,
-  and a task job needs ``--rollout-temperature`` 1, ``--rollout-top-p`` 1 and
-  ``--rollout-top-k`` -1, so the trainer reads the same distribution; the
-  engines answer another request with 400. The recorded log-probs are the
-  same distribution as ``rollout_log_probs`` and the trainer's: after
+  ``topk_log_probs``). A sample that serving recorded has none, and the
+  component fails the job. The Spindle full-parameter component's task rollouts
+  record them when its ``score_centering`` option is on. A task job on Slime
+  trains the ``slime`` family, which refuses this term; it uses Slime's own
+  ``--use-score-centering`` instead (`Task jobs on Slime
+  <../reference/configuration.rst#task-jobs-on-slime>`__). So on Slime, this
+  term reads only the samples that a method provides with recorded heads. The
+  recorded log-probs are the same distribution as ``rollout_log_probs`` and the
+  trainer's: after
   temperature and before the top-k, top-p and min-p filters (see the
   configuration reference). With those filters on, the correction centers
   against the unfiltered distribution.

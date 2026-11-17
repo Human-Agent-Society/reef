@@ -8,7 +8,7 @@ import no concrete integration.
 
 Each integration owns native engine launch, request adaptation, loading saved
 weight files and its worker lifecycle. The serving runtimes of
-``reef.inference.serving`` decide which published release the engines load, and
+``reef.inference.serving`` decide which published snapshot the engines load, and
 integrations report their results through those contracts.
 
 Import this package without loading optional inference or training frameworks.

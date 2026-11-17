@@ -1,13 +1,14 @@
-"""Run the deployment's coding agent in one step's workspace.
+"""Run the deployment's coding agent in one job's workspace.
 
-``AgentExecution`` is the agent bound for one scenario: its adapter, the
-executor that isolates it, its binary and its time limit. ``run_agent``
+``AgentExecution`` (``reef.train.harness_backend.contract``) is the agent bound
+for one scenario: its adapter, the executor that isolates it, its binary and
+its time limit. ``run_agent``
 implements ``Services.run_agent``: it starts the gateway with the workspace's
 tools (``check`` and ``evaluate``), renders the agent's tree after Reef's
 protocol rules (``protocol.md``), runs the agent in the workspace, and keeps
 its session log in ``output/``.
 
-The agent's root is the directory that holds the step's workspace and the
+The agent's root is the directory that holds the job's workspace and the
 history, so the agent reads both. Its working directory is the workspace;
 ``harness/``, ``state/``, ``scratch/`` and ``output/`` are writable, and
 ``material/``, the history and the agent's own rendered files are not.
@@ -20,53 +21,29 @@ import os
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.core.errors import ReefError
 from reef.evaluation.harness.history import RUNS_DIR
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout
+from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeoutError
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.gateway import AgentGateway, AgentTool
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import headless_argv, headless_env, launch_agent, read_session
 from reef.harness.tree import HarnessTree, render_tree
-from reef.train.harness_backend.contract import AgentOutcome, Services
+from reef.train.harness_backend.contract import AgentExecution, AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace
 
 #: Reef's rules for every agent run, before the agent's own: the workspace, the outputs and the tools.
 PROTOCOL = Path(__file__).with_name("protocol.md").read_text(encoding="utf-8").strip()
-#: In the step's ``scratch/``: the agent's home, which holds its rendered harness and its sessions.
+#: In the job's ``scratch/``: the agent's home, which holds its rendered harness and its sessions.
 AGENT_HOME = "agent"
-#: In the step's ``output/``: the agent's session log, one JSON event per line.
+#: In the job's ``output/``: the agent's session log, one JSON event per line.
 SESSION_FILE = "agent-session.jsonl"
 #: The tree a tool reads when its arguments name none.
 DEFAULT_TREE = "harness"
-
-
-@dataclass(frozen=True)
-class AgentExecution:
-    """Where and how the deployment's coding agent runs, bound for one scenario.
-
-    Values: ``descriptor`` is the agent's adapter, which takes a text
-    prompt. ``executor`` is bound to the adapter's program, and ``binary`` is
-    the agent's binary there. ``timeout_s`` > 0 bounds one run.
-    Purpose: ``AgentSettings.bind`` makes one per scenario; ``run_agent``
-    runs the agent with it.
-    """
-
-    descriptor: AdapterDescriptor
-    executor: ProgramExecutor
-    binary: str
-    timeout_s: float
-
-    def __post_init__(self) -> None:
-        if self.descriptor.takes_task_directory:
-            raise ValueError(f"adapter {self.descriptor.name!r} plays task directories, so it cannot run a prompt")
-        if self.timeout_s <= 0:
-            raise ValueError("AgentExecution.timeout_s must be positive")
 
 
 def agent_env(descriptor: AdapterDescriptor, binary: str, home: Path) -> dict[str, str]:
@@ -78,15 +55,15 @@ def agent_env(descriptor: AdapterDescriptor, binary: str, home: Path) -> dict[st
 
 
 def fill(text: str, workspace: Workspace) -> str:
-    """``text`` with ``{step}`` as the step's number and ``{history}`` as the history's path from the workspace."""
+    """``text`` with ``{step}`` as the job's number and ``{history}`` as the history's path from the workspace."""
     history = os.path.relpath(workspace.history_dir, workspace.root)
     return text.replace("{step}", str(workspace.step)).replace("{history}", history)
 
 
 class AgentRun:
-    """One agent run in a step's workspace: what its tools read, and the session that runs it.
+    """One agent run in a job's workspace: what its tools read, and the session that runs it.
 
-    Values: ``workspace`` is the step's workspace and ``services`` the step's
+    Values: ``workspace`` is the job's workspace and ``services`` the job's
     services. ``root`` is the run's root: the directory that holds the
     workspace and the history. ``session`` is the executor of the running
     agent, ``None`` before it starts. ``lock`` makes the run's tool calls
@@ -107,11 +84,11 @@ class AgentRun:
         left it; ``ValueError`` for a name outside the workspace and for a tree that cannot be read."""
         name = arguments.get("tree", DEFAULT_TREE)
         if not isinstance(name, str) or not name.strip():
-            raise ValueError("tree must name a directory of the step's workspace, such as harness")
+            raise ValueError("tree must name a directory of the job's workspace, such as harness")
         workspace = self.workspace.root.resolve()
         directory = (workspace / name).resolve()
         if directory != workspace and workspace not in directory.parents:
-            raise ValueError(f"tree {name!r} is outside the step's workspace")
+            raise ValueError(f"tree {name!r} is outside the job's workspace")
         if self.session is not None:
             # A remote agent edits a copy; a tool reads that copy as it stands now.
             download_directory(self.session, self.root, directory.relative_to(self.root).as_posix())
@@ -123,13 +100,13 @@ class CheckTool(AgentTool):
 
     name = "check"
     description = (
-        "Validate a tree of the step's workspace for the harness's adapter, as the step validates its candidate. "
+        "Validate a tree of the job's workspace for the harness's adapter, as the job validates its candidate. "
         "Answers passed (true or false) and problems (a list of messages)."
     )
     input_schema: ClassVar[Mapping[str, Any]] = {
         "type": "object",
         "properties": {
-            "tree": {"type": "string", "description": "A directory of the step's workspace.", "default": "harness"}
+            "tree": {"type": "string", "description": "A directory of the job's workspace.", "default": "harness"}
         },
         "additionalProperties": False,
     }
@@ -149,19 +126,19 @@ class CheckTool(AgentTool):
 
 
 class EvaluateTool(AgentTool):
-    """``evaluate``: score a tree of the workspace on tasks, through the score cache and the step's budget."""
+    """``evaluate``: score a tree of the workspace on tasks, through the score cache and the job's budget."""
 
     name = "evaluate"
     description = (
-        "Score a tree of the step's workspace on tasks, repeats runs each. A scored run in the history is "
-        "reused; new runs spend the step's run budget. Answers tree (its checksum) and runs: one "
+        "Score a tree of the job's workspace on tasks, repeats runs each. A scored run in the history is "
+        "reused; new runs spend the job's run budget. Answers tree (its checksum) and runs: one "
         "record per run with its task, repeat, score (null when it could not run), failure, reply, and "
         "directory (its files, from the workspace)."
     )
     input_schema: ClassVar[Mapping[str, Any]] = {
         "type": "object",
         "properties": {
-            "tree": {"type": "string", "description": "A directory of the step's workspace.", "default": "harness"},
+            "tree": {"type": "string", "description": "A directory of the job's workspace.", "default": "harness"},
             "tasks": {"type": "array", "items": {"type": "string"}, "minItems": 1},
             "repeats": {"type": "integer", "minimum": 1, "default": 1},
         },
@@ -249,7 +226,7 @@ def run_agent(
                 # The executor copies the agent's files back, also after a time out.
                 run.session.close()
             outcome = AgentOutcome(process.exit_code, False, None, round(time.monotonic() - started, 1))
-        except ProgramTimeout:
+        except ProgramTimeoutError:
             outcome = AgentOutcome(None, True, None, round(time.monotonic() - started, 1))
         except ProgramLaunchError as exc:
             outcome = AgentOutcome(None, False, str(exc), round(time.monotonic() - started, 1))

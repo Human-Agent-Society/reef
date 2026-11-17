@@ -476,7 +476,7 @@ const docDescriptions: Partial<Record<string, string>> = {
   "getting-started/installation":
     "Install Reef for harness evolution on a laptop, GPU-based model training, or client-only access to an existing deployment.",
   "getting-started/quickstart":
-    "Start Reef locally without a GPU, send an inference request, report feedback, and inspect the release history.",
+    "Start Reef locally without a GPU, send an inference request, report feedback, and inspect the snapshot history.",
   "getting-started/harness-tutorial":
     "Start Reef, connect your coding agent, give feedback on a session, and see Reef evolve the agent's harness from it.",
   "user-guide/recipes":
@@ -486,7 +486,7 @@ const docDescriptions: Partial<Record<string, string>> = {
   "user-guide/evolve-your-model":
     "Configure Reef to train model weights from feedback and serve accepted updates through the same inference endpoint.",
   "reference/http-api":
-    "Use the Reef HTTP API to send inference requests, report feedback, inspect scenarios, and manage model and harness releases.",
+    "Use the Reef HTTP API to send inference requests, report feedback, inspect scenarios, and manage model and harness artifacts.",
 };
 
 function loadDoc(sourcePath: string): Doc {

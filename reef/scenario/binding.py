@@ -17,7 +17,7 @@ from reef.train.component import TrainingComponent
 class ScenarioBinding:
     """Runtime-facing capabilities selected by a recipe at construction."""
 
-    #: The components every release binds, with each one's admission check, run before that component is
+    #: The components every snapshot binds, with each one's admission check, run before that component is
     #: published or restored.
     components: ScenarioComponents
     runtime: InferenceRuntime | None
@@ -31,29 +31,23 @@ class ScenarioBinding:
     report_type: type[ReportBase] | None = None
     #: The training component of a weight-training recipe, which its trainer submits jobs to.
     training_component: TrainingComponent | None = None
-    #: Standalone scenarios activate their runtime directly. Service scenarios leave activation to inference.
-    activates_runtime: bool = True
-    #: The actual serving routes, or None for a standalone scenario that activates its own runtime.
+    #: The actual serving routes, or None for a scenario without them, whose served artifact is unknown.
     served_models: ServedModels | None = None
 
 
-def activate_release(
+def activate_snapshot(
     components: ScenarioComponents,
     artifact: Artifact,
     runtime: InferenceRuntime | None,
     scenario: str,
-    *,
-    previous: Artifact | None = None,
 ) -> None:
-    """Load the release ``artifact`` of ``scenario`` into ``runtime`` before traffic routes to it.
+    """Load the snapshot ``artifact`` of ``scenario`` into ``runtime`` before traffic routes to it.
 
     Only the loaded component (``ScenarioComponents.loaded_component``) loads. Nothing loads without a runtime or
-    such a component, or when ``previous``, the release served before, already selects the same artifact for it.
+    such a component. The inference worker calls it.
     """
     name = components.loaded_component
     if name is None or runtime is None:
-        return
-    if previous is not None and not components.component_changed(artifact, previous, name):
         return
     runtime.activate_checkpoint(
         components.component_artifact(artifact, name),
