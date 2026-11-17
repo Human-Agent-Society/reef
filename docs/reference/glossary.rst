@@ -394,6 +394,17 @@ Tinker, a task job runs each task ``rollouts_per_task`` times on the job's start
 weights. On Slime, ``n-samples-per-prompt`` gives the rollouts of each task, on
 the weights of the Slime rollout that holds them.
 
+Training pool
+-------------
+
+The train tasks of the generated-task recipe that train again, with
+``pipeline.record2sample.config.pool_capacity`` above 0. When a task's job
+ends, the task waits for a job again after the tasks that wait already, so the
+tasks train in turn. A pool review retires a task whose recent pass rate is
+outside the review band, or whose recent rewards do not differ enough; a
+retired task does not train again. See `Configuration
+<configuration.rst#generated-tasks>`__.
+
 Patch
 -----
 

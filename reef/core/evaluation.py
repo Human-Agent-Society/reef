@@ -16,7 +16,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from reef.core.job_data import TrajectorySample
-from reef.core.values import JsonValue, require_text
+from reef.core.values import JsonValue, require_integer, require_text
 
 #: The JSON value of a failed rollout's score (``RolloutScore.to_json``).
 FAILED = "failed"
@@ -802,12 +802,6 @@ Caller = Literal["agent", "verifier"]
 CALLERS: tuple[Caller, ...] = ("agent", "verifier")
 #: The longest ``label`` of a call.
 MAX_CALL_LABEL_CHARACTERS = 200
-
-
-def require_integer(value: object, name: str, *, minimum: int = 0) -> None:
-    """Raise ``ValueError`` naming ``name`` unless ``value`` is an integer from ``minimum``."""
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
-        raise ValueError(f"{name} is an integer from {minimum}")
 
 
 @dataclass(frozen=True)
