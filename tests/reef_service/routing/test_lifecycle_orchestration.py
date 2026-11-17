@@ -22,7 +22,7 @@ pytestmark = pytest.mark.unit
 
 #: A managed owner run in its own process: the real ``_run_orchestrator`` and ``_Stack`` signal handling,
 #: run loop and shutdown, with a fake routing controller and no service start, so nothing touches Docker.
-#: It raises one real SIGHUP when it reaches ``phase``; a default SIGHUP there would kill the owner.
+#: It raises a real SIGHUP at each phase; a default SIGHUP at any phase would kill the owner.
 MANAGED_OWNER_PROGRAM = textwrap.dedent(
     """
     import json
@@ -32,14 +32,13 @@ MANAGED_OWNER_PROGRAM = textwrap.dedent(
 
     from reef.service.deploy import orchestrator
 
-    phase, config, previous_handler = sys.argv[1], sys.argv[2], sys.argv[3]
+    config, previous_handler = sys.argv[1:]
     root = Path(config).parent
     events, reloads, previous_calls, ticks = [], [], [], []
 
     def reach(name):
         events.append(name)
-        if name == phase:
-            signal.raise_signal(signal.SIGHUP)
+        signal.raise_signal(signal.SIGHUP)
 
     def previous(signum, frame):
         previous_calls.append(signum)
@@ -125,11 +124,11 @@ def write_managed_config(tmp_path: Path) -> Path:
     return path
 
 
-def run_managed_owner(tmp_path: Path, phase: str, previous_handler: str) -> dict[str, object]:
+def run_managed_owner(tmp_path: Path, previous_handler: str) -> dict[str, object]:
     # The child imports the same Reef as this test: this checkout or the installed wheel.
     environment = {**os.environ, "PYTHONPATH": str(Path(orchestrator.__file__).resolve().parents[3])}
     result = subprocess.run(
-        [sys.executable, "-c", MANAGED_OWNER_PROGRAM, phase, str(write_managed_config(tmp_path)), previous_handler],
+        [sys.executable, "-c", MANAGED_OWNER_PROGRAM, str(write_managed_config(tmp_path)), previous_handler],
         cwd=tmp_path,
         env=environment,
         capture_output=True,
@@ -146,25 +145,21 @@ def run_managed_owner(tmp_path: Path, phase: str, previous_handler: str) -> dict
 LIFECYCLE_EVENTS = ["prepare", "start", "steady", "stopping", "shutdown", "cleanup", "release"]
 
 
-@pytest.mark.parametrize("phase", LIFECYCLE_EVENTS)
-def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(tmp_path: Path, phase: str) -> None:
-    owner = run_managed_owner(tmp_path, phase, "default")
-    # The owner survives and completes every cleanup step; the signal became one reload request.
+@pytest.mark.parametrize(("previous_handler", "previous_calls"), [("default", []), ("custom", [signal.SIGHUP])])
+def test_sighup_anywhere_in_a_managed_lifecycle_only_records_a_reload(
+    tmp_path: Path, previous_handler: str, previous_calls: list[signal.Signals]
+) -> None:
+    owner = run_managed_owner(tmp_path, previous_handler)
+    # The owner survives and each signal becomes a reload request.
     assert owner["code"] == 0
     assert owner["events"] == LIFECYCLE_EVENTS
-    assert owner["reloads"] == [phase]
+    assert owner["reloads"] == LIFECYCLE_EVENTS
     # A stop takes precedence: the run loop never ticks the controller again, so no reload can start.
     assert owner["ticks"] == 2
     # After the last cleanup the handler that was installed before reef serve is back.
     assert owner["restored"] is True
-
-
-def test_managed_owner_restores_a_custom_sighup_handler_it_never_calls(tmp_path: Path) -> None:
-    owner = run_managed_owner(tmp_path, "prepare", "custom")
-    assert owner["reloads"] == ["prepare"]
-    assert owner["restored"] is True
     # Only the SIGHUP sent after reef serve returned reached the earlier handler.
-    assert owner["previous_calls"] == [signal.SIGHUP]
+    assert owner["previous_calls"] == previous_calls
 
 
 def test_an_ordinary_deployment_never_installs_a_sighup_handler(
