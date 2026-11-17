@@ -1,6 +1,7 @@
 """Transport-independent handling of the data routes (RFC #1028).
 
-A client creates, reads, queries, updates and deletes the data items of one owner. Each write that adds an item
+A client creates, reads, queries, updates and deletes the data items of one owner. A delete keeps the item as a
+deleted item, which a client lists, restores or purges; the store purges it after ``DELETED_ITEM_TTL_SECONDS``. Each write that adds an item
 to a scenario, or removes one, follows the same order:
 
 1. Check the scenarios that the items are to use: each existing one must have the owner, and must be able to train
@@ -31,9 +32,11 @@ from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.dispatcher import Dispatcher
 from reef.service.tasks import MAX_TASKS_PER_UPLOAD, unpack_task_archive
 from reef.storage.data import (
+    DELETED_ITEM_TTL_SECONDS,
     ITEM_KINDS,
     MAX_QUERY_LIMIT,
     DataStore,
+    DeletedItem,
     ItemKind,
     ItemNotFoundError,
     NewItem,
@@ -544,6 +547,9 @@ def update_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[
 def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
     """Delete one item of ``owner``; the scenarios that used it lose its upload. ``ItemNotFoundError`` if unknown.
 
+    The item becomes a deleted item of ``owner`` (``DataStore.delete``): ``restore_items`` brings it back until
+    ``purge_item`` or the store's purge after ``DELETED_ITEM_TTL_SECONDS`` removes it.
+
     Raise ``ValueError`` for the artifact item of an artifact that a scenario of ``owner`` made while the scenario
     exists: the next artifact copy would make the item again (``reef.storage.artifact_items``).
     """
@@ -559,6 +565,74 @@ def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
     store.delete(owner, item_id)
     synced = sync_touched(data, owner, touched)
     return {"owner": owner, "id": item_id, "deleted": True, "synced": synced}
+
+
+def deleted_item_json(deleted: DeletedItem) -> dict[str, Any]:
+    """A deleted item as JSON: ``item_json`` of its item without content, and ``deleted_at`` and ``purge_at``, in
+    seconds since the epoch."""
+    return {
+        **item_json(deleted.item, content=False),
+        "deleted_at": deleted.deleted_at,
+        "purge_at": deleted.deleted_at + DELETED_ITEM_TTL_SECONDS,
+    }
+
+
+def deleted_listing(
+    data: DataAccess, owner: str, *, kind: str | None, before: int | None, limit: int
+) -> dict[str, Any]:
+    """The deleted items of ``owner`` (``DataStore.deleted_items``), of ``kind`` when it is given, newest item
+    first: ``{owner, items, next}``. Each item is ``deleted_item_json``. ``next`` is the ``before`` of the next
+    page, or null after the last item."""
+    if kind is not None and kind not in KINDS:
+        raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
+    found = data.require_store().deleted_items(
+        owner, kind=None if kind is None else KINDS[kind], before=before, limit=limit
+    )
+    return {
+        "owner": owner,
+        "items": [deleted_item_json(deleted) for deleted in found],
+        "next": found[-1].item.sequence if len(found) == limit else None,
+    }
+
+
+def restore_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """Restore the deleted items of ``{"ids": [...]}``, all or none; return them, without content.
+
+    The scenarios that the items name in ``scenarios`` are checked as for an update, and each scenario that uses a
+    restored item, also by the hold of one of its sets, syncs. Raise ``ItemNotFoundError`` for an ID without a
+    deleted item, and ``ItemConflictError`` for an ID that the owner stores as an item.
+    """
+    check_owner(owner)
+    ids = body.get("ids")
+    if body.keys() != {"ids"} or not isinstance(ids, list):
+        raise ValueError("the body holds only 'ids', an array of item IDs")
+    if not 1 <= len(ids) <= MAX_QUERY_LIMIT:
+        raise ValueError(f"a restore names 1 to {MAX_QUERY_LIMIT} items")
+    item_ids: list[str] = []
+    for item_id in dict.fromkeys(ids):
+        if not isinstance(item_id, str) or not item_id:
+            raise ValueError("an item ID is a non-empty string")
+        item_ids.append(item_id)
+    store = data.require_store()
+    found = {deleted.item.item_id: deleted.item for deleted in store.read_deleted(owner, item_ids)}
+    missing = [item_id for item_id in item_ids if item_id not in found]
+    if missing:
+        raise ItemNotFoundError(f"{owner!r} has no deleted item {missing[0]!r}")
+    uses: dict[str, list[Use]] = {}
+    for item in found.values():
+        for scenario, split in item.scenarios.items():
+            uses.setdefault(scenario, []).append(new_use(item.kind, split))
+    check_uses(data, owner, uses)
+    restored = store.restore(owner, item_ids)
+    synced = sync_touched(data, owner, using_scenarios(store, owner, [item.metadata for item in restored]))
+    return {"owner": owner, "items": [item_json(item, content=False) for item in restored], "synced": synced}
+
+
+def purge_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
+    """Remove the deleted item ``item_id`` of ``owner`` for good; ``ItemNotFoundError`` when there is none."""
+    if not data.require_store().purge(owner, item_id):
+        raise ItemNotFoundError(f"{owner!r} has no deleted item {item_id!r}")
+    return {"owner": owner, "id": item_id, "purged": True}
 
 
 def touched_items(store: DataStore, owner: str, ids: Sequence[object]) -> list[StoredItem]:
@@ -600,14 +674,18 @@ __all__ = [
     "create_task_references",
     "create_trajectory_items",
     "delete_item",
+    "deleted_item_json",
+    "deleted_listing",
     "item_json",
     "jsonl_trajectories",
     "parsed_metadata",
+    "purge_item",
     "query_items",
     "read_item",
     "replace_task_files",
     "replace_task_item",
     "replace_task_reference",
+    "restore_items",
     "set_listing",
     "store_items",
     "update_items",

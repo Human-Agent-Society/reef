@@ -1033,7 +1033,27 @@ stores`_).
        Changing ``kind``, ``owner`` or ``origin`` is ``ValueError``; an
        unknown ID is ``ItemNotFoundError``.
    * - ``delete(owner, item_id)``
-     - Removes the item; ``False`` for an unknown ID.
+     - Removes the item; ``False`` for an unknown ID. The store keeps it as a
+       ``DeletedItem`` (the item without content, and ``deleted_at``), one for
+       each ID; a second delete of the ID replaces the earlier one. A deleted
+       item is in no read, query, set, use or record link, and ``create`` can
+       use its ID again.
+   * - ``deleted_items(owner, *, kind=None, before=None, limit=1000)``
+     - The owner's ``DeletedItem`` values, of ``kind`` when given, by item
+       sequence newest first, below ``before`` when given.
+   * - ``read_deleted(owner, item_ids)``
+     - The ``DeletedItem`` of each given ID that has one, in the order given.
+   * - ``restore(owner, item_ids)``
+     - Makes the deleted items items again, all or none, with their sequence,
+       metadata and content, and gives them the uses that their metadata
+       gives. Each use gets a new use sequence. An ID without a deleted item
+       is ``ItemNotFoundError``; an ID that the owner stores is
+       ``ItemConflictError``.
+   * - ``purge(owner, item_id)``
+     - Removes the deleted item for good; ``False`` when there is none.
+   * - ``purge_deleted(time)``
+     - Purges each deleted item, across owners, deleted before ``time``, and
+       returns their number.
    * - ``task_path(item)``
      - A local directory with the files of a task item.
    * - ``record_links(owner, item_ids)``
@@ -1051,7 +1071,9 @@ stores`_).
        default reads every page of ``query``; the SQL stores group in SQL.
    * - ``maintain()``
      - The store's periodic work. The data service calls it every 5 minutes.
-       It changes no item. The default does nothing.
+       It changes no item. The default deletes the unused job data
+       directories and purges the items deleted 30 days ago or earlier
+       (``DELETED_ITEM_TTL_SECONDS``).
    * - ``close()``
      - Releases the store's resources; a second call does nothing.
 

@@ -1,5 +1,6 @@
-"""HTTP routes of a data owner's items (RFC #1028), under ``/reef/namespaces/{owner}/data``, and of its
-collections (RFC #1312), under ``/reef/namespaces/{owner}/collections``.
+"""HTTP routes of a data owner's items (RFC #1028), under ``/reef/namespaces/{owner}/data``, of its deleted items,
+under ``/reef/namespaces/{owner}/deleted-items``, and of its collections (RFC #1312), under
+``/reef/namespaces/{owner}/collections``.
 
 ``reef.service.data`` and ``reef.service.collections`` handle each route; this module reads the request and writes the response.
 """
@@ -32,13 +33,16 @@ from reef.service.data import (
     create_task_references,
     create_trajectory_items,
     delete_item,
+    deleted_listing,
     group_items,
     jsonl_trajectories,
     parsed_metadata,
+    purge_item,
     query_items,
     read_item,
     replace_task_item,
     replace_task_reference,
+    restore_items,
     set_listing,
     update_items,
 )
@@ -258,6 +262,25 @@ def register_data_routes(
         )
         return web.json_response(receipt)
 
+    async def deleted(request: web.Request) -> web.Response:
+        listing = await asyncio.to_thread(
+            deleted_listing,
+            data,
+            request.match_info["owner"],
+            kind=request.query.get("kind") or None,
+            before=query_int(request, "before", 0) or None,
+            limit=query_int(request, "limit", MAX_QUERY_LIMIT),
+        )
+        return web.json_response(listing)
+
+    async def restore(request: web.Request) -> web.Response:
+        body = await read_object(request)
+        return web.json_response(await asyncio.to_thread(restore_items, data, request.match_info["owner"], body))
+
+    async def purge(request: web.Request) -> web.Response:
+        receipt = await asyncio.to_thread(purge_item, data, request.match_info["owner"], request.match_info["item_id"])
+        return web.json_response(receipt)
+
     async def collections(request: web.Request) -> web.Response:
         return web.json_response(await asyncio.to_thread(list_collections, data, request.match_info["owner"]))
 
@@ -313,6 +336,10 @@ def register_data_routes(
     # An item ID can hold '/', so the route takes the rest of the path.
     app.router.add_get(base + "/{item_id:.+}", read)
     app.router.add_delete(base + "/{item_id:.+}", delete)
+    deleted_base = "/reef/namespaces/{owner}/deleted-items"
+    app.router.add_get(deleted_base, deleted)
+    app.router.add_post(f"{deleted_base}/restore", restore)
+    app.router.add_delete(deleted_base + "/{item_id:.+}", purge)
     stored = "/reef/namespaces/{owner}/collections"
     app.router.add_get(stored, collections)
     for method in ("PUT", "GET", "DELETE"):
