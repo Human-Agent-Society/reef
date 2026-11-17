@@ -2155,7 +2155,7 @@ which are not records.
        the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
 
    ``pipeline.record2sample.config.refill_tasks`` : 1
-       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait. With ``pool_capacity`` above 0, it must stay 1.
+       the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait. With ``pool_capacity`` above 0, leave it out: the pool's capacity paces the rounds.
 
    ``pipeline.record2sample.config.rounds`` : 0
        rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
@@ -2228,7 +2228,7 @@ after the tasks that wait already, so the tasks train in turn. A new round
 starts only while fewer tasks than ``pool_capacity`` are active, so the pool
 can hold more tasks than the capacity by the train tasks of one generation.
 The ``review_*`` keys need ``pool_capacity`` above 0, and ``refill_tasks``
-must stay 1. Imported train tasks still train once.
+must be left out. Imported train tasks still train once.
 
 After every ``review_interval`` task jobs, a review reads the last
 ``review_window`` rewards of each active task. A failed task job counts too.

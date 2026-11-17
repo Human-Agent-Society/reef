@@ -46,6 +46,7 @@ import statistics
 import tempfile
 import threading
 from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Self
@@ -94,7 +95,7 @@ from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, read_harbor_task, write_harbor_task
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.core.values import is_whole_number
+from reef.core.values import require_integer
 from reef.execution.sandbox.config import remote_executor
 from reef.execution.sandbox.process import SandboxUnavailableError
 from reef.execution.sandbox.remote import RemoteExecutor
@@ -485,8 +486,7 @@ class GenerationCursor:
             ("next_position", self.next_position),
             ("next_seed", self.next_seed),
         ):
-            if not is_whole_number(value) or value < 0:
-                raise ValueError(f"a cursor's {name} must be a non-negative integer, not {value!r}")
+            require_integer(value, f"a cursor's {name}")
 
 
 @dataclass(frozen=True)
@@ -1022,8 +1022,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
     ) -> None:
         if count < 1 or max_checks < 1:
             raise ValueError("count and max_checks must be positive")
-        if not is_whole_number(designer_concurrency) or designer_concurrency < 1:
-            raise ValueError("designer_concurrency must be a positive integer")
+        require_integer(designer_concurrency, "designer_concurrency", minimum=1)
         if seeds and not is_adaptive:
             raise ValueError("seed tasks need adaptive: true")
         if not sources and not seeds:
@@ -1278,18 +1277,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, error)
                     break
         finally:
-            # The slots still being written after an outage, or in a cancelled generation, stop and take nothing.
-            for running in writing.values():
-                running.cancel()
-            await asyncio.gather(*writing.values(), return_exceptions=True)
-            for index, running in writing.items():
-                held = None if index in taken or running.cancelled() else running.exception()
-                if isinstance(held, CredentialHeldError):
-                    # The slot takes nothing, but the token may have left the sandbox, so the report names it.
-                    proposal = task_slots[index].proposal
-                    refusal = f"the Designer could not rebuild {proposal.source_record_id}: {held}"
-                    logger.error("AutoEnvScaling generation %d: %s", self.generation, refusal)
-                    refused.append(replace(proposal, stage=STAGE_CREDENTIAL, refusal=refusal))
+            refused.extend(await self.stop_slots(writing, taken, task_slots))
         open_generation = OpenGeneration(self.generation, tuple(refused), pending, error)
         if ended_on_outage and not tasks:
             # No task waits for results, so the attempt closes now. The recipe's retry saves its open generation under
@@ -1302,6 +1290,29 @@ class AutoEnvScalingGenerator(TaskGenerator):
         if next_seed != self.cursor.next_seed:
             self.save_cursor(replace(self.cursor, next_seed=next_seed))
         return tuple(tasks)
+
+    async def stop_slots(
+        self,
+        writing: Mapping[int, asyncio.Future[HarborTask]],
+        taken: AbstractSet[int],
+        task_slots: Mapping[int, TaskSlot],
+    ) -> list[SessionProposal]:
+        """Stop the slots of ``writing`` that :meth:`generate` did not take: those still being written after an
+        outage, or in a cancelled generation. They take nothing. Return the proposal of each stopped slot whose task
+        held the Claude Code token, with stage ``credential``: the token may have left the sandbox, so the report
+        names it."""
+        for running in writing.values():
+            running.cancel()
+        await asyncio.gather(*writing.values(), return_exceptions=True)
+        held_token: list[SessionProposal] = []
+        for index, running in writing.items():
+            held = None if index in taken or running.cancelled() else running.exception()
+            if isinstance(held, CredentialHeldError):
+                proposal = task_slots[index].proposal
+                refusal = f"the Designer could not rebuild {proposal.source_record_id}: {held}"
+                logger.error("AutoEnvScaling generation %d: %s", self.generation, refusal)
+                held_token.append(replace(proposal, stage=STAGE_CREDENTIAL, refusal=refusal))
+        return held_token
 
     def slots(self) -> list[TaskSlot | HarborTask]:
         """The generation's slots in order: the variants, then the seeds not taken yet, then sessions from the walk.

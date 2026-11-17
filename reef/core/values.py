@@ -16,9 +16,10 @@ def require_text(value: object, name: str) -> str:
     return value
 
 
-def is_whole_number(value: object) -> bool:
-    """Whether ``value`` is an int and not a bool."""
-    return isinstance(value, int) and not isinstance(value, bool)
+def require_integer(value: object, name: str, *, minimum: int = 0) -> None:
+    """Raise ``ValueError`` naming ``name`` unless ``value`` is an integer from ``minimum``."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name} is an integer from {minimum}")
 
 
 def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
@@ -30,4 +31,4 @@ def deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str,
     return merged
 
 
-__all__ = ["JsonValue", "deep_merge", "is_whole_number", "require_text"]
+__all__ = ["JsonValue", "deep_merge", "require_integer", "require_text"]

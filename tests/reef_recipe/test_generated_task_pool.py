@@ -21,10 +21,11 @@ from tests.reef_recipe.support import (
 from reef.core.job_data import JobOutcome
 from reef.core.plugins import PluginConfigError
 from reef.recipe.generated_tasks.generator import RolledOutTask
-from reef.recipe.generated_tasks.pool import PoolReview, RetiredTask, TaskUse, pool_reviews, retired_tasks, task_uses
+from reef.recipe.generated_tasks.pool import PoolReview, RetiredTask, pool_reviews, retired_tasks, task_uses
 from reef.recipe.generated_tasks.processor import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.results import rollout_results
-from reef.storage.samples import stage_item_id
+from reef.recipe.generated_tasks.training import TaskUse, task_items
+from reef.storage.samples import TrainerSamples, stage_item_id
 from reef.storage.tasks import TaskStore
 from reef.train.pipeline import TrainingPipeline
 
@@ -51,6 +52,12 @@ def task_stage(stages: TrainingPipeline) -> GeneratedTaskSamples:
     return stage
 
 
+def trainer_samples(stages: TrainingPipeline) -> TrainerSamples:
+    samples = task_stage(stages).samples
+    assert samples is not None
+    return samples
+
+
 def task_store(stages: TrainingPipeline) -> TaskStore:
     store = task_stage(stages).task_store
     assert store is not None
@@ -74,7 +81,7 @@ def handed_out(stages: TrainingPipeline) -> list[str]:
 def waiting(stages: TrainingPipeline) -> list[str]:
     """Look for job data, then return the names of the tasks whose sample waits, in the order that jobs take them."""
     stages.ready(job_size(stages))
-    samples = task_stage(stages).task_items().values()
+    samples = task_items(trainer_samples(stages)).values()
     untrained = sorted(
         (sample for found in samples for sample in found if not sample.train_counts),
         key=lambda sample: sample.sequence,
@@ -102,7 +109,7 @@ def test_without_pool_capacity_a_task_trains_once_and_leaves_the_pool(tmp_path: 
     stages = pool_pipeline(tmp_path, ScriptedGenerator([generated(0, 0, 1)]))
     assert train(stages, "job-1") == [TASK_A, TASK_B]
     assert waiting(stages) == [] and handed_out(stages) == []
-    assert task_uses(task_store(stages)) == {} and "training_pool" not in stages.status()
+    assert task_uses(task_store(stages).documents()) == {} and "training_pool" not in stages.status()
 
 
 @pytest.mark.unit
@@ -111,9 +118,9 @@ def test_with_pool_capacity_a_task_returns_to_the_pool_after_its_job_ends(tmp_pa
     assert train(stages, "job-1") == [TASK_A, TASK_B]
     assert train(stages, "job-2") == [TASK_C, TASK_A], "the tasks go back to the end of the pool"
     assert waiting(stages) == [TASK_B, TASK_C, TASK_A]
-    uses = task_uses(task_store(stages))
+    uses = task_uses(task_store(stages).documents())
     assert [(use.job_id, use.use_index) for use in uses[TASK_A]] == [("job-1", 0), ("job-2", 1)]
-    samples = task_stage(stages).task_items()[TASK_A]
+    samples = task_items(trainer_samples(stages))[TASK_A]
     assert [sample.sample_id for sample in samples] == [
         stage_item_id("tasks", f"generated-tasks/{TASK_A}"),
         stage_item_id("tasks", f"generated-tasks/{TASK_A}@1"),
@@ -128,7 +135,7 @@ def test_a_repeated_job_end_saves_each_use_once(tmp_path: Path) -> None:
     train(stages, "job-1", {TASK_A: (1.0, 1.0)})
     # The trainer gives the same end again, as after a restart.
     stages.job_ended(finished_job("job-1", {TASK_A: (0.0, 0.0), TASK_B: (0.0, 0.0)}))
-    uses = task_uses(task_store(stages))
+    uses = task_uses(task_store(stages).documents())
     assert {name: [(use.use_index, use.rewards) for use in found] for name, found in uses.items()} == {
         TASK_A: [(0, (1.0, 1.0))],
         TASK_B: [(0, (1.0, 0.0))],
@@ -143,7 +150,7 @@ def test_a_job_end_repeated_while_the_next_job_runs_saves_nothing_for_the_next_j
     assert submit(stages) == [TASK_A, TASK_B]
     stages.job_ended(finished_job("job-1", {TASK_A: (1.0, 0.0), TASK_B: (1.0, 0.0)}))
     stages.job_ended(finished_job("job-2", {TASK_A: (0.0, 0.0), TASK_B: (1.0, 1.0)}))
-    uses = task_uses(task_store(stages))
+    uses = task_uses(task_store(stages).documents())
     assert [(use.job_id, use.use_index, use.rewards) for use in uses[TASK_A]] == [
         ("job-1", 0, (1.0, 0.0)),
         ("job-2", 1, (0.0, 0.0)),
@@ -161,7 +168,9 @@ def test_a_job_end_given_again_while_the_next_job_runs_leaves_every_task_of_that
     assert waiting(stages) == [TASK_B], "task C trains in job-2, so it does not wait again"
     stages.job_ended(finished_job("job-2", {TASK_C: (0.0, 1.0), TASK_A: (1.0, 1.0)}))
     store = task_store(stages)
-    assert {name: [(use.job_id, use.rewards) for use in found] for name, found in task_uses(store).items()} == {
+    assert {
+        name: [(use.job_id, use.rewards) for use in found] for name, found in task_uses(store.documents()).items()
+    } == {
         TASK_A: [("job-1", (1.0, 0.0)), ("job-2", (1.0, 1.0))],
         TASK_B: [("job-1", (1.0, 0.0))],
         TASK_C: [("job-2", (0.0, 1.0))],
@@ -189,7 +198,9 @@ def test_a_failed_job_returns_its_tasks_with_uses_that_have_no_rewards(tmp_path:
     stages = pool_pipeline(tmp_path, ScriptedGenerator([generated(0, 0, 1, 2)]), pool_capacity=3, review_interval=0)
     assert submit(stages) == [TASK_A, TASK_B]
     stages.job_ended(JobOutcome("job-1", "tinker", "failed", error="the sampler is gone"))
-    assert {name: [use.rewards for use in found] for name, found in task_uses(task_store(stages)).items()} == {
+    assert {
+        name: [use.rewards for use in found] for name, found in task_uses(task_store(stages).documents()).items()
+    } == {
         TASK_A: [()],
         TASK_B: [()],
     }
@@ -207,7 +218,7 @@ def test_a_job_end_returns_a_cancelled_jobs_tasks_and_leaves_a_later_jobs_tasks(
     # The trainer submits the third job before the samples service reads the second job's end.
     assert submit(stages) == [TASK_C]
     stages.job_ended(finished_job("job-2", {TASK_B: (1.0, 0.0)}))
-    uses = task_uses(task_store(stages))
+    uses = task_uses(task_store(stages).documents())
     assert {name: [use.job_id for use in found] for name, found in uses.items()} == {
         TASK_A: ["job-2"],
         TASK_B: ["job-2"],
@@ -215,7 +226,7 @@ def test_a_job_end_returns_a_cancelled_jobs_tasks_and_leaves_a_later_jobs_tasks(
     assert uses[TASK_A][0].rewards == (), "the cancelled job ran no rollout that the end reports"
     assert waiting(stages) == [TASK_A, TASK_B], "task C still trains"
     stages.job_ended(finished_job("job-3", {TASK_C: (0.0, 1.0)}))
-    assert task_uses(task_store(stages))[TASK_C][0].rewards == (0.0, 1.0)
+    assert task_uses(task_store(stages).documents())[TASK_C][0].rewards == (0.0, 1.0)
     assert waiting(stages) == [TASK_A, TASK_B, TASK_C]
 
 
@@ -229,7 +240,7 @@ def test_two_job_ends_read_together_save_each_use_once(tmp_path: Path) -> None:
     assert submit(stages) == [TASK_A] and submit(stages) == [TASK_B]
     stages.job_ended(finished_job("job-1", {TASK_A: (1.0, 0.0)}))
     stages.job_ended(finished_job("job-2", {TASK_B: (0.0, 1.0)}))
-    uses = task_uses(task_store(stages))
+    uses = task_uses(task_store(stages).documents())
     assert {name: [(use.job_id, use.rewards) for use in found] for name, found in uses.items()} == {
         TASK_A: [("job-1", (1.0, 0.0))],
         TASK_B: [("job-2", (0.0, 1.0))],
@@ -302,8 +313,8 @@ def test_a_review_retires_a_task_outside_the_band_or_without_reward_spread(
     )
     train(stages, "job-1", {TASK_A: rewards})
     store = task_store(stages)
-    assert retired_tasks(store) == {TASK_A: RetiredTask(TASK_A, 0, rewards, reason)}
-    assert pool_reviews(store) == (PoolReview(0, 1, 1, {TASK_A: reason}),)
+    assert retired_tasks(store.documents()) == {TASK_A: RetiredTask(TASK_A, 0, rewards, reason)}
+    assert pool_reviews(store.documents()) == (PoolReview(0, 1, 1, {TASK_A: reason}),)
     assert handed_out(stages) == [TASK_B], "a retired task is not handed out again"
 
 
@@ -321,10 +332,10 @@ def test_a_review_retires_a_waiting_task_before_it_trains_again(tmp_path: Path) 
     train(stages, "job-1", {TASK_A: (1.0, 1.0)})
     assert waiting(stages) == [TASK_B, TASK_A]
     train(stages, "job-2")
-    assert set(retired_tasks(task_store(stages))) == {TASK_A}
+    assert set(retired_tasks(task_store(stages).documents())) == {TASK_A}
     assert handed_out(stages) == [TASK_B], "task A waited in the pool when the review retired it"
     assert waiting(stages) == [TASK_B], "the scenario no longer uses the sample of task A that waited"
-    (trained,) = task_stage(stages).task_items()[TASK_A]
+    (trained,) = task_items(trainer_samples(stages))[TASK_A]
     assert trained.sample_id == stage_item_id("tasks", f"generated-tasks/{TASK_A}"), "the trained sample stays"
 
 
@@ -344,7 +355,7 @@ def test_a_review_takes_a_retired_task_out_of_the_next_jobs_hand_out(tmp_path: P
     # While job-2 runs, a look for job data finds the next job's tasks.
     assert handed_out(stages) == [task_e, TASK_A]
     stages.job_ended(finished_job("job-2", {TASK_C: (1.0, 0.0), task_d: (1.0, 0.0)}))
-    assert set(retired_tasks(task_store(stages))) == {TASK_A}
+    assert set(retired_tasks(task_store(stages).documents())) == {TASK_A}
     assert handed_out(stages) == [task_e, TASK_B], "the next job takes the tasks without task A, in pool order"
 
 
@@ -364,7 +375,7 @@ def test_a_job_whose_data_was_taken_before_the_review_trains_the_retired_task_on
     # The trainer takes the next job's data as soon as job-2 ends, before the samples service reads that end.
     data = stages.build_job_data(2)
     stages.job_ended(finished_job("job-2", {TASK_C: (1.0, 0.0), task_d: (1.0, 0.0)}))
-    assert set(retired_tasks(task_store(stages))) == {TASK_A}
+    assert set(retired_tasks(task_store(stages).documents())) == {TASK_A}
     stages.acknowledge(data.data_id)
     assert [sample.metadata["task"]["name"] for sample in data.samples] == [task_e, TASK_A]
     stages.job_ended(finished_job("job-3", {task_e: (1.0, 0.0), TASK_A: (1.0, 1.0)}))
@@ -384,7 +395,10 @@ def test_a_later_review_leaves_a_retired_task_out(tmp_path: Path) -> None:
     )
     train(stages, "job-1", {TASK_A: (1.0, 1.0)})
     train(stages, "job-2", {TASK_B: (0.0, 1.0)})
-    assert pool_reviews(task_store(stages)) == (PoolReview(0, 1, 1, {TASK_A: "above_band"}), PoolReview(1, 2, 1, {}))
+    assert pool_reviews(task_store(stages).documents()) == (
+        PoolReview(0, 1, 1, {TASK_A: "above_band"}),
+        PoolReview(1, 2, 1, {}),
+    )
 
 
 @pytest.mark.unit
@@ -402,7 +416,7 @@ def test_a_review_retires_a_task_whose_next_sample_is_not_stored_yet(tmp_path: P
     # The samples service reads both ends before it stores the sample of task A's next use.
     stages.job_ended(finished_job("job-1", {TASK_A: (1.0, 1.0)}))
     stages.job_ended(finished_job("job-2", {TASK_B: (0.0, 1.0)}))
-    assert set(retired_tasks(task_store(stages))) == {TASK_A}
+    assert set(retired_tasks(task_store(stages).documents())) == {TASK_A}
     assert waiting(stages) == [TASK_B]
 
 
@@ -417,7 +431,7 @@ def test_a_pass_rate_on_a_band_edge_is_kept(tmp_path: Path) -> None:
         **REVIEW_BAND,
     )
     train(stages, "job-1", {TASK_A: (1.0, 0.5), TASK_B: (0.5, 0.0)})
-    assert pool_reviews(task_store(stages)) == (PoolReview(0, 1, 2, {}),)
+    assert pool_reviews(task_store(stages).documents()) == (PoolReview(0, 1, 2, {}),)
     assert handed_out(stages) == [TASK_A, TASK_B]
 
 
@@ -433,7 +447,7 @@ def test_a_review_reads_only_the_most_recent_rewards(tmp_path: Path) -> None:
     )
     train(stages, "job-1", {TASK_A: (0.0, 0.0)})
     train(stages, "job-2", {TASK_A: (1.0, 0.0)})
-    assert pool_reviews(task_store(stages)) == (
+    assert pool_reviews(task_store(stages).documents()) == (
         PoolReview(0, 2, 2, {}),
     ), "the older rewards of task A are below the band"
 
@@ -449,8 +463,8 @@ def test_a_task_with_fewer_rewards_than_the_window_is_kept(tmp_path: Path) -> No
         **REVIEW_BAND,
     )
     train(stages, "job-1", {TASK_A: (1.0, 1.0)})
-    assert pool_reviews(task_store(stages)) == (PoolReview(0, 1, 3, {}),)
-    assert retired_tasks(task_store(stages)) == {}
+    assert pool_reviews(task_store(stages).documents()) == (PoolReview(0, 1, 3, {}),)
+    assert retired_tasks(task_store(stages).documents()) == {}
 
 
 @pytest.mark.unit
@@ -466,9 +480,9 @@ def test_a_review_runs_after_review_interval_jobs_and_not_before(tmp_path: Path)
     reviews = []
     for job in range(1, 5):
         train(stages, f"job-{job}")
-        reviews.append(len(pool_reviews(task_store(stages))))
+        reviews.append(len(pool_reviews(task_store(stages).documents())))
     assert reviews == [0, 1, 1, 2]
-    assert [review.jobs for review in pool_reviews(task_store(stages))] == [2, 4]
+    assert [review.jobs for review in pool_reviews(task_store(stages).documents())] == [2, 4]
 
 
 @pytest.mark.unit
@@ -477,7 +491,7 @@ def test_review_interval_zero_reuses_tasks_and_retires_none(tmp_path: Path) -> N
     for job in range(1, 4):
         assert train(stages, f"job-{job}", {TASK_A: (1.0, 1.0), TASK_B: (0.0, 0.0)}) == [TASK_A, TASK_B]
     store = task_store(stages)
-    assert pool_reviews(store) == () and retired_tasks(store) == {}
+    assert pool_reviews(store.documents()) == () and retired_tasks(store.documents()) == {}
 
 
 @pytest.mark.unit
@@ -485,7 +499,7 @@ def test_a_review_with_the_default_band_and_spread_retires_no_task(tmp_path: Pat
     stages = pool_pipeline(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), pool_capacity=2, review_interval=1)
     train(stages, "job-1", {TASK_A: (1.0, 1.0), TASK_B: (0.0, 0.0)})
     store = task_store(stages)
-    assert pool_reviews(store) == (PoolReview(0, 1, 2, {}),) and retired_tasks(store) == {}
+    assert pool_reviews(store.documents()) == (PoolReview(0, 1, 2, {}),) and retired_tasks(store.documents()) == {}
 
 
 # ------------------------------------------------------------------------------------------------- restart
@@ -524,7 +538,7 @@ def test_a_pool_set_on_a_scenario_whose_tasks_trained_once_trains_them_again(tmp
     again = pool_pipeline(tmp_path, ScriptedGenerator(), pool_capacity=3, review_interval=0)
     assert waiting(again) == [TASK_C, TASK_A, TASK_B], "the tasks with a first result go back to the pool"
     assert train(again, "job-2") == [TASK_C, TASK_A]
-    uses = task_uses(task_store(again))
+    uses = task_uses(task_store(again).documents())
     assert {name: [(use.job_id, use.use_index) for use in found] for name, found in uses.items()} == {
         TASK_A: [("job-2", 1)],
         TASK_C: [("job-2", 0)],
@@ -548,14 +562,14 @@ def test_a_restart_after_retirement_repeats_the_same_review(tmp_path: Path, monk
     monkeypatch.setattr(store, "write_document", stopping_write_document)
     with pytest.raises(OSError, match="No space left"):
         train(first, "job-1", {TASK_A: (1.0, 1.0)})
-    assert pool_reviews(store) == () and set(retired_tasks(store)) == {TASK_A}
+    assert pool_reviews(store.documents()) == () and set(retired_tasks(store.documents())) == {TASK_A}
     first.close()
     again = pool_pipeline(tmp_path, ScriptedGenerator(), **config)
     # The trainer gives the stage the last job's end again.
     again.job_ended(finished_job("job-1", {TASK_A: (1.0, 1.0), TASK_B: (1.0, 0.0)}))
     restored = task_store(again)
-    assert pool_reviews(restored) == (PoolReview(0, 1, 1, {TASK_A: "above_band"}),)
-    assert retired_tasks(restored) == {TASK_A: RetiredTask(TASK_A, 0, (1.0, 1.0), "above_band")}
+    assert pool_reviews(restored.documents()) == (PoolReview(0, 1, 1, {TASK_A: "above_band"}),)
+    assert retired_tasks(restored.documents()) == {TASK_A: RetiredTask(TASK_A, 0, (1.0, 1.0), "above_band")}
     assert waiting(again) == [TASK_B]
 
 
@@ -578,13 +592,13 @@ def test_a_restart_after_a_stop_between_two_uses_reviews_every_use_of_the_job(
     rewards = {TASK_A: (1.0, 0.0), TASK_B: (1.0, 1.0)}
     with pytest.raises(OSError, match="No space left"):
         train(first, "job-1", rewards)
-    assert set(task_uses(store)) == {TASK_A}
+    assert set(task_uses(store.documents())) == {TASK_A}
     first.close()
     again = pool_pipeline(tmp_path, ScriptedGenerator(), **config)
-    assert pool_reviews(task_store(again)) == (), "a start reviews nothing before the last job's end"
+    assert pool_reviews(task_store(again).documents()) == (), "a start reviews nothing before the last job's end"
     # The trainer gives the stage the last job's end again.
     again.job_ended(finished_job("job-1", rewards))
-    assert pool_reviews(task_store(again)) == (PoolReview(0, 1, 1, {TASK_B: "above_band"}),)
+    assert pool_reviews(task_store(again).documents()) == (PoolReview(0, 1, 1, {TASK_B: "above_band"}),)
     assert waiting(again) == [TASK_A]
 
 
@@ -618,8 +632,8 @@ def test_a_review_that_a_failed_write_cut_short_keeps_its_retirements_at_a_later
         stages = pool_pipeline(tmp_path, ScriptedGenerator(), job_samples=1, **config)
     stages.job_ended(finished_job("job-3", {TASK_A: (0.0, 0.0)}))
     store = task_store(stages)
-    assert pool_reviews(store) == (PoolReview(0, 3, 1, {TASK_A: "above_band"}),)
-    assert retired_tasks(store) == {TASK_A: RetiredTask(TASK_A, 0, (1.0, 1.0), "above_band")}
+    assert pool_reviews(store.documents()) == (PoolReview(0, 3, 1, {TASK_A: "above_band"}),)
+    assert retired_tasks(store.documents()) == {TASK_A: RetiredTask(TASK_A, 0, (1.0, 1.0), "above_band")}
     assert waiting(stages) == [TASK_B]
 
 
@@ -639,7 +653,9 @@ def test_a_restart_while_a_job_runs_leaves_the_tasks_of_that_job_to_its_end(tmp_
     assert waiting(again) == [TASK_A, TASK_B], "C and D wait for the end of job-2"
     again.job_ended(finished_job("job-2", {TASK_C: (0.0, 1.0), task_d: (1.0, 0.0)}))
     store = task_store(again)
-    assert {name: [(use.job_id, use.rewards) for use in found] for name, found in task_uses(store).items()} == {
+    assert {
+        name: [(use.job_id, use.rewards) for use in found] for name, found in task_uses(store.documents()).items()
+    } == {
         TASK_A: [("job-1", (1.0, 0.0))],
         TASK_B: [("job-1", (1.0, 0.0))],
         TASK_C: [("job-2", (0.0, 1.0))],
@@ -657,14 +673,17 @@ def test_a_restart_while_a_job_runs_leaves_the_tasks_of_that_job_to_its_end(tmp_
     ("config", "message"),
     [
         ({"pool_capacity": -1}, "pool_capacity must be non-negative"),
-        ({"pool_capacity": 4, "review_interval": -1}, "review_interval must be a non-negative integer"),
-        ({"pool_capacity": 4, "review_interval": True}, "review_interval must be a non-negative integer"),
-        ({"pool_capacity": 4, "review_window": 1}, "review_window must be an integer of at least 2"),
+        ({"pool_capacity": 4, "review_interval": -1}, "review_interval is an integer from 0"),
+        ({"pool_capacity": 4, "review_interval": True}, "review_interval is an integer from 0"),
+        ({"pool_capacity": 4, "review_window": 1}, "review_window is an integer from 2"),
         ({"pool_capacity": 4, "review_band_low": -0.1}, "between 0 and 1"),
         ({"pool_capacity": 4, "review_band_high": 1.5}, "between 0 and 1"),
         ({"pool_capacity": 4, "review_band_low": 0.8, "review_band_high": 0.5}, "must not be above"),
         ({"pool_capacity": 4, "review_min_reward_std": -0.1}, "review_min_reward_std must be a non-negative"),
         ({"review_window": 8}, "need a pool_capacity above 0"),
+        # A key set to its default is still set: without a pool, no review runs.
+        ({"review_interval": 0}, "need a pool_capacity above 0"),
+        ({"review_window": 2}, "need a pool_capacity above 0"),
     ],
 )
 def test_a_malformed_pool_setting_is_refused(config: dict[str, float], message: str) -> None:
@@ -678,8 +697,8 @@ def test_a_malformed_pool_setting_is_refused(config: dict[str, float], message: 
     [
         ({"task_name": ""}, ValueError, "task_name must be a non-empty string"),
         ({"job_id": " job-1"}, ValueError, "job_id must be a non-empty string"),
-        ({"use_index": -1}, ValueError, "use_index must be a non-negative integer"),
-        ({"use_index": True}, ValueError, "use_index must be a non-negative integer"),
+        ({"use_index": -1}, ValueError, "use_index is an integer from 0"),
+        ({"use_index": True}, ValueError, "use_index is an integer from 0"),
         ({"rewards": [1.0]}, TypeError, "a task use's rewards must be a tuple of finite numbers"),
         ({"rewards": (1.0, float("nan"))}, ValueError, "rewards must be finite numbers"),
         ({"rewards": (True,)}, ValueError, "rewards must be finite numbers"),
@@ -695,7 +714,7 @@ def test_a_malformed_task_use_is_refused(fields: dict[str, Any], error: type[Exc
     ("fields", "error", "message"),
     [
         ({"task_name": ""}, ValueError, "task_name must be a non-empty string"),
-        ({"review": -1}, ValueError, "review must be a non-negative integer"),
+        ({"review": -1}, ValueError, "review is an integer from 0"),
         ({"rewards": ()}, ValueError, "a retired task needs two or more rewards"),
         ({"rewards": (1.0,)}, ValueError, "a retired task needs two or more rewards"),
         ({"rewards": [1.0, 1.0]}, TypeError, "a retired task's rewards must be a tuple of finite numbers"),
@@ -714,7 +733,8 @@ def test_a_malformed_retired_task_is_refused(fields: dict[str, Any], error: type
     ("config", "message"),
     [
         ({"pool_capacity": True}, "pool_capacity must be a valid int"),
-        ({"refill_tasks": 2, "pool_capacity": 4}, "leave refill_tasks at 1"),
+        ({"refill_tasks": 2, "pool_capacity": 4}, "refill_tasks needs pool_capacity 0"),
+        ({"refill_tasks": 1, "pool_capacity": 4}, "refill_tasks needs pool_capacity 0"),
     ],
 )
 def test_a_pool_config_that_cannot_run_is_refused(config: dict[str, object], message: str) -> None:

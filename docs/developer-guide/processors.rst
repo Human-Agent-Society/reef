@@ -899,10 +899,11 @@ sessions does not count. A round whose generation ran out of attempts counts
 too, and the next round retries the same sessions and finishes the same
 generation from its saved candidates.
 
-With ``pool_capacity`` above 0, the stage keeps a training pool, and each train
-task trains again until a review retires it. A round is then due while fewer
-train tasks of complete generations than ``pool_capacity`` are active, in place
-of the ``refill_tasks`` rule. When a job's end commits, the stage saves each use
+With ``pool_capacity`` above 0, the stage keeps a training pool
+(``reef.recipe.generated_tasks.pool.TrainingPool``), and each train task trains
+again until a review retires it. A round is then due while fewer train tasks of
+complete generations than ``pool_capacity`` are active, in place of the
+``refill_tasks`` rule. When a job's end commits, the stage saves each use
 that the end ends, with its rewards, and runs the review that is due after every
 ``review_interval`` jobs. Then it makes the sample of each active task's next
 use, ``generated-tasks/<task name>@<k>`` for use ``k``, which waits after the

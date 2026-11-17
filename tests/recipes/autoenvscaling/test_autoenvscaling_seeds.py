@@ -846,7 +846,7 @@ def test_seeds_and_seeded_parents_need_a_designer_that_varies_seeds(tmp_path: Pa
     [{"next_seed": -1}, {"next_seed": "1"}, {"next_seed": True}, {"next_position": -2}, {"next_generation": 1.0}],
 )
 def test_a_cursor_holds_non_negative_ints(fields: dict[str, object]) -> None:
-    with pytest.raises(ValueError, match="must be a non-negative int"):
+    with pytest.raises(ValueError, match="is an integer from 0"):
         GenerationCursor(**fields)  # type: ignore[arg-type]
 
 
