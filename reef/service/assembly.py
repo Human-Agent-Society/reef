@@ -679,6 +679,7 @@ def build_dispatcher(
                     ),
                     agent_host=settings.evaluation_agent_host,
                     slots=settings.evaluation_max_sandboxes,
+                    on_stop=settings.evaluation_on_stop,
                 )
             )
         if (

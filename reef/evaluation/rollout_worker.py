@@ -74,6 +74,9 @@ SERVE_WAIT_S = 12 * 3600.0
 SERVE_POLL_S = 1.0
 #: The seconds between two checks of a running trial's lease.
 LEASE_CHECK_S = 1.0
+#: What a stopping evaluation worker does with the rollouts that it runs: ``requeue`` cancels each one and gives it
+#: back to the queue, where another worker starts it again; ``finish`` takes no new rollout and finishes each one.
+ON_STOP_CHOICES = ("requeue", "finish")
 #: The limit of a tree agent's command, in seconds. Harbor's agent timeout of each task ends the run first.
 TREE_AGENT_TIMEOUT_S = 24 * 3600.0
 #: The directory of a trial's verifier directory where the verifier writes its own model calls and trajectories: the
@@ -596,7 +599,10 @@ class EvaluationRolloutWorker(QueueWorker):
     Values: as ``QueueWorker``, on the rollouts of the evaluations queue, with one rollout in each slot;
     ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's
     lab; ``trial_observer`` reads each trial before its directory is removed, None for none; ``agent_host`` is the
-    address at which a task's container reaches this host. A failed rollout is retried: a trial fails for reasons
+    address at which a task's container reaches this host. ``on_stop`` is one of ``ON_STOP_CHOICES``: what ``stop``
+    does with the rollouts that run. With ``requeue``, ``stop`` cancels each one and gives it back to the queue; with
+    ``finish``, it takes no new rollout and returns when each running one has finished, so a process that a scale-down
+    or a deploy stops loses no work in its grace period. A failed rollout is retried: a trial fails for reasons
     outside its input, such as a sandbox that did not start. A rollout of a harness tree whose task needs what the
     tree's agent does not give it (``task_agent_tools``) fails for good.
 
@@ -616,7 +622,10 @@ class EvaluationRolloutWorker(QueueWorker):
         agent_host: str = DEFAULT_AGENT_HOST,
         poll_seconds: float = 0.5,
         slots: int = 1,
+        on_stop: str = "requeue",
     ) -> None:
+        if on_stop not in ON_STOP_CHOICES:
+            raise ValueError(f"on_stop must be one of {', '.join(ON_STOP_CHOICES)}, not {on_stop!r}")
         super().__init__(
             queue,
             EVALUATIONS_QUEUE,
@@ -629,6 +638,9 @@ class EvaluationRolloutWorker(QueueWorker):
         self.lab = lab
         self.trial_observer = trial_observer
         self.agent_host = agent_host
+        self.on_stop = on_stop
+        #: The event that cancels the running rollouts: the worker's stop with ``requeue``, never with ``finish``.
+        self.rollouts_cancelled = self.stopped if on_stop == "requeue" else threading.Event()
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         score, rewards, error = self.score(EvaluationRollout.from_item(item), lease_lost, item.attempt_count)
@@ -643,7 +655,7 @@ class EvaluationRolloutWorker(QueueWorker):
         self.queue.append(NewWork(SERVING_QUEUE, item_id, rollout.scenario, SERVE_ARTIFACT_KIND, payload))
         deadline = time.monotonic() + SERVE_WAIT_S
         while time.monotonic() < deadline:
-            if self.stopped.is_set():
+            if self.rollouts_cancelled.is_set():
                 raise WorkerStoppedError
             if lease_lost.is_set():
                 raise WorkLeaseLostError("the evaluation worker lost its lease")
@@ -702,7 +714,7 @@ class EvaluationRolloutWorker(QueueWorker):
             )
             request = RolloutRequest(runner.harness, runner.policy_model, str(task_directory))
             try:
-                result = asyncio.run(run_while_held(runner, request, lease_lost, self.stopped))
+                result = asyncio.run(run_while_held(runner, request, lease_lost, self.rollouts_cancelled))
             finally:
                 calls.close()
             # The trial directory is under ``work``, so read it before the block removes it.
