@@ -34,7 +34,7 @@ case "$FAKE_AENV_MODE" in
   ok) echo "Template ready." ;;
   conflict) echo "Error: HTTP 400: alias 'a' already points to 'x', cannot rebind to 'y'"; exit 1 ;;
   flaky)
-    if [ "$(wc -l < "$FAKE_AENV_LOG.runs")" -eq 1 ]; then echo "Error: HTTP 503: Service Unavailable"; exit 1; fi
+    if [ "$(wc -l < "$FAKE_AENV_LOG.runs")" -eq 1 ]; then echo "Error: HTTP $FAKE_AENV_STATUS: try later"; exit 1; fi
     echo "Template ready." ;;
   *) echo "#5 ERROR: process apt-get did not complete"; exit 1 ;;
 esac
@@ -225,9 +225,12 @@ def test_a_template_left_waiting_is_an_orphan_that_is_deleted_and_built_again(
 
 
 @pytest.mark.unit
+# 429: the AgentENV worker already runs as many builds as it takes ("node concurrent build limit reached").
+@pytest.mark.parametrize("status", ["429", "503"])
 def test_a_build_and_a_read_that_an_overloaded_api_refuses_are_tried_again(
-    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch, status: str
 ) -> None:
     monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
+    monkeypatch.setenv("FAKE_AENV_STATUS", status)
     ensured(FakeAgentEnv([503, None]), task_build(tmp_path))
     assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run", "run"]
