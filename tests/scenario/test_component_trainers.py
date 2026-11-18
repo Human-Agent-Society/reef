@@ -431,6 +431,8 @@ def test_a_reload_leaves_the_harness_cycle_in_flight_its_instance(
     ends, and the cycle then looks again on the rebuilt instance instead of failing."""
     dispatcher, _ = dispatchers.open(recipe=held_recipe(HARNESS))
     scenario = loaded(dispatcher, 1)
+    # The test runs each cycle itself; background notifications must not start sibling workers.
+    monkeypatch.setattr(dispatcher.local_workers, "start", lambda scenario, component=None: None)
     # The training service checked the job, so the cycle that the test holds is the one that submits it.
     wait_for_job_check(scenario, HARNESS)
     held_cycle.blocks = True
@@ -465,7 +467,7 @@ def test_a_reload_leaves_the_harness_cycle_in_flight_its_instance(
     worker.join(10)
     assert not worker.is_alive()
     assert errors == [] and outcome == [True]
-    # Another worker can hold the cycle lock as this cycle ends; it closes the old instance when its own cycle ends.
+    # The original cycle closes its instance only after releasing it.
     assert became_true(lambda: closed_under_the_cycle == [False])
     assert dispatcher.build_training_status()["error"] is None
     # The rows the cycle held train on the rebuilt instance.
