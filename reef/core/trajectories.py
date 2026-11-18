@@ -195,6 +195,34 @@ def make_trajectory(
     return builder.sample(reward, feedback)
 
 
+def has_image_content(payload: Mapping[str, object]) -> bool:
+    """Whether provider conversation fields or ATIF steps contain an image part.
+
+    Only conversation fields are searched; metadata, tool definitions and tool arguments are ignored.
+    """
+    pending = [
+        payload.get(key) for key in ("messages", "input", "prompt", "system", "instructions", "response", "steps")
+    ]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, Mapping):
+            if value.get("type") in (
+                "image",
+                "image_url",
+                "input_image",
+                "computer_screenshot",
+                "image_generation_call",
+            ):
+                return True
+            pending.extend(
+                value.get(key)
+                for key in ("content", "output", "source", "message", "choices", "observation", "results")
+            )
+    return False
+
+
 def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
     response = payload.get("response", {})
     response = response if isinstance(response, Mapping) else {"content": response}

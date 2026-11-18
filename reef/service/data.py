@@ -29,7 +29,9 @@ from harbor.models.task.task import Task as HarborTaskLoader
 from reef.core.errors import ReefError
 from reef.core.job_data import TrajectorySample
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
+from reef.core.trajectories import has_image_content
 from reef.dispatcher import Dispatcher
+from reef.recipe.deployment import refuses_images
 from reef.service.tasks import MAX_TASKS_PER_UPLOAD, unpack_task_archive
 from reef.storage.data import (
     DELETED_ITEM_TTL_SECONDS,
@@ -72,7 +74,8 @@ class DataAccess:
     """What the data writes and reads use of a process.
 
     Values: ``store`` is the deployment's data store, or None for a deployment without one; ``queue`` is the work
-    queue that carries the data syncs and transfers; ``scenarios`` checks the scenarios that the items name.
+    queue that carries the data syncs and transfers; ``scenarios`` checks the scenarios that the items name;
+    ``refuses_images`` is whether the deployment refuses image content (``reef.recipe.deployment.refuses_images``).
 
     Purpose: the data routes and the data service make one from their dispatcher (``of``); the functions of this
     module and of ``reef.service.data_transfer`` read it, and no other part of the dispatcher.
@@ -81,10 +84,11 @@ class DataAccess:
     store: DataStore | None
     queue: WorkQueue
     scenarios: ScenarioUses
+    refuses_images: bool = False
 
     @classmethod
     def of(cls, dispatcher: Dispatcher) -> DataAccess:
-        return cls(dispatcher.data_store, dispatcher.queue, dispatcher)
+        return cls(dispatcher.data_store, dispatcher.queue, dispatcher, refuses_images(dispatcher.recipe))
 
     def require_store(self) -> DataStore:
         """The data store; ``DataStoreUnavailableError`` for a deployment without one."""
@@ -255,6 +259,22 @@ def store_items(data: DataAccess, owner: str, items: Sequence[NewItem], *, wait:
         raise ValueError(f"a create call holds 1 to {MAX_ITEMS_PER_CREATE} items")
     uses: dict[str, list[Use]] = {}
     created = [created_metadata(owner, item.metadata) for item in items]
+    if data.refuses_images:
+        for item, checked in zip(items, created, strict=True):
+            # A record item holds the record's payload; the store checks the shape of its content.
+            content = (
+                item.content.get("payload")
+                if checked["kind"] == "record" and isinstance(item.content, Mapping)
+                else item.content
+            )
+            if (
+                checked["kind"] in ("trajectory", "record")
+                and isinstance(content, Mapping)
+                and has_image_content(content)
+            ):
+                raise ValueError(
+                    f"item {item.item_id!r} holds an image, and the deployment's recipe does not train on images"
+                )
     for checked in created:
         for scenario, split in checked["scenarios"].items():
             uses.setdefault(scenario, []).append(new_use(checked["kind"], split))
