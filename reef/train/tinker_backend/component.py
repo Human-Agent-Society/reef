@@ -47,6 +47,7 @@ from reef.train.tinker_backend.checkpoint import FreshStart, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerServiceSettings, TinkerSettings
 from reef.train.tinker_backend.facts import SpindleFullFacts, TinkerFacts
+from reef.train.tinker_backend.objectives import resolve_objective
 from reef.train.tinker_backend.parameters import TinkerJobParameters, rollout_settings
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
@@ -360,7 +361,9 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         left_out = 0
         if needs_rendering(data):
             data, unrenderable = rendered_job_data(
-                data, self._client.chat_template(self._config.chat_template_kwargs or {})
+                data,
+                self._client.chat_template(self._config.chat_template_kwargs or {}),
+                split_contexts=resolve_objective(parameters.objective).loss_family == "sft",
             )
             left_out += len(unrenderable)
         # Tinker refuses a whole optimizer step for one row whose targets, every token but the first, are longer than

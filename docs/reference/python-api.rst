@@ -1934,14 +1934,21 @@ stage that accepts a lag. ``reef.core.chat_rendering`` holds the shared renderin
   ``teacher_tokens`` is the rendered teacher prompt followed by the student's
   reply tokens verbatim, or the student's own tokens when it names no
   messages.
-- ``rendered_job_data(data, template)`` renders each trajectory sample that
-  has no ``tokens``. A trajectory of several segments becomes one sample for
+- ``rendered_job_data(data, template, split_contexts=False)`` renders each
+  trajectory sample that has no ``tokens``. With ``split_contexts=True``, it
+  first divides trajectories with complete captured requests into verified
+  context windows. Slime and Tinker enable this for SFT jobs only. Summaries
+  without request bodies keep the normal rendering path. See
+  `Train on whole conversations <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__.
+  A window or trajectory of several token segments becomes one sample for
   each segment, with ``segment``: ``{"index": i, "count": n}`` in its
-  ``extra.reef.training``. It returns the job data and the positions of the
-  samples that it leaves out: a sample that cannot render, that is longer
-  than its ``max_tokens``, whose teacher sequence is longer than its teacher
-  request allows, or that has a teacher and several segments. The Slime and Tinker components count them in the job
-  metric ``unrenderable_samples``.
+  ``extra.reef.training``. It returns the job data and the original sample
+  positions with rejected input: a sample or window that cannot render,
+  exceeds ``max_tokens`` or its teacher's token limit, or has a teacher and
+  several segments or context windows. Invalid captured context also rejects the sample. Each
+  original position occurs at most once; other valid windows still train.
+  Slime and Tinker add these positions to ``unrenderable_samples``. Tinker
+  also counts rendered samples that exceed the model's context window.
 
 Training objective
 ------------------

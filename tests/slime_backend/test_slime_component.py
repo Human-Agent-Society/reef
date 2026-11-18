@@ -23,7 +23,7 @@ pytest.importorskip("ray", reason="requires the optional Ray runtime")
 from tests.support.chat_templates import CharTemplate
 from tests.support.job_data import job_data_ref
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
-from tests.support.trajectories import policy_trajectory
+from tests.support.trajectories import policy_trajectory, recorded_trajectory
 
 from reef.artifact import Artifact, DirectoryFiles
 from reef.artifact.base_root import BASE_FILE, BaseRoot
@@ -927,6 +927,44 @@ def test_a_recorded_trajectory_renders_with_the_models_chat_template(tmp_path, s
     (data,) = stack.processor.calls
     # user q | assistant ab in CharTemplate; the actor computes the log-probabilities, so the row ships none.
     assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["loss_masks"][1] == [1, 1]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("objective_name", ["sft", REWARD_OBJECTIVE])
+def test_the_job_objective_selects_context_splitting_and_keeps_token_samples(
+    tmp_path: Path, stacks, objective_name: str
+) -> None:
+    stack = stacks(tmp_path)
+    stack.component.template = CharTemplate()
+    calls = tuple(
+        {
+            "messages": [{"role": "user", "content": question}],
+            "response": {"choices": [{"message": {"role": "assistant", "content": answer}}]},
+        }
+        for question, answer in (("q", "a"), ("s", "b"))
+    )
+    captured = recorded_trajectory("captured", calls[-1], 1.0, trajectory=calls)
+    captured = captured.with_metadata(
+        records=[
+            {**record, "payload": payload}
+            for record, payload in zip(captured.metadata["records"], calls, strict=True)
+        ]
+    )
+    data = JobData("rewritten-context", (batch_for(0).samples[0], captured))
+
+    status = stack.run(objective_name, step=0, batch=data)
+
+    assert status.state == "finished", status.error
+    (trained,) = stack.processor.calls
+    assert trained["tokens"][0] == [1, 2, 3]
+    assert trained["loss_masks"][0] == [1, 1]
+    if objective_name == "sft":
+        assert trained["tokens"][1:] == [[2, 213, 9, 197], [2, 215, 9, 198]]
+        assert trained["loss_masks"][1:] == [[1], [1]]
+    else:
+        # A policy job can override the component's startup SFT family, and keeps its original sample unit.
+        assert trained["tokens"][1:] == [[2, 213, 9, 197, 2, 215, 9, 198]]
+        assert trained["loss_masks"][1:] == [[1, 0, 0, 0, 1]]
 
 
 @pytest.mark.unit

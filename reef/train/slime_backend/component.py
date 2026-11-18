@@ -433,7 +433,11 @@ class SlimeJobRunner(SlimeJobs):
         # A trajectory that serving recorded carries no tokens: the component renders it with the trained model's
         # chat template, and the actor computes its log-probabilities with the weights of this job's start.
         if needs_rendering(data):
-            data, left_out = rendered_job_data(data, self.chat_template())
+            data, left_out = rendered_job_data(
+                data,
+                self.chat_template(),
+                split_contexts=resolve_objective(parameters.objective).loss_family == "sft",
+            )
             if left_out:
                 rollout_metrics["unrenderable_samples"] = len(left_out)
                 if not data.samples:

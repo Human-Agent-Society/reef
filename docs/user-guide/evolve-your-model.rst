@@ -309,6 +309,15 @@ inference is a record. When the verifier scores the rollout, one report reaches
 ``/reef/report``: the reward as the score, the receipts as the references, and
 the task's name, path and digest under ``metadata.task``. The recipe's reported
 processor turns those records into training samples like any other report.
+
+Reef retries the default Harbor verifier once when uploading its tests fails,
+or when it finishes without a reward file. The retry waits one second and uses
+the same running environment; the agent does not run again. Both attempts
+share the original verifier timeout. A valid score, including zero, is final.
+Empty or invalid rewards, download failures and timeouts are not retried.
+Verifier scripts must tolerate another invocation after an incomplete attempt.
+Explicit custom verifiers retain their own failure behavior.
+
 ``--instructions FILE`` appends a file to every task's instruction and
 ``--label name=value`` tags the calls and the report, so two arms of one task
 stay apart. The proxy the agent talks to listens on this host's loopback; an

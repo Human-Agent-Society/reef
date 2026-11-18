@@ -15,11 +15,26 @@ from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 from aiohttp import web
+from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.agent.context import AgentContext
-from harbor.models.task.config import MCPServerConfig
+from harbor.models.task.config import MCPServerConfig, TaskOS
+from harbor.models.task.task import Task
+from harbor.models.trial.config import VerifierConfig
+from harbor.models.trial.paths import TrialPaths
+from harbor.models.verifier.result import VerifierResult
+from harbor.verifier.factory import VerifierFactory
+from harbor.verifier.verifier import (
+    AddTestsDirError,
+    DownloadVerifierDirError,
+    RewardFileEmptyError,
+    RewardFileNotFoundError,
+    Verifier,
+    VerifierOutputParseError,
+)
 
 from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
@@ -51,6 +66,7 @@ from reef.harness.harbor.node_runtime import (
 )
 from reef.harness.harbor.rollouts import RolloutRow, TaskLab
 from reef.harness.harbor.uv_runtime import UV_BUILDS, UV_VERSION, UvBuild, UvRuntimeError, uv_archive, uv_build_name
+from reef.harness.harbor.verifier import RetryingVerifier
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tasks.run import TaskRunError
 from reef.harness.tasks.trajectory import failed_trial_error
@@ -736,3 +752,126 @@ def test_the_agent_copies_the_skills_of_the_task_into_its_skills_directory_befor
     copied = next(index for index, event in enumerate(events) if copy in event)
     assert copied < events.index(f"upload {CONTAINER_ROOT}")
     assert not any("cp -R" in event for event in run_events(tmp_path / "without"))
+
+
+@pytest.mark.parametrize("failure", [AddTestsDirError("upload interrupted"), RewardFileNotFoundError("no reward")])
+def test_verifier_retries_once_in_the_same_environment_and_keeps_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    task_path = harbor_task(tmp_path)
+    task = Task(task_path, disable_verification=True)
+    environment = create_autospec(BaseEnvironment, instance=True)
+    verifier = RetryingVerifier(
+        task=task, trial_paths=TrialPaths(trial_dir=tmp_path / "trial"), environment=environment
+    )
+    calls: list[Verifier] = []
+    zero = VerifierResult(rewards={"reward": 0.0})
+
+    async def _verify(current: Verifier) -> VerifierResult:
+        calls.append(current)
+        if len(calls) == 1:
+            raise failure
+        return zero
+
+    monkeypatch.setattr(Verifier, "verify", _verify)
+    sleep = AsyncMock()
+    monkeypatch.setattr("reef.harness.harbor.verifier.asyncio.sleep", sleep)
+    assert asyncio.run(verifier.verify()) is zero
+    assert len(calls) == 2 and calls[0] is calls[1]
+    assert all(call.environment is environment for call in calls)
+    environment.start.assert_not_called()
+    environment.stop.assert_not_called()
+    sleep.assert_awaited_once_with(1.0)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        None,
+        RewardFileEmptyError("empty"),
+        VerifierOutputParseError("invalid"),
+        DownloadVerifierDirError("download interrupted"),
+        TimeoutError("deadline"),
+        asyncio.CancelledError(),
+    ],
+)
+def test_verifier_does_not_retry_scores_or_ambiguous_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: BaseException | None
+) -> None:
+    task = Task(harbor_task(tmp_path), disable_verification=True)
+    verifier = RetryingVerifier(
+        task=task,
+        trial_paths=TrialPaths(trial_dir=tmp_path / "trial"),
+        environment=create_autospec(BaseEnvironment, instance=True),
+    )
+    zero = VerifierResult(rewards={"reward": 0.0})
+    verify = AsyncMock(side_effect=failure, return_value=zero)
+    monkeypatch.setattr(Verifier, "verify", verify)
+    if failure is None:
+        assert asyncio.run(verifier.verify()) is zero
+    else:
+        with pytest.raises(type(failure)):
+            asyncio.run(verifier.verify())
+    assert verify.await_count == 1
+
+
+def test_verifier_stops_after_a_second_missing_reward(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    task = Task(harbor_task(tmp_path), disable_verification=True)
+    verifier = RetryingVerifier(
+        task=task,
+        trial_paths=TrialPaths(trial_dir=tmp_path / "trial"),
+        environment=create_autospec(BaseEnvironment, instance=True),
+    )
+    verify = AsyncMock(side_effect=RewardFileNotFoundError("no reward"))
+    monkeypatch.setattr(Verifier, "verify", verify)
+    monkeypatch.setattr("reef.harness.harbor.verifier.asyncio.sleep", AsyncMock())
+    with pytest.raises(RewardFileNotFoundError, match="no reward"):
+        asyncio.run(verifier.verify())
+    assert verify.await_count == 2
+
+
+@pytest.mark.parametrize(
+    ("mode", "bundled_tests"),
+    [("shared", False), ("separate", True), ("separate", False), ("step_separate", True), ("step_separate", False)],
+)
+def test_the_verifier_factory_keeps_tests_in_separate_verifier_images(
+    tmp_path: Path, mode: str, bundled_tests: bool
+) -> None:
+    task_path = harbor_task(tmp_path)
+    step_name = "score" if mode == "step_separate" else None
+    if step_name is None:
+        config = f'version = "1.0"\n[verifier]\nenvironment_mode = "{mode}"\n'
+    else:
+        config = 'version = "1.0"\n[[steps]]\nname = "score"\n[steps.verifier]\nenvironment_mode = "separate"\n'
+    if bundled_tests:
+        section = "steps.verifier.environment" if step_name is not None else "verifier.environment"
+        config += f'[{section}]\ndocker_image = "grader:test"\n'
+    (task_path / "task.toml").write_text(config)
+    if not bundled_tests:
+        (task_path / "tests").mkdir()
+        (task_path / "tests/test.sh").write_text("exit 0\n")
+    task = Task(task_path, disable_verification=True)
+    paths = TrialPaths(trial_dir=tmp_path / "trial")
+    paths.verifier_dir.mkdir(parents=True)
+    environment = create_autospec(BaseEnvironment, instance=True)
+    environment.os = TaskOS.LINUX
+    environment.is_path_mounted.return_value = True
+
+    async def _execute(command: str, **kwargs: object) -> ExecResult:
+        if command.startswith("rm -f -- "):
+            paths.reward_text_path.unlink(missing_ok=True)
+        elif not command.startswith("chmod "):
+            paths.reward_text_path.write_text("0")
+        return ExecResult(return_code=0)
+
+    environment.exec.side_effect = _execute
+    verifier = VerifierFactory.create_verifier_from_config(
+        VerifierConfig(import_path="reef.harness.harbor.verifier:RetryingVerifier"),
+        task=task,
+        trial_paths=paths,
+        environment=environment,
+        step_name=step_name,
+        skip_tests_upload=bundled_tests,
+    )
+    assert asyncio.run(verifier.verify()).rewards == {"reward": 0.0}
+    assert environment.upload_dir.await_count == (0 if bundled_tests else 1)

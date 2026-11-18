@@ -63,8 +63,11 @@ SFT has two pipeline stages
 The training component renders each sample with the model's chat template
 (`Chat template arguments
 <../../reference/configuration.rst#chat-template-arguments>`__). It leaves out
-a sample that cannot render or that is longer than ``max_tokens``, and counts
-it in the job metric ``unrenderable_samples``.
+a sample or context window that cannot render or that is longer than
+``max_tokens``. For rendering failures, the job metric
+``unrenderable_samples`` counts each original sample with rejected input
+once, even when its other windows train. Tinker also counts rendered samples
+that exceed the model's context window.
 
 The ``sft`` objective, built in on Slime and on Tinker, sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
@@ -120,7 +123,8 @@ Train on whole conversations
 A complete conversation, such as an agent rollout with tool calls, can train
 every agent turn at once. Create it as a trajectory item that the scenario uses
 (`Create trajectory items <../../reference/http-api.rst#create-trajectory-items>`__).
-Each uploaded trajectory is one sample. The training component renders it:
+Each uploaded trajectory counts as one stored sample. The training component
+renders it:
 
 - The steps become chat messages: an ``agent`` step is an assistant turn with
   its tool calls, and each observation result is a tool message.
@@ -144,6 +148,34 @@ For example, to keep an earlier answer as context and train only the last one:
      {"step_id": 4, "source": "agent", "message": "37 + 45 = 82."}
    ]}
 
+For an SFT job, a trajectory with multiple complete captured requests in
+``extra.reef.records`` is checked against those requests before rendering.
+This applies to older stored trajectories and imports that retain request
+bodies. Current Reef trajectories store call summaries and use the normal
+rendering path; summaries alone cannot establish the original context.
+Consecutive calls share a training window only when the next request retains
+the previous request and reply as its prefix, with the same model, provider,
+tools and chat template arguments. A rewritten context, such as a compaction
+summary, starts a separate window. Each window uses the context that its
+requests actually sent. Earlier assistant messages copied into a new window
+remain context and receive no loss.
+
+The original trajectory still counts once toward ``job_samples`` and is
+consumed once. Its training windows may produce several optimizer samples.
+``max_tokens`` applies to each rendered segment. A window with an over-limit
+segment is left out. Slime and Tinker enable this processing for the job's
+SFT loss; policy and distillation jobs keep their existing sample grouping.
+
+Reef rejects captured input that cannot establish these windows, including
+missing requests or replies, server-side conversation references, and steps
+that disagree with the captured calls. This conversion supports text and
+function tool calls; images, opaque reasoning and unsupported provider
+content are rejected. The original records remain unchanged.
+For an external trajectory without captured requests, supply each context
+window as its own trajectory and mark copied assistant steps with
+``is_copied_context``. Reef cannot reconstruct omitted context from a session
+log alone.
+
 Reef checks the structure of each trajectory when it accepts the upload. It
 refuses the whole upload with 400, naming the trajectory, when one cannot
 train:
@@ -155,13 +187,16 @@ train:
   of a message or an observation result is not an object, a text part has a
   ``text`` that is not a string, or an image part has no ``source.path``.
 
-The training component leaves a trajectory out of its job when:
+The training component leaves a trajectory or context window out of its job when:
 
-- the chat template does not render each trained turn as a prefix of the
-  whole conversation. A template that removes the reasoning of earlier
-  turns, for example, does not. Set the component's chat template arguments
-  so that it keeps them, or upload each turn as its own trajectory;
-- the sample is longer than ``max_tokens``.
+- the chat template does not render a trained turn after that turn's own
+  generation prompt;
+- a rendered segment is longer than ``max_tokens``.
+
+When a later turn's prompt no longer extends the preceding turn's tokens,
+Reef starts a new token segment. For example, this can happen when a chat
+template removes reasoning from earlier turns. Each segment trains only its
+own new agent tokens.
 
 Configuration
 -------------
@@ -196,10 +231,10 @@ Each stage reads only its own ``config``.
        ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
 
    ``pipeline.record2sample.config.max_tokens`` : 0
-       the maximum tokens in a sample, prompt and target together. The training component leaves a longer sample out and counts it in ``unrenderable_samples``. 0 disables the limit. Set it to the trainer's sequence length.
+       the maximum tokens in a rendered segment, prompt and target together. A sample or context window with a longer segment is left out. 0 disables the limit. Set it to the trainer's sequence length.
 
    ``pipeline.sample2job.config.job_samples`` : required
-       the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
+       the stored samples of one job. The example sets it to ``training.config.global_batch_size``. Captured context windows can make a job larger than one optimizer step.
 
    ``pipeline.sample2job.config.buffer_size`` : ``job_samples``
        the most samples that one job takes. Later samples wait for the next jobs.
