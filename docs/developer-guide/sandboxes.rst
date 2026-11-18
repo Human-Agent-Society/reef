@@ -86,7 +86,11 @@ The class also builds a task's Dockerfile differently in two ways:
   then builds it with Docker's semantics, multi-stage builds included. Before a
   build, the class reads the template's status. It uses a ready template, waits
   for a build that another trial runs, and deletes a failed template before it
-  builds again.
+  builds again. A template that stays ``waiting`` for three minutes has no build
+  behind it, for example after an ``aenv build`` was killed, so the class also
+  deletes it and builds again. A build or a status read that the AgentENV API
+  refuses with 502, 503 or 504 is tried again until the environment's build
+  timeout.
 
 Two callers apply the config. ``reef.harness.harbor.rollouts.TaskRolloutRunner``
 gives it to each in-process trial and to each environment build. That covers
