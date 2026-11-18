@@ -386,10 +386,12 @@ class ModelBinding:
                 f"(declared: {known}); runs cannot reach a model{hint}"
             )
         metadata = {}
-        if self.metadata is not None:
+        # An explicit window makes an entry also without metadata. It claims no reasoning, as the entry of a model
+        # whose metadata is unknown does (Codex's catalog).
+        if self.metadata is not None or self.context_window is not None:
             metadata[self.model] = {
                 "context_window": self.context_window_tokens,
-                "reasoning": self.metadata.reasoning,
+                "reasoning": self.metadata is not None and self.metadata.reasoning,
             }
         values: dict[str, Any] = {
             "base_url": self.base_url,

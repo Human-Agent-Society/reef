@@ -24,6 +24,7 @@ other runtime.
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
@@ -49,12 +50,14 @@ from reef.core.evaluation import (
     RolloutScore,
     RolloutScores,
     harness_item,
+    harness_item_config,
     harness_item_env,
     mean_score,
 )
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import TrajectoryBuilder
 from reef.core.trajectory_index import TrajectoryIndex
+from reef.core.values import deep_merge
 from reef.dispatcher import Dispatcher
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
@@ -66,6 +69,7 @@ from reef.evaluation.rollout_worker import (
 )
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.adapters.parts import PLACEHOLDER
 from reef.harness.harbor.agent import can_run_in_task_container
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.scenario.scenario import Scenario
@@ -1008,12 +1012,21 @@ class ArtifactEvaluations:
             raise ValueError(f"the eval split of the imported tasks holds no task of the collection {name!r}")
         return EvaluationCollection(name, stored.average, benchmarks)
 
-    def tree_harness(self, scenario: str, item_id: str, api: str, env: Mapping[str, str]) -> TreeHarness:
+    def tree_harness(
+        self,
+        scenario: str,
+        item_id: str,
+        api: str,
+        env: Mapping[str, str],
+        config: Mapping[str, Mapping[str, Any]],
+    ) -> TreeHarness:
         """The harness tree of the artifact item ``item_id`` of the owner of ``scenario``, for model calls of the
-        dialect ``api``, whose agent's commands get the variables ``env``.
+        dialect ``api``, whose agent's commands get the variables ``env``. Each object of ``config`` merges into the
+        tree's ``config/<target>.json`` of its config target, as a tree's own config would.
 
-        Raise ``ValueError`` when the item is not a tree that a task's container can run, or when ``env`` sets a
-        token limit that is not a positive integer. The tasks are not read
+        Raise ``ValueError`` when the item is not a tree that a task's container can run, when the tree with
+        ``config`` fails the adapter's validation, such as for a key that Reef's model binding writes, or when
+        ``env`` sets a token limit that is not a positive integer. The tasks are not read
         here: each rollout checks its own task against the tree's agent (``EvaluationRolloutWorker.score``).
         """
         owner = self.dispatcher.scenario_owner(scenario)
@@ -1047,6 +1060,17 @@ class ArtifactEvaluations:
         validation = validate_tree(tree, descriptor)
         if not validation.passed:
             raise ValueError(f"the harness tree of item {item_id!r} fails validation: {validation.message()}")
+        if config:
+            configured = dict(tree.files)
+            for target, data in config.items():
+                path = descriptor.layout.parts["config"].path.replace(PLACEHOLDER, target)
+                configured[path] = (
+                    json.dumps(deep_merge(json.loads(configured.get(path, "{}")), data), indent=2) + "\n"
+                )
+            tree = HarnessTree(configured)
+            validation = validate_tree(tree, descriptor)
+            if not validation.passed:
+                raise ValueError(f"the harness config fails validation: {validation.message()}")
         harness = TreeHarness(adapter, api, tree.files, env)
         # Rendering now refuses a bad tree here, and not at the end of the evaluation.
         harness.policy_harness()
@@ -1107,7 +1131,13 @@ class ArtifactEvaluations:
         names = sampled
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
-        tree = None if item is None else self.tree_harness(scenario, item, api, harness_item_env(request.harness))
+        tree = (
+            None
+            if item is None
+            else self.tree_harness(
+                scenario, item, api, harness_item_env(request.harness), harness_item_config(request.harness)
+            )
+        )
         agent = None if tree is not None else harbor_agent(request.harness)
         # The stored request names its tasks, so that the rollouts that wait can be added later.
         request = replace(request, task_names=names, collection=collection)

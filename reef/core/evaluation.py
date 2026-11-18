@@ -411,6 +411,12 @@ def harness_item_env(harness: Mapping[str, Any] | None) -> dict[str, str]:
     return {} if harness is None else dict(harness.get("env") or {})
 
 
+def harness_item_config(harness: Mapping[str, Any] | None) -> dict[str, Mapping[str, Any]]:
+    """The config that ``harness``, an ``ArtifactEvaluationRequest``'s value, merges into a harness item's tree, by
+    config target: its ``config``; none for no harness or a harness without one."""
+    return {} if harness is None else dict(harness.get("config") or {})
+
+
 @dataclass(frozen=True)
 class ArtifactEvaluationRequest:
     """A client's request to evaluate one artifact: a component of a snapshot, with the other side of its policy.
@@ -420,7 +426,9 @@ class ArtifactEvaluationRequest:
     harness that runs a model artifact: a Harbor agent (an object with a non-empty ``name`` or ``import_path``, as
     ``TaskRolloutRunner``'s ``agent``), or an artifact item of a harness tree of the scenario's owner (an object
     with a non-empty ``item``, and optionally ``env``, which maps variable names to the values that the agent's
-    commands get; a value holds no ``${``, which Harbor would fill from Reef's own environment); or ``model``, the
+    commands get, where a value holds no ``${``, which Harbor would fill from Reef's own environment, and
+    ``config``, which maps the name of each of the adapter's config targets to a JSON object that merges into the
+    tree's ``config/<target>.json``); or ``model``, the
     non-empty name of the deployment's model binding that a harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
     ``collection`` is None, or the ``EvaluationCollection`` that the evaluation runs on; its tasks are then exactly
     ``task_names``.
@@ -460,12 +468,20 @@ class ArtifactEvaluationRequest:
                 raise ValueError("an artifact evaluation's harness is a JSON object")
             if "item" in self.harness:
                 if (
-                    not set(self.harness) <= {"item", "env"}
+                    not set(self.harness) <= {"item", "env", "config"}
                     or not isinstance(self.harness["item"], str)
                     or not self.harness["item"]
                 ):
                     raise ValueError(
-                        "an artifact evaluation's harness item is a non-empty string, with no other key but env"
+                        "an artifact evaluation's harness item is a non-empty string, with no other key but env "
+                        "and config"
+                    )
+                config = self.harness.get("config", {})
+                if not isinstance(config, Mapping) or not all(
+                    isinstance(target, str) and target and isinstance(data, Mapping) for target, data in config.items()
+                ):
+                    raise ValueError(
+                        "an artifact evaluation's harness config maps config target names to JSON objects"
                     )
                 env = self.harness.get("env", {})
                 if not isinstance(env, Mapping) or not all(
