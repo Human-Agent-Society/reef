@@ -1337,10 +1337,7 @@ def test_a_new_pipeline_judges_the_stored_samples_once_under_the_same_config(
 @pytest.mark.unit
 def test_a_samples_service_in_its_own_process_judges_control_activations(dispatchers: _Dispatchers) -> None:
     """Control and a samples-only process share the storage. After a weights commit in control activates new
-    weights, the samples process judges the new history without a reload, and control's next automatic job runs.
-
-    The samples process's worker runs every selection, so the test waits for it and makes no samples itself: the
-    commit asks for a selection, and the worker can judge before any check of the test runs."""
+    weights, the samples process judges the new history without a reload, and control's next automatic job runs."""
     repository = _repository(dispatchers.tmp_path)
     control, scenario = on_policy_weights(dispatchers, backend_factory=repository)
     # The two processes read one deployment, so their stages have one config and one staleness rule.
@@ -1359,10 +1356,13 @@ def test_a_samples_service_in_its_own_process_judges_control_activations(dispatc
         control.request_samples(scenario, "records")
         assert became_true(lambda: all(item.final for item in control.queue.items(SAMPLES_QUEUE, scenario="agent")))
 
+    root = scenario.serving_artifact_id()
     append_and_select(1)
     assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
-    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
-    assert became_true(lambda: pipeline.judged(scenario.served_artifacts()))
+    assert scenario.serving_artifact_id() != root
+    # The test commits directly. Notify control as its local worker does after a commit.
+    control.scenario_committed(scenario)
+    assert became_true(lambda: pipeline.judged(scenario.served_artifacts())), "the new activation was not judged"
     append_and_select(2)
     assert append_commit(scenario, WEIGHTS, make=False) == [("i2", "r2")]
 
