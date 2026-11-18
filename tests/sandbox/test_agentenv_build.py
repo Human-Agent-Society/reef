@@ -24,13 +24,18 @@ from reef.execution.sandbox.agentenv_build import (
     ensure_aenv_template,
 )
 
-#: A fake ``aenv``: it records its arguments and the credentials that it reads, then acts as FAKE_AENV_MODE says.
+#: A fake ``aenv``: it records its arguments, the credentials that it reads and each run, then acts as FAKE_AENV_MODE
+#: says. ``flaky`` fails its first run on an overloaded API and passes the next.
 FAKE_AENV = """#!/bin/sh
 printf '%s\\n' "$@" > "$FAKE_AENV_LOG.args"
 cp "$XDG_CONFIG_HOME/aenv/credentials" "$FAKE_AENV_LOG.credentials"
+echo run >> "$FAKE_AENV_LOG.runs"
 case "$FAKE_AENV_MODE" in
   ok) echo "Template ready." ;;
   conflict) echo "Error: HTTP 400: alias 'a' already points to 'x', cannot rebind to 'y'"; exit 1 ;;
+  flaky)
+    if [ "$(wc -l < "$FAKE_AENV_LOG.runs")" -eq 1 ]; then echo "Error: HTTP 503: Service Unavailable"; exit 1; fi
+    echo "Template ready." ;;
   *) echo "#5 ERROR: process apt-get did not complete"; exit 1 ;;
 esac
 """
@@ -38,9 +43,10 @@ esac
 
 class FakeAgentEnv:
     """A fake AgentENV template API. ``states`` holds the answers to the reads of the alias, in order; the last answer
-    repeats. An answer is None (no template) or ``(template_id, status)``. ``deleted`` records each deletion."""
+    repeats. An answer is None (no template), ``(template_id, status)``, or ``503`` (an overloaded API). A template
+    that ``deleted`` records, each deletion in order, reads as no template."""
 
-    def __init__(self, states: list[tuple[str, str] | None]) -> None:
+    def __init__(self, states: list[tuple[str, str] | int | None]) -> None:
         self.states = states
         self.deleted: list[str] = []
         self.current: tuple[str, str] | None = None
@@ -48,7 +54,11 @@ class FakeAgentEnv:
     def app(self) -> web.Application:
         async def alias(request: web.Request) -> web.Response:
             assert request.headers["X-API-Key"] == "key"
-            self.current = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+            answer = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+            if answer == 503:
+                return web.json_response({"message": "Service Unavailable"}, status=503)
+            assert not isinstance(answer, int)
+            self.current = None if answer is not None and answer[0] in self.deleted else answer
             if self.current is None:
                 return web.json_response({"message": "template alias not found"}, status=404)
             return web.json_response({"templateID": self.current[0], "public": False})
@@ -81,6 +91,7 @@ def fake_aenv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_AENV_LOG", str(tmp_path / "aenv"))
     monkeypatch.setattr(agentenv_build, "BUILD_POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(agentenv_build, "ORPHAN_WAITING_S", 0.1)
     yield tmp_path / "aenv"
 
 
@@ -200,3 +211,23 @@ def test_a_failed_build_raises_with_the_end_of_its_output(
     monkeypatch.setenv("FAKE_AENV_MODE", "fail")
     with pytest.raises(AgentEnvBuildError, match="exit code 1: #5 ERROR: process apt-get did not complete"):
         ensured(FakeAgentEnv([None]), task_build(tmp_path))
+
+
+@pytest.mark.unit
+def test_a_template_left_waiting_is_an_orphan_that_is_deleted_and_built_again(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An aenv build that was killed or refused left the template waiting, with no build behind it.
+    monkeypatch.setenv("FAKE_AENV_MODE", "ok")
+    fake = FakeAgentEnv([("t1", "waiting")])
+    ensured(fake, task_build(tmp_path))
+    assert fake.deleted == ["t1"] and Path(f"{fake_aenv}.args").exists()
+
+
+@pytest.mark.unit
+def test_a_build_and_a_read_that_an_overloaded_api_refuses_are_tried_again(
+    tmp_path: Path, fake_aenv: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_AENV_MODE", "flaky")
+    ensured(FakeAgentEnv([503, None]), task_build(tmp_path))
+    assert Path(f"{fake_aenv}.runs").read_text().splitlines() == ["run", "run"]

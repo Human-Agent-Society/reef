@@ -10,6 +10,10 @@ another build under that alias until the template is deleted. So ``ensure_aenv_t
 before it builds: it uses a ready template, waits for a build that another trial runs, and deletes a failed template
 before it builds again.
 
+``aenv build`` makes the template, in the status ``waiting``, before it starts the build. An ``aenv build`` that stops
+then, killed or refused by an overloaded API, leaves the template ``waiting`` for good, and the alias bound to it. So a
+template that stays ``waiting`` for ``ORPHAN_WAITING_S`` is an orphan: ``ensure_aenv_template`` deletes it and builds.
+
 ``KillOnTimeoutE2BEnvironment`` (``reef.execution.sandbox.e2b``) uses this module when ``REEF_E2B_DOCKERFILE_BUILD`` is
 ``aenv``. The ``aenv`` CLI and its ``aenv-buildctl`` must be on ``PATH``.
 """
@@ -20,6 +24,7 @@ import asyncio
 import io
 import logging
 import os
+import random
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -38,8 +43,14 @@ logger = logging.getLogger(__name__)
 #: default) or ``aenv`` (``aenv build`` on an AgentENV deployment).
 DOCKERFILE_BUILD_VARIABLE = "REEF_E2B_DOCKERFILE_BUILD"
 DOCKERFILE_BUILDS = ("e2b", "aenv")
-#: How long a wait for another trial's build sleeps between two reads of the build's status.
-BUILD_POLL_INTERVAL_S = 5.0
+#: How long a wait for another trial's build sleeps between two reads of the build's status, on average: each sleep
+#: is from half to one and a half times it, so that the trials that wait for one build do not read it together.
+BUILD_POLL_INTERVAL_S = 15.0
+#: How long a template can stay ``waiting`` before it counts as an orphan: ``aenv build`` starts its build at once
+#: after it makes the template, so a live build leaves ``waiting`` within seconds.
+ORPHAN_WAITING_S = 180.0
+#: The HTTP statuses of an AgentENV API that is down or overloaded for a while: a later request can pass.
+TRANSIENT_STATUSES = (502, 503, 504)
 #: The statuses of an AgentENV template build, with E2B's names.
 BUILD_STATUSES = ("waiting", "building", "ready", "error")
 #: The part of ``aenv build``'s error when another build holds the alias (AgentENV's ``AliasConflict``).
@@ -80,6 +91,10 @@ class AgentEnvBuildError(InternalError):
 
 class AliasConflictError(AgentEnvBuildError):
     """``aenv build`` found its alias bound to the template of another build."""
+
+
+class TransientBuildError(AgentEnvBuildError):
+    """``aenv build`` failed on a status of ``TRANSIENT_STATUSES`` from the AgentENV API: a later build can pass."""
 
 
 @dataclass(frozen=True)
@@ -227,7 +242,23 @@ class DockerfileBuild:
         tail = text[-BUILD_OUTPUT_TAIL_CHARS:]
         if ALIAS_CONFLICT_TEXT in text:
             raise AliasConflictError(f"another build holds the alias {self.alias}: {tail}")
-        raise AgentEnvBuildError(f"aenv build of {self.alias} failed with exit code {process.returncode}: {tail}")
+        message = f"aenv build of {self.alias} failed with exit code {process.returncode}: {tail}"
+        if any(f"HTTP {status}" in text for status in TRANSIENT_STATUSES):
+            raise TransientBuildError(message)
+        raise AgentEnvBuildError(message)
+
+
+def poll_interval() -> float:
+    """One sleep between two reads of a build's status: from half to one and a half times ``BUILD_POLL_INTERVAL_S``."""
+    return BUILD_POLL_INTERVAL_S * random.uniform(0.5, 1.5)
+
+
+def is_transient(error: aiohttp.ClientError | asyncio.TimeoutError) -> bool:
+    """Whether ``error`` of a request to the AgentENV API can pass later: a status of ``TRANSIENT_STATUSES``, or no
+    answer at all."""
+    if isinstance(error, aiohttp.ClientResponseError):
+        return error.status in TRANSIENT_STATUSES
+    return isinstance(error, (aiohttp.ClientConnectionError, asyncio.TimeoutError))
 
 
 async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
@@ -235,13 +266,27 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
 
     A ready template is used as it is. While another trial builds the template, this waits for it, at most
     ``build.timeout_seconds``, and then raises ``TimeoutError``. A failed template is deleted, and the alias is built
-    again. When the alias names no template, ``build`` runs; when another trial starts a build under the alias first,
-    this waits for that build. A failure of this trial's own build raises its ``AgentEnvBuildError``.
+    again; so is a template that this wait saw ``waiting``, unchanged, for ``ORPHAN_WAITING_S`` (an orphan). When the
+    alias names no template, ``build`` runs; when another trial starts a build under the alias first, this waits for
+    that build. A failure of this trial's own build deletes the ``waiting`` template that it left. A build or a read
+    that the API refuses for a while (``is_transient``, ``TransientBuildError``) is tried again until the deadline; any
+    other failure of this trial's own build raises its ``AgentEnvBuildError``.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + build.timeout_seconds
+    #: The waiting template that this wait saw first, and when.
+    waiting_since: tuple[str, float] | None = None
     while True:
-        state = await templates.state(build.alias)
+        try:
+            state = await templates.state(build.alias)
+        except (TimeoutError, aiohttp.ClientError) as error:
+            if not is_transient(error):
+                raise
+            if loop.time() >= deadline:
+                raise TimeoutError(f"the AgentENV API did not answer for the template {build.alias}") from error
+            logger.warning("could not read the template %s; reading it again: %s", build.alias, error)
+            await asyncio.sleep(poll_interval())
+            continue
         if state is not None and state.status == "ready":
             return
         if loop.time() >= deadline:
@@ -253,13 +298,40 @@ async def ensure_aenv_template(templates: AgentEnvTemplates, build: DockerfileBu
                 return
             except AliasConflictError:
                 logger.info("another trial builds the template %s; waiting for it", build.alias)
-                await asyncio.sleep(BUILD_POLL_INTERVAL_S)
-                continue
-        if state.status == "error":
-            logger.warning("deleting the failed template %s (%s): %s", build.alias, state.template_id, state.reason)
-            await templates.delete(state.template_id)
+            except AgentEnvBuildError as error:
+                await delete_orphan(templates, build.alias)
+                if not isinstance(error, TransientBuildError):
+                    raise
+                logger.warning("the AgentENV API refused the build of %s; building it again: %s", build.alias, error)
+            await asyncio.sleep(poll_interval())
             continue
-        await asyncio.sleep(BUILD_POLL_INTERVAL_S)
+        orphan = False
+        if state.status == "waiting":
+            if waiting_since is None or waiting_since[0] != state.template_id:
+                waiting_since = (state.template_id, loop.time())
+            orphan = loop.time() - waiting_since[1] >= ORPHAN_WAITING_S
+        if state.status == "error" or orphan:
+            reason = state.reason if state.status == "error" else f"waiting for {ORPHAN_WAITING_S:.0f} s"
+            logger.warning("deleting the template %s (%s): %s", build.alias, state.template_id, reason)
+            try:
+                await templates.delete(state.template_id)
+                continue
+            except (TimeoutError, aiohttp.ClientError) as error:
+                if not is_transient(error):
+                    raise
+                logger.warning("could not delete the template %s; trying again: %s", build.alias, error)
+        await asyncio.sleep(poll_interval())
+
+
+async def delete_orphan(templates: AgentEnvTemplates, alias: str) -> None:
+    """Delete the template that ``alias`` names when it is ``waiting``: a failed ``aenv build`` leaves it so. A read or a
+    delete that fails is logged, and the orphan check of a later wait deletes the template."""
+    try:
+        state = await templates.state(alias)
+        if state is not None and state.status == "waiting":
+            await templates.delete(state.template_id)
+    except (TimeoutError, aiohttp.ClientError) as error:
+        logger.warning("could not delete the template %s that a failed build left: %s", alias, error)
 
 
 __all__ = [
@@ -270,6 +342,7 @@ __all__ = [
     "AliasConflictError",
     "DockerfileBuild",
     "TemplateState",
+    "TransientBuildError",
     "dockerfile_build",
     "dockerfile_sets_start_command",
     "ensure_aenv_template",
