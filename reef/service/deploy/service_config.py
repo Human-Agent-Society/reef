@@ -18,6 +18,7 @@ from typing import Any
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory
 from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
+from reef.evaluation.rollout_worker import ON_STOP_CHOICES
 from reef.evaluation.trials import TrialObserver
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
@@ -281,6 +282,13 @@ class ServiceSettings:
         public_path=("evaluation", "max_sandboxes"),
         help="The task sandboxes that one process of the evaluation service holds at once: one for each rollout.",
     )
+    #: What a stopping process of the evaluation service does with the rollouts that it runs (``ON_STOP_CHOICES`` of
+    #: ``reef.evaluation.rollout_worker``): ``requeue`` gives them back to the queue at once, ``finish`` finishes them.
+    evaluation_on_stop: str = config_option(
+        "requeue",
+        public_path=("evaluation", "on_stop"),
+        help="requeue or finish: what a stopping evaluation process does with the rollouts that it runs.",
+    )
     #: Unset, or a ``TrialObserver`` plugin: ``package.module:ClassName`` or module and config.
     evaluation_trial_observer: str | Mapping[str, Any] | None = config_option(
         None,
@@ -513,6 +521,8 @@ class ServiceSettings:
         sandboxes = self.evaluation_max_sandboxes
         if isinstance(sandboxes, bool) or not isinstance(sandboxes, int) or sandboxes < 1:
             raise ValueError("evaluation.max_sandboxes must be a positive integer")
+        if self.evaluation_on_stop not in ON_STOP_CHOICES:
+            raise ValueError(f"evaluation.on_stop must be one of {', '.join(ON_STOP_CHOICES)}")
         if self.evaluation_trial_observer is not None:
             TrialObserver.reference(self.evaluation_trial_observer, setting="evaluation.trial_observer")
         if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
