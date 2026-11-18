@@ -946,8 +946,7 @@ def test_the_job_objective_selects_context_splitting_and_keeps_token_samples(
     captured = recorded_trajectory("captured", calls[-1], 1.0, trajectory=calls)
     captured = captured.with_metadata(
         records=[
-            {**record, "payload": payload}
-            for record, payload in zip(captured.metadata["records"], calls, strict=True)
+            {**record, "payload": payload} for record, payload in zip(captured.metadata["records"], calls, strict=True)
         ]
     )
     data = JobData("rewritten-context", (batch_for(0).samples[0], captured))
