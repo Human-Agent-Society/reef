@@ -10,7 +10,9 @@ asks for the hour again before it ends (:class:`SandboxKeeper`).
 
 ``KillOnTimeoutE2BEnvironment`` reuses Harbor's E2B environment for task trials. It requests deletion at timeout,
 so AgentENV deletes an abandoned sandbox instead of pausing it. It also keeps the file modes of a task's
-``COPY --chmod``, which E2B's Dockerfile parser ignores (:func:`dockerfile_with_copy_modes`). The shared
+``COPY --chmod``, which E2B's Dockerfile parser ignores (:func:`dockerfile_with_copy_modes`). On AgentENV, whose E2B
+template builds take no files, ``REEF_E2B_DOCKERFILE_BUILD=aenv`` makes it build a task's Dockerfile with
+``aenv build`` (:mod:`reef.execution.sandbox.agentenv_build`). The shared
 ``environment_config`` selects this class for Reef's Harbor rollouts and generator checks through ``import_path``.
 A standalone Harbor trial that selects only ``e2b`` uses Harbor's own class.
 
@@ -25,6 +27,8 @@ from __future__ import annotations
 
 import io
 import logging
+import math
+import os
 import posixpath
 import re
 import shlex
@@ -39,6 +43,13 @@ from harbor.environments.e2b import E2BEnvironment
 from harbor.models.task.config import NetworkMode
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from reef.execution.sandbox.agentenv_build import (
+    AgentEnvTemplates,
+    DockerfileBuild,
+    dockerfile_build,
+    dockerfile_sets_start_command,
+    ensure_aenv_template,
+)
 from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramLaunchError,
@@ -72,6 +83,9 @@ TRAFFIC_ACCESS_TOKEN_HEADER = "e2b-traffic-access-token"
 #: The end of the template alias of a task whose Dockerfile has ``--chmod``. Harbor's class builds that template
 #: without the modes, so Reef's class does not use a template that Harbor's class built.
 COPY_MODES_TEMPLATE_SUFFIX = "__copy-modes"
+#: The end of the template alias that ``aenv build`` builds, so that it never names a template of E2B's template API,
+#: which AgentENV builds without the task's files.
+AENV_TEMPLATE_SUFFIX = "__aenv"
 
 
 def dockerfile_with_copy_modes(dockerfile: str, context_dir: Path) -> str:
@@ -409,9 +423,14 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
 
     Values: those of ``E2BEnvironment``. Harbor makes one from a trial's environment config, so the sandbox's lifetime
     (``sandbox_timeout_secs``), its metadata, its startup environment and its network options are the parent's, and
-    ``type()`` is ``e2b``. The template is the parent's, with one difference: when the task builds its image from a
-    Dockerfile that has ``--chmod``, the template is built from ``dockerfile_with_copy_modes`` of that Dockerfile, and
-    its alias ends with ``COPY_MODES_TEMPLATE_SUFFIX``.
+    ``type()`` is ``e2b``. ``dockerfile_build`` is the value of ``REEF_E2B_DOCKERFILE_BUILD`` when it was made. The
+    template is the parent's, with two differences for a task that builds its image from a Dockerfile:
+
+    - With ``dockerfile_build`` ``aenv``, ``aenv build`` builds the template on the AgentENV deployment
+      (``reef.execution.sandbox.agentenv_build``), and its alias ends with ``AENV_TEMPLATE_SUFFIX``.
+    - Else, when the Dockerfile has ``--chmod``, the template is built from ``dockerfile_with_copy_modes`` of it, and
+      its alias ends with ``COPY_MODES_TEMPLATE_SUFFIX``.
+
     Purpose: Harbor's ``EnvironmentFactory`` makes one for an ``e2b`` trial whose environment config names this class
     as its ``import_path``. ``start`` builds a missing template with ``_create_template``, creates the sandbox with
     ``_create_sandbox``, and ``stop`` deletes it, as before.
@@ -419,18 +438,52 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.dockerfile_build = dockerfile_build(os.environ)
         # Harbor builds the template from the task's image when it has one; then the Dockerfile is not read.
-        if not self.task_env_config.docker_image:
-            dockerfile = self._environment_definition_path.read_text()
-            if dockerfile_with_copy_modes(dockerfile, self.environment_dir) != dockerfile:
-                self._template_name += COPY_MODES_TEMPLATE_SUFFIX
+        if self.task_env_config.docker_image:
+            return
+        if self.dockerfile_build == "aenv":
+            self._template_name += AENV_TEMPLATE_SUFFIX
+            return
+        dockerfile = self._environment_definition_path.read_text()
+        if dockerfile_with_copy_modes(dockerfile, self.environment_dir) != dockerfile:
+            self._template_name += COPY_MODES_TEMPLATE_SUFFIX
 
-    # Harbor 0.25.0's template build, with one change: the Dockerfile is ``dockerfile_with_copy_modes`` of the task's
-    # Dockerfile. The decorator is Harbor's retry policy. The parity test in tests/sandbox/test_task_environment.py
-    # compares the build with Harbor's for a Dockerfile without ``--chmod``.
+    @property
+    def builds_with_aenv(self) -> bool:
+        """Whether ``aenv build`` builds this trial's template: the task builds from a Dockerfile, and
+        ``REEF_E2B_DOCKERFILE_BUILD`` is ``aenv``."""
+        return self.dockerfile_build == "aenv" and not self.task_env_config.docker_image
+
+    @override
+    async def _does_template_exist(self) -> bool:
+        # An AgentENV alias can name a template that is still building or that failed. ``ensure_aenv_template`` in
+        # ``_create_template`` reads its status and returns at once for a ready template.
+        if self.builds_with_aenv:
+            return False
+        return await super()._does_template_exist()
+
+    # Harbor 0.25.0's template build, with two changes: with ``builds_with_aenv``, ``aenv build`` builds the template;
+    # else the Dockerfile is ``dockerfile_with_copy_modes`` of the task's Dockerfile. The decorator is Harbor's retry
+    # policy. The parity test in tests/sandbox/test_task_environment.py compares the build with Harbor's for a
+    # Dockerfile without ``--chmod``.
     @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=10), reraise=True)
     @override
     async def _create_template(self) -> None:
+        if self.builds_with_aenv:
+            dockerfile = self._environment_definition_path.read_text()
+            cpus = self._effective_cpus
+            build = DockerfileBuild(
+                context_dir=self.environment_dir,
+                dockerfile=self._environment_definition_path,
+                alias=self._template_name,
+                cpu_count=None if cpus is None else int(cpus),
+                memory_mb=self._effective_memory_mb,
+                timeout_seconds=min(max(math.ceil(self.task_env_config.build_timeout_sec), 1), 86400),
+                start_command=dockerfile_sets_start_command(dockerfile),
+            )
+            await ensure_aenv_template(AgentEnvTemplates.from_environ(os.environ), build)
+            return
         # Keep this optional SDK import inside template creation.
         from e2b import AsyncTemplate, Template
 
@@ -475,6 +528,7 @@ class KillOnTimeoutE2BEnvironment(E2BEnvironment):
 
 
 __all__ = [
+    "AENV_TEMPLATE_SUFFIX",
     "COPY_MODES_TEMPLATE_SUFFIX",
     "TRAFFIC_ACCESS_TOKEN_HEADER",
     "E2BExecutor",

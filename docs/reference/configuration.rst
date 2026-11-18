@@ -2314,6 +2314,12 @@ runs the rollouts. The first two select the service's API and sandbox
 endpoints. The Slime training component applies these settings to its
 workers automatically.
 
+On AgentENV, also set ``REEF_E2B_DOCKERFILE_BUILD=aenv`` in that process, and
+put AgentENV's ``aenv`` CLI and its ``aenv-buildctl`` on ``PATH``. AgentENV's
+E2B template builds refuse a Dockerfile's COPY steps. With this setting, Reef
+builds each task's Dockerfile with ``aenv build`` and the same ``E2B_API_URL``
+and ``E2B_API_KEY``. The default, ``e2b``, uses E2B's template API.
+
 Harbor deletes the sandbox when the rollout ends. If the rollout process is
 killed before cleanup, the sandbox's lifetime limits how long it can remain.
 The lifetime is the sum of the task's build, agent and verifier time limits,

@@ -316,3 +316,47 @@ def test_reefs_e2b_template_is_harbors_and_keeps_the_modes_of_copy_chmod(
         ("WORKDIR", ["/home/user"]),
     ]
     assert not any(step["type"] == "RUN" for step in modes["harbor"]["steps"])
+
+
+@pytest.mark.unit
+def test_with_aenv_builds_reefs_class_builds_the_tasks_dockerfile_with_aenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("e2b")
+    from reef.execution.sandbox import e2b as reef_e2b
+    from reef.execution.sandbox.agentenv_build import AgentEnvTemplates, DockerfileBuild
+
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "aenv")
+    monkeypatch.setenv("E2B_API_URL", "https://api.agentenv.example/")
+    monkeypatch.setenv("E2B_API_KEY", "key")
+    dockerfile = "FROM debian AS build\nRUN make\nFROM python:3.12-slim\nCOPY --chmod=0500 tool /opt/tool\n"
+    environments = harbor_e2b_environments(tmp_path, dockerfile=dockerfile)
+    reef, harbor = environments["reef"], environments["harbor"]
+    calls: list[tuple[AgentEnvTemplates, DockerfileBuild]] = []
+
+    async def ensure(templates: AgentEnvTemplates, build: DockerfileBuild) -> None:
+        calls.append((templates, build))
+
+    monkeypatch.setattr(reef_e2b, "ensure_aenv_template", ensure)
+    # The alias is its own: an E2B template build of AgentENV, without the task's files, never answers for it.
+    assert reef._template_name == harbor._template_name + reef_e2b.AENV_TEMPLATE_SUFFIX
+    # Reef's class always reads the alias's state itself; AgentENV's alias check also answers for a failed build.
+    assert asyncio.run(reef._does_template_exist()) is False
+    asyncio.run(reef._create_template())
+    templates, build = calls[0]
+    assert templates == AgentEnvTemplates("https://api.agentenv.example", "key")
+    environment_dir = tmp_path / "task" / "environment"
+    # The Dockerfile as the task wrote it: BuildKit builds the stages and sets the mode. The task's resources and
+    # build time limit; no start command, as the last stage has none.
+    assert build == DockerfileBuild(
+        context_dir=environment_dir,
+        dockerfile=environment_dir / "Dockerfile",
+        alias=reef._template_name,
+        cpu_count=2,
+        memory_mb=4096,
+        timeout_seconds=120,
+        start_command=False,
+    )
+    monkeypatch.setenv("REEF_E2B_DOCKERFILE_BUILD", "kaniko")
+    with pytest.raises(ValueError, match="REEF_E2B_DOCKERFILE_BUILD must be one of e2b, aenv"):
+        harbor_e2b_environments(tmp_path / "other", dockerfile=dockerfile)
