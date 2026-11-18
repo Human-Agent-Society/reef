@@ -485,6 +485,22 @@ def test_opencode_binding_gives_the_model_its_limits_from_metadata_env_or_the_de
     )
 
 
+def test_pi_and_codex_take_the_context_window_that_a_run_sets() -> None:
+    """pi gets the binding's window always. Codex's catalog gets an entry only for known metadata or an explicit
+    window: a guessed window would replace Codex's own handling of a model it does not know."""
+    binding = ModelBinding("http://up", "served", api_key="k", api="responses")
+    configured = binding.with_env_limits({"REEF_CONTEXT_WINDOW": "65536"})
+    assert models_overlay(configured)["providers"]["reef"]["models"][0]["contextWindow"] == 65536
+
+    def codex_models(binding: ModelBinding) -> object:
+        return dict(binding.config_overlays(get_adapter("codex")))["models"]["models"]
+
+    assert codex_models(binding) == {}
+    assert codex_models(configured) == {"served": {"context_window": 65536, "reasoning": False}}
+    known = replace(configured, metadata=ModelMetadata(context_window=262144, reasoning=True))
+    assert codex_models(known) == {"served": {"context_window": 65536, "reasoning": True}}
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "1e5", "big", ""])
 def test_a_token_limit_in_the_env_is_a_positive_integer(value: str) -> None:
     with pytest.raises(ValueError, match="REEF_CONTEXT_WINDOW must be a positive number of tokens"):
@@ -612,6 +628,7 @@ def test_a_pi_tree_carries_the_bindings_reply_budget_as_a_number() -> None:
     models = models_overlay(binding)
     assert models["providers"]["reef"]["models"][0] == {
         "id": "anthropic/claude-sonnet-5",
+        "contextWindow": DEFAULT_CONTEXT_WINDOW,
         "maxTokens": 32000,
     }
     assert binding.max_output_tokens == 32000

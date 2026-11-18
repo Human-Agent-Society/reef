@@ -1392,7 +1392,12 @@ The body takes these fields:
   and ``REEF_MAX_OUTPUT_TOKENS`` also set the model's token limits in the
   rendered tree, each a positive number of tokens (`Token limits
   <../developer-guide/harness-adapters.rst#token-limits>`__). A Harbor agent
-  takes variables in its own ``env`` key.
+  takes variables in its own ``env`` key. ``"config": {"<target>": {...}}``
+  merges each JSON object into the tree's ``config/<target>.json``, as if the
+  tree held it. The tree with the config must pass the adapter's validation
+  (`Config checks <../developer-guide/harness-adapters.rst#config-checks>`__),
+  so the config sets no key that Reef's model binding writes. Reef refuses the
+  evaluation with 400 otherwise.
 - ``model``: the model binding that a harness artifact runs on. A request
   sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run. Leave it out to run every eval task.

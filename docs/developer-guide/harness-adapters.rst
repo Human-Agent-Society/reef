@@ -524,8 +524,29 @@ A binding template can give the agent the model's token limits:
 
 An agent compacts its history before the context window fills. Without a
 window, opencode never compacts, and a long run fails at the endpoint's
-limit. So the ``opencode`` binding always writes ``limit.context`` and
-``limit.output`` for each model. ``pi`` reads ``{max_output_tokens}`` only.
+limit. The bindings use the limits as follows:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 14 43 43
+
+   * - Adapter
+     - Context window
+     - Reply budget
+   * - ``opencode``
+     - ``limit.context`` of each model, always
+     - ``limit.output`` of each model, always
+   * - ``pi``
+     - ``contextWindow`` of each model, always
+     - ``maxTokens`` of each model, always
+   * - ``codex``
+     - ``context_window`` of the model's catalog entry, only with the
+       endpoint's model metadata or ``REEF_CONTEXT_WINDOW``. Without either,
+       Codex keeps its own handling of a model it does not know, and the
+       entry claims no reasoning.
+     - not written
+
+The other adapters write neither limit.
 
 A harness item's ``env`` sets the two variables for an artifact evaluation
 (``POST /reef/scenarios/{scenario}/evaluations``). Reef refuses a value that

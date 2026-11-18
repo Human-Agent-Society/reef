@@ -1331,7 +1331,11 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
             activated: list[str] = []
             evaluations.results.activate = lambda scenario, request: activated.append(request.artifact_id)
             item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
-            harness = {"item": item_id, "env": {"REEF_MAX_OUTPUT_TOKENS": "8192", "TASK_MODE": "fast"}}
+            harness = {
+                "item": item_id,
+                "env": {"REEF_MAX_OUTPUT_TOKENS": "8192", "TASK_MODE": "fast"},
+                "config": {"primary": {"defaultTools": []}},
+            }
             body = {"artifact_id": artifact_id, "harness": harness}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 202, await response.text()
@@ -1342,6 +1346,7 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
         assert answer["request"]["harness"] == harness
         assert lab.agent is not None and lab.agent.extra_env["TASK_MODE"] == "fast", "the agent's commands get the env"
         assert '"maxTokens": 8192' in lab.rendered["pi-agent/models.json"], "the env sets the binding's reply budget"
+        assert json.loads(lab.rendered["plugin/settings.json"]) == {"defaultTools": []}, "the config merges in"
         evaluation = answer["policy_evaluation"]
         assert evaluation["harness"]["base"] == "pi"
         assert evaluation["scores"] == [{"task": "add", "scores": [1.0]}]
@@ -1390,6 +1395,10 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
         ({"env": {"REEF_CONTEXT_WINDOW": "big"}}, "REEF_CONTEXT_WINDOW must be a positive number of tokens"),
         ({"env": {"TOKEN": "${REEF_TOKEN}"}}, "text values without ${"),
         ({"env": {"1BAD": "x"}}, "maps variable names"),
+        ({"config": {"primary": "x"}}, "maps config target names to JSON objects"),
+        ({"config": {"missing": {}}}, "declares no config target 'missing'"),
+        ({"config": {"models": {"providers": {"evil": {}}}}}, "the harness config fails validation"),
+        ({"config": {"primary": {"defaultTools": ["bash"]}}}, "the harness config fails validation"),
     ],
 )
 def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
@@ -1404,10 +1413,10 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
             await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
             uri = options.pop("uri", harness_tree(tmp_path / "tree"))
             environment = options.pop("environment", "docker")
-            env = options.pop("env", {})
+            extra = {key: options.pop(key) for key in ("env", "config") if key in options}
             body = {
                 "artifact_id": artifact_id,
-                "harness": {"item": tree_item(dispatcher, uri, **options), **({"env": env} if env else {})},
+                "harness": {"item": tree_item(dispatcher, uri, **options), **extra},
                 "environment": environment,
             }
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
