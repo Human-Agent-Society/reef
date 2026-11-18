@@ -1386,7 +1386,13 @@ The body takes these fields:
   Reef's sandbox relay and Harbor's exec, also for a task with several compose
   services (RFC #986). Reef refuses a task that declares MCP servers or skills. This
   evaluation does not reach the activation rule, and an automatic evaluation
-  cannot use an item.
+  cannot use an item. ``{"item": "<item id>", "env": {"NAME": "value"}}``
+  also gives each command of the agent these variables. A name is a shell
+  variable name, and a value is text without ``${``. ``REEF_CONTEXT_WINDOW``
+  and ``REEF_MAX_OUTPUT_TOKENS`` also set the model's token limits in the
+  rendered tree, each a positive number of tokens (`Token limits
+  <../developer-guide/harness-adapters.rst#token-limits>`__). A Harbor agent
+  takes variables in its own ``env`` key.
 - ``model``: the model binding that a harness artifact runs on. A request
   sets exactly one of ``harness`` and ``model``.
 - ``task_names``: the eval tasks to run. Leave it out to run every eval task.

@@ -49,6 +49,7 @@ from reef.core.evaluation import (
     RolloutScore,
     RolloutScores,
     harness_item,
+    harness_item_env,
     mean_score,
 )
 from reef.core.records_types import AgentRecord, RequestType
@@ -1007,11 +1008,12 @@ class ArtifactEvaluations:
             raise ValueError(f"the eval split of the imported tasks holds no task of the collection {name!r}")
         return EvaluationCollection(name, stored.average, benchmarks)
 
-    def tree_harness(self, scenario: str, item_id: str, api: str) -> TreeHarness:
+    def tree_harness(self, scenario: str, item_id: str, api: str, env: Mapping[str, str]) -> TreeHarness:
         """The harness tree of the artifact item ``item_id`` of the owner of ``scenario``, for model calls of the
-        dialect ``api``.
+        dialect ``api``, whose agent's commands get the variables ``env``.
 
-        Raise ``ValueError`` when the item is not a tree that a task's container can run. The tasks are not read
+        Raise ``ValueError`` when the item is not a tree that a task's container can run, or when ``env`` sets a
+        token limit that is not a positive integer. The tasks are not read
         here: each rollout checks its own task against the tree's agent (``EvaluationRolloutWorker.score``).
         """
         owner = self.dispatcher.scenario_owner(scenario)
@@ -1045,7 +1047,7 @@ class ArtifactEvaluations:
         validation = validate_tree(tree, descriptor)
         if not validation.passed:
             raise ValueError(f"the harness tree of item {item_id!r} fails validation: {validation.message()}")
-        harness = TreeHarness(adapter, api, tree.files)
+        harness = TreeHarness(adapter, api, tree.files, env)
         # Rendering now refuses a bad tree here, and not at the end of the evaluation.
         harness.policy_harness()
         return harness
@@ -1105,7 +1107,7 @@ class ArtifactEvaluations:
         names = sampled
         evaluation_id = uuid.uuid4().hex
         item = harness_item(request.harness)
-        tree = None if item is None else self.tree_harness(scenario, item, api)
+        tree = None if item is None else self.tree_harness(scenario, item, api, harness_item_env(request.harness))
         agent = None if tree is not None else harbor_agent(request.harness)
         # The stored request names its tasks, so that the rollouts that wait can be added later.
         request = replace(request, task_names=names, collection=collection)

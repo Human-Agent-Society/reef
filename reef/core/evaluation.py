@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -394,10 +395,20 @@ class RolloutRequest:
             raise TypeError("a rollout request's record_dir is None or a Path")
 
 
+#: The name of an environment variable that a harness item's ``env`` sets.
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def harness_item(harness: Mapping[str, Any] | None) -> str | None:
     """The artifact item that ``harness``, an ``ArtifactEvaluationRequest``'s value, names; None for a Harbor agent or
     no harness."""
     return None if harness is None else harness.get("item")
+
+
+def harness_item_env(harness: Mapping[str, Any] | None) -> dict[str, str]:
+    """The variables that ``harness``, an ``ArtifactEvaluationRequest``'s value, gives the commands of a harness
+    item's agent: its ``env``; none for no harness or a harness without one."""
+    return {} if harness is None else dict(harness.get("env") or {})
 
 
 @dataclass(frozen=True)
@@ -408,8 +419,9 @@ class ArtifactEvaluationRequest:
     non-empty name of one of its components: the evaluated artifact. Exactly one of ``harness`` and ``model`` is set: ``harness``, the
     harness that runs a model artifact: a Harbor agent (an object with a non-empty ``name`` or ``import_path``, as
     ``TaskRolloutRunner``'s ``agent``), or an artifact item of a harness tree of the scenario's owner (an object
-    with a non-empty ``item`` and no other key); or ``model``, the non-empty name of the deployment's model binding that a
-    harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
+    with a non-empty ``item``, and optionally ``env``, which maps variable names to the values that the agent's
+    commands get; a value holds no ``${``, which Harbor would fill from Reef's own environment); or ``model``, the
+    non-empty name of the deployment's model binding that a harness artifact runs on. ``task_names`` names distinct eval tasks, or is empty for every eval task.
     ``collection`` is None, or the ``EvaluationCollection`` that the evaluation runs on; its tasks are then exactly
     ``task_names``.
     ``rollouts_per_task`` is a positive int, and ``environment`` a non-empty Harbor environment type.
@@ -448,11 +460,21 @@ class ArtifactEvaluationRequest:
                 raise ValueError("an artifact evaluation's harness is a JSON object")
             if "item" in self.harness:
                 if (
-                    set(self.harness) != {"item"}
+                    not set(self.harness) <= {"item", "env"}
                     or not isinstance(self.harness["item"], str)
                     or not self.harness["item"]
                 ):
-                    raise ValueError("an artifact evaluation's harness item is one non-empty string and no other key")
+                    raise ValueError(
+                        "an artifact evaluation's harness item is a non-empty string, with no other key but env"
+                    )
+                env = self.harness.get("env", {})
+                if not isinstance(env, Mapping) or not all(
+                    isinstance(name, str) and ENV_NAME.fullmatch(name) and isinstance(value, str) and "${" not in value
+                    for name, value in env.items()
+                ):
+                    raise ValueError(
+                        "an artifact evaluation's harness env maps variable names to text values without ${"
+                    )
             elif not any(
                 isinstance(self.harness.get(key), str) and self.harness[key] for key in ("name", "import_path")
             ):
