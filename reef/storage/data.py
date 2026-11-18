@@ -13,6 +13,7 @@ This module defines the item values, the metadata rules, the ``DataStore`` plugi
 from __future__ import annotations
 
 import copy
+import math
 import re
 import tempfile
 import time
@@ -26,11 +27,12 @@ from typing import Any, Literal, Self, get_args
 
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
-from reef.core.evaluation import EvaluationCallSummary, require_integer
+from reef.core.evaluation import EvaluationCallSummary
 from reef.core.job_data import JobData, TaskFiles
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RecordLoss, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
+from reef.core.values import require_integer
 from reef.storage.item_kinds import ITEM_KIND_RULES, TaskFilesReference, task_partition
 from reef.storage.job_data import (
     JOB_DATA_PREFIX,
@@ -412,6 +414,29 @@ class ItemGroup:
             raise ValueError("a group's first_sequence is at most its last_sequence")
 
 
+@dataclass(frozen=True)
+class DeletedItem:
+    """An item that ``DataStore.delete`` removed, and that ``DataStore.restore`` can bring back.
+
+    Values: ``item`` is the item as it was at the delete, without its content: its sequence, ID, metadata and
+    digest. ``deleted_at`` is the time of the delete, in seconds since the epoch, a finite number.
+
+    Purpose: ``DataStore.deleted_items`` and ``DataStore.read_deleted`` return it. A client lists the deleted items of
+    an owner, and chooses the ones to restore.
+    """
+
+    item: StoredItem
+    deleted_at: float
+
+    def __post_init__(self) -> None:
+        if self.item.content is not None:
+            raise ValueError("a deleted item is listed without its content")
+        if isinstance(self.deleted_at, bool) or not isinstance(self.deleted_at, (int, float)):
+            raise ValueError("a deleted item's deleted_at is a number of seconds")
+        if not math.isfinite(self.deleted_at):
+            raise ValueError("a deleted item's deleted_at is finite")
+
+
 #: The kinds of sets that a scenario holds, each with the kind of its items: a benchmark is a set of tasks, and a
 #: trajectory set is a set of trajectories.
 HOLD_ITEM_KINDS: Mapping[str, ItemKind] = {"benchmark": "task", "trajectory_set": "trajectory"}
@@ -521,6 +546,8 @@ class RecordLink:
 
 #: How long a data store keeps a job data directory that no job used: 7 days.
 JOB_DIRECTORY_TTL_SECONDS = 7 * 24 * 3600.0
+#: How long a data store keeps a deleted item before ``maintain`` purges it: 30 days.
+DELETED_ITEM_TTL_SECONDS = 30 * 24 * 3600.0
 
 
 class DataStore(Plugin, JobDataReader, ABC):
@@ -599,11 +626,31 @@ class DataStore(Plugin, JobDataReader, ABC):
       with ``replace_task``; the same content changes nothing. It returns the item without content. An unknown ID is
       an ``ItemNotFoundError``; an item of another kind, or content that a trajectory may not have, is a
       ``ValueError``, and nothing changes.
-    * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
+    * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID. The store
+      keeps the removed item, with its sequence, metadata and content, as a deleted item of ``owner`` with the time
+      of the delete (``DeletedItem``). No read, query, set, group, use or record link has a deleted item. An owner
+      has at most one deleted item for each ID: a delete purges the deleted item with the same ID first. A
+      ``create`` can store a new item with the ID of a deleted item.
+    * ``deleted_items(owner, kind, before, limit)`` returns the deleted items of ``owner``, of ``kind`` when it is
+      given, by item sequence newest first: those with ``sequence < before`` when ``before`` is given, at most
+      ``limit``.
+    * ``read_deleted(owner, item_ids)`` returns the deleted item of each ID of ``item_ids`` that has one, each once,
+      in the order given.
+    * ``restore(owner, item_ids)`` makes each deleted item of ``item_ids`` an item again, all or none, and returns
+      the items without content. An item comes back with its sequence, metadata, digest and content, and gets the
+      uses that its metadata gives: its own ``scenarios`` and the holds of its sets. Each use gets a new use
+      sequence, so a trainer reads the item again. An ID without a deleted item is an ``ItemNotFoundError``, and an
+      ID that the owner stores as an item is an ``ItemConflictError``; nothing changes then.
+    * ``purge(owner, item_id)`` removes the deleted item ``item_id`` for good and returns True, or returns False
+      when there is none.
+    * ``purge_deleted(time)`` purges each deleted item, across owners, deleted before ``time``, and returns their
+      number.
     * ``delete_scenario(owner, scenario)`` removes ``scenario`` from the uses of each item of ``owner``, also from
       the record items that it made, and returns the number of items that named it. It ends the scenario's holds
       of benchmarks too. It also ends the scenario's generation. The archive
-      of a scenario calls it, so that a new scenario with that name uses nothing. The items stay.
+      of a scenario calls it, so that a new scenario with that name uses nothing. The items stay. It also removes
+      ``scenario`` from the ``scenarios`` metadata of the deleted items of ``owner``, so that a restore does not
+      give it a use; it does not count them.
     * ``scenario_generation(owner, scenario)`` returns the current generation of ``scenario``: an opaque string,
       new when the scenario has none. A writer of the scenario's records reads it when it opens the scenario, and
       gives it to ``create``. ``create(owner, items, generation=...)`` stores record items of one origin scenario
@@ -611,7 +658,8 @@ class DataStore(Plugin, JobDataReader, ABC):
     * ``prune_records(max_bytes)`` deletes the oldest record items of the source ``inference``, across owners, until
       those items hold at most ``max_bytes``, and returns their number. Each deleted item adds to the ``RecordLoss``
       of its origin scenario. It deletes no evaluation call and does not count its bytes. A store counts the bytes that it keeps for a record item: its row and the trajectory nodes that
-      only it needs. A retry of a deleted record stores it again.
+      only it needs. A retry of a deleted record stores it again. A pruned item is gone for good: it does not become
+      a deleted item.
     * ``record_loss(owner, scenario)`` returns the ``RecordLoss`` of the record items of ``owner`` that
       ``scenario`` made.
     * ``task_path(item)`` returns a local directory with the files of a task item.
@@ -628,8 +676,9 @@ class DataStore(Plugin, JobDataReader, ABC):
       collection operation changes an item. The store keeps each collection as it is given; the service checks that
       the collections of an owner name each other without a cycle (``reef.service.collections``).
     * ``maintain()`` does the store's periodic work: it deletes the job data directories that no job used for
-      ``job_directory_ttl_seconds``, and a subclass can do more, such as moving content into segments. It changes
-      no item. The data service calls it every few minutes.
+      ``job_directory_ttl_seconds``, purges the items deleted ``DELETED_ITEM_TTL_SECONDS`` ago or earlier
+      (``purge_deleted``), and a subclass can do more, such as moving content into segments. It changes no item.
+      The data service calls it every few minutes.
 
     The store also keeps the data directory of each training job (``reef.storage.job_data``), one directory for each
     content, in the segment store ``job_directories``:
@@ -793,6 +842,23 @@ class DataStore(Plugin, JobDataReader, ABC):
     def delete(self, owner: str, item_id: str) -> bool: ...
 
     @abstractmethod
+    def deleted_items(
+        self, owner: str, *, kind: ItemKind | None = None, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[DeletedItem, ...]: ...
+
+    @abstractmethod
+    def read_deleted(self, owner: str, item_ids: Sequence[str]) -> tuple[DeletedItem, ...]: ...
+
+    @abstractmethod
+    def restore(self, owner: str, item_ids: Sequence[str]) -> tuple[StoredItem, ...]: ...
+
+    @abstractmethod
+    def purge(self, owner: str, item_id: str) -> bool: ...
+
+    @abstractmethod
+    def purge_deleted(self, time: float) -> int: ...
+
+    @abstractmethod
     def delete_scenario(self, owner: str, scenario: str) -> int: ...
 
     @abstractmethod
@@ -866,8 +932,11 @@ class DataStore(Plugin, JobDataReader, ABC):
         return tuple(group for group in newest if before is None or group.first_sequence < before)[:limit]
 
     def maintain(self) -> None:
-        """Do the store's periodic work: delete the job data directories that no job used for the time to live."""
-        self.delete_unused_job_directories(time.time() - self.job_directory_ttl_seconds)
+        """Do the store's periodic work: delete the job data directories that no job used for the time to live, and
+        purge the items deleted ``DELETED_ITEM_TTL_SECONDS`` ago or earlier."""
+        now = time.time()
+        self.delete_unused_job_directories(now - self.job_directory_ttl_seconds)
+        self.purge_deleted(now - DELETED_ITEM_TTL_SECONDS)
 
     #: The segment store of the job data directories.
     job_directories: SegmentStore
@@ -973,6 +1042,17 @@ def check_sets(owner: str, kind: object, scenario: object, before: object, limit
         raise ValueError("before must be a positive int")
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
         raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
+
+
+def check_deleted_listing(owner: str, kind: object, before: object, limit: object) -> None:
+    """Check the arguments of ``DataStore.deleted_items``; ``ValueError`` for a bad one."""
+    check_owner(owner)
+    if kind is not None and kind not in ITEM_KINDS:
+        raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
+    if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 1):
+        raise ValueError("before is a positive int")
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= MAX_QUERY_LIMIT:
+        raise ValueError(f"limit is 1 to {MAX_QUERY_LIMIT}")
 
 
 def group_value(metadata: Mapping[str, Any], key: str) -> str | None:
@@ -1106,7 +1186,8 @@ class MemoryDataStore(DataStore):
     by owner, item, scenario, held set and split, where "" stands for the item's own mark), the holds
     (``held``, by owner, scenario, kind, name and split), and the next sequence, which items and uses share. Task directories go to the task file store that it
     is given. ``trajectories`` links the record items of each owner and link scope (``record_link_scope``) as
-    they are created; a deleted item stays there as a link of later calls.
+    they are created; a deleted item stays there as a link of later calls. ``deleted`` keeps the deleted items of
+    each owner by ID, each with its content and the time of its delete.
     """
 
     def __init__(
@@ -1123,6 +1204,7 @@ class MemoryDataStore(DataStore):
         self.generations: dict[tuple[str, str], str] = {}
         self.losses: dict[tuple[str, str], RecordLoss] = {}
         self.stored_collections: dict[str, dict[str, TaskCollection]] = {}
+        self.deleted: dict[str, dict[str, tuple[StoredItem, float]]] = {}
         self.next_sequence = 1
 
     def take_sequence(self) -> int:
@@ -1479,8 +1561,64 @@ class MemoryDataStore(DataStore):
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
+        item = self.items.get(owner, {}).pop(item_id, None)
+        if item is None:
+            return False
         self.write_uses(owner, item_id, None)
-        return self.items.get(owner, {}).pop(item_id, None) is not None
+        self.deleted.setdefault(owner, {})[item_id] = (item, time.time())
+        return True
+
+    def deleted_items(
+        self, owner: str, *, kind: ItemKind | None = None, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[DeletedItem, ...]:
+        check_deleted_listing(owner, kind, before, limit)
+        found = sorted(
+            (
+                (item, deleted_at)
+                for item, deleted_at in self.deleted.get(owner, {}).values()
+                if (kind is None or item.kind == kind) and (before is None or item.sequence < before)
+            ),
+            key=lambda entry: entry[0].sequence,
+            reverse=True,
+        )
+        return tuple(DeletedItem(replace(item, content=None), deleted_at) for item, deleted_at in found[:limit])
+
+    def read_deleted(self, owner: str, item_ids: Sequence[str]) -> tuple[DeletedItem, ...]:
+        check_owner(owner)
+        deleted = self.deleted.get(owner, {})
+        return tuple(
+            DeletedItem(replace(deleted[item_id][0], content=None), deleted[item_id][1])
+            for item_id in dict.fromkeys(item_ids)
+            if item_id in deleted
+        )
+
+    def restore(self, owner: str, item_ids: Sequence[str]) -> tuple[StoredItem, ...]:
+        check_owner(owner)
+        deleted, stored = self.deleted.get(owner, {}), self.items.setdefault(owner, {})
+        wanted = list(dict.fromkeys(item_ids))
+        missing = [item_id for item_id in wanted if item_id not in deleted]
+        if missing:
+            raise ItemNotFoundError(f"{owner!r} has no deleted item {missing[0]!r}")
+        taken = [item_id for item_id in wanted if item_id in stored]
+        if taken:
+            raise ItemConflictError(f"{owner!r} stores an item {taken[0]!r}, so its deleted item cannot come back")
+        restored = [deleted.pop(item_id)[0] for item_id in wanted]
+        for item in restored:
+            stored[item.item_id] = item
+            self.write_uses(owner, item.item_id, item.metadata)
+        return tuple(replace(item, content=None) for item in restored)
+
+    def purge(self, owner: str, item_id: str) -> bool:
+        check_owner(owner)
+        return self.deleted.get(owner, {}).pop(item_id, None) is not None
+
+    def purge_deleted(self, time: float) -> int:
+        purged = 0
+        for deleted in self.deleted.values():
+            for item_id in [item_id for item_id, (_, deleted_at) in deleted.items() if deleted_at < time]:
+                deleted.pop(item_id)
+                purged += 1
+        return purged
 
     def delete_scenario(self, owner: str, scenario: str) -> int:
         check_owner(owner)
@@ -1492,6 +1630,11 @@ class MemoryDataStore(DataStore):
         for item in used:
             scenarios = {name: split for name, split in item.scenarios.items() if name != scenario}
             stored[item.item_id] = replace(item, metadata={**item.metadata, "scenarios": scenarios})
+        deleted = self.deleted.get(owner, {})
+        for item_id, (item, deleted_at) in list(deleted.items()):
+            if scenario in item.scenarios:
+                scenarios = {name: split for name, split in item.scenarios.items() if name != scenario}
+                deleted[item_id] = (replace(item, metadata={**item.metadata, "scenarios": scenarios}), deleted_at)
         self.generations.pop((owner, scenario), None)
         return len(used)
 

@@ -203,9 +203,11 @@ def reef():
 def written_task(root: Path, name: str, record_id: str = "rec-source") -> Path:
     task = HarborTask(
         name=name,
-        instruction="List the files in the working directory and write their count to /app/count.txt.",
-        tests={"test.sh": "#!/bin/sh\nmkdir -p /logs/verifier\necho 1 > /logs/verifier/reward.txt\n"},
-        environment={"Dockerfile": "FROM python:3.12-slim\nWORKDIR /app\n"},
+        files={
+            "instruction.md": "List the files in the working directory and write their count to /app/count.txt.",
+            "tests/test.sh": "#!/bin/sh\nmkdir -p /logs/verifier\necho 1 > /logs/verifier/reward.txt\n",
+            "environment/Dockerfile": "FROM python:3.12-slim\nWORKDIR /app\n",
+        },
         source_agent_record_ids=(record_id,),
     )
     return write_harbor_task(task, root)

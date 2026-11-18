@@ -58,7 +58,6 @@ from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
-from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.execution.jobs import SupportsReceipt
 from reef.execution.workers import SERVICE_COMPONENTS
@@ -66,7 +65,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.record2sample.assembly import SampleAssemblySettings
-from reef.record2sample.service import SAMPLES_QUEUE, Selection
+from reef.record2sample.service import SAMPLES_QUEUE
 from reef.record2sample.staleness import ServedArtifacts, lags_behind
 from reef.record2sample.traces import TraceSamples
 from reef.sample2job.traces import TraceJobData
@@ -1247,13 +1246,6 @@ def test_a_weights_step_marks_the_older_weights_samples_stale_and_the_harness_st
     assert scenario.trainer_for(HARNESS).state["finished_jobs"] == 2
 
 
-class NoSelectionProgress(Selection):
-    """A selection whose progress nobody reads."""
-
-    def progress(self, records_read: int, samples_created: int) -> None:
-        return
-
-
 def on_policy_weights(
     dispatchers: _Dispatchers, *, max_artifact_lag: int = 0, **options: Any
 ) -> tuple[Dispatcher, Scenario]:
@@ -1347,29 +1339,31 @@ def test_a_samples_service_in_its_own_process_judges_control_activations(dispatc
     """Control and a samples-only process share the storage. After a weights commit in control activates new
     weights, the samples process judges the new history without a reload, and control's next automatic job runs."""
     repository = _repository(dispatchers.tmp_path)
-    _, scenario = on_policy_weights(dispatchers, backend_factory=repository)
+    control, scenario = on_policy_weights(dispatchers, backend_factory=repository)
     # The two processes read one deployment, so their stages have one config and one staleness rule.
     weights = WeightsRecipe(pipeline_stages=component_stages(record2sample_config={"max_artifact_lag": 0}))
-    samples_process, _ = dispatchers.open(
+    dispatchers.open(
         recipe=two_trainer_recipe(weights=weights),
         hold_local_cycles=True,
         components=frozenset({"samples"}),
         backend_factory=repository,
     )
-    producers = LocalSampleProducers(samples_process.registry, None)
-
-    def produce() -> None:
-        producers.produce("agent", WEIGHTS, NoSelectionProgress("selection"))
-
-    _append_records(scenario, 1)
-    produce()
-    assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
-    assert became_true(lambda: scenario.served_artifact_id() == scenario.serving_artifact_id())
     pipeline = scenario.trainer_for(WEIGHTS).pipeline
-    assert not pipeline.judged(scenario.served_artifacts())
-    _append_records(scenario, 2)
-    produce()
-    assert pipeline.judged(scenario.served_artifacts())
+
+    def append_and_select(step: int) -> None:
+        # Ask for the selection of the new records, as control does for accepted records, and wait for its end.
+        _append_records(scenario, step)
+        control.request_samples(scenario, "records")
+        assert became_true(lambda: all(item.final for item in control.queue.items(SAMPLES_QUEUE, scenario="agent")))
+
+    root = scenario.serving_artifact_id()
+    append_and_select(1)
+    assert append_commit(scenario, WEIGHTS, make=False) == [("i1", "r1")]
+    assert scenario.serving_artifact_id() != root
+    # The test commits directly. Notify control as its local worker does after a commit.
+    control.scenario_committed(scenario)
+    assert became_true(lambda: pipeline.judged(scenario.served_artifacts())), "the new activation was not judged"
+    append_and_select(2)
     assert append_commit(scenario, WEIGHTS, make=False) == [("i2", "r2")]
 
 

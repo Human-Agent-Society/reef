@@ -145,9 +145,11 @@ def write_task(root: Path, name: str) -> Path:
     return write_harbor_task(
         HarborTask(
             name=name,
-            instruction=f"task {name}",
-            tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
-            environment={"Dockerfile": "FROM python:3.12-slim\n"},
+            files={
+                "instruction.md": f"task {name}",
+                "tests/test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n",
+                "environment/Dockerfile": "FROM python:3.12-slim\n",
+            },
         ),
         root,
     )

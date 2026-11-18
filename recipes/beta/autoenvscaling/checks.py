@@ -11,6 +11,8 @@
 - :class:`CalibrationCheck`: rollouts of the current solver on the task. Their mean reward must lie inside the
   pass-rate band, and their rewards must vary.
 
+A seed task runs :class:`SeedCheck` in place of the oracle check, then the contamination check alone.
+
 A refusing check keeps a task out when it finds a defect or cannot run; the two are recorded apart. A check that
 only measures records what it found and never keeps a task out. :func:`band_place` places a pass rate against the
 band, for the calibration and for the training pass rates in the generation report.
@@ -29,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from recipes.beta.autoenvscaling.author import ModelReplies
+from recipes.beta.autoenvscaling.designer import ModelReplies
 from reef.core.prompts import untrusted_text
 from reef.core.tasks import HarborTask
 from reef.harness.harbor.rollouts import TaskRollout, rewards_of
@@ -181,22 +183,67 @@ class OracleCheck(TaskCheck):
         return CheckResult(self.name, errors, details=details)
 
 
+class SeedCheck(TaskCheck):
+    """Harbor's oracle trial on a seed task: its environment builds and its verifier scores, and doing nothing does
+    not pass.
+
+    Values: ``service`` is the generator service that runs the trials. The check refuses a seed whose oracle
+    reward is None: the environment did not build, or the verifier wrote no reward. It passes a seed whose oracle
+    and nop check passes, or whose oracle reward is below 1: the service stops after a failed oracle trial, so for a
+    seed whose solution does nothing, as a converted TMax task's does, that trial is the nop measurement. A seed
+    whose solution scores 1 while doing nothing also scores 1, or gives no reward, is refused. Its details hold
+    ``oracle_reward`` and ``nop_reward``.
+    Purpose: ``validate`` runs it in place of :class:`OracleCheck` on a seed task, which comes with no reference
+    solution to hold to a score of 1. A check that cannot run raises ``GeneratorError``, as the oracle check does.
+    """
+
+    def __init__(self, service: Generator) -> None:
+        super().__init__("seed")
+        self.service = service
+
+    async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
+        oracle = await self.service.check(written.path)
+        details = {"oracle_reward": oracle.oracle_reward, "nop_reward": oracle.nop_reward}
+        if oracle.oracle_reward is None:
+            errors: tuple[str, ...] = (
+                f"seed check refused: the environment did not build or its verifier wrote no reward: {oracle.reason}",
+            )
+        elif oracle.is_solvable or oracle.oracle_reward < 1:
+            errors = ()
+        else:
+            errors = (f"seed check refused: doing nothing passes the seed: {oracle.reason}",)
+        return CheckResult(self.name, errors, details=details)
+
+
 def review_prompt(task: HarborTask) -> str:
     """The review's user turn: the instruction, every test file and every solution file, each cut to
-    :data:`REVIEW_FILE_CHARS` characters and fenced as data."""
+    :data:`REVIEW_FILE_CHARS` characters and fenced as data. A binary file shows only its size."""
 
     def fenced(text: str, label: str) -> str:
         cut = f"\n[... {len(text) - REVIEW_FILE_CHARS} characters cut]" if len(text) > REVIEW_FILE_CHARS else ""
         return untrusted_text(text[:REVIEW_FILE_CHARS] + cut, label)
 
-    def files_text(folder: str, files: Mapping[str, str]) -> str:
-        return "\n\n".join(fenced(text, f"{folder}/{name}") for name, text in sorted(files.items())) or "(none)"
+    def files_text(folder: str) -> str:
+        return (
+            "\n\n".join(
+                fenced(content if isinstance(content, str) else f"[binary file, {len(content)} bytes]", path)
+                for path, content in sorted(task.files.items())
+                if path.startswith(f"{folder}/")
+            )
+            or "(none)"
+        )
 
     return REVIEW_PROMPT.format(
-        instruction=fenced(task.instruction, "instruction.md"),
-        tests=files_text("tests", task.tests),
-        solution=files_text("solution", task.solution),
+        instruction=fenced(instruction_text(task), "instruction.md"),
+        tests=files_text("tests"),
+        solution=files_text("solution"),
     )
+
+
+def instruction_text(task: HarborTask) -> str:
+    """The text of the task's ``instruction.md``; empty when the task has none or it is not UTF-8."""
+    instruction = task.files.get("instruction.md")
+    return instruction if isinstance(instruction, str) else ""
 
 
 def review_findings(reply: str) -> tuple[ReviewFinding, ...]:
@@ -603,7 +650,7 @@ class ContaminationCheck(TaskCheck):
     async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
         # Each distinct shared n-gram, in the instruction's order, and the first reference task that holds it.
         shared: dict[str, str] = {}
-        for ngram in instruction_ngrams(instruction_tokens(task.instruction), self.n):
+        for ngram in instruction_ngrams(instruction_tokens(instruction_text(task)), self.n):
             if ngram in self.index and ngram not in shared:
                 shared[ngram] = self.index[ngram]
         hits = [

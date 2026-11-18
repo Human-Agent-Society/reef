@@ -58,6 +58,16 @@ NO_KEY_PLACEHOLDER = "no-key"
 
 ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
 
+#: The context window, in tokens, that a harness assumes for a model whose window Reef does not know: from neither the
+#: endpoint's metadata nor a run's ``REEF_CONTEXT_WINDOW``. A harness compacts its history before the window fills, so
+#: one with no window never compacts and fails at the endpoint's limit.
+DEFAULT_CONTEXT_WINDOW = 128_000
+
+#: The variables of a run's environment that set the binding's token limits for the harness: ``REEF_CONTEXT_WINDOW``
+#: the context window and ``REEF_MAX_OUTPUT_TOKENS`` the reply budget, each a positive number of tokens.
+CONTEXT_WINDOW_ENV = "REEF_CONTEXT_WINDOW"
+MAX_OUTPUT_TOKENS_ENV = "REEF_MAX_OUTPUT_TOKENS"
+
 
 class ModelBindingError(ReefError):
     """A model call failed; ``status`` carries the HTTP status when there was one."""
@@ -113,6 +123,9 @@ class ModelBinding:
     #: the default leaves room for both. A harness that sets none of its own picks a smaller one (pi takes 16384).
     max_output_tokens: int = 32000
     metadata: ModelMetadata | None = None
+    #: The context window a harness bound to this endpoint assumes, in tokens: a positive int, or None for the
+    #: metadata's window, else ``DEFAULT_CONTEXT_WINDOW`` (``context_window_tokens``).
+    context_window: int | None = None
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -125,6 +138,12 @@ class ModelBinding:
             raise ValueError("model binding timeout_s must be positive")
         if isinstance(self.max_output_tokens, bool) or self.max_output_tokens <= 0:
             raise ValueError("model binding max_output_tokens must be a positive number of tokens")
+        if self.context_window is not None and (
+            isinstance(self.context_window, bool)
+            or not isinstance(self.context_window, int)
+            or self.context_window <= 0
+        ):
+            raise ValueError("model binding context_window must be a positive number of tokens")
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
 
     @classmethod
@@ -195,6 +214,22 @@ class ModelBinding:
                     "Could not read metadata for model %r; configure evolution.model_metadata for Codex", self.model
                 )
         return replace(self, metadata=selected)
+
+    @property
+    def context_window_tokens(self) -> int:
+        """The context window a harness assumes: ``context_window``, else the metadata's, else the default."""
+        if self.context_window is not None:
+            return self.context_window
+        return self.metadata.context_window if self.metadata is not None else DEFAULT_CONTEXT_WINDOW
+
+    def with_env_limits(self, env: Mapping[str, str]) -> ModelBinding:
+        """This binding with the token limits that ``env``, a run's environment, sets (``token_limits``)."""
+        context_window, max_output_tokens = token_limits(env)
+        return replace(
+            self,
+            context_window=self.context_window if context_window is None else context_window,
+            max_output_tokens=self.max_output_tokens if max_output_tokens is None else max_output_tokens,
+        )
 
     # -- Method-side calls ---------------------------------------------------
 
@@ -353,7 +388,7 @@ class ModelBinding:
         metadata = {}
         if self.metadata is not None:
             metadata[self.model] = {
-                "context_window": self.metadata.context_window,
+                "context_window": self.context_window_tokens,
                 "reasoning": self.metadata.reasoning,
             }
         values: dict[str, Any] = {
@@ -361,6 +396,7 @@ class ModelBinding:
             "api_key": self.api_key or NO_KEY_PLACEHOLDER,
             "model": self.model,
             "max_output_tokens": self.max_output_tokens,
+            "context_window": self.context_window_tokens,
             "model_metadata": metadata,
         }
         choices = [self.model]
@@ -370,6 +406,22 @@ class ModelBinding:
         return tuple(
             (str(template["target"]), _substitute(template["data"], values, choices)) for template in templates
         )
+
+
+def token_limits(env: Mapping[str, str]) -> tuple[int | None, int | None]:
+    """The ``(context window, reply budget)`` in tokens that ``env`` sets with ``CONTEXT_WINDOW_ENV`` and
+    ``MAX_OUTPUT_TOKENS_ENV``, None for a variable it does not set. ``ValueError`` for a value that is not a positive
+    integer."""
+    limits: list[int | None] = []
+    for name in (CONTEXT_WINDOW_ENV, MAX_OUTPUT_TOKENS_ENV):
+        value = env.get(name)
+        if value is None:
+            limits.append(None)
+            continue
+        if not value.strip().isdecimal() or int(value) <= 0:
+            raise ValueError(f"{name} must be a positive number of tokens, not {value!r}")
+        limits.append(int(value))
+    return limits[0], limits[1]
 
 
 @dataclass(frozen=True)
@@ -450,4 +502,13 @@ def _substitute(value: Any, values: Mapping[str, Any], models: Sequence[str] = (
     return value
 
 
-__all__ = ["MODEL_APIS", "ModelBinding", "ModelBindingError", "ModelBindings"]
+__all__ = [
+    "CONTEXT_WINDOW_ENV",
+    "DEFAULT_CONTEXT_WINDOW",
+    "MAX_OUTPUT_TOKENS_ENV",
+    "MODEL_APIS",
+    "ModelBinding",
+    "ModelBindingError",
+    "ModelBindings",
+    "token_limits",
+]
