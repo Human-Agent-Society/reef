@@ -647,7 +647,7 @@ BINDING_COPY = {
         "reef": {
             "npm": "@ai-sdk/openai-compatible",
             "options": {"baseURL": "http://127.0.0.1:9/v1", "apiKey": ""},
-            "models": {"x": {}},
+            "models": {"x": {"limit": {"context": 128000, "output": 32000}}},
         }
     },
     "model": "reef/x",
@@ -660,6 +660,10 @@ BINDING_COPY = {
         ({"provider": EVIL_PROVIDER}, "on provider in"),
         ({"provider": {"reef": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}}, "on provider in"),
         (BINDING_COPY, "on provider in"),
+        (
+            {"provider": {"reef": {**BINDING_COPY["provider"]["reef"], "models": {"x": {"name": "other"}}}}},
+            "on provider in",
+        ),
         ({"model": "reef/other"}, "on model in"),
         ({"small_model": "reef/served"}, r"on small_model in plugin/config\.json: Reef's model binding"),
         ({"disabled_providers": ["reef"]}, "on disabled_providers in"),
@@ -686,6 +690,7 @@ def test_opencode_render_admits_the_model_binding(api: str) -> None:
     config_json = json.loads(files["opencode/opencode.json"])
     assert config_json["model"] == "reef/served"
     assert set(config_json["provider"]["reef"]["models"]) == {"served", "other/big"}
+    assert config_json["provider"]["reef"]["models"]["other/big"]["limit"]["output"] == binding.max_output_tokens
 
 
 def test_opencode_validation_refuses_a_tree_that_copies_the_binding() -> None:

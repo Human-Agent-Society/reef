@@ -30,7 +30,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
 
@@ -55,6 +55,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.capture import CaptureObserver
 from reef.harness.harbor.agent import task_agent_tools, tree_agent, trial_directory
 from reef.harness.harbor.rollouts import DEFAULT_AGENT, TaskLab, TaskRollout, TaskRolloutRunner
+from reef.harness.tasks.model_binding import token_limits
 from reef.harness.tree import HarnessTree, render_tree
 from reef.storage.served_models import SERVE_ARTIFACT_KIND, SERVING_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLostError, WorkQueue
@@ -119,19 +120,26 @@ class TreeHarness:
     """A harness tree that a rollout runs, read from an artifact item.
 
     Values: ``adapter`` is the name of an adapter, ``api`` the API dialect of the model calls, and ``files`` maps
-    each path of the tree to its text. Purpose: control reads it once when it accepts an evaluation, so that each
-    rollout runs the same tree; a worker runs it.
+    each path of the tree to its text. ``env`` maps the name of each variable that the agent's commands get to its
+    value; its token limits, when it sets them, are positive integers (``token_limits``). Purpose: control reads it
+    once when it accepts an evaluation, so that each rollout runs the same tree; a worker runs it.
     """
 
     adapter: str
     api: str
     files: Mapping[str, str]
+    env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         require_text(self.adapter, "adapter")
         require_text(self.api, "api")
         if not isinstance(self.files, Mapping):
             raise TypeError("files is a mapping of paths to text")
+        if not isinstance(self.env, Mapping) or not all(
+            isinstance(name, str) and name and isinstance(value, str) for name, value in self.env.items()
+        ):
+            raise TypeError("env maps non-empty variable names to text")
+        token_limits(self.env)
 
     def policy_harness(self) -> PolicyHarness:
         """The harness side of the policy: the adapter, with the tree rendered with no model binding."""
@@ -149,14 +157,19 @@ class TreeHarness:
             files_dir=directory / "rendered",
             timeout=TREE_AGENT_TIMEOUT_S,
             bridge=bridge,
+            env=self.env,
         )
 
     def to_json(self) -> dict[str, JsonValue]:
-        return {"adapter": self.adapter, "api": self.api, "files": dict(self.files)}
+        value: dict[str, JsonValue] = {"adapter": self.adapter, "api": self.api, "files": dict(self.files)}
+        if self.env:
+            value["env"] = dict(self.env)
+        return value
 
     @classmethod
     def from_json(cls, value: Mapping[str, Any]) -> TreeHarness:
-        return cls(value["adapter"], value["api"], value["files"])
+        # A rollout stored before a tree harness had an env has none.
+        return cls(value["adapter"], value["api"], value["files"], value.get("env", {}))
 
 
 @dataclass(frozen=True)

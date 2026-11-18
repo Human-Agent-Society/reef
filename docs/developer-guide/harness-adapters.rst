@@ -73,7 +73,9 @@ pi's ``adapter.yaml``, shortened:
        format that reads it
    * - ``model``
      - config templates per dialect (``openai``, ``responses``,
-       ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``
+       ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``,
+       and the token limits ``{context_window}`` and ``{max_output_tokens}``
+       (`Token limits`_)
    * - ``run.task``
      - the headless command (``{task}``, ``{root}``) and its variables;
        optionally ``skills``, the directory under the root where the agent
@@ -508,6 +510,26 @@ refuse its agent's other routes, such as a fallback model, a second provider
 or a proxy, and ``tests/harness/test_harness_model_route.py`` lists them.
 The checks read the config only; a tool that builds its own request can
 still name another model.
+
+Token limits
+~~~~~~~~~~~~
+
+A binding template can give the agent the model's token limits:
+
+- ``{context_window}``: the context window in tokens. It is the run's
+  ``REEF_CONTEXT_WINDOW``, else the window in the endpoint's model metadata,
+  else 128000.
+- ``{max_output_tokens}``: the reply budget in tokens. It is the run's
+  ``REEF_MAX_OUTPUT_TOKENS``, else 32000.
+
+An agent compacts its history before the context window fills. Without a
+window, opencode never compacts, and a long run fails at the endpoint's
+limit. So the ``opencode`` binding always writes ``limit.context`` and
+``limit.output`` for each model. ``pi`` reads ``{max_output_tokens}`` only.
+
+A harness item's ``env`` sets the two variables for an artifact evaluation
+(``POST /reef/scenarios/{scenario}/evaluations``). Reef refuses a value that
+is not a positive integer.
 
 Adapter steps
 ~~~~~~~~~~~~~

@@ -14,8 +14,15 @@ from urllib.request import Request
 import pytest
 from tests.support.harness_jobs import evolution_config
 
+from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.model_binding import NO_KEY_PLACEHOLDER, ModelBinding, ModelBindings
+from reef.harness.tasks.model_binding import (
+    DEFAULT_CONTEXT_WINDOW,
+    NO_KEY_PLACEHOLDER,
+    ModelBinding,
+    ModelBindings,
+    token_limits,
+)
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
@@ -455,6 +462,34 @@ def test_config_overlays_repeat_the_model_entries_for_every_client_model() -> No
     assert binding.config_overlays(get_adapter("opencode")) == binding.config_overlays(
         get_adapter("opencode"), models=("served",)
     )
+
+
+def test_opencode_binding_gives_the_model_its_limits_from_metadata_env_or_the_default() -> None:
+    """Without limits opencode never compacts a session, so the binding always writes them: the run's env wins
+    over the endpoint's metadata, and the default stands in for an unknown window."""
+
+    def limit(binding: ModelBinding) -> dict[str, int]:
+        ((_, data),) = binding.config_overlays(get_adapter("opencode"))
+        return data["provider"]["reef"]["models"]["served"]["limit"]
+
+    binding = ModelBinding("http://up", "served", api_key="k")
+    assert limit(binding) == {"context": DEFAULT_CONTEXT_WINDOW, "output": binding.max_output_tokens}
+    known = replace(binding, metadata=ModelMetadata(context_window=262144, reasoning=True))
+    assert limit(known) == {"context": 262144, "output": binding.max_output_tokens}
+    configured = known.with_env_limits({"REEF_CONTEXT_WINDOW": "65536", "REEF_MAX_OUTPUT_TOKENS": "8192"})
+    assert limit(configured) == {"context": 65536, "output": 8192}
+    files = render_tree(HarnessTree({}), get_adapter("opencode"), configured.config_overlays(get_adapter("opencode")))
+    assert (
+        json.loads(files["opencode/opencode.json"])["provider"]["reef"]["models"]["served"]["limit"]["context"]
+        == 65536
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1e5", "big", ""])
+def test_a_token_limit_in_the_env_is_a_positive_integer(value: str) -> None:
+    with pytest.raises(ValueError, match="REEF_CONTEXT_WINDOW must be a positive number of tokens"):
+        token_limits({"REEF_CONTEXT_WINDOW": value})
+    assert token_limits({"OTHER": value}) == (None, None)
 
 
 def test_recipe_binds_the_model_metadata_of_the_served_model() -> None:

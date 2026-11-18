@@ -1264,7 +1264,8 @@ class TreeCallingLab(TaskLab):
         assert import_path == "reef.harness.harbor.agent:TreeAgent"
         kwargs = cast(dict[str, Any], agent["kwargs"])
         self.overrides = overrides
-        self.agent = TreeAgent(self.logs, **kwargs)
+        # Harbor gives the agent the config's env as extra_env.
+        self.agent = TreeAgent(self.logs, extra_env=cast(dict[str, str], agent.get("env") or {}), **kwargs)
         files = Path(kwargs["files_dir"])
         self.rendered = {str(path.relative_to(files)): path.read_text() for path in files.rglob("*") if path.is_file()}
         body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "solve"}]}).encode()
@@ -1330,14 +1331,17 @@ def test_a_model_artifact_is_evaluated_with_a_harness_tree_from_an_artifact_item
             activated: list[str] = []
             evaluations.results.activate = lambda scenario, request: activated.append(request.artifact_id)
             item_id = tree_item(dispatcher, harness_tree(tmp_path / "tree"))
-            body = {"artifact_id": artifact_id, "harness": {"item": item_id}}
+            harness = {"item": item_id, "env": {"REEF_MAX_OUTPUT_TOKENS": "8192", "TASK_MODE": "fast"}}
+            body = {"artifact_id": artifact_id, "harness": harness}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 202, await response.text()
             answer = await finished(client, (await response.json())["evaluation_id"])
             assert activated == [], "a score with a harness from an item activates nothing"
 
         assert answer["state"] == "finished", answer
-        assert answer["request"]["harness"] == {"item": item_id}
+        assert answer["request"]["harness"] == harness
+        assert lab.agent is not None and lab.agent.extra_env["TASK_MODE"] == "fast", "the agent's commands get the env"
+        assert '"maxTokens": 8192' in lab.rendered["pi-agent/models.json"], "the env sets the binding's reply budget"
         evaluation = answer["policy_evaluation"]
         assert evaluation["harness"]["base"] == "pi"
         assert evaluation["scores"] == [{"task": "add", "scores": [1.0]}]
@@ -1383,6 +1387,9 @@ def test_a_tree_in_a_remote_environment_bridges_its_container_to_the_proxy(tmp_p
         ({"adapter": "missing"}, "unknown harness adapter"),
         ({"adapter": "native"}, "cannot run in a task's container"),
         ({"adapter": "claude"}, "cannot call this runtime's API dialect"),
+        ({"env": {"REEF_CONTEXT_WINDOW": "big"}}, "REEF_CONTEXT_WINDOW must be a positive number of tokens"),
+        ({"env": {"TOKEN": "${REEF_TOKEN}"}}, "text values without ${"),
+        ({"env": {"1BAD": "x"}}, "maps variable names"),
     ],
 )
 def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
@@ -1397,9 +1404,10 @@ def test_an_artifact_item_that_cannot_run_is_refused_before_any_rollout(
             await client.post("/reef/scenarios", headers=AUTH, json={"name": "other", "owner": "s"})
             uri = options.pop("uri", harness_tree(tmp_path / "tree"))
             environment = options.pop("environment", "docker")
+            env = options.pop("env", {})
             body = {
                 "artifact_id": artifact_id,
-                "harness": {"item": tree_item(dispatcher, uri, **options)},
+                "harness": {"item": tree_item(dispatcher, uri, **options), **({"env": env} if env else {})},
                 "environment": environment,
             }
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
