@@ -89,8 +89,9 @@ The class also builds a task's Dockerfile differently in two ways:
   builds again. A template that stays ``waiting`` for three minutes has no build
   behind it, for example after an ``aenv build`` was killed, so the class also
   deletes it and builds again. A build or a status read that the AgentENV API
-  refuses with 502, 503 or 504 is tried again until the environment's build
-  timeout.
+  refuses with 429, 502, 503 or 504 is tried again until the environment's build
+  timeout. An AgentENV worker answers 429 when it already runs as many builds as
+  it takes at once.
 
 Two callers apply the config. ``reef.harness.harbor.rollouts.TaskRolloutRunner``
 gives it to each in-process trial and to each environment build. That covers

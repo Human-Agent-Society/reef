@@ -49,8 +49,10 @@ BUILD_POLL_INTERVAL_S = 15.0
 #: How long a template can stay ``waiting`` before it counts as an orphan: ``aenv build`` starts its build at once
 #: after it makes the template, so a live build leaves ``waiting`` within seconds.
 ORPHAN_WAITING_S = 180.0
-#: The HTTP statuses of an AgentENV API that is down or overloaded for a while: a later request can pass.
-TRANSIENT_STATUSES = (502, 503, 504)
+#: The HTTP statuses of an AgentENV API that is busy, down or overloaded for a while: a later request can pass. Each
+#: AgentENV worker runs a fixed number of builds at once, and refuses another with 429 ("node concurrent build limit
+#: reached; retry later").
+TRANSIENT_STATUSES = (429, 502, 503, 504)
 #: The statuses of an AgentENV template build, with E2B's names.
 BUILD_STATUSES = ("waiting", "building", "ready", "error")
 #: The part of ``aenv build``'s error when another build holds the alias (AgentENV's ``AliasConflict``).
