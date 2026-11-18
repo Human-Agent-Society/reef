@@ -30,6 +30,8 @@ from urllib.parse import quote
 import aiohttp
 import tomli_w
 
+from reef.core.errors import InternalError
+
 logger = logging.getLogger(__name__)
 
 #: The variable that selects how Reef's Harbor E2B class builds a task's Dockerfile: ``e2b`` (E2B's template API, the
@@ -72,7 +74,7 @@ def dockerfile_sets_start_command(dockerfile: str) -> bool:
     return any(instruction in ("CMD", "ENTRYPOINT") for instruction in instructions[last_stage:])
 
 
-class AgentEnvBuildError(RuntimeError):
+class AgentEnvBuildError(InternalError):
     """``aenv build`` failed. The message has the tail of its output."""
 
 
