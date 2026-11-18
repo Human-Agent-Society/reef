@@ -36,13 +36,7 @@ def harness_adapter(recipe: Recipe) -> str | None:
 
 
 def refuses_images(recipe: Recipe) -> bool:
-    """Whether the deployment whose recipe is ``recipe`` refuses image content: whether any of its recipes trains
-    weights (``WeightTrainingRecipe``).
-
-    Training renders text only, so a sample with an image would train on its text without the image. No recipe
-    trains on images yet. When one can, this function is the one place to change. A recipe that trains no weights
-    keeps image content in its records.
-    """
+    """Whether any deployment component trains weights. Weight training currently supports text only."""
     return any(isinstance(child, WeightTrainingRecipe) for _, child in component_recipes(recipe))
 
 

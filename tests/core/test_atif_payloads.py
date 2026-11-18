@@ -333,6 +333,14 @@ ANTHROPIC_IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "
         {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": IMAGE_URL}}]}]},
         {"messages": [{"role": "user", "content": [ANTHROPIC_IMAGE]}]},
         {"messages": [{"role": "user", "content": [{"type": "tool_result", "content": [ANTHROPIC_IMAGE]}]}]},
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "document", "source": {"type": "content", "content": [ANTHROPIC_IMAGE]}}],
+                }
+            ]
+        },
         {"input": [{"role": "user", "content": [{"type": "input_image", "image_url": IMAGE_URL}]}]},
         {
             "input": [
@@ -355,6 +363,8 @@ def test_has_image_content_finds_an_image(payload) -> None:
         {"messages": [], "tools": [{"type": "function", "function": {"parameters": {"type": "image"}}}]},
         {"messages": [{"role": "assistant", "content": [{"type": "tool_use", "input": {"type": "image"}}]}]},
         {"steps": [{"source": "user", "message": "q"}]},
+        {"messages": [{"role": "user", "content": "q"}], "extra": {"type": "image"}},
+        {"steps": [{"source": "user", "message": "q", "extra": {"image_url": IMAGE_URL}}]},
     ],
 )
 def test_has_image_content_ignores_text_and_tools(payload) -> None:

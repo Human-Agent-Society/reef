@@ -195,54 +195,31 @@ def make_trajectory(
     return builder.sample(reward, feedback)
 
 
-#: The part types that hold an image in a provider request or response and in an ATIF document, including the
-#: screenshot of a Responses ``computer_call_output``.
-IMAGE_PART_TYPES = frozenset({"image", "image_url", "input_image", "computer_screenshot", "image_generation_call"})
-#: The keys of a provider body or an ATIF document that hold its conversation (``has_image_content``).
-CONVERSATION_KEYS = ("messages", "input", "prompt", "system", "instructions", "response", "steps", "extra")
-#: The keys of a message, a part or a reply that hold more of the conversation. Tool definitions and tool call
-#: arguments are not among them.
-CONTENT_KEYS = (
-    "content",
-    "output",
-    "outputs",
-    "source",
-    "message",
-    "choices",
-    "observation",
-    "results",
-    "training",
-    "request_messages",
-    "response_message",
-    "extra",
-    "reef",
-    "records",
-)
+def has_image_content(payload: Mapping[str, object]) -> bool:
+    """Whether provider conversation fields or ATIF steps contain an image part.
 
-
-def has_image_content(payload: Mapping[str, Any]) -> bool:
-    """Whether a provider request body, a recorded inference or an ATIF document holds an image.
-
-    A part holds an image when its ``type`` is in ``IMAGE_PART_TYPES``, or when it has a non-empty ``image_url`` and is
-    not a text part, whatever its media type. The search starts at ``CONVERSATION_KEYS`` and follows ``CONTENT_KEYS``. It also
-    reads the payloads in the ``extra.reef.records`` of an ATIF document, because ATIF does not keep every image as an
-    image part. It uses an explicit stack, so deeply nested content cannot exhaust the call stack.
+    Only conversation fields are searched; metadata, tool definitions and tool arguments are ignored.
     """
-    pending: list[Any] = [payload.get(key) for key in CONVERSATION_KEYS]
+    pending = [
+        payload.get(key) for key in ("messages", "input", "prompt", "system", "instructions", "response", "steps")
+    ]
     while pending:
         value = pending.pop()
         if isinstance(value, list):
             pending.extend(value)
         elif isinstance(value, Mapping):
-            kind = value.get("type")
-            if isinstance(kind, str) and kind in IMAGE_PART_TYPES:
+            if value.get("type") in (
+                "image",
+                "image_url",
+                "input_image",
+                "computer_screenshot",
+                "image_generation_call",
+            ):
                 return True
-            if value.get("image_url") and kind not in ("text", "input_text", "output_text"):
-                return True
-            pending.extend(value.get(key) for key in CONTENT_KEYS)
-            record_payload = value.get("payload")
-            if isinstance(record_payload, Mapping):
-                pending.extend(record_payload.get(key) for key in CONVERSATION_KEYS)
+            pending.extend(
+                value.get(key)
+                for key in ("content", "output", "source", "message", "choices", "observation", "results")
+            )
     return False
 
 
