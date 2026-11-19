@@ -134,22 +134,28 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
     served(dispatcher, check)
 
 
-def test_a_trajectory_import_reads_gzip_files_and_stores_and_reports_one_batch_at_a_time(
+def test_a_trajectory_import_checks_every_line_then_stores_and_reports_one_batch_at_a_time(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Two lines fill a batch.
     monkeypatch.setattr(data_transfer, "MAX_IMPORT_BATCH_CHARACTERS", 2 * len(trajectory_lines("t1")) - 1)
-    sources = {name: tmp_path / name for name in ("good", "repeated", "broken")}
+    sources = {name: tmp_path / name for name in ("good", "repeated", "bad", "broken", "conflict")}
     for source in sources.values():
         source.mkdir()
     (sources["good"] / "a.jsonl").write_bytes(trajectory_lines("t1", "t2", "t3"))
     (sources["good"] / "b.jsonl.gz").write_bytes(gzip.compress(trajectory_lines("t4", "t5")))
     (sources["repeated"] / "a.jsonl").write_bytes(trajectory_lines("u1", "u2", "u3"))
     (sources["repeated"] / "b.jsonl").write_bytes(trajectory_lines("u4", "u1"))
+    (sources["bad"] / "a.jsonl").write_bytes(trajectory_lines("w1", "w2", "w3"))
+    (sources["bad"] / "b.jsonl").write_bytes(trajectory_lines("w4") + b'{"session_id": "w5"}\n')
     (sources["broken"] / "a.jsonl.gz").write_bytes(gzip.compress(trajectory_lines("v1"))[:-8])
+    (sources["conflict"] / "a.jsonl").write_bytes(trajectory_lines("x1", "x2", "x3"))
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
 
     async def check(client: TestClient) -> None:
+        other_x3 = json.dumps({**atif("x3"), "agent": {"name": "other"}}) + "\n"
+        stored_x3 = await upload_trajectories(client, AUTH, scenario=None, base=DATA, lines=other_x3.encode())
+        assert stored_x3.status == 201
         statuses = {}
         for name, source in sources.items():
             response = await client.post(
@@ -160,16 +166,23 @@ def test_a_trajectory_import_reads_gzip_files_and_stores_and_reports_one_batch_a
         assert statuses["good"]["result"] == {"items": 5} and statuses["good"]["progress"] == {"items": 5}
         progress = dispatcher.queue.read(DATA_QUEUE, statuses["good"]["id"]).progress
         assert [entry["items"] for entry in progress] == [2, 4, 5]
-        # A session_id on an earlier line fails the import for good, and keeps the batches before it.
-        repeated = statuses["repeated"]
-        assert repeated["state"] == "failed" and repeated["progress"] == {"items": 4}, repeated
-        assert "b.jsonl line 2: session_id 'u1' is on an earlier line of a.jsonl" in repeated["error"]
-        assert dispatcher.queue.read(DATA_QUEUE, repeated["id"]).attempt_count == 1
-        broken = statuses["broken"]
-        assert broken["state"] == "failed" and "a.jsonl.gz is not UTF-8 text or not complete gzip" in broken["error"]
+        # A bad line fails the import for good before it stores an item, also after two full batches of lines.
+        errors = {
+            "repeated": "b.jsonl line 2: session_id 'u1' is on an earlier line of a.jsonl",
+            "bad": "b.jsonl line 2: trajectory must have an ATIF schema_version",
+            "broken": "a.jsonl.gz is not UTF-8 text or not complete gzip",
+        }
+        for name, error in errors.items():
+            status = statuses[name]
+            assert status["state"] == "failed" and status["progress"] is None and error in status["error"], status
+            assert dispatcher.queue.read(DATA_QUEUE, status["id"]).attempt_count == 1
+        # A conflict with a stored item stops the import, and keeps the batches before it.
+        conflict = statuses["conflict"]
+        assert conflict["state"] == "failed" and conflict["progress"] == {"items": 2}, conflict
+        assert "ItemConflictError" in conflict["error"]
         listing = await (await client.get(DATA, headers=AUTH)).json()
         stored = sorted(item["id"] for item in listing["items"])
-        assert stored == ["t1", "t2", "t3", "t4", "t5", "u1", "u2", "u3", "u4"]
+        assert stored == ["t1", "t2", "t3", "t4", "t5", "x1", "x2", "x3"]
 
     served(dispatcher, check)
 

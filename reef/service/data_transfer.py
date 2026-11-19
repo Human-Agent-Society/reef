@@ -8,12 +8,13 @@ a scenario.
   and stores them as items of the owner with the request's metadata. For ``kind: task`` each Harbor task directory
   becomes a task item: the URI's root when it holds ``task.toml``, else each directory under the root that holds
   one. For ``kind: trajectory`` each ``*.jsonl`` file and each gzip ``*.jsonl.gz`` file at the root holds one ATIF
-  document a line, and each line becomes a trajectory item named after its ``session_id``. The import reads, checks
-  and stores one transaction at a time (``trajectory_batches``): it holds the documents of one transaction and the
-  ``session_id`` of each item so far. After each transaction it adds ``{items}``, the count stored so far, to the
-  progress of its work item. An import that fails, for example at a bad line, keeps the items of its earlier
-  transactions. It checks and stores the items as an upload does, and asks control to sync the scenarios without
-  waiting.
+  document a line, and each line becomes a trajectory item named after its ``session_id``. The import reads the
+  files twice (``trajectory_batches``), and holds the documents of one transaction and the ``session_id`` of each
+  line so far. Pass 1 checks every line, so a bad line, or a ``session_id`` on two lines, fails the import before it
+  stores an item. Pass 2 stores one transaction at a time, and after each one adds ``{items}``, the count stored so
+  far, to the progress of its work item. It checks and stores the items as an upload does. A check that only the
+  store makes, such as a conflict with a stored item, stops pass 2 and keeps the items of its earlier transactions.
+  The import asks control to sync the scenarios without waiting.
 - An export (``data_export``) writes the items that the request names, or that match its ``kind`` and ``scenario``,
   to a tar.gz at a URI (``ArchiveWriters``). The archive holds ``manifest.jsonl``, one line ``{id, kind, metadata,
   path}`` for each item, and each item at its ``path``: ``items/<n>.json`` for the content of a trajectory or a
@@ -120,8 +121,14 @@ def transfer_json(item: WorkItem) -> dict[str, Any]:
 
 def run_import(data: DataAccess, sources: ArtifactSources, item: WorkItem) -> dict[str, JsonValue]:
     """Import the files at the ``uri`` of the held import ``item`` as items of its ``owner``; return ``{items}``, the
-    count. A trajectory import adds ``{items}``, the count stored so far, to the item's progress after each
-    transaction. ``WorkLeaseLostError`` stops it when its worker no longer holds the item."""
+    count.
+
+    A trajectory import checks every line before it stores an item: it raises ``ValueError`` as
+    ``trajectory_batches`` and stores nothing. Then it stores the items one transaction at a time, and adds
+    ``{items}``, the count stored so far, to the item's progress after each transaction. An ``ItemConflictError``
+    with a stored item, or another refusal of ``create_trajectory_items``, stops it there and keeps the items of the
+    earlier transactions. ``WorkLeaseLostError`` stops it when its worker no longer holds the item.
+    """
     payload: Mapping[str, Any] = item.payload
     owner, uri, metadata = payload["owner"], payload["uri"], payload["metadata"]
     if item.worker_id is None:
@@ -149,6 +156,9 @@ def run_import(data: DataAccess, sources: ArtifactSources, item: WorkItem) -> di
         files = sorted(path for path in root.iterdir() if path.name.endswith(TRAJECTORY_FILE_SUFFIXES))
         if not files:
             raise ValueError(f"{uri} holds no *.jsonl or *.jsonl.gz file of trajectories at its root")
+        # Pass 1 checks every line and drops each batch, so that a bad line fails the import before it stores an item.
+        for _ in trajectory_batches(files):
+            pass
         stored = 0
         for number, batch in enumerate(trajectory_batches(files)):
             create_trajectory_items(data, owner, batch, metadata, wait=False)

@@ -1222,9 +1222,10 @@ The status is ``{"id", "kind", "state", "request", "progress", "result",
   ``failed``.
 - ``request`` is the body that started the transfer.
 - ``progress`` is ``{"items"}`` after a trajectory import stores its first
-  transaction: the count of items that the attempt stored so far. A retry
-  counts again from the start. ``progress`` is ``null`` before the first
-  transaction, and for a task import and an export.
+  transaction: the count of items that the attempt stored so far. It is
+  ``null`` before that, and for a task import and an export. A retry counts
+  again from the start. While its check pass runs, ``progress`` still shows
+  the attempt before.
 - ``result`` is set when the transfer finished: ``{"items"}``, the item count,
   for an import, and ``{"items", "bytes"}`` for an export.
 - ``error`` tells why a run failed.
@@ -1242,11 +1243,16 @@ adds. It finds the items as follows:
 - ``trajectory``: each ``*.jsonl`` file and each gzip ``*.jsonl.gz`` file at
   the root holds one ATIF document a line, as the upload takes them. Each
   document's ``session_id`` is its item ID; two documents of the import never
-  share one. Reef reads no other file. Reef reads the files in name order. It
-  reads, checks and stores one transaction at a time, of at most 1000 items
-  and about 32 MiB of lines, so it holds one transaction in memory. An import
-  that fails, for example at a bad line or at a ``session_id`` that an earlier
-  line has, keeps the items of its earlier transactions.
+  share one. Reef reads no other file. Reef reads the files in name order,
+  in two passes, and holds one transaction of at most 1000 items and about
+  32 MiB of lines in memory:
+
+  1. Reef checks every line. A bad line, or a ``session_id`` that an earlier
+     line has, fails the import, and Reef stores no item.
+  2. Reef stores the items one transaction at a time. A check that only the
+     data store makes, such as a conflict with an item that the owner
+     stores already, stops the import. The items of the earlier transactions
+     stay.
 
 The import checks and stores the items as the create routes do. It does not
 wait for the syncs of the scenarios that it touched.
